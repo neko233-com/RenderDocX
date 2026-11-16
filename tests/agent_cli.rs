@@ -130,6 +130,10 @@ fn agent_jsonl_session_has_correlated_errors_and_clean_shutdown() {
         agent.send(r#"{"command":"target_connect_pid","pid":0}"#)["error"]["code"],
         "invalid_arguments"
     );
+    assert_eq!(
+        agent.send(r#"{"command":"mesh","stage":"vs_out"}"#)["error"]["code"],
+        "no_capture"
+    );
     assert_eq!(agent.send(r#"{"id":"c","command":"close"}"#)["ok"], true);
     agent.quit();
 }
@@ -654,6 +658,11 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         selected["data"]["event_id"].as_u64().unwrap().to_string(),
         event
     );
+    let not_draw = agent.send(r#"{"command":"mesh","stage":"vs_out"}"#);
+    assert_eq!(
+        not_draw["error"]["code"], "replay_mesh_failed",
+        "{not_draw}"
+    );
     let vertex_before = opened["data"]["capture"]["buffers"]
         .as_array()
         .unwrap()
@@ -689,6 +698,69 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let draw =
         agent.send(&serde_json::json!({"command":"select","event_id":draw_event}).to_string());
     assert_eq!(draw["ok"], true, "{draw}");
+    let invalid_instance = agent.send(r#"{"command":"mesh","stage":"vs_out","instance":1}"#);
+    assert_eq!(
+        invalid_instance["error"]["code"], "replay_mesh_failed",
+        "{invalid_instance}"
+    );
+    let invalid_view = agent.send(r#"{"command":"mesh","stage":"vs_out","view":1}"#);
+    assert_eq!(
+        invalid_view["error"]["code"], "replay_mesh_failed",
+        "{invalid_view}"
+    );
+    let unsupported_stage = agent.send(r#"{"command":"mesh","stage":"mesh_out"}"#);
+    assert_eq!(
+        unsupported_stage["error"]["code"], "replay_mesh_failed",
+        "{unsupported_stage}"
+    );
+    let mesh = agent.send(r#"{"command":"mesh","stage":"vs_out"}"#);
+    assert_eq!(mesh["ok"], true, "{mesh}");
+    assert_eq!(mesh["data"]["mesh"]["event_id"], draw_event);
+    assert_eq!(mesh["data"]["mesh"]["vertex_bound"], true, "{mesh}");
+    assert_eq!(mesh["data"]["mesh"]["component_type"], 1);
+    assert_eq!(mesh["data"]["mesh"]["component_count"], 4);
+    assert_eq!(mesh["data"]["mesh"]["component_byte_width"], 4);
+    assert_eq!(mesh["data"]["mesh"]["num_indices"], 3);
+    assert_eq!(mesh["data"]["mesh"]["index_bound"], true, "{mesh}");
+    assert_eq!(mesh["data"]["mesh"]["index_stride"], 2);
+    let mesh_indices =
+        agent.send(r#"{"command":"mesh_read","kind":"index","offset":"0","length":6}"#);
+    assert_eq!(mesh_indices["ok"], true, "{mesh_indices}");
+    assert_eq!(mesh_indices["data"]["hex"], "000001000200");
+    let mesh_bytes =
+        agent.send(r#"{"command":"mesh_read","kind":"vertex","offset":"0","length":16}"#);
+    assert_eq!(mesh_bytes["ok"], true, "{mesh_bytes}");
+    assert_eq!(
+        mesh_bytes["data"]["hex"],
+        "0000404000004040000000000000803f"
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"mesh_read","kind":"vertex","offset":"0","length":65537}"#)["error"]
+            ["code"],
+        "invalid_arguments"
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"mesh","stage":"invalid"}"#)["error"]["code"],
+        "invalid_arguments"
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"mesh_read","kind":"vertex","offset":"0","length":16}"#)["error"]
+            ["code"],
+        "no_mesh"
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"mesh","stage":"vs_out"}"#)["ok"],
+        true
+    );
+    assert_eq!(
+        agent.send(&serde_json::json!({"command":"select","event_id":draw_event}).to_string())["ok"],
+        true
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"mesh_read","kind":"vertex","offset":"0","length":16}"#)["error"]
+            ["code"],
+        "no_mesh"
+    );
     let layered_index = opened["data"]["capture"]["textures"]
         .as_array()
         .unwrap()

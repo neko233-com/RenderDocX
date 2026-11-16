@@ -2,8 +2,8 @@ use renderdocx::{
     backend::Settings,
     live::{CaptureOptions, LaunchConfiguration, LiveSession, enumerate},
     replay::{
-        BUFFER_PAGE_LIMIT, Pipeline, SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session, Snapshot,
-        TextureSelection,
+        BUFFER_PAGE_LIMIT, MeshSelection, Pipeline, SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session,
+        Snapshot, TextureSelection,
     },
 };
 use serde_json::{Value, json};
@@ -25,7 +25,7 @@ fn usage() -> Value {
         {"name":"select","arguments":["capture.rdc","event_id"],"description":"Replay a capture to an event."},
         {"name":"serve","arguments":[],"description":"Serve sequential JSONL requests using a persistent replay session."},
         {"name":"capabilities","arguments":[],"description":"Describe the commands currently implemented."}
-    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","structure","structure_buffer","read_buffer","export_texture","close","target_list","target_launch","target_connect","target_connect_pid","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
+    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","mesh","mesh_read","structure","structure_buffer","read_buffer","export_texture","close","target_list","target_launch","target_connect","target_connect_pid","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
 }
 
 fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
@@ -110,6 +110,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
     let mut opened: Option<(Session, Snapshot)> = None;
     let mut selected_event: Option<u32> = None;
     let mut pipeline: Option<Pipeline> = None;
+    let mut mesh_selection: Option<(u32, MeshSelection)> = None;
     let mut target: Option<LiveSession> = None;
     for line in input.lines() {
         let line = line?;
@@ -284,6 +285,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         opened = Some((session, snapshot));
                         selected_event = None;
                         pipeline = None;
+                        mesh_selection = None;
                         Ok(value)
                     }
                     Err(message) => Err(("replay_open_failed", message)),
@@ -385,6 +387,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     match session.select_pipeline(event, revision) {
                         Ok(Some(state)) => {
                             selected_event = Some(event);
+                            mesh_selection = None;
                             let value = json!({"event_id":event, "pipeline": &state});
                             pipeline = Some(state);
                             Ok(value)
@@ -397,6 +400,75 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     }
                 }
             },
+            "mesh" => {
+                mesh_selection = None;
+                let stage = match request.get("stage").and_then(Value::as_str) {
+                    Some("vs_out") => Some(1),
+                    Some("gs_out") => Some(2),
+                    Some("task_out") => Some(3),
+                    Some("mesh_out") => Some(4),
+                    _ => None,
+                };
+                let number = |name: &str| match request.get(name) {
+                    None => Some(0),
+                    Some(v) => v.as_u64().and_then(|v| u32::try_from(v).ok()),
+                };
+                match (
+                    &opened,
+                    selected_event,
+                    stage,
+                    number("instance"),
+                    number("view"),
+                ) {
+                    (None, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some(_), None, _, _, _) => {
+                        Err(("no_event", "Select a draw event first".into()))
+                    }
+                    (Some((session, _)), Some(event), Some(stage), Some(instance), Some(view)) => {
+                        let selection = MeshSelection {
+                            instance,
+                            view,
+                            stage,
+                        };
+                        session
+                            .mesh(event, selection)
+                            .map(|mesh| {
+                                mesh_selection = Some((event, selection));
+                                json!({"mesh":mesh})
+                            })
+                            .map_err(|error| ("replay_mesh_failed", error))
+                    }
+                    _ => Err((
+                        "invalid_arguments",
+                        "mesh requires a valid stage, instance and view".into(),
+                    )),
+                }
+            }
+            "mesh_read" => {
+                let kind = request
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .filter(|v| matches!(*v, "vertex" | "index"));
+                let offset = request
+                    .get("offset")
+                    .and_then(Value::as_str)
+                    .and_then(|v| v.parse::<u64>().ok());
+                let length = request
+                    .get("length")
+                    .and_then(Value::as_u64)
+                    .and_then(|v| u32::try_from(v).ok())
+                    .filter(|v| *v <= BUFFER_PAGE_LIMIT);
+                match (&opened, mesh_selection, kind, offset, length) {
+                    (None, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some(_), None, _, _, _) => Err(("no_mesh", "Query mesh data first".into())),
+                    (Some((session, _)), Some((event, selection)), Some(kind), Some(offset), Some(length)) if offset.checked_add(u64::from(length)).is_some() =>
+                        session.mesh_read(event, selection, kind, offset, length).map(|bytes| {
+                            let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+                            json!({"event_id":event,"selection":selection,"kind":kind,"offset":offset.to_string(),"length":bytes.len(),"hex":hex})
+                        }).map_err(|error| ("replay_mesh_read_failed", error)),
+                    _ => Err(("invalid_arguments", "mesh_read requires kind, decimal-string offset and valid length".into())),
+                }
+            }
             "read_buffer" => {
                 let index = request
                     .get("index")
@@ -515,6 +587,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
             "close" | "quit" => {
                 selected_event = None;
                 pipeline = None;
+                mesh_selection = None;
                 match opened.take() {
                     Some((session, _)) => session
                         .close()

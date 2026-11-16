@@ -17,8 +17,8 @@ use renderdocx::{
         LiveSession, capture_directory, capture_notice, enumerate, parse_target_pid,
     },
     replay::{
-        Pipeline, SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session, ShaderReport, Snapshot,
-        StructurePage, StructuredNode, TextureSelection,
+        MeshInfo, MeshSelection, Pipeline, SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session,
+        ShaderReport, Snapshot, StructurePage, StructuredNode, TextureSelection,
     },
 };
 use std::path::PathBuf;
@@ -38,6 +38,106 @@ struct StructureView {
     offset: u64,
     bytes: Option<Vec<u8>>,
     bytes_offset: u64,
+}
+
+struct MeshView {
+    selection: MeshSelection,
+    info: Option<MeshInfo>,
+    bytes: Option<Vec<u8>>,
+    offset: u64,
+}
+
+impl Default for MeshView {
+    fn default() -> Self {
+        Self {
+            selection: MeshSelection {
+                instance: 0,
+                view: 0,
+                stage: 1,
+            },
+            info: None,
+            bytes: None,
+            offset: 0,
+        }
+    }
+}
+
+fn mesh_position_format(info: &MeshInfo) -> bool {
+    cfg!(target_endian = "little")
+        && info.unproject
+        && info.format_type == 0
+        && info.component_type == 1
+        && info.component_byte_width == 4
+        && (1..=4).contains(&info.component_count)
+        && info.vertex_stride > 0
+        && u64::from(info.vertex_stride) <= BUFFER_VIEW_PAGE
+        && info.component_count * 4 <= info.vertex_stride
+}
+
+fn mesh_page_size(info: &MeshInfo) -> u64 {
+    if mesh_position_format(info) {
+        BUFFER_VIEW_PAGE / u64::from(info.vertex_stride) * u64::from(info.vertex_stride)
+    } else {
+        BUFFER_VIEW_PAGE
+    }
+}
+
+fn mesh_positions(info: &MeshInfo, bytes: &[u8], offset: u64) -> Option<Vec<(u64, Vec<f32>)>> {
+    if !mesh_position_format(info) {
+        return None;
+    }
+    let stride = u64::from(info.vertex_stride);
+    let mut relative = (stride - offset % stride) % stride;
+    let mut positions = Vec::new();
+    while relative.checked_add(u64::from(info.component_count) * 4)? <= bytes.len() as u64 {
+        let start = usize::try_from(relative).ok()?;
+        let components = (0..info.component_count as usize)
+            .map(|index| {
+                let i = start + index * 4;
+                f32::from_le_bytes(bytes[i..i + 4].try_into().unwrap())
+            })
+            .collect();
+        positions.push((offset.checked_add(relative)? / stride, components));
+        relative = relative.checked_add(stride)?;
+    }
+    Some(positions)
+}
+
+#[cfg(test)]
+mod mesh_tests {
+    use super::*;
+
+    #[test]
+    fn position_pages_preserve_vertices_when_stride_does_not_divide_page() {
+        let info = MeshInfo {
+            vertex_stride: 20,
+            component_type: 1,
+            component_count: 4,
+            component_byte_width: 4,
+            unproject: true,
+            ..MeshInfo::default()
+        };
+        assert_eq!(mesh_page_size(&info), 240);
+        let mut bytes = Vec::new();
+        for n in 0..24 {
+            for value in [n as f32, 3.0, 0.0, 1.0] {
+                bytes.extend(value.to_le_bytes());
+            }
+            bytes.extend([0; 4]);
+        }
+        let first = mesh_positions(&info, &bytes[..240], 0).unwrap();
+        let second = mesh_positions(&info, &bytes[240..], 240).unwrap();
+        assert_eq!(first.len(), 12);
+        assert_eq!(second.len(), 12);
+        assert_eq!(first[11].0, 11);
+        assert_eq!(second[0], (12, vec![12.0, 3.0, 0.0, 1.0]));
+        let unsupported = MeshInfo {
+            vertex_stride: 512,
+            ..info
+        };
+        assert!(mesh_positions(&unsupported, &bytes, 0).is_none());
+        assert_eq!(mesh_page_size(&unsupported), BUFFER_VIEW_PAGE);
+    }
 }
 
 fn structured_value(node: &StructuredNode) -> String {
@@ -67,6 +167,7 @@ enum CaptureTab {
     Textures,
     Buffers,
     Shaders,
+    Mesh,
 }
 #[derive(Clone, Copy)]
 enum TextureField {
@@ -98,6 +199,7 @@ struct Workspace {
     selected_shader: Option<usize>,
     shader_data: Option<ShaderReport>,
     structure: StructureView,
+    mesh: MeshView,
     open_revision: u64,
     selection_revision: u64,
     replay_pending: bool,
@@ -585,6 +687,7 @@ impl Workspace {
                         this.selected_shader = None;
                         this.shader_data = None;
                         this.structure = StructureView::default();
+                        this.mesh = MeshView::default();
                         this.replay_pending = false;
                         this.export_pending = false;
                         this.preview = None;
@@ -646,6 +749,7 @@ impl Workspace {
         self.buffer_data = None;
         self.shader_data = None;
         self.structure = StructureView::default();
+        self.mesh = MeshView::default();
         let open_revision = self.open_revision;
         self.status = Some(
             self.t(
@@ -866,6 +970,103 @@ impl Workspace {
                                 "着色器查看失败",
                                 "シェーダーを表示できません",
                                 "셰이더 확인 실패"
+                            )
+                        ));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn read_mesh(&mut self, selection: MeshSelection, offset: u64, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            self.status = Some(
+                self.t(
+                    "Wait for the current operation.",
+                    "请等待当前操作完成。",
+                    "現在の処理が完了するまでお待ちください。",
+                    "현재 작업이 끝날 때까지 기다려 주세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let Some(event) = self.pipeline.as_ref().map(|pipeline| pipeline.event_id) else {
+            self.status = Some(
+                self.t(
+                    "Select a draw or mesh event first.",
+                    "请先选择绘制或网格事件。",
+                    "先に描画またはメッシュイベントを選択してください。",
+                    "먼저 그리기 또는 메시 이벤트를 선택하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let revision = self.open_revision;
+        let selection_revision = self.selection_revision;
+        self.resource_pending = true;
+        self.status = Some(
+            self.t(
+                "Loading mesh output…",
+                "正在加载网格输出…",
+                "メッシュ出力を読み込み中…",
+                "메시 출력을 불러오는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            let info = session.mesh(event, selection)?;
+            let bytes = if info.vertex_bound {
+                Some(session.mesh_read(
+                    event,
+                    selection,
+                    "vertex",
+                    offset,
+                    mesh_page_size(&info) as u32,
+                )?)
+            } else {
+                None
+            };
+            Ok::<_, String>((info, bytes))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision || this.selection_revision != selection_revision {
+                    return;
+                }
+                this.resource_pending = false;
+                match result {
+                    Ok((info, bytes)) => {
+                        this.mesh = MeshView {
+                            selection,
+                            info: Some(info),
+                            bytes,
+                            offset,
+                        };
+                        this.status = None;
+                    }
+                    Err(error) => {
+                        this.mesh = MeshView {
+                            selection,
+                            ..MeshView::default()
+                        };
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Could not inspect mesh output",
+                                "无法查看网格输出",
+                                "メッシュ出力を表示できません",
+                                "메시 출력을 확인할 수 없습니다"
                             )
                         ));
                     }
@@ -1306,7 +1507,29 @@ impl Workspace {
             .snapshot
             .as_ref()
             .expect("capture view requires a snapshot");
+        let mesh_lines = match (&self.mesh.info, &self.mesh.bytes) {
+            (Some(info), Some(bytes)) => {
+                if let Some(positions) = mesh_positions(info, bytes, self.mesh.offset) {
+                    positions
+                        .into_iter()
+                        .map(|(index, values)| format!("{index}: {values:?}"))
+                        .collect::<Vec<_>>()
+                } else {
+                    bytes
+                        .chunks(16)
+                        .enumerate()
+                        .map(|(index, chunk)| {
+                            let hex: String =
+                                chunk.iter().map(|byte| format!("{byte:02x} ")).collect();
+                            format!("{:08X}: {hex}", self.mesh.offset + (index as u64) * 16)
+                        })
+                        .collect()
+                }
+            }
+            _ => Vec::new(),
+        };
         let count = match self.tab {
+            CaptureTab::Mesh => mesh_lines.len(),
             CaptureTab::Textures => snapshot.textures.len(),
             CaptureTab::Buffers => snapshot.buffers.len(),
             CaptureTab::Events => self.event_tree.visible.len(),
@@ -1571,7 +1794,29 @@ impl Workspace {
         let status = self.status.clone();
         let preview_path = self.preview.as_ref().map(|preview| preview.path.clone());
 
-        let list = if self.tab == CaptureTab::Parameters {
+        let list = if self.tab == CaptureTab::Mesh {
+            let lines = std::sync::Arc::new(mesh_lines);
+            uniform_list(
+                "capture-mesh",
+                count,
+                cx.processor(move |_, range: std::ops::Range<usize>, _, _| {
+                    range
+                        .filter_map(|index| {
+                            lines.get(index).map(|line| {
+                                div()
+                                    .id(("mesh-row", index))
+                                    .test_support()
+                                    .h(px(32.))
+                                    .px_3()
+                                    .child(line.clone())
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .flex_1()
+            .into_any_element()
+        } else if self.tab == CaptureTab::Parameters {
             uniform_list(
                 "capture-structured-children",
                 count,
@@ -1945,7 +2190,50 @@ impl Workspace {
             .into_any_element()
         };
 
-        let detail_view = if self.tab == CaptureTab::Parameters {
+        let detail_view = if self.tab == CaptureTab::Mesh {
+            let heading = self.t("MESH OUTPUT", "网格输出", "メッシュ出力", "메시 출력");
+            let empty = self.t(
+                "Select a draw or mesh event.",
+                "选择绘制或网格事件。",
+                "描画またはメッシュイベントを選択してください。",
+                "그리기 또는 메시 이벤트를 선택하세요.",
+            );
+            let note = self.t("Positions are shown in buffer order, not draw index order. Other formats are shown as bytes.", "位置按缓冲区顺序显示，非绘制索引顺序；其他格式显示为字节。", "位置は描画インデックス順ではなくバッファ順です。他の形式はバイトで表示します。", "위치는 그리기 인덱스 순서가 아닌 버퍼 순서입니다. 다른 형식은 바이트로 표시합니다.");
+            let mut view = div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(div().text_sm().text_color(rgb(0x82aaff)).child(heading));
+            if let Some(info) = &self.mesh.info {
+                let stage = match info.stage {
+                    1 => "VSOut",
+                    2 => "GSOut",
+                    3 => "TaskOut",
+                    4 => "MeshOut",
+                    _ => "?",
+                };
+                view = view
+                    .child(format!("{event_label}: {} · {stage}", info.event_id))
+                    .child(format!(
+                        "{instances_label}: {} · View: {}",
+                        info.instance, info.view
+                    ))
+                    .child(format!("{indices_label}: {}", info.num_indices))
+                    .child(format!(
+                        "{format_label}: {} · {stride_label}: {}",
+                        info.format_name, info.vertex_stride
+                    ))
+                    .child(format!("{topology_label}: {}", info.topology))
+                    .child(format!("{offset_label}: {}", self.mesh.offset))
+                    .when(!info.status.is_empty(), |view| {
+                        view.child(info.status.clone())
+                    })
+                    .child(note);
+            } else {
+                view = view.child(empty);
+            }
+            view
+        } else if self.tab == CaptureTab::Parameters {
             let page = self.structure.page.clone();
             let bytes_lines = self
                 .structure
@@ -2588,6 +2876,7 @@ impl Workspace {
                             this.buffer_data = None;
                             this.shader_data = None;
                             this.structure = StructureView::default();
+                            this.mesh = MeshView::default();
                             this.preview = None;
                             this.status = None;
                             cx.notify();
@@ -2717,6 +3006,19 @@ impl Workspace {
                                         },
                                         cx,
                                     ))
+                                    .child(button(
+                                        "mesh-tab",
+                                        self.t("Mesh", "网格", "メッシュ", "메시"),
+                                        self.tab == CaptureTab::Mesh,
+                                        |this, cx| {
+                                            this.tab = CaptureTab::Mesh;
+                                            if this.mesh.info.is_none() {
+                                                this.read_mesh(this.mesh.selection, 0, cx);
+                                            }
+                                            cx.notify();
+                                        },
+                                        cx,
+                                    ))
                                     .child(
                                         div()
                                             .self_center()
@@ -2725,6 +3027,80 @@ impl Workspace {
                                             .child(count.to_string()),
                                     ),
                             )
+                            .when(self.tab == CaptureTab::Mesh, |view| {
+                                view.child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .gap_2()
+                                        .px_3()
+                                        .pb_2()
+                                        .child(button(
+                                            "mesh-stage",
+                                            self.t(
+                                                "Next stage",
+                                                "切换阶段",
+                                                "ステージ切替",
+                                                "단계 전환",
+                                            ),
+                                            false,
+                                            |this, cx| {
+                                                let mut selection = this.mesh.selection;
+                                                selection.stage = selection.stage % 4 + 1;
+                                                this.read_mesh(selection, 0, cx);
+                                            },
+                                            cx,
+                                        ))
+                                        .child(button(
+                                            "mesh-previous",
+                                            previous_bytes,
+                                            false,
+                                            |this, cx| {
+                                                if this.mesh.offset > 0 {
+                                                    let step = this
+                                                        .mesh
+                                                        .info
+                                                        .as_ref()
+                                                        .map(mesh_page_size)
+                                                        .unwrap_or(BUFFER_VIEW_PAGE);
+                                                    this.read_mesh(
+                                                        this.mesh.selection,
+                                                        this.mesh.offset.saturating_sub(step),
+                                                        cx,
+                                                    );
+                                                }
+                                            },
+                                            cx,
+                                        ))
+                                        .child(button(
+                                            "mesh-next",
+                                            next_bytes,
+                                            false,
+                                            |this, cx| {
+                                                let step = this
+                                                    .mesh
+                                                    .info
+                                                    .as_ref()
+                                                    .map(mesh_page_size)
+                                                    .unwrap_or(BUFFER_VIEW_PAGE);
+                                                if this.mesh.bytes.as_ref().is_some_and(|bytes| {
+                                                    bytes.len() == step as usize
+                                                }) {
+                                                    if let Some(offset) =
+                                                        this.mesh.offset.checked_add(step)
+                                                    {
+                                                        this.read_mesh(
+                                                            this.mesh.selection,
+                                                            offset,
+                                                            cx,
+                                                        );
+                                                    }
+                                                }
+                                            },
+                                            cx,
+                                        )),
+                                )
+                            })
                             .when(self.tab == CaptureTab::Events, |view| {
                                 view.child(
                                     div()
@@ -3676,6 +4052,7 @@ fn main() {
                         selected_shader: None,
                         shader_data: None,
                         structure: StructureView::default(),
+                        mesh: MeshView::default(),
                         open_revision: 0,
                         selection_revision: 0,
                         replay_pending: false,
@@ -3784,6 +4161,7 @@ mod ui_tests {
                         selected_shader: None,
                         shader_data: None,
                         structure: StructureView::default(),
+                        mesh: MeshView::default(),
                         open_revision: 0,
                         selection_revision: 0,
                         replay_pending: false,
@@ -4041,6 +4419,7 @@ mod ui_tests {
                         selected_shader: None,
                         shader_data: None,
                         structure: StructureView::default(),
+                        mesh: MeshView::default(),
                         open_revision: 0,
                         selection_revision: 0,
                         replay_pending: false,
@@ -4502,6 +4881,13 @@ mod ui_tests {
                     ..Settings::default()
                 };
                 let (real_session, real_snapshot) = Session::open(&settings, &capture).unwrap();
+                let (draw_index, draw_event) = real_snapshot
+                    .actions
+                    .iter()
+                    .enumerate()
+                    .find(|(_, action)| action.name.contains("DrawIndexed"))
+                    .map(|(index, action)| (index, action.event_id))
+                    .expect("captured indexed draw");
                 let (action_index, api_index, event_id) = real_snapshot
                     .actions
                     .iter()
@@ -4673,6 +5059,72 @@ mod ui_tests {
                     );
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.click("events-tab", cx);
+                    window.click("event-filter", cx);
+                    window.press("ctrl-a", cx);
+                    window.input("DrawIndexed", cx);
+                })
+                .unwrap();
+                cx.run_until_parked();
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    window.click(draw_index, cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx)
+                            .pipeline
+                            .as_ref()
+                            .is_some_and(|state| state.event_id == draw_event)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real draw selection did not complete"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| window.click("mesh-tab", cx))
+                    .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx)
+                            .mesh
+                            .info
+                            .as_ref()
+                            .is_some_and(|info| info.event_id == draw_event)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real mesh output did not load: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update(|cx| {
+                    let mesh = &view.read(cx).mesh;
+                    let positions = mesh_positions(
+                        mesh.info.as_ref().unwrap(),
+                        mesh.bytes.as_ref().unwrap(),
+                        0,
+                    )
+                    .unwrap();
+                    assert_eq!(positions[0], (0, vec![3.0, 3.0, 0.0, 1.0]));
+                });
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    assert!(window.find(("mesh-row", 0usize)).visible());
+                })
+                .unwrap();
             }
         }
     }

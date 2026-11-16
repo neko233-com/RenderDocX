@@ -62,6 +62,58 @@ pub struct StructuredNode {
 
 pub const STRUCTURE_PAGE_LIMIT: u32 = 128;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct MeshSelection {
+    pub instance: u32,
+    pub view: u32,
+    /// RenderDoc MeshDataStage: 1 = VSOut, 2 = GSOut, 3 = TaskOut, 4 = MeshOut.
+    pub stage: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct MeshletInfo {
+    pub indices: u32,
+    pub vertices: u32,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct MeshInfo {
+    pub event_id: u32,
+    pub instance: u32,
+    pub view: u32,
+    pub stage: u32,
+    pub index_bound: bool,
+    pub index_offset: String,
+    pub index_size: String,
+    pub index_stride: u32,
+    pub base_vertex: i32,
+    pub vertex_bound: bool,
+    pub vertex_offset: String,
+    pub vertex_size: String,
+    pub vertex_stride: u32,
+    pub per_primitive_offset: String,
+    pub per_primitive_stride: u32,
+    pub format_name: String,
+    pub format_type: u32,
+    pub component_type: u32,
+    pub component_count: u32,
+    pub component_byte_width: u32,
+    pub topology: u32,
+    pub num_indices: u32,
+    pub restart_index: u32,
+    pub allow_restart: bool,
+    pub unproject: bool,
+    pub flip_y: bool,
+    pub near_plane: Option<f32>,
+    pub far_plane: Option<f32>,
+    pub meshlet_offset: u32,
+    pub meshlet_index_offset: u32,
+    pub dispatch_size: Option<[u32; 3]>,
+    pub meshlets: Vec<MeshletInfo>,
+    pub tasks: Vec<[u32; 3]>,
+    pub status: String,
+}
+
 #[derive(Deserialize, Serialize)]
 pub struct Snapshot {
     pub protocol: u32,
@@ -260,6 +312,13 @@ enum Reply {
     },
     Shader(ShaderReport),
     Structure(StructurePage),
+    Mesh(MeshInfo),
+    MeshData {
+        event_id: u32,
+        kind: String,
+        offset: String,
+        hex: String,
+    },
     StructuredBuffer {
         event_id: u32,
         path: Vec<String>,
@@ -467,12 +526,91 @@ trait Transport: Send {
     ) -> Result<Vec<u8>, String> {
         Err("Structured buffer reading is not supported by this transport".into())
     }
+    fn mesh(&mut self, _event: u32, _selection: MeshSelection) -> Result<MeshInfo, String> {
+        Err("Mesh inspection is not supported by this transport".into())
+    }
+    fn mesh_read(
+        &mut self,
+        _event: u32,
+        _selection: MeshSelection,
+        _kind: &str,
+        _offset: u64,
+        _length: u32,
+    ) -> Result<Vec<u8>, String> {
+        Err("Mesh buffer reading is not supported by this transport".into())
+    }
     fn close(&mut self) -> Result<(), String> {
         Ok(())
     }
 }
 
 impl Transport for Process {
+    fn mesh(&mut self, event: u32, selection: MeshSelection) -> Result<MeshInfo, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(
+            input,
+            "mesh {} {} {}",
+            selection.instance, selection.view, selection.stage
+        )
+        .and_then(|_| input.flush())
+        .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::Mesh(info)
+                if info.event_id == event
+                    && info.instance == selection.instance
+                    && info.view == selection.view
+                    && info.stage == selection.stage
+                    && [
+                        &info.index_offset,
+                        &info.index_size,
+                        &info.vertex_offset,
+                        &info.vertex_size,
+                        &info.per_primitive_offset,
+                    ]
+                    .iter()
+                    .all(|v| v.parse::<u64>().is_ok()) =>
+            {
+                Ok(info)
+            }
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected mesh response".into()),
+        }
+    }
+    fn mesh_read(
+        &mut self,
+        event: u32,
+        selection: MeshSelection,
+        kind: &str,
+        offset: u64,
+        length: u32,
+    ) -> Result<Vec<u8>, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(
+            input,
+            "mesh_read {} {} {} {kind} {offset} {length}",
+            selection.instance, selection.view, selection.stage
+        )
+        .and_then(|_| input.flush())
+        .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::MeshData {
+                event_id,
+                kind: actual_kind,
+                offset: actual_offset,
+                hex,
+            } if event_id == event
+                && actual_kind == kind
+                && actual_offset.parse::<u64>().ok() == Some(offset)
+                && hex.len() % 2 == 0
+                && hex.len() / 2 <= length as usize =>
+            {
+                decode_buffer_hex(&hex, (hex.len() / 2) as u32)
+            }
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected mesh buffer response".into()),
+        }
+    }
+
     fn structure_buffer(
         &mut self,
         event: u32,
@@ -767,6 +905,37 @@ impl Session {
             .shader(stage, target)
     }
 
+    pub fn mesh(&self, event: u32, selection: MeshSelection) -> Result<MeshInfo, String> {
+        if !(1..=4).contains(&selection.stage) {
+            return Err("Invalid mesh stage".into());
+        }
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .mesh(event, selection)
+    }
+
+    pub fn mesh_read(
+        &self,
+        event: u32,
+        selection: MeshSelection,
+        kind: &str,
+        offset: u64,
+        length: u32,
+    ) -> Result<Vec<u8>, String> {
+        if !(1..=4).contains(&selection.stage)
+            || !matches!(kind, "vertex" | "index")
+            || length > BUFFER_PAGE_LIMIT
+            || offset.checked_add(u64::from(length)).is_none()
+        {
+            return Err("Invalid mesh buffer request".into());
+        }
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .mesh_read(event, selection, kind, offset, length)
+    }
+
     pub fn structure(
         &self,
         event: u32,
@@ -863,6 +1032,53 @@ pub mod test_support {
     use super::*;
     struct RecordingTransport(Arc<Mutex<Vec<u32>>>, Arc<Mutex<Vec<TextureSelection>>>);
     impl Transport for RecordingTransport {
+        fn mesh(&mut self, event: u32, selection: MeshSelection) -> Result<MeshInfo, String> {
+            Ok(MeshInfo {
+                event_id: event,
+                instance: selection.instance,
+                view: selection.view,
+                stage: selection.stage,
+                index_offset: "0".into(),
+                index_size: "0".into(),
+                vertex_bound: true,
+                vertex_offset: "0".into(),
+                vertex_size: "48".into(),
+                vertex_stride: 16,
+                per_primitive_offset: "0".into(),
+                format_name: "R32G32B32A32_FLOAT".into(),
+                component_type: 1,
+                component_count: 4,
+                component_byte_width: 4,
+                num_indices: 3,
+                unproject: true,
+                ..MeshInfo::default()
+            })
+        }
+
+        fn mesh_read(
+            &mut self,
+            _event: u32,
+            _selection: MeshSelection,
+            kind: &str,
+            offset: u64,
+            length: u32,
+        ) -> Result<Vec<u8>, String> {
+            if kind != "vertex" {
+                return Err("Unavailable mesh buffer".into());
+            }
+            let mut bytes = Vec::new();
+            for _ in 0..3 {
+                for value in [3.0_f32, 3.0, 0.0, 1.0] {
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            Ok(bytes
+                .into_iter()
+                .skip(usize::try_from(offset).unwrap_or(usize::MAX))
+                .take(length as usize)
+                .collect())
+        }
+
         fn structure(
             &mut self,
             event: u32,

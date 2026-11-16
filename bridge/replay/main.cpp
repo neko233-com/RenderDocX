@@ -111,7 +111,8 @@ bool decimal(const std::string &text, uint64_t &value)
 
 void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids,
                     std::vector<TextureRef> &texture_ids, std::vector<BufferRef> &buffer_ids,
-                    std::map<uint32_t, uint32_t> &event_chunks)
+                    std::map<uint32_t, uint32_t> &event_chunks,
+                    std::map<uint32_t, uint32_t> &draw_instances)
 {
   const APIProperties api = controller->GetAPIProperties();
   const FrameDescription frame = controller->GetFrameInfo();
@@ -158,6 +159,8 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
     }
     std::cout << "]}";
     event_ids.insert(action.eventId);
+    if(action.flags & (ActionFlags::Drawcall | ActionFlags::MeshDispatch))
+      draw_instances.emplace(action.eventId, (std::max)(1U, action.numInstances));
     for(size_t i = action.children.size(); i > 0; --i)
       pending.push_back({&action.children[i - 1], node.depth + 1, static_cast<int64_t>(index)});
     ++index;
@@ -210,6 +213,49 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
     std::cout << ",\"length\":\"" << buffer.length << "\",\"creation_flags\":" << uint32_t(buffer.creationFlags) << '}';
   }
   std::cout << "]}" << std::endl;
+}
+
+void write_mesh(const MeshFormat &mesh, uint32_t event, uint32_t instance, uint32_t view, uint32_t stage)
+{
+  auto number = [](float value) {
+    if(std::isfinite(value)) std::cout << std::setprecision(std::numeric_limits<float>::max_digits10) << value;
+    else std::cout << "null";
+  };
+  std::cout << "\nRENDERDOCX/1 {\"type\":\"mesh\",\"event_id\":" << event << ",\"instance\":" << instance
+            << ",\"view\":" << view << ",\"stage\":" << stage
+            << ",\"index_bound\":" << (mesh.indexResourceId != ResourceId() ? "true" : "false")
+            << ",\"index_offset\":\"" << mesh.indexByteOffset << "\",\"index_size\":\"" << mesh.indexByteSize
+            << "\",\"index_stride\":" << mesh.indexByteStride << ",\"base_vertex\":" << mesh.baseVertex
+            << ",\"vertex_bound\":" << (mesh.vertexResourceId != ResourceId() ? "true" : "false")
+            << ",\"vertex_offset\":\"" << mesh.vertexByteOffset << "\",\"vertex_size\":\"" << mesh.vertexByteSize
+            << "\",\"vertex_stride\":" << mesh.vertexByteStride << ",\"per_primitive_offset\":\"" << mesh.perPrimitiveOffset
+            << "\",\"per_primitive_stride\":" << mesh.perPrimitiveStride << ",\"format_name\":";
+  json_string(mesh.format.Name());
+  std::cout << ",\"format_type\":" << uint32_t(mesh.format.type) << ",\"component_type\":" << uint32_t(mesh.format.compType)
+            << ",\"component_count\":" << uint32_t(mesh.format.compCount) << ",\"component_byte_width\":" << uint32_t(mesh.format.compByteWidth)
+            << ",\"topology\":" << uint32_t(mesh.topology) << ",\"num_indices\":" << mesh.numIndices
+            << ",\"restart_index\":" << mesh.restartIndex << ",\"allow_restart\":" << (mesh.allowRestart ? "true" : "false")
+            << ",\"unproject\":" << (mesh.unproject ? "true" : "false") << ",\"flip_y\":" << (mesh.flipY ? "true" : "false")
+            << ",\"near_plane\":"; number(mesh.nearPlane); std::cout << ",\"far_plane\":"; number(mesh.farPlane);
+  std::cout << ",\"meshlet_offset\":" << mesh.meshletOffset << ",\"meshlet_index_offset\":" << mesh.meshletIndexOffset
+            << ",\"dispatch_size\":";
+  // Upstream only defines dispatchSize for an available task-stage output.
+  if(stage == uint32_t(MeshDataStage::TaskOut) && mesh.vertexResourceId != ResourceId())
+    std::cout << '[' << mesh.dispatchSize[0] << ',' << mesh.dispatchSize[1] << ',' << mesh.dispatchSize[2] << ']';
+  else std::cout << "null";
+  std::cout << ",\"meshlets\":[";
+  for(size_t i = 0; i < mesh.meshletSizes.size(); ++i)
+  {
+    if(i) std::cout << ',';
+    std::cout << "{\"indices\":" << mesh.meshletSizes[i].numIndices << ",\"vertices\":" << mesh.meshletSizes[i].numVertices << '}';
+  }
+  std::cout << "],\"tasks\":[";
+  for(size_t i = 0; i < mesh.taskSizes.size(); ++i)
+  {
+    if(i) std::cout << ',';
+    std::cout << '[' << mesh.taskSizes[i].x << ',' << mesh.taskSizes[i].y << ',' << mesh.taskSizes[i].z << ']';
+  }
+  std::cout << "],\"status\":"; json_string(mesh.status); std::cout << '}' << std::endl;
 }
 
 // Preserve upstream type metadata and scalar values; child arrays are paged separately.
@@ -389,17 +435,78 @@ int run(const std::string &capture, bool structure_worker)
   std::vector<TextureRef> texture_ids;
   std::vector<BufferRef> buffer_ids;
   std::map<uint32_t, uint32_t> event_chunks;
-  write_snapshot(replay.controller, event_ids, texture_ids, buffer_ids, event_chunks);
+  std::map<uint32_t, uint32_t> draw_instances;
+  write_snapshot(replay.controller, event_ids, texture_ids, buffer_ids, event_chunks, draw_instances);
   std::map<ResourceId, size_t> resource_indices;
   const auto &resources = replay.controller->GetResources();
   for(size_t i = 0; i < resources.size(); ++i) resource_indices.emplace(resources[i].resourceId, i);
   bool selected = false;
   uint32_t selected_event = 0;
+  bool mesh_ready = false;
+  MeshFormat selected_mesh;
+  uint32_t mesh_instance = 0, mesh_view = 0, mesh_stage = 0;
 
   std::string command;
   while(std::getline(std::cin, command))
   {
     if(command == "quit") break;
+    if(command.compare(0, 5, "mesh ") == 0)
+    {
+      std::istringstream arguments(command.substr(5));
+      std::string instance_text, view_text, stage_text, extra;
+      uint64_t instance = 0, view = 0, stage = 0;
+      if(!(arguments >> instance_text >> view_text >> stage_text) || (arguments >> extra) ||
+         !decimal(instance_text, instance) || !decimal(view_text, view) || !decimal(stage_text, stage) ||
+         instance > UINT32_MAX || view > UINT32_MAX || stage < 1 || stage > 4)
+      { error("Invalid mesh request"); continue; }
+      auto draw = draw_instances.find(selected_event);
+      if(!selected || draw == draw_instances.end()) { error("Select a draw or mesh dispatch event first"); continue; }
+      if(instance >= draw->second) { error("Mesh instance is out of range"); continue; }
+      // Backends can ignore or silently clamp viewID. Until the actual view count is
+      // exposed by the replay API, do not report a different view as requested.
+      if(view != 0) { error("Nonzero mesh views cannot yet be verified"); continue; }
+      const GraphicsAPI api = replay.controller->GetAPIProperties().pipelineType;
+      if(stage >= 3 && (api == GraphicsAPI::D3D11 || api == GraphicsAPI::OpenGL))
+      { error("Task and mesh shader output is unavailable on this replay API"); continue; }
+      mesh_ready = false;
+      selected_mesh = replay.controller->GetPostVSData(uint32_t(instance), uint32_t(view), MeshDataStage(stage));
+      result = replay.controller->GetFatalErrorStatus();
+      if(!result.OK()) { error(result_message(result)); break; }
+      mesh_ready = true;
+      mesh_instance = uint32_t(instance); mesh_view = uint32_t(view); mesh_stage = uint32_t(stage);
+      write_mesh(selected_mesh, selected_event, uint32_t(instance), uint32_t(view), uint32_t(stage));
+      continue;
+    }
+    if(command.compare(0, 10, "mesh_read ") == 0)
+    {
+      std::istringstream arguments(command.substr(10));
+      std::string instance_text, view_text, stage_text, kind, offset_text, length_text, extra;
+      uint64_t instance = 0, view = 0, stage = 0, offset = 0, length = 0;
+      if(!(arguments >> instance_text >> view_text >> stage_text >> kind >> offset_text >> length_text) || (arguments >> extra) ||
+         !decimal(instance_text, instance) || !decimal(view_text, view) || !decimal(stage_text, stage) ||
+         instance > UINT32_MAX || view > UINT32_MAX || stage < 1 || stage > 4 ||
+         (kind != "vertex" && kind != "index") || !decimal(offset_text, offset) ||
+         !decimal(length_text, length) || length > 65536)
+      { error("Invalid mesh buffer request"); continue; }
+      if(!selected || !mesh_ready) { error("Query mesh data for the selected event first"); continue; }
+      if(instance != mesh_instance || view != mesh_view || stage != mesh_stage)
+      { error("Mesh selection has changed"); continue; }
+      const ResourceId id = kind == "vertex" ? selected_mesh.vertexResourceId : selected_mesh.indexResourceId;
+      const uint64_t base = kind == "vertex" ? selected_mesh.vertexByteOffset : selected_mesh.indexByteOffset;
+      if(id == ResourceId() || offset > UINT64_MAX - base || length > UINT64_MAX - (base + offset))
+      { error("Mesh buffer is unavailable or range overflowed"); continue; }
+      bytebuf data;
+      if(length) data = replay.controller->GetBufferData(id, base + offset, length);
+      result = replay.controller->GetFatalErrorStatus();
+      if(!result.OK()) { error(result_message(result)); break; }
+      if(data.size() > length) { error("Invalid mesh buffer response"); continue; }
+      static const char hex[] = "0123456789abcdef";
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"mesh_data\",\"event_id\":" << selected_event << ",\"kind\":";
+      json_string(kind.data(), kind.size()); std::cout << ",\"offset\":\"" << offset << "\",\"hex\":\"";
+      for(byte value : data) std::cout << hex[value >> 4] << hex[value & 15];
+      std::cout << "\"}" << std::endl;
+      continue;
+    }
     if(command.compare(0, 17, "structure_buffer ") == 0)
     {
       if(!structure_worker || !replay.file) { error("Structured buffer export requires an isolated worker"); continue; }
@@ -662,6 +769,7 @@ int run(const std::string &capture, bool structure_worker)
       if(event > (std::numeric_limits<uint32_t>::max)()) { valid = false; break; }
     }
     if(!valid || event_ids.count(uint32_t(event)) == 0) { error("Unknown capture event"); continue; }
+    mesh_ready = false;
     replay.controller->SetFrameEvent(uint32_t(event), false);
     result = replay.controller->GetFatalErrorStatus();
     if(!result.OK()) { error(result_message(result)); break; }

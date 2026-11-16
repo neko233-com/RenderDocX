@@ -8,6 +8,8 @@ The event browser can filter visible event names using case-insensitive literal 
 
 Select an action and open **API calls** to inspect its associated API events, or select those events in the main hierarchy after enabling them. Both views can replay the selected event. **Parameters** browses structured capture data on demand, including nested children and pages. Buffer nodes offer a paged byte view; the first read creates an isolated worker and exports the full structured capture, which can require substantial extra memory and time. Event names still use structured chunk names rather than RenderDoc's fully formatted call summaries.
 
+**Mesh** queries post-shader output for a selected draw and displays paged positions when RenderDoc reports a supported float position format; otherwise it displays raw bytes. Positions follow buffer order, not draw-index order. The current desktop view uses instance 0 and view 0 and is not yet the complete RenderDoc mesh viewer. The agent CLI also exposes the index buffer and instance selection.
+
 The interface detects the system language on startup and supports English, Simplified Chinese, Japanese, and Korean, with a manual language override. Its settings are stored in the operating system's user configuration directory.
 
 ## Build and run
