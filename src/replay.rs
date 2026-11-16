@@ -40,6 +40,45 @@ pub struct Snapshot {
 
 /// The maximum bytes per IPC response; larger buffers can be read in pages.
 pub const BUFFER_PAGE_LIMIT: u32 = 65_536;
+pub const SHADER_STAGES: [&str; 8] = [
+    "vertex",
+    "tess_control",
+    "tess_eval",
+    "geometry",
+    "fragment",
+    "compute",
+    "task",
+    "mesh",
+];
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ShaderSignature {
+    pub name: String,
+    pub semantic: String,
+    pub semantic_index: u32,
+    pub register: u32,
+    pub system_value: u32,
+    #[serde(rename = "type")]
+    pub variable_type: u32,
+    pub components: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ShaderReport {
+    pub event_id: u32,
+    pub stage: u32,
+    pub entry_point: String,
+    pub encoding: u32,
+    pub target: String,
+    pub targets: Vec<String>,
+    pub disassembly: String,
+    pub inputs: Vec<ShaderSignature>,
+    pub outputs: Vec<ShaderSignature>,
+    pub constant_blocks: usize,
+    pub read_only_resources: usize,
+    pub read_write_resources: usize,
+    pub samplers: usize,
+}
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Buffer {
@@ -148,6 +187,7 @@ enum Reply {
         offset: String,
         hex: String,
     },
+    Shader(ShaderReport),
     Error {
         message: String,
     },
@@ -207,6 +247,9 @@ trait Transport: Send {
     fn read_buffer(&mut self, _index: u32, _offset: u64, _length: u32) -> Result<Vec<u8>, String> {
         Err("Buffer reading is not supported by this transport".into())
     }
+    fn shader(&mut self, _stage: u32, _target: Option<u32>) -> Result<ShaderReport, String> {
+        Err("Shader inspection is not supported by this transport".into())
+    }
     fn close(&mut self) -> Result<(), String> {
         Ok(())
     }
@@ -265,6 +308,21 @@ impl Transport for Process {
             }
             Reply::Error { message } => Err(message),
             _ => Err("Unexpected buffer response".into()),
+        }
+    }
+
+    fn shader(&mut self, stage: u32, target: Option<u32>) -> Result<ShaderReport, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        let target = target
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "default".into());
+        writeln!(input, "shader {stage} {target}")
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::Shader(report) if report.stage == stage => Ok(report),
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected shader response".into()),
         }
     }
 
@@ -385,6 +443,16 @@ impl Session {
             .read_buffer(index, offset, length)
     }
 
+    pub fn shader(&self, stage: u32, target: Option<u32>) -> Result<ShaderReport, String> {
+        if stage as usize >= SHADER_STAGES.len() {
+            return Err("Invalid shader stage".into());
+        }
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .shader(stage, target)
+    }
+
     pub fn close(&self) -> Result<(), String> {
         self.process.lock().map_err(|e| e.to_string())?.close()
     }
@@ -440,6 +508,18 @@ pub mod test_support {
                 event_id: event,
                 available: true,
                 topology: 5,
+                shaders: SHADER_STAGES
+                    .iter()
+                    .enumerate()
+                    .map(|(index, stage)| PipelineShader {
+                        stage: (*stage).into(),
+                        resource: PipelineResource {
+                            bound: index == 0,
+                            resource_index: None,
+                            name: "fixture shader".into(),
+                        },
+                    })
+                    .collect(),
                 index_buffer: Some(PipelineBuffer {
                     resource: PipelineResource {
                         bound: true,
@@ -485,6 +565,40 @@ pub mod test_support {
             length: u32,
         ) -> Result<Vec<u8>, String> {
             Ok((0..length).map(|i| (offset + u64::from(i)) as u8).collect())
+        }
+
+        fn shader(&mut self, stage: u32, target: Option<u32>) -> Result<ShaderReport, String> {
+            if stage != 0 {
+                return Err("No shader is bound to this stage".into());
+            }
+            if target.is_some_and(|value| value > 0) {
+                return Err("Invalid shader target".into());
+            }
+            let event = *self
+                .0
+                .lock()
+                .map_err(|e| e.to_string())?
+                .last()
+                .ok_or("No event")?;
+            Ok(ShaderReport {
+                event_id: event,
+                stage,
+                entry_point: "main".into(),
+                encoding: 1,
+                target: if target.is_some() {
+                    "native".into()
+                } else {
+                    String::new()
+                },
+                targets: vec!["native".into()],
+                disassembly: "fixture disassembly".into(),
+                inputs: vec![],
+                outputs: vec![],
+                constant_blocks: 0,
+                read_only_resources: 0,
+                read_write_resources: 0,
+                samplers: 0,
+            })
         }
     }
 

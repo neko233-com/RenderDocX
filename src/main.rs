@@ -11,7 +11,7 @@ use gpui_kit::{
 use renderdocx::{
     backend::{self, Settings},
     i18n::Language,
-    replay::{Pipeline, Session, Snapshot},
+    replay::{Pipeline, SHADER_STAGES, Session, ShaderReport, Snapshot},
 };
 use std::path::PathBuf;
 
@@ -25,6 +25,7 @@ enum CaptureTab {
     Events,
     Textures,
     Buffers,
+    Shaders,
 }
 const BUFFER_VIEW_PAGE: u64 = 256;
 
@@ -41,7 +42,9 @@ struct Workspace {
     selected_buffer: Option<usize>,
     buffer_offset: u64,
     buffer_data: Option<Vec<u8>>,
-    buffer_pending: bool,
+    resource_pending: bool,
+    selected_shader: Option<usize>,
+    shader_data: Option<ShaderReport>,
     open_revision: u64,
     selection_revision: u64,
     replay_pending: bool,
@@ -83,7 +86,7 @@ impl Workspace {
     }
 
     fn open(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if self.replay_pending || self.export_pending || self.buffer_pending {
+        if self.replay_pending || self.export_pending || self.resource_pending {
             self.status = Some(
                 self.t(
                     "Wait for the current replay operation to finish.",
@@ -140,7 +143,9 @@ impl Workspace {
                         this.tab = CaptureTab::Events;
                         this.selected_buffer = None;
                         this.buffer_data = None;
-                        this.buffer_pending = false;
+                        this.resource_pending = false;
+                        this.selected_shader = None;
+                        this.shader_data = None;
                         this.replay_pending = false;
                         this.export_pending = false;
                         this.preview = None;
@@ -165,7 +170,7 @@ impl Workspace {
     }
 
     fn select(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.export_pending || self.buffer_pending {
+        if self.export_pending || self.resource_pending {
             self.status = Some(
                 self.t(
                     "Wait for the resource operation to finish.",
@@ -194,6 +199,7 @@ impl Workspace {
         self.replay_pending = true;
         self.preview = None;
         self.buffer_data = None;
+        self.shader_data = None;
         let open_revision = self.open_revision;
         self.status = Some(
             self.t(
@@ -241,7 +247,7 @@ impl Workspace {
     }
 
     fn read_buffer(&mut self, index: usize, offset: u64, cx: &mut Context<Self>) {
-        if self.replay_pending || self.export_pending || self.buffer_pending {
+        if self.replay_pending || self.export_pending || self.resource_pending {
             self.status = Some(
                 self.t(
                     "Wait for the current operation.",
@@ -288,7 +294,7 @@ impl Workspace {
             return;
         };
         let length = (size - offset).min(BUFFER_VIEW_PAGE) as u32;
-        self.buffer_pending = true;
+        self.resource_pending = true;
         self.status = Some(
             self.t(
                 "Reading buffer…",
@@ -309,7 +315,7 @@ impl Workspace {
                 if this.open_revision != revision {
                     return;
                 }
-                this.buffer_pending = false;
+                this.resource_pending = false;
                 match result {
                     Ok(bytes) => {
                         this.buffer_data = Some(bytes);
@@ -333,10 +339,105 @@ impl Workspace {
         .detach();
     }
 
+    fn read_shader(&mut self, stage: usize, target: Option<u32>, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            self.status = Some(
+                self.t(
+                    "Wait for the current operation.",
+                    "请等待当前操作完成。",
+                    "現在の処理が完了するまでお待ちください。",
+                    "현재 작업이 끝날 때까지 기다려 주세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let Some(event) = self
+            .selected
+            .and_then(|i| self.snapshot.as_ref()?.actions.get(i))
+            .map(|action| action.event_id)
+        else {
+            self.status = Some(
+                self.t(
+                    "Select an event before inspecting shaders.",
+                    "请先选择事件再查看着色器。",
+                    "シェーダーを見る前にイベントを選択してください。",
+                    "셰이더를 확인하기 전에 이벤트를 선택하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if stage >= SHADER_STAGES.len() {
+            return;
+        }
+        self.selected_shader = Some(stage);
+        self.shader_data = None;
+        self.resource_pending = true;
+        self.status = Some(
+            self.t(
+                "Loading shader…",
+                "正在加载着色器…",
+                "シェーダーを読み込み中…",
+                "셰이더를 불러오는 중…",
+            )
+            .to_owned(),
+        );
+        let revision = self.open_revision;
+        cx.notify();
+        let task = cx
+            .background_executor()
+            .spawn(async move { session.shader(stage as u32, target) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision {
+                    return;
+                }
+                this.resource_pending = false;
+                match result {
+                    Ok(report) if report.event_id == event => {
+                        this.shader_data = Some(report);
+                        this.status = None;
+                    }
+                    Ok(_) => {
+                        this.status = Some(
+                            this.t(
+                                "Shader response belongs to another event.",
+                                "着色器结果属于其他事件。",
+                                "シェーダーの結果は別のイベントのものです。",
+                                "셰이더 결과가 다른 이벤트에 속합니다.",
+                            )
+                            .to_owned(),
+                        );
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Shader inspection failed",
+                                "着色器查看失败",
+                                "シェーダーを表示できません",
+                                "셰이더 확인 실패"
+                            )
+                        ));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn export_texture(&mut self, cx: &mut Context<Self>) {
         if self.replay_pending
             || self.export_pending
-            || self.buffer_pending
+            || self.resource_pending
             || self.selected.is_none()
         {
             self.status = Some(
@@ -415,7 +516,7 @@ impl Workspace {
     fn preview_texture(&mut self, cx: &mut Context<Self>) {
         if self.replay_pending
             || self.export_pending
-            || self.buffer_pending
+            || self.resource_pending
             || self.selected.is_none()
         {
             self.status = Some(
@@ -502,6 +603,13 @@ impl Workspace {
             CaptureTab::Textures => snapshot.textures.len(),
             CaptureTab::Buffers => snapshot.buffers.len(),
             CaptureTab::Events => snapshot.actions.len(),
+            CaptureTab::Shaders => {
+                if self.pipeline.is_some() {
+                    SHADER_STAGES.len()
+                } else {
+                    0
+                }
+            }
         };
         let api = match snapshot.api {
             0 => "D3D11",
@@ -565,6 +673,29 @@ impl Workspace {
         let events = self.t("EVENTS", "事件", "イベント", "이벤트");
         let textures_label = self.t("Textures", "纹理", "テクスチャ", "텍스처");
         let buffers_label = self.t("Buffers", "缓冲区", "バッファ", "버퍼");
+        let shaders_tab_label = self.t("Shaders", "着色器", "シェーダー", "셰이더");
+        let shader_details = self.t(
+            "SHADER DETAILS",
+            "着色器详情",
+            "シェーダー詳細",
+            "셰이더 상세",
+        );
+        let shader_empty = self.t(
+            "Select an event and a bound shader stage.",
+            "选择事件及已绑定的着色器阶段。",
+            "イベントとバインドされたシェーダーステージを選択してください。",
+            "이벤트와 바인딩된 셰이더 단계를 선택하세요.",
+        );
+        let next_target = self.t("Next target", "切换目标", "ターゲット切替", "대상 전환");
+        let entry_label = self.t("Entry point", "入口点", "エントリポイント", "진입점");
+        let disasm_label = self.t("Disassembly", "反汇编", "逆アセンブル", "역어셈블리");
+        let shader_inputs_label = self.t("Inputs", "输入", "入力", "입력");
+        let shader_outputs_label = self.t("Outputs", "输出", "出力", "출력");
+        let constants_label = self.t("Constant blocks", "常量块", "定数ブロック", "상수 블록");
+        let target_label = self.t("Target", "目标", "ターゲット", "대상");
+        let default_label = self.t("Default", "默认", "既定", "기본값");
+        let bound_label = self.t("bound", "已绑定", "バインド済み", "바인딩됨");
+        let unbound_label = self.t("unbound", "未绑定", "未バインド", "바인딩 안 됨");
         let buffer_label = self.t("Buffer", "缓冲区", "バッファ", "버퍼");
         let buffer_details = self.t(
             "BUFFER DETAILS",
@@ -670,7 +801,54 @@ impl Workspace {
         let status = self.status.clone();
         let preview_path = self.preview.as_ref().map(|preview| preview.path.clone());
 
-        let list = if self.tab == CaptureTab::Buffers {
+        let list = if self.tab == CaptureTab::Shaders {
+            uniform_list(
+                "capture-shaders",
+                count,
+                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                    range
+                        .filter_map(|index| {
+                            let stage = *SHADER_STAGES.get(index)?;
+                            let shader = this
+                                .pipeline
+                                .as_ref()?
+                                .shaders
+                                .iter()
+                                .find(|shader| shader.stage == stage)?;
+                            let bound = shader.resource.bound;
+                            let name = shader.resource.name.clone();
+                            Some(
+                                div()
+                                    .id(SharedString::from(format!("shader-{index}")))
+                                    .test_support()
+                                    .h(px(32.))
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .cursor_pointer()
+                                    .bg(rgb(if this.selected_shader == Some(index) {
+                                        0x304c7c
+                                    } else {
+                                        0x192332
+                                    }))
+                                    .hover(|row| row.bg(rgb(0x263950)))
+                                    .child(format!(
+                                        "{stage} · {}",
+                                        if bound { bound_label } else { unbound_label }
+                                    ))
+                                    .child(div().overflow_hidden().child(name))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.read_shader(index, None, cx)
+                                    })),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .flex_1()
+            .into_any_element()
+        } else if self.tab == CaptureTab::Buffers {
             uniform_list(
                 "capture-buffers",
                 count,
@@ -806,7 +984,105 @@ impl Workspace {
             .into_any_element()
         };
 
-        let detail_view = if self.tab == CaptureTab::Buffers {
+        let detail_view = if self.tab == CaptureTab::Shaders {
+            let report = self.shader_data.clone();
+            let target_button = button(
+                "shader-next-target",
+                next_target,
+                false,
+                |this, cx| {
+                    if let (Some(stage), Some(report)) =
+                        (this.selected_shader, this.shader_data.as_ref())
+                    {
+                        if report.targets.is_empty() {
+                            return;
+                        }
+                        let target = if report.target.is_empty() {
+                            Some(0)
+                        } else {
+                            report
+                                .targets
+                                .iter()
+                                .position(|target| *target == report.target)
+                                .and_then(|index| u32::try_from(index + 1).ok())
+                                .filter(|index| (*index as usize) < report.targets.len())
+                        };
+                        this.read_shader(stage, target, cx);
+                    }
+                },
+                cx,
+            );
+            div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0x82aaff))
+                        .child(shader_details),
+                )
+                .when_some(report, |view, shader| {
+                    let inputs = shader
+                        .inputs
+                        .iter()
+                        .map(|parameter| {
+                            format!(
+                                "{} · r{} · {}",
+                                if parameter.name.is_empty() {
+                                    &parameter.semantic
+                                } else {
+                                    &parameter.name
+                                },
+                                parameter.register,
+                                parameter.components
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let outputs = shader
+                        .outputs
+                        .iter()
+                        .map(|parameter| {
+                            format!(
+                                "{} · r{} · {}",
+                                if parameter.name.is_empty() {
+                                    &parameter.semantic
+                                } else {
+                                    &parameter.name
+                                },
+                                parameter.register,
+                                parameter.components
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    view.child(format!("{entry_label}: {}", shader.entry_point))
+                        .child(format!(
+                            "{target_label}: {}",
+                            if shader.target.is_empty() {
+                                default_label
+                            } else {
+                                &shader.target
+                            }
+                        ))
+                        .child(target_button)
+                        .child(format!("{constants_label}: {}", shader.constant_blocks))
+                        .child(format!("{shader_inputs_label}: {}", inputs.len()))
+                        .children(inputs.into_iter().map(|line| div().text_sm().child(line)))
+                        .child(format!("{shader_outputs_label}: {}", outputs.len()))
+                        .children(outputs.into_iter().map(|line| div().text_sm().child(line)))
+                        .child(format!("{disasm_label} · {}", shader.encoding))
+                        .child(
+                            div()
+                                .id("shader-disassembly")
+                                .test_support()
+                                .text_sm()
+                                .child(shader.disassembly),
+                        )
+                })
+                .when(self.shader_data.is_none(), |view| {
+                    view.child(div().text_color(rgb(0x9eacc0)).child(shader_empty))
+                })
+        } else if self.tab == CaptureTab::Buffers {
             let rows = self.buffer_data.as_ref().map(|data| {
                 data.chunks(8)
                     .enumerate()
@@ -1207,8 +1483,9 @@ impl Workspace {
                             this.selected = None;
                             this.replay_pending = false;
                             this.export_pending = false;
-                            this.buffer_pending = false;
+                            this.resource_pending = false;
                             this.buffer_data = None;
+                            this.shader_data = None;
                             this.preview = None;
                             this.status = None;
                             cx.notify();
@@ -1300,6 +1577,16 @@ impl Workspace {
                                         self.tab == CaptureTab::Buffers,
                                         |this, cx| {
                                             this.tab = CaptureTab::Buffers;
+                                            cx.notify();
+                                        },
+                                        cx,
+                                    ))
+                                    .child(button(
+                                        "shaders-tab",
+                                        shaders_tab_label,
+                                        self.tab == CaptureTab::Shaders,
+                                        |this, cx| {
+                                            this.tab = CaptureTab::Shaders;
                                             cx.notify();
                                         },
                                         cx,
@@ -1607,7 +1894,9 @@ fn main() {
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_data: None,
-                        buffer_pending: false,
+                        resource_pending: false,
+                        selected_shader: None,
+                        shader_data: None,
                         open_revision: 0,
                         selection_revision: 0,
                         replay_pending: false,
@@ -1666,7 +1955,9 @@ mod ui_tests {
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_data: None,
-                        buffer_pending: false,
+                        resource_pending: false,
+                        selected_shader: None,
+                        shader_data: None,
                         open_revision: 0,
                         selection_revision: 0,
                         replay_pending: false,
@@ -1755,7 +2046,9 @@ mod ui_tests {
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_data: None,
-                        buffer_pending: false,
+                        resource_pending: false,
+                        selected_shader: None,
+                        shader_data: None,
                         open_revision: 0,
                         selection_revision: 0,
                         replay_pending: false,
@@ -1787,7 +2080,7 @@ mod ui_tests {
         cx.update(|cx| {
             assert!(view.read(cx).status.is_some());
             assert!(view.read(cx).buffer_data.is_none());
-            assert!(!view.read(cx).buffer_pending);
+            assert!(!view.read(cx).resource_pending);
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.click("events-tab", cx);
@@ -1873,5 +2166,29 @@ mod ui_tests {
             assert_eq!(view.buffer_offset, 256);
             assert_eq!(view.buffer_data.as_ref().unwrap().len(), 44);
         });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("shaders-tab", cx);
+            window.click("shader-0", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let shader = view.read(cx).shader_data.as_ref().expect("shader report");
+            assert_eq!(shader.event_id, 42);
+            assert_eq!(shader.disassembly, "fixture disassembly");
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(2000.))),
+                cx,
+            );
+            assert!(window.find("shader-disassembly").visible());
+            window.click("shader-next-target", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).shader_data.as_ref().unwrap().target, "native"));
     }
 }

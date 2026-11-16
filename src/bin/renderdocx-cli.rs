@@ -1,6 +1,6 @@
 use renderdocx::{
     backend::Settings,
-    replay::{BUFFER_PAGE_LIMIT, Pipeline, Session, Snapshot},
+    replay::{BUFFER_PAGE_LIMIT, Pipeline, SHADER_STAGES, Session, Snapshot},
 };
 use serde_json::{Value, json};
 use std::{
@@ -21,7 +21,7 @@ fn usage() -> Value {
         {"name":"select","arguments":["capture.rdc","event_id"],"description":"Replay a capture to an action event."},
         {"name":"serve","arguments":[],"description":"Serve sequential JSONL requests using a persistent replay session."},
         {"name":"capabilities","arguments":[],"description":"Describe the commands currently implemented."}
-    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","read_buffer","export_texture","close","quit"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
+    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","read_buffer","export_texture","close","quit"],"shader_stages":SHADER_STAGES,"buffer_page_limit":BUFFER_PAGE_LIMIT,"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
 }
 
 fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
@@ -231,6 +231,36 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     _ => Err((
                         "invalid_arguments",
                         "read_buffer requires index, decimal-string offset and length".into(),
+                    )),
+                }
+            }
+            "shader" => {
+                let stage = request
+                    .get("stage")
+                    .and_then(Value::as_str)
+                    .and_then(|stage| SHADER_STAGES.iter().position(|name| *name == stage));
+                let target = match request.get("target_index") {
+                    None | Some(Value::Null) => Some(None),
+                    Some(value) => value.as_u64().and_then(|v| u32::try_from(v).ok()).map(Some),
+                };
+                match (&opened, selected_event, stage, target) {
+                    (None, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some(_), None, _, _) => Err((
+                        "no_event",
+                        "Select an event before inspecting shaders".into(),
+                    )),
+                    (Some((session, _)), Some(event), Some(stage), Some(target)) => session
+                        .shader(stage as u32, target)
+                        .and_then(|report| {
+                            if report.event_id != event {
+                                return Err("Shader response belongs to a different event".into());
+                            }
+                            Ok(json!({"stage_name":SHADER_STAGES[stage],"shader":report}))
+                        })
+                        .map_err(|error| ("replay_shader_failed", error)),
+                    _ => Err((
+                        "invalid_arguments",
+                        "shader requires a valid stage and optional target_index".into(),
                     )),
                 }
             }

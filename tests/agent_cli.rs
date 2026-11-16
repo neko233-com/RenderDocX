@@ -242,6 +242,10 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         "no_event"
     );
     assert_eq!(
+        agent.send(r#"{"command":"shader","stage":"vertex"}"#)["error"]["code"],
+        "no_event"
+    );
+    assert_eq!(
         agent.send(r#"{"command":"read_buffer","index":0,"offset":"0","length":1}"#)["error"]["code"],
         "no_event"
     );
@@ -311,6 +315,52 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let draw =
         agent.send(&serde_json::json!({"command":"select","event_id":draw_event}).to_string());
     assert_eq!(draw["ok"], true, "{draw}");
+    let vertex_shader = agent.send(r#"{"command":"shader","stage":"vertex"}"#);
+    assert_eq!(vertex_shader["ok"], true, "{vertex_shader}");
+    assert_eq!(vertex_shader["data"]["shader"]["event_id"], draw_event);
+    assert!(
+        vertex_shader["data"]["shader"]["disassembly"]
+            .as_str()
+            .unwrap()
+            .contains("vs_4_0"),
+        "{vertex_shader}"
+    );
+    assert!(
+        vertex_shader["data"]["shader"]["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value["semantic"] == "POSITION"),
+        "{vertex_shader}"
+    );
+    let targets = vertex_shader["data"]["shader"]["targets"]
+        .as_array()
+        .unwrap();
+    assert!(!targets.is_empty(), "{vertex_shader}");
+    let alternate = agent.send(r#"{"command":"shader","stage":"vertex","target_index":0}"#);
+    assert_eq!(alternate["ok"], true, "{alternate}");
+    assert_eq!(alternate["data"]["shader"]["target"], targets[0]);
+    let pixel_shader = agent.send(r#"{"command":"shader","stage":"fragment"}"#);
+    assert_eq!(pixel_shader["ok"], true, "{pixel_shader}");
+    assert!(
+        pixel_shader["data"]["shader"]["disassembly"]
+            .as_str()
+            .unwrap()
+            .contains("ps_4_0"),
+        "{pixel_shader}"
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"shader","stage":"geometry"}"#)["error"]["code"],
+        "replay_shader_failed"
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"shader","stage":"vertex","target_index":4294967295}"#)["error"]["code"],
+        "replay_shader_failed"
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"shader","stage":"other"}"#)["error"]["code"],
+        "invalid_arguments"
+    );
     let state = agent.send(r#"{"command":"pipeline"}"#);
     let pipeline = &state["data"]["pipeline"];
     assert_eq!(pipeline["event_id"], draw_event);

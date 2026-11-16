@@ -316,11 +316,61 @@ int run(const std::string &capture)
   std::vector<BufferRef> buffer_ids;
   write_snapshot(replay.controller, event_ids, texture_ids, buffer_ids);
   bool selected = false;
+  uint32_t selected_event = 0;
 
   std::string command;
   while(std::getline(std::cin, command))
   {
     if(command == "quit") break;
+    if(command.compare(0, 7, "shader ") == 0)
+    {
+      std::istringstream arguments(command.substr(7));
+      std::string stage_text, target_text, extra;
+      uint64_t stage_index = 0, target_index = 0;
+      if(!(arguments >> stage_text >> target_text) || (arguments >> extra) || !decimal(stage_text, stage_index) ||
+         stage_index >= 8 || (target_text != "default" && !decimal(target_text, target_index)))
+      { error("Invalid shader stage or disassembly target"); continue; }
+      if(!selected) { error("Select an event before inspecting shaders"); continue; }
+      const PipeState &state = replay.controller->GetPipelineState();
+      const ShaderStage stage = ShaderStage(stage_index);
+      if(state.GetShader(stage) == ResourceId()) { error("No shader is bound to this stage"); continue; }
+      const ShaderReflection *reflection = state.GetShaderReflection(stage);
+      if(!reflection) { error("Shader reflection is unavailable"); continue; }
+      const ResourceId pipeline = stage == ShaderStage::Compute ? state.GetComputePipelineObject() : state.GetGraphicsPipelineObject();
+      const auto targets = replay.controller->GetDisassemblyTargets(pipeline != ResourceId());
+      if(target_text != "default" && target_index >= targets.size()) { error("Invalid shader disassembly target"); continue; }
+      const rdcstr target = target_text == "default" ? rdcstr() : targets[size_t(target_index)];
+      const rdcstr disassembly = replay.controller->DisassembleShader(pipeline, reflection, target);
+      result = replay.controller->GetFatalErrorStatus();
+      if(!result.OK()) { error(result_message(result)); break; }
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"shader\",\"event_id\":" << selected_event << ",\"stage\":" << stage_index << ",\"entry_point\":";
+      json_string(reflection->entryPoint);
+      std::cout << ",\"encoding\":" << uint32_t(reflection->encoding) << ",\"target\":"; json_string(target);
+      std::cout << ",\"targets\":[";
+      for(size_t i = 0; i < targets.size(); ++i) { if(i) std::cout << ','; json_string(targets[i]); }
+      std::cout << "],\"disassembly\":"; json_string(disassembly);
+      auto signature = [](const rdcarray<SigParameter> &parameters) {
+        std::cout << '[';
+        for(size_t i = 0; i < parameters.size(); ++i)
+        {
+          if(i) std::cout << ',';
+          const auto &p = parameters[i];
+          std::cout << "{\"name\":"; json_string(p.varName);
+          std::cout << ",\"semantic\":"; json_string(p.semanticName);
+          std::cout << ",\"semantic_index\":" << p.semanticIndex << ",\"register\":" << p.regIndex
+                    << ",\"system_value\":" << uint32_t(p.systemValue) << ",\"type\":" << uint32_t(p.varType)
+                    << ",\"components\":" << p.compCount << '}';
+        }
+        std::cout << ']';
+      };
+      std::cout << ",\"inputs\":"; signature(reflection->inputSignature);
+      std::cout << ",\"outputs\":"; signature(reflection->outputSignature);
+      std::cout << ",\"constant_blocks\":" << reflection->constantBlocks.size()
+                << ",\"read_only_resources\":" << reflection->readOnlyResources.size()
+                << ",\"read_write_resources\":" << reflection->readWriteResources.size()
+                << ",\"samplers\":" << reflection->samplers.size() << "}" << std::endl;
+      continue;
+    }
     if(command.compare(0, 7, "buffer ") == 0)
     {
       std::istringstream arguments(command.substr(7));
@@ -390,6 +440,7 @@ int run(const std::string &capture)
     result = replay.controller->GetFatalErrorStatus();
     if(!result.OK()) { error(result_message(result)); break; }
     selected = true;
+    selected_event = uint32_t(event);
     std::cout << "\nRENDERDOCX/1 {\"type\":\"selected\",\"event_id\":" << event << ",\"pipeline\":";
     write_pipeline(replay.controller, uint32_t(event));
     std::cout << "}" << std::endl;
