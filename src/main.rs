@@ -16,7 +16,10 @@ use renderdocx::{
         CaptureOptions, EnvOperation, EnvSeparator, EnvironmentModification, LaunchConfiguration,
         LiveSession, capture_directory, capture_notice, enumerate, parse_target_pid,
     },
-    replay::{Pipeline, SHADER_STAGES, Session, ShaderReport, Snapshot, TextureSelection},
+    replay::{
+        Pipeline, SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session, ShaderReport, Snapshot,
+        StructurePage, StructuredNode, TextureSelection,
+    },
 };
 use std::path::PathBuf;
 
@@ -28,10 +31,37 @@ struct TexturePreview {
     _directory: tempfile::TempDir,
 }
 
+#[derive(Default)]
+struct StructureView {
+    page: Option<StructurePage>,
+    path: Vec<u64>,
+    offset: u64,
+}
+
+fn structured_value(node: &StructuredNode) -> String {
+    match (&node.custom_string, &node.value) {
+        (Some(custom), Some(value)) if custom != value => format!("{custom} ({value})"),
+        (Some(custom), _) => custom.clone(),
+        (_, Some(value)) => value.clone(),
+        _ if node.basic_type == 3
+            || node.flags & 8 != 0
+            || node.resource_non_null == Some(false) =>
+        {
+            "NULL".into()
+        }
+        _ if node.resource_non_null == Some(true) => node
+            .resource_index
+            .map(|index| format!("#{index}"))
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CaptureTab {
     Events,
     ApiCalls,
+    Parameters,
     Textures,
     Buffers,
     Shaders,
@@ -65,6 +95,7 @@ struct Workspace {
     resource_pending: bool,
     selected_shader: Option<usize>,
     shader_data: Option<ShaderReport>,
+    structure: StructureView,
     open_revision: u64,
     selection_revision: u64,
     replay_pending: bool,
@@ -551,6 +582,7 @@ impl Workspace {
                         this.resource_pending = false;
                         this.selected_shader = None;
                         this.shader_data = None;
+                        this.structure = StructureView::default();
                         this.replay_pending = false;
                         this.export_pending = false;
                         this.preview = None;
@@ -611,6 +643,7 @@ impl Workspace {
         self.preview = None;
         self.buffer_data = None;
         self.shader_data = None;
+        self.structure = StructureView::default();
         let open_revision = self.open_revision;
         self.status = Some(
             self.t(
@@ -831,6 +864,87 @@ impl Workspace {
                                 "着色器查看失败",
                                 "シェーダーを表示できません",
                                 "셰이더 확인 실패"
+                            )
+                        ));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn read_structure(&mut self, path: Vec<u64>, offset: u64, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            self.status = Some(
+                self.t(
+                    "Wait for the current operation.",
+                    "请等待当前操作完成。",
+                    "現在の処理が完了するまでお待ちください。",
+                    "현재 작업이 끝날 때까지 기다려 주세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let Some(event) = self.pipeline.as_ref().map(|pipeline| pipeline.event_id) else {
+            self.status = Some(
+                self.t(
+                    "Select an event before inspecting parameters.",
+                    "请先选择事件再查看参数。",
+                    "パラメーターを見る前にイベントを選択してください。",
+                    "매개변수를 확인하기 전에 이벤트를 선택하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let revision = self.open_revision;
+        let selection_revision = self.selection_revision;
+        let request_path = path.clone();
+        self.resource_pending = true;
+        self.status = Some(
+            self.t(
+                "Loading event parameters…",
+                "正在加载事件参数…",
+                "イベントパラメーターを読み込み中…",
+                "이벤트 매개변수를 불러오는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            session.structure(event, &request_path, offset, STRUCTURE_PAGE_LIMIT)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision || this.selection_revision != selection_revision {
+                    return;
+                }
+                this.resource_pending = false;
+                match result {
+                    Ok(page) => {
+                        this.structure = StructureView {
+                            page: Some(page),
+                            path,
+                            offset,
+                        };
+                        this.status = None;
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Could not inspect event parameters",
+                                "无法查看事件参数",
+                                "イベントパラメーターを表示できません",
+                                "이벤트 매개변수를 확인할 수 없습니다"
                             )
                         ));
                     }
@@ -1128,6 +1242,11 @@ impl Workspace {
                 .selected
                 .and_then(|i| snapshot.actions.get(i))
                 .map_or(0, |action| action.api_events.len()),
+            CaptureTab::Parameters => self
+                .structure
+                .page
+                .as_ref()
+                .map_or(0, |page| page.children.len()),
             CaptureTab::Shaders => {
                 if self.pipeline.is_some() {
                     SHADER_STAGES.len()
@@ -1197,6 +1316,10 @@ impl Workspace {
         );
         let events = self.t("EVENTS", "事件", "イベント", "이벤트");
         let api_calls = self.t("API calls", "API 调用", "API 呼び出し", "API 호출");
+        let parameters_label = self.t("Parameters", "参数", "パラメーター", "매개변수");
+        let parent_label = self.t("Parent", "上一级", "親", "상위");
+        let previous_label = self.t("Previous", "上一页", "前へ", "이전");
+        let next_label = self.t("Next", "下一页", "次へ", "다음");
         let selected_event_label = self.t(
             "Selected event",
             "当前事件",
@@ -1363,7 +1486,55 @@ impl Workspace {
         let status = self.status.clone();
         let preview_path = self.preview.as_ref().map(|preview| preview.path.clone());
 
-        let list = if self.tab == CaptureTab::ApiCalls && count == 0 {
+        let list = if self.tab == CaptureTab::Parameters {
+            uniform_list(
+                "capture-structured-children",
+                count,
+                cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                    range
+                        .filter_map(|index| {
+                            let node = this.structure.page.as_ref()?.children.get(index)?;
+                            let mut path = this.structure.path.clone();
+                            let offset = this.structure.offset.checked_add(index as u64)?;
+                            path.push(offset);
+                            let name = if node.name.is_empty() {
+                                format!("[{offset}]")
+                            } else {
+                                node.name.clone()
+                            };
+                            let kind = node.type_name.clone();
+                            let value = structured_value(node);
+                            Some(
+                                div()
+                                    .id(SharedString::from(format!("structure-child-{index}")))
+                                    .test_support()
+                                    .h(px(32.))
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .cursor_pointer()
+                                    .hover(|row| row.bg(rgb(0x263950)))
+                                    .child(div().w(px(150.)).overflow_hidden().child(name))
+                                    .child(
+                                        div()
+                                            .w(px(120.))
+                                            .overflow_hidden()
+                                            .text_color(rgb(0x91a7c0))
+                                            .child(kind),
+                                    )
+                                    .child(div().flex_1().overflow_hidden().child(value))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.read_structure(path.clone(), 0, cx)
+                                    })),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .flex_1()
+            .into_any_element()
+        } else if self.tab == CaptureTab::ApiCalls && count == 0 {
             let message = if self.selected.is_none() {
                 self.t(
                     "Select an action to view its API calls.",
@@ -1689,7 +1860,63 @@ impl Workspace {
             .into_any_element()
         };
 
-        let detail_view = if self.tab == CaptureTab::Shaders {
+        let detail_view = if self.tab == CaptureTab::Parameters {
+            let page = self.structure.page.clone();
+            let heading = self.t(
+                "STRUCTURED DATA",
+                "结构化数据",
+                "構造化データ",
+                "구조화된 데이터",
+            );
+            let type_label = self.t("Type", "类型", "型", "유형");
+            let children_label = self.t("Children", "子项", "子要素", "하위 항목");
+            let size_label = self.t("Bytes", "字节", "バイト", "바이트");
+            let resource_label = self.t(
+                "Resource index",
+                "资源索引",
+                "リソースインデックス",
+                "리소스 인덱스",
+            );
+            let resource_value_label = self.t("Resource", "资源", "リソース", "리소스");
+            let non_null_label = self.t("non-null", "非空", "非 null", "널 아님");
+            let null_label = self.t("null", "空", "null", "널");
+            let pending_label = self.t(
+                "Select an event to inspect its parameters.",
+                "选择事件以查看参数。",
+                "イベントを選択してパラメーターを表示します。",
+                "이벤트를 선택하여 매개변수를 확인하세요.",
+            );
+            div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(div().text_sm().text_color(rgb(0x82aaff)).child(heading))
+                .when_some(page, |view, page| {
+                    let value = structured_value(&page.node);
+                    view.child(
+                        div()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .child(page.node.name),
+                    )
+                    .child(format!("{type_label}: {}", page.node.type_name))
+                    .child(format!("{flags_label}: 0x{:08X}", page.node.flags))
+                    .child(format!("{size_label}: {}", page.node.byte_size))
+                    .child(format!("{children_label}: {}", page.node.child_count))
+                    .when_some(page.node.resource_index, |view, index| {
+                        view.child(format!("{resource_label}: {index}"))
+                    })
+                    .when_some(page.node.resource_non_null, |view, non_null| {
+                        view.child(format!(
+                            "{resource_value_label}: {}",
+                            if non_null { non_null_label } else { null_label }
+                        ))
+                    })
+                    .when(!value.is_empty(), |view| view.child(value))
+                })
+                .when(self.structure.page.is_none(), |view| {
+                    view.child(pending_label)
+                })
+        } else if self.tab == CaptureTab::Shaders {
             let report = self.shader_data.clone();
             let target_button = button(
                 "shader-next-target",
@@ -2249,6 +2476,7 @@ impl Workspace {
                             this.resource_pending = false;
                             this.buffer_data = None;
                             this.shader_data = None;
+                            this.structure = StructureView::default();
                             this.preview = None;
                             this.status = None;
                             cx.notify();
@@ -2311,6 +2539,7 @@ impl Workspace {
                             .child(
                                 div()
                                     .flex()
+                                    .flex_wrap()
                                     .gap_2()
                                     .px_3()
                                     .py_2()
@@ -2330,6 +2559,19 @@ impl Workspace {
                                         self.tab == CaptureTab::ApiCalls,
                                         |this, cx| {
                                             this.tab = CaptureTab::ApiCalls;
+                                            cx.notify();
+                                        },
+                                        cx,
+                                    ))
+                                    .child(button(
+                                        "parameters-tab",
+                                        parameters_label,
+                                        self.tab == CaptureTab::Parameters,
+                                        |this, cx| {
+                                            this.tab = CaptureTab::Parameters;
+                                            if this.structure.page.is_none() {
+                                                this.read_structure(Vec::new(), 0, cx);
+                                            }
                                             cx.notify();
                                         },
                                         cx,
@@ -2400,6 +2642,71 @@ impl Workspace {
                                     },
                                     cx,
                                 ))
+                            })
+                            .when(self.tab == CaptureTab::Parameters, |view| {
+                                view.child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .gap_2()
+                                        .px_3()
+                                        .pb_2()
+                                        .child(button(
+                                            "structure-parent",
+                                            parent_label,
+                                            false,
+                                            |this, cx| {
+                                                let mut path = this.structure.path.clone();
+                                                if path.pop().is_some() {
+                                                    this.read_structure(path, 0, cx);
+                                                }
+                                            },
+                                            cx,
+                                        ))
+                                        .child(button(
+                                            "structure-previous",
+                                            previous_label,
+                                            false,
+                                            |this, cx| {
+                                                if this.structure.offset > 0 {
+                                                    this.read_structure(
+                                                        this.structure.path.clone(),
+                                                        this.structure.offset.saturating_sub(
+                                                            u64::from(STRUCTURE_PAGE_LIMIT),
+                                                        ),
+                                                        cx,
+                                                    );
+                                                }
+                                            },
+                                            cx,
+                                        ))
+                                        .child(button(
+                                            "structure-next",
+                                            next_label,
+                                            false,
+                                            |this, cx| {
+                                                if let Some(page) = &this.structure.page {
+                                                    let next = this
+                                                        .structure
+                                                        .offset
+                                                        .checked_add(page.children.len() as u64);
+                                                    let total =
+                                                        page.node.child_count.parse::<u64>().ok();
+                                                    if let (Some(next), Some(total)) = (next, total)
+                                                    {
+                                                        if next < total {
+                                                            this.read_structure(
+                                                                this.structure.path.clone(),
+                                                                next,
+                                                                cx,
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            cx,
+                                        )),
+                                )
                             })
                             .child(list),
                     )
@@ -3186,6 +3493,7 @@ fn main() {
                         resource_pending: false,
                         selected_shader: None,
                         shader_data: None,
+                        structure: StructureView::default(),
                         open_revision: 0,
                         selection_revision: 0,
                         replay_pending: false,
@@ -3293,6 +3601,7 @@ mod ui_tests {
                         resource_pending: false,
                         selected_shader: None,
                         shader_data: None,
+                        structure: StructureView::default(),
                         open_revision: 0,
                         selection_revision: 0,
                         replay_pending: false,
@@ -3549,6 +3858,7 @@ mod ui_tests {
                         resource_pending: false,
                         selected_shader: None,
                         shader_data: None,
+                        structure: StructureView::default(),
                         open_revision: 0,
                         selection_revision: 0,
                         replay_pending: false,
@@ -3819,6 +4129,83 @@ mod ui_tests {
             assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 41);
         });
         cx.update_window(handle.into(), |_, window, cx| {
+            window.click("parameters-tab", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let page = view.read(cx).structure.page.as_ref().unwrap();
+            assert_eq!(page.event_id, 41);
+            assert_eq!(page.children[0].name, "Topology");
+            assert_eq!(page.children.len(), 128);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("structure-next", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(view.read(cx).structure.offset, 128);
+            assert_eq!(
+                view.read(cx)
+                    .structure
+                    .page
+                    .as_ref()
+                    .unwrap()
+                    .children
+                    .len(),
+                2
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("structure-previous", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).structure.offset, 0));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("structure-next", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("structure-child-0", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).structure.path, [128]));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("structure-parent", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).structure.offset, 0));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("structure-child-0", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(view.read(cx).structure.path, [0]);
+            assert_eq!(
+                view.read(cx)
+                    .structure
+                    .page
+                    .as_ref()
+                    .unwrap()
+                    .node
+                    .value
+                    .as_deref(),
+                Some("4")
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("structure-parent", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert!(view.read(cx).structure.path.is_empty()));
+        cx.update_window(handle.into(), |_, window, cx| {
             window.click("shaders-tab", cx);
             window.click("shader-0", cx);
         })
@@ -3951,6 +4338,42 @@ mod ui_tests {
                     assert!(
                         std::time::Instant::now() < deadline,
                         "real API event selection did not complete"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.click("parameters-tab", cx)
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx).structure.page.as_ref().is_some_and(|page| {
+                            page.event_id == event_id && !page.children.is_empty()
+                        })
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real structured event did not load"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.click("structure-child-0", cx)
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| view.read(cx).structure.path == [0]) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real structured child did not load"
                     );
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }

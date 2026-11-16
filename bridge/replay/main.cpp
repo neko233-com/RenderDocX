@@ -109,7 +109,8 @@ bool decimal(const std::string &text, uint64_t &value)
 }
 
 void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids,
-                    std::vector<TextureRef> &texture_ids, std::vector<BufferRef> &buffer_ids)
+                    std::vector<TextureRef> &texture_ids, std::vector<BufferRef> &buffer_ids,
+                    std::map<uint32_t, uint32_t> &event_chunks)
 {
   const APIProperties api = controller->GetAPIProperties();
   const FrameDescription frame = controller->GetFrameInfo();
@@ -151,6 +152,8 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
       else json_string("", 0);
       std::cout << '}';
       event_ids.insert(event.eventId);
+      if(event.chunkIndex < structured.chunks.size() && structured.chunks[event.chunkIndex])
+        event_chunks.emplace(event.eventId, event.chunkIndex);
     }
     std::cout << "]}";
     event_ids.insert(action.eventId);
@@ -206,6 +209,56 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
     std::cout << ",\"length\":\"" << buffer.length << "\",\"creation_flags\":" << uint32_t(buffer.creationFlags) << '}';
   }
   std::cout << "]}" << std::endl;
+}
+
+// Preserve upstream type metadata and scalar values; child arrays are paged separately.
+void write_structured_node(const SDObject *object, const std::map<ResourceId, size_t> &resources)
+{
+  std::cout << "{\"name\":"; json_string(object->name.c_str(), object->name.size());
+  std::cout << ",\"type_name\":"; json_string(object->type.name.c_str(), object->type.name.size());
+  std::cout << ",\"basic_type\":" << uint32_t(object->type.basetype)
+            << ",\"flags\":" << uint32_t(object->type.flags)
+            << ",\"byte_size\":\"" << object->type.byteSize << "\",\"child_count\":\""
+            << object->NumChildren() << "\",\"value\":";
+  std::string scalar;
+  bool has_scalar = true;
+  switch(object->type.basetype)
+  {
+    case SDBasic::String:
+      if(object->type.flags & SDTypeFlags::NullString) has_scalar = false;
+      else scalar.assign(object->data.str.c_str(), object->data.str.size());
+      break;
+    case SDBasic::Enum:
+    case SDBasic::UnsignedInteger:
+    case SDBasic::GPUAddress: scalar = std::to_string(object->data.basic.u); break;
+    case SDBasic::SignedInteger: scalar = std::to_string(object->data.basic.i); break;
+    case SDBasic::Float:
+    {
+      std::ostringstream stream;
+      stream << std::setprecision(std::numeric_limits<double>::max_digits10) << object->data.basic.d;
+      scalar = stream.str();
+      break;
+    }
+    case SDBasic::Boolean: scalar = object->data.basic.b ? "true" : "false"; break;
+    case SDBasic::Character: scalar = std::to_string(static_cast<unsigned char>(object->data.basic.c)); break;
+    default: has_scalar = false; break;
+  }
+  if(has_scalar) json_string(scalar.data(), scalar.size()); else std::cout << "null";
+  std::cout << ",\"custom_string\":";
+  if(object->type.flags & SDTypeFlags::HasCustomString) json_string(object->data.str.c_str(), object->data.str.size());
+  else std::cout << "null";
+  std::cout << ",\"resource_non_null\":";
+  if(object->type.basetype == SDBasic::Resource) std::cout << (object->AsResourceId() == ResourceId() ? "false" : "true");
+  else std::cout << "null";
+  std::cout << ",\"resource_index\":";
+  if(object->type.basetype == SDBasic::Resource)
+  {
+    auto found = resources.find(object->AsResourceId());
+    if(found != resources.end() && object->AsResourceId() != ResourceId()) std::cout << found->second;
+    else std::cout << "null";
+  }
+  else std::cout << "null";
+  std::cout << '}';
 }
 
 // ResourceId is opaque. Indices refer to GetResources() in this replay session only.
@@ -335,7 +388,11 @@ int run(const std::string &capture)
   std::set<uint32_t> event_ids;
   std::vector<TextureRef> texture_ids;
   std::vector<BufferRef> buffer_ids;
-  write_snapshot(replay.controller, event_ids, texture_ids, buffer_ids);
+  std::map<uint32_t, uint32_t> event_chunks;
+  write_snapshot(replay.controller, event_ids, texture_ids, buffer_ids, event_chunks);
+  std::map<ResourceId, size_t> resource_indices;
+  const auto &resources = replay.controller->GetResources();
+  for(size_t i = 0; i < resources.size(); ++i) resource_indices.emplace(resources[i].resourceId, i);
   bool selected = false;
   uint32_t selected_event = 0;
 
@@ -343,6 +400,47 @@ int run(const std::string &capture)
   while(std::getline(std::cin, command))
   {
     if(command == "quit") break;
+    if(command.compare(0, 10, "structure ") == 0)
+    {
+      std::istringstream arguments(command.substr(10));
+      std::string event_text, offset_text, limit_text, item;
+      uint64_t event = 0, offset = 0, limit = 0;
+      if(!(arguments >> event_text >> offset_text >> limit_text) || !decimal(event_text, event) ||
+         !decimal(offset_text, offset) || !decimal(limit_text, limit) || event > UINT32_MAX || limit == 0 || limit > 128)
+      { error("Invalid structured event request"); continue; }
+      auto found = event_chunks.find(uint32_t(event));
+      if(found == event_chunks.end()) { error("Structured data is unavailable for this event"); continue; }
+      const SDObject *object = replay.controller->GetStructuredFile().chunks[found->second];
+      std::vector<uint64_t> path;
+      bool valid = true;
+      while(arguments >> item)
+      {
+        uint64_t index = 0;
+        if(!decimal(item, index) || index >= object->NumChildren()) { valid = false; break; }
+        object = object->GetChild(size_t(index));
+        if(!object) { valid = false; break; }
+        path.push_back(index);
+      }
+      if(!valid || offset > object->NumChildren()) { error("Invalid structured data path or offset"); continue; }
+      const size_t begin = size_t(offset);
+      const size_t end = begin + std::min<size_t>(size_t(limit), object->NumChildren() - begin);
+      std::vector<const SDObject *> children;
+      for(size_t i = begin; i < end; ++i)
+      {
+        const SDObject *child = object->GetChild(i);
+        if(!child) { valid = false; break; }
+        children.push_back(child);
+      }
+      if(!valid) { error("Structured child is unavailable"); continue; }
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"structure\",\"event_id\":" << event
+                << ",\"offset\":\"" << offset << "\",\"path\":[";
+      for(size_t i = 0; i < path.size(); ++i) { if(i) std::cout << ','; std::cout << '"' << path[i] << '"'; }
+      std::cout << "],\"node\":"; write_structured_node(object, resource_indices);
+      std::cout << ",\"children\":[";
+      for(size_t i = 0; i < children.size(); ++i) { if(i) std::cout << ','; write_structured_node(children[i], resource_indices); }
+      std::cout << "]}" << std::endl;
+      continue;
+    }
     if(command.compare(0, 7, "shader ") == 0)
     {
       std::istringstream arguments(command.substr(7));

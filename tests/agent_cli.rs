@@ -78,6 +78,14 @@ fn capabilities_advertises_versioned_machine_readable_contract() {
     assert_eq!(value["capture_options_default"]["allow_vsync"], true);
     assert_eq!(value["capture_options_default"]["debug_output_mute"], true);
     assert_eq!(value["capture_options_default"]["soft_memory_limit"], 0);
+    assert_eq!(value["structure_page_limit"], 128);
+    assert!(
+        value["serve_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|name| name == "structure")
+    );
     assert!(
         value["commands"]
             .as_array()
@@ -472,6 +480,19 @@ fn real_d3d11_capture_is_inspected_and_selected() {
             .is_ok()
     );
     let api_event_id = api_event["event_id"].as_u64().unwrap();
+    let shader_api_id = result["capture"]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|action| action["api_events"].as_array().unwrap())
+        .find(|event| {
+            event["name"]
+                .as_str()
+                .is_some_and(|name| name.contains("PSSetShader"))
+        })
+        .expect("pixel shader API event")["event_id"]
+        .as_u64()
+        .unwrap();
     let (success, api_selected) = invoke(&[
         "--bridge",
         bridge,
@@ -489,6 +510,61 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let request = serde_json::json!({"id":1,"command":"open","path":capture}).to_string();
     let opened = agent.send(&request);
     assert_eq!(opened["ok"], true, "{opened}");
+    let root_request = serde_json::json!({"command":"structure","event_id":api_event_id,"limit":1});
+    let root = agent.send(&root_request.to_string());
+    assert_eq!(root["ok"], true, "{root}");
+    assert_eq!(root["data"]["structure"]["event_id"], api_event_id);
+    let structure = &root["data"]["structure"];
+    let children = structure["children"].as_array().unwrap();
+    assert_eq!(children.len(), 1, "{root}");
+    let child_count: u64 = structure["node"]["child_count"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(child_count > 0);
+    let full =
+        agent.send(&serde_json::json!({"command":"structure","event_id":api_event_id}).to_string());
+    let topology = full["data"]["structure"]["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["name"] == "Topology")
+        .expect("topology parameter");
+    assert_eq!(topology["basic_type"], 6); // upstream SDBasic::Enum
+    assert_eq!(topology["value"], "4"); // D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST
+    let shader_structure = agent
+        .send(&serde_json::json!({"command":"structure","event_id":shader_api_id}).to_string());
+    let shader_resource = shader_structure["data"]["structure"]["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["name"] == "pShader")
+        .expect("shader parameter");
+    assert_eq!(shader_resource["basic_type"], 12); // upstream SDBasic::Resource
+    assert_eq!(shader_resource["resource_non_null"], true);
+    let child = agent.send(
+        &serde_json::json!({"command":"structure","event_id":api_event_id,"path":["0"]})
+            .to_string(),
+    );
+    assert_eq!(child["ok"], true, "{child}");
+    assert_eq!(
+        child["data"]["structure"]["node"]["name"],
+        children[0]["name"]
+    );
+    let end = agent.send(&serde_json::json!({"command":"structure","event_id":api_event_id,"offset":child_count.to_string()}).to_string());
+    assert!(
+        end["data"]["structure"]["children"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let bad_path = agent.send(&serde_json::json!({"command":"structure","event_id":api_event_id,"path":["18446744073709551615"]}).to_string());
+    assert_eq!(bad_path["error"]["code"], "replay_structure_failed");
+    let bad_limit = agent.send(
+        &serde_json::json!({"command":"structure","event_id":api_event_id,"limit":129}).to_string(),
+    );
+    assert_eq!(bad_limit["error"]["code"], "invalid_arguments");
     assert_eq!(
         agent.send(r#"{"command":"pipeline"}"#)["error"]["code"],
         "no_event"

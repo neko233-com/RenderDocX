@@ -35,6 +35,32 @@ pub struct ApiEvent {
     pub name: String,
 }
 
+/// A page of direct children in RenderDoc's structured capture data.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct StructurePage {
+    pub event_id: u32,
+    pub offset: String,
+    pub path: Vec<String>,
+    pub node: StructuredNode,
+    pub children: Vec<StructuredNode>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct StructuredNode {
+    pub name: String,
+    pub type_name: String,
+    pub basic_type: u32,
+    pub flags: u32,
+    pub byte_size: String,
+    pub child_count: String,
+    pub value: Option<String>,
+    pub custom_string: Option<String>,
+    pub resource_non_null: Option<bool>,
+    pub resource_index: Option<usize>,
+}
+
+pub const STRUCTURE_PAGE_LIMIT: u32 = 128;
+
 #[derive(Deserialize, Serialize)]
 pub struct Snapshot {
     pub protocol: u32,
@@ -232,6 +258,7 @@ enum Reply {
         hex: String,
     },
     Shader(ShaderReport),
+    Structure(StructurePage),
     Error {
         message: String,
     },
@@ -299,12 +326,46 @@ trait Transport: Send {
     fn shader(&mut self, _stage: u32, _target: Option<u32>) -> Result<ShaderReport, String> {
         Err("Shader inspection is not supported by this transport".into())
     }
+    fn structure(
+        &mut self,
+        _event: u32,
+        _path: &[u64],
+        _offset: u64,
+        _limit: u32,
+    ) -> Result<StructurePage, String> {
+        Err("Structured event inspection is not supported by this transport".into())
+    }
     fn close(&mut self) -> Result<(), String> {
         Ok(())
     }
 }
 
 impl Transport for Process {
+    fn structure(
+        &mut self,
+        event: u32,
+        path: &[u64],
+        offset: u64,
+        limit: u32,
+    ) -> Result<StructurePage, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        write!(input, "structure {event} {offset} {limit}").map_err(|e| e.to_string())?;
+        for index in path {
+            write!(input, " {index}").map_err(|e| e.to_string())?;
+        }
+        writeln!(input)
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::Structure(page) => {
+                validate_structure_page(&page, event, path, offset, limit)?;
+                Ok(page)
+            }
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected structured event response".into()),
+        }
+    }
+
     fn select(&mut self, event: u32) -> Result<Pipeline, String> {
         let input = self.input.as_mut().ok_or("Replay session has closed")?;
         writeln!(input, "select {event}")
@@ -413,6 +474,35 @@ impl Transport for Process {
         }
         Ok(())
     }
+}
+
+fn validate_structure_page(
+    page: &StructurePage,
+    event: u32,
+    path: &[u64],
+    offset: u64,
+    limit: u32,
+) -> Result<(), String> {
+    let page_path: Result<Vec<u64>, _> = page.path.iter().map(|s| s.parse()).collect();
+    let count = page
+        .node
+        .child_count
+        .parse::<u64>()
+        .map_err(|_| "Invalid structured child count")?;
+    if page.event_id != event
+        || page.offset.parse::<u64>().ok() != Some(offset)
+        || page_path.ok().as_deref() != Some(path)
+        || offset > count
+        || page.children.len() as u64 != (count - offset).min(u64::from(limit))
+        || std::iter::once(&page.node)
+            .chain(&page.children)
+            .any(|node| {
+                node.child_count.parse::<u64>().is_err() || node.byte_size.parse::<u64>().is_err()
+            })
+    {
+        return Err("Invalid structured event response".into());
+    }
+    Ok(())
 }
 
 fn decode_buffer_hex(hex: &str, length: u32) -> Result<Vec<u8>, String> {
@@ -525,6 +615,22 @@ impl Session {
             .shader(stage, target)
     }
 
+    pub fn structure(
+        &self,
+        event: u32,
+        path: &[u64],
+        offset: u64,
+        limit: u32,
+    ) -> Result<StructurePage, String> {
+        if limit == 0 || limit > STRUCTURE_PAGE_LIMIT {
+            return Err("Invalid structured page size".into());
+        }
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .structure(event, path, offset, limit)
+    }
+
     pub fn close(&self) -> Result<(), String> {
         self.process.lock().map_err(|e| e.to_string())?.close()
     }
@@ -589,6 +695,62 @@ pub mod test_support {
     use super::*;
     struct RecordingTransport(Arc<Mutex<Vec<u32>>>, Arc<Mutex<Vec<TextureSelection>>>);
     impl Transport for RecordingTransport {
+        fn structure(
+            &mut self,
+            event: u32,
+            path: &[u64],
+            offset: u64,
+            limit: u32,
+        ) -> Result<StructurePage, String> {
+            let make =
+                |name: &str, basic_type: u32, children: &str, value: Option<&str>| StructuredNode {
+                    name: name.into(),
+                    type_name: "fixture".into(),
+                    basic_type,
+                    flags: 0,
+                    byte_size: "4".into(),
+                    child_count: children.into(),
+                    value: value.map(str::to_owned),
+                    custom_string: None,
+                    resource_non_null: None,
+                    resource_index: None,
+                };
+            let (node, all) = match path {
+                [] => (
+                    make("Call", 0, "130", None),
+                    (0..130)
+                        .map(|index| {
+                            if index == 0 {
+                                make("Topology", 6, "0", Some("4"))
+                            } else {
+                                make(&format!("Param{index}"), 7, "0", Some("1"))
+                            }
+                        })
+                        .collect(),
+                ),
+                [0] => (make("Topology", 6, "0", Some("4")), vec![]),
+                [index] if *index < 130 => {
+                    (make(&format!("Param{index}"), 7, "0", Some("1")), vec![])
+                }
+                _ => return Err("Invalid path".into()),
+            };
+            if offset > all.len() as u64 || limit == 0 {
+                return Err("Invalid page".into());
+            }
+            let children = all
+                .into_iter()
+                .skip(offset as usize)
+                .take(limit as usize)
+                .collect();
+            Ok(StructurePage {
+                event_id: event,
+                path: path.iter().map(u64::to_string).collect(),
+                offset: offset.to_string(),
+                node,
+                children,
+            })
+        }
+
         fn select(&mut self, event: u32) -> Result<Pipeline, String> {
             self.0.lock().map_err(|e| e.to_string())?.push(event);
             Ok(Pipeline {
@@ -808,6 +970,22 @@ mod tests {
         );
         assert_eq!(snapshot.actions[1].api_events[1].event_id, 11);
         assert_eq!(snapshot.actions[1].api_events[1].name, "Draw()");
+    }
+
+    #[test]
+    fn structured_pages_reject_mismatched_identity_and_malformed_ranges() {
+        let node = serde_json::json!({"name":"x","type_name":"int","basic_type":7,"flags":0,
+            "byte_size":"4","child_count":"2","value":"4","custom_string":null,
+            "resource_non_null":null,"resource_index":null});
+        let mut page: StructurePage = serde_json::from_value(serde_json::json!({"event_id":9,
+            "offset":"1","path":["18446744073709551615"],"node":node.clone(),"children":[node]}))
+        .unwrap();
+        assert!(validate_structure_page(&page, 9, &[u64::MAX], 1, 128).is_ok());
+        assert!(validate_structure_page(&page, 10, &[u64::MAX], 1, 128).is_err());
+        assert!(validate_structure_page(&page, 9, &[0], 1, 128).is_err());
+        assert!(validate_structure_page(&page, 9, &[u64::MAX], 2, 128).is_err());
+        page.children[0].byte_size = "not-a-number".into();
+        assert!(validate_structure_page(&page, 9, &[u64::MAX], 1, 128).is_err());
     }
 
     #[test]
