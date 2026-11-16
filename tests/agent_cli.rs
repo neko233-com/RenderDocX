@@ -1466,6 +1466,24 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     }
     let vertex_shader = agent.send(r#"{"command":"shader","stage":"vertex"}"#);
     assert_eq!(vertex_shader["ok"], true, "{vertex_shader}");
+    let shader_path = dir.path().join("vertex-disassembly.txt");
+    let export_request = serde_json::json!({"command":"shader_export","stage":"vertex","kind":"disassembly","path":shader_path}).to_string();
+    let exported = agent.send(&export_request);
+    assert_eq!(exported["ok"], true, "{exported}");
+    assert_eq!(
+        std::fs::read_to_string(&shader_path).unwrap(),
+        vertex_shader["data"]["shader"]["disassembly"]
+            .as_str()
+            .unwrap()
+    );
+    assert_eq!(
+        agent.send(&export_request)["error"]["code"],
+        "shader_export_failed"
+    );
+    let missing_source = dir.path().join("missing-source.txt");
+    let result = agent.send(&serde_json::json!({"command":"shader_export","stage":"vertex","kind":"source","source_index":999999,"path":missing_source}).to_string());
+    assert_eq!(result["error"]["code"], "shader_export_failed");
+    assert!(!missing_source.exists());
     let bad_debug =
         agent.send(r#"{"command":"debug_vertex","vertex":4294967295,"instance":0,"index":0}"#);
     assert_eq!(bad_debug["error"]["code"], "replay_debug_failed");

@@ -42,7 +42,7 @@ fn usage() -> Value {
         {"name":"select","arguments":["capture.rdc","event_id"],"description":"Replay a capture to an event."},
         {"name":"serve","arguments":[],"description":"Serve sequential JSONL requests using a persistent replay session."},
         {"name":"capabilities","arguments":[],"description":"Describe the commands currently implemented."}
-    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","debug_vertex","debug_pixel","debug_compute","debug_collect","debug_state","debug_breakpoint","debug_navigate","debug_next","debug_stop","vertex_input","mesh","mesh_read","structure","structure_buffer","read_buffer","resource_usage","resource_rename","annotation_read","annotation_write","descriptors","debug_messages","clear_debug_messages","counter_fetch","counter_page","pick_pixel","pixel_history","texture_statistics","export_texture","close","target_list","target_launch","target_connect","target_connect_pid","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"counter_page_limit":renderdocx::replay::COUNTER_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
+    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","shader_export","debug_vertex","debug_pixel","debug_compute","debug_collect","debug_state","debug_breakpoint","debug_navigate","debug_next","debug_stop","vertex_input","mesh","mesh_read","structure","structure_buffer","read_buffer","resource_usage","resource_rename","annotation_read","annotation_write","descriptors","debug_messages","clear_debug_messages","counter_fetch","counter_page","pick_pixel","pixel_history","texture_statistics","export_texture","close","target_list","target_launch","target_connect","target_connect_pid","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"counter_page_limit":renderdocx::replay::COUNTER_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
 }
 
 fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
@@ -825,6 +825,65 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     _ => Err((
                         "invalid_arguments",
                         "shader requires a valid stage and optional target_index".into(),
+                    )),
+                }
+            }
+            "shader_export" => {
+                let stage = request
+                    .get("stage")
+                    .and_then(Value::as_str)
+                    .and_then(|stage| SHADER_STAGES.iter().position(|name| *name == stage));
+                let target = match request.get("target_index") {
+                    None | Some(Value::Null) => Some(None),
+                    Some(value) => value.as_u64().and_then(|v| u32::try_from(v).ok()).map(Some),
+                };
+                let selection = match request.get("kind").and_then(Value::as_str) {
+                    Some("disassembly") => Some(renderdocx::shader_export::ShaderText::Disassembly),
+                    Some("source") => request
+                        .get("source_index")
+                        .and_then(Value::as_u64)
+                        .and_then(|v| usize::try_from(v).ok())
+                        .map(renderdocx::shader_export::ShaderText::Source),
+                    _ => None,
+                };
+                let path = request
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty());
+                match (&opened, selected_event, stage, target, selection, path) {
+                    (None, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some(_), None, _, _, _, _) => Err((
+                        "no_event",
+                        "Select an event before exporting a shader".into(),
+                    )),
+                    (
+                        Some((session, _)),
+                        Some(event),
+                        Some(stage),
+                        Some(target),
+                        Some(selection),
+                        Some(path),
+                    ) => {
+                        let result = (|| {
+                            let report = session.shader(stage as u32, target)?;
+                            if report.event_id != event {
+                                return Err("Shader response belongs to a different event".into());
+                            }
+                            let text = renderdocx::shader_export::text(&report, selection)?;
+                            renderdocx::shader_export::write_new(
+                                PathBuf::from(path).as_path(),
+                                text,
+                            )?;
+                            Ok::<_, String>(
+                                json!({"event_id":event,"stage":SHADER_STAGES[stage],"bytes":text.len(),"path":path}),
+                            )
+                        })();
+                        result.map_err(|error| ("shader_export_failed", error))
+                    }
+                    _ => Err((
+                        "invalid_arguments",
+                        "shader_export requires stage, kind, path and source_index for source"
+                            .into(),
                     )),
                 }
             }

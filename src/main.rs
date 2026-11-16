@@ -2853,6 +2853,81 @@ impl Workspace {
         .detach();
     }
 
+    fn export_shader_text(&mut self, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            return;
+        }
+        let Some(report) = self.shader_data.as_ref() else {
+            return;
+        };
+        let selection = self.shader_source.map_or(
+            renderdocx::shader_export::ShaderText::Disassembly,
+            renderdocx::shader_export::ShaderText::Source,
+        );
+        let Ok(contents) = renderdocx::shader_export::text(report, selection).map(str::to_owned)
+        else {
+            return;
+        };
+        let default_name = if self.shader_source.is_some() {
+            "shader-source.txt"
+        } else {
+            "shader-disassembly.txt"
+        };
+        let Some(destination) = rfd::FileDialog::new()
+            .set_file_name(default_name)
+            .save_file()
+        else {
+            return;
+        };
+        let destination_label = destination.display().to_string();
+        self.export_pending = true;
+        let revision = self.open_revision;
+        self.status = Some(
+            self.t(
+                "Exporting shader text…",
+                "正在导出着色器文本…",
+                "シェーダーテキストを書き出し中…",
+                "셰이더 텍스트를 내보내는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx
+            .background_executor()
+            .spawn(async move { renderdocx::shader_export::write_new(&destination, &contents) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision {
+                    return;
+                }
+                this.export_pending = false;
+                this.status = Some(match result {
+                    Ok(()) => format!(
+                        "{}: {destination_label}",
+                        this.t(
+                            "Shader text exported",
+                            "着色器文本已导出",
+                            "シェーダーテキストを書き出しました",
+                            "셰이더 텍스트를 내보냈습니다"
+                        )
+                    ),
+                    Err(error) => format!(
+                        "{}: {error}",
+                        this.t(
+                            "Shader text export failed",
+                            "着色器文本导出失败",
+                            "シェーダーテキストを書き出せません",
+                            "셰이더 텍스트 내보내기 실패"
+                        )
+                    ),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn read_pixel_history(&mut self, offset: u64, reuse: bool, cx: &mut Context<Self>) {
         if self.replay_pending || self.export_pending || self.resource_pending {
             self.status = Some(
@@ -6163,7 +6238,18 @@ impl Workspace {
                                 })),
                         );
                     }
-                    view = view.child(selectors);
+                    view = view.child(selectors).child(button(
+                        "shader-export-text",
+                        self.t(
+                            "Export full text",
+                            "导出完整文本",
+                            "全文を書き出す",
+                            "전체 텍스트 내보내기",
+                        ),
+                        false,
+                        |this, cx| this.export_shader_text(cx),
+                        cx,
+                    ));
                     if let Some(file) = self
                         .shader_source
                         .and_then(|index| shader.source_files.get(index))
