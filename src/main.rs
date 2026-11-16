@@ -205,6 +205,53 @@ struct StructureView {
     callstack: Option<renderdocx::replay::EventCallstack>,
 }
 
+#[derive(Default)]
+struct TimelineView {
+    model: renderdocx::timeline::Timeline,
+    shown: bool,
+    start: u32,
+    end: u32,
+    collapsed: std::collections::HashSet<usize>,
+}
+impl TimelineView {
+    fn reset(&mut self, actions: &[renderdocx::replay::Action]) {
+        self.model = renderdocx::timeline::Timeline::from_actions(actions);
+        self.start = 0;
+        self.end = self.model.max_event;
+        self.collapsed.clear();
+    }
+    fn zoom(&mut self, inward: bool, focus: Option<u32>) {
+        let total = u64::from(self.model.max_event) + 1;
+        let length = u64::from(self.end) - u64::from(self.start) + 1;
+        let next = if inward {
+            (length / 2).max(1)
+        } else {
+            length.saturating_mul(2).min(total)
+        };
+        let center = focus
+            .filter(|id| *id >= self.start && *id <= self.end)
+            .map(u64::from)
+            .unwrap_or(u64::from(self.start) + length / 2);
+        let start = center.saturating_sub(next / 2).min(total - next);
+        self.start = start as u32;
+        self.end = (start + next - 1) as u32;
+    }
+    fn pan(&mut self, forward: bool) {
+        let total = u64::from(self.model.max_event) + 1;
+        let length = u64::from(self.end) - u64::from(self.start) + 1;
+        let step = (length / 2).max(1);
+        let start = if forward {
+            u64::from(self.start)
+                .saturating_add(step)
+                .min(total - length)
+        } else {
+            u64::from(self.start).saturating_sub(step)
+        };
+        self.start = start as u32;
+        self.end = (start + length - 1) as u32;
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MeshBufferKind {
     Vertex,
@@ -498,6 +545,7 @@ struct Workspace {
     shader_edit_encoding: Entity<InputState>,
     shader_edit_command: Entity<InputState>,
     structure: StructureView,
+    timeline: TimelineView,
     mesh: MeshView,
     input_page: Option<InputPage>,
     vertex_instance: Entity<InputState>,
@@ -2422,6 +2470,7 @@ impl Workspace {
                         this.open_revision += 1;
                         this.capture = Some(capture);
                         this.event_tree.reset(&snapshot.actions);
+                        this.timeline.reset(&snapshot.actions);
                         this.snapshot = Some(snapshot);
                         this.session = Some(session.clone());
                         this.message_generation += 1;
@@ -5924,6 +5973,198 @@ impl Workspace {
         Some(view.into_any_element())
     }
 
+    fn timeline_view(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        const WIDTH: f64 = 768.0;
+        let start = self.timeline.start;
+        let end = self.timeline.end;
+        let extent = f64::from(end) - f64::from(start) + 1.0;
+        let position = |id: u32| {
+            ((f64::from(id.saturating_sub(start)) / extent) * WIDTH).clamp(0.0, WIDTH) as f32
+        };
+        let current = self.pipeline.as_ref().map(|p| p.event_id);
+        let actions = self.snapshot.as_ref().map(|s| &s.actions);
+        let mut hidden = vec![false; self.timeline.model.action_count];
+        if let Some(actions) = actions {
+            for (i, action) in actions.iter().enumerate() {
+                if let Ok(parent) = usize::try_from(action.parent) {
+                    if parent < i {
+                        hidden[i] = hidden[parent] || self.timeline.collapsed.contains(&parent);
+                    }
+                }
+            }
+        }
+        let markers: Vec<_> = self
+            .timeline
+            .model
+            .items
+            .iter()
+            .filter(|item| {
+                item.marker
+                    && item.end >= start
+                    && item.start <= end
+                    && !hidden.get(item.action_index).copied().unwrap_or(true)
+            })
+            .cloned()
+            .collect();
+        let max_depth = markers.iter().map(|item| item.depth).max().unwrap_or(0);
+        let height = ((max_depth.saturating_add(1)) as f32 * 20.0 + 24.0).max(44.0);
+        let mut bins = std::collections::BTreeMap::<u32, (u32, usize)>::new();
+        for &(event, index) in &self.timeline.model.actions {
+            if event >= start && event <= end && !hidden.get(index).copied().unwrap_or(true) {
+                bins.entry(position(event) as u32).or_insert((event, index));
+            }
+        }
+        let usage = self
+            .usage_page
+            .as_ref()
+            .map(|page| page.entries.iter().map(|e| e.event_id).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let history = self
+            .pixel_history
+            .as_ref()
+            .map(|page| page.entries.iter().map(|e| e.event_id).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let bookmarks = self
+            .annotations
+            .bookmarks
+            .as_ref()
+            .and_then(|(_, doc)| annotations::bookmarks(doc).ok())
+            .unwrap_or_default();
+        let mut graph = div()
+            .relative()
+            .w(px(WIDTH as f32))
+            .h(px(height))
+            .bg(rgb(0x182434));
+        for item in markers {
+            let left = position(item.start.max(start));
+            let right = position(item.end.min(end))
+                .max(left + 2.0)
+                .min(WIDTH as f32);
+            let color = item
+                .color_bits
+                .map(|b| {
+                    let rgba = b.map(f32::from_bits);
+                    if rgba[3].is_finite()
+                        && rgba[3] > 0.0
+                        && rgba[..3].iter().all(|n| n.is_finite())
+                    {
+                        let v = rgba.map(|n| (n.clamp(0.0, 1.0) * 255.0) as u32);
+                        (v[0] << 16) | (v[1] << 8) | v[2]
+                    } else {
+                        0x526477
+                    }
+                })
+                .unwrap_or(0x526477);
+            let index = item.action_index;
+            let title = item.name;
+            graph = graph.child(
+                div()
+                    .id(("timeline-marker", index))
+                    .test_support()
+                    .absolute()
+                    .left(px(left))
+                    .top(px(item.depth as f32 * 20.0))
+                    .w(px((right - left).max(2.0)))
+                    .h(px(18.))
+                    .overflow_hidden()
+                    .cursor_pointer()
+                    .bg(rgb(color))
+                    .text_sm()
+                    .child(title)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.timeline.collapsed.remove(&index) {
+                            this.timeline.collapsed.insert(index);
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        for (x, (event, index)) in bins {
+            graph = graph.child(
+                div()
+                    .id(("timeline-action", index))
+                    .test_support()
+                    .absolute()
+                    .left(px(x as f32))
+                    .top(px(height - 16.0))
+                    .w(px(6.))
+                    .h(px(12.))
+                    .cursor_pointer()
+                    .bg(rgb(0x82aaff))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.jump_to_usage(event, window, cx)
+                    })),
+            );
+        }
+        for (kind, values, color) in [(0u8, usage, 0xffb454), (1u8, history, 0xf07178)] {
+            for (index, event) in values
+                .into_iter()
+                .enumerate()
+                .filter(|(_, e)| *e >= start && *e <= end)
+            {
+                graph = graph.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "timeline-highlight-{kind}-{index}"
+                        )))
+                        .test_support()
+                        .absolute()
+                        .left(px(position(event)))
+                        .top(px(height - 22.0))
+                        .w(px(4.))
+                        .h(px(6.))
+                        .cursor_pointer()
+                        .bg(rgb(color))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.jump_to_usage(event, window, cx)
+                        })),
+                );
+            }
+        }
+        for (index, (event, _)) in bookmarks
+            .into_iter()
+            .enumerate()
+            .filter(|(_, (e, _))| *e >= start && *e <= end)
+        {
+            graph = graph.child(
+                div()
+                    .id(("timeline-bookmark", index))
+                    .test_support()
+                    .absolute()
+                    .left(px(position(event)))
+                    .top(px(height - 28.0))
+                    .w(px(4.))
+                    .h(px(6.))
+                    .cursor_pointer()
+                    .bg(rgb(0xc3e88d))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.jump_to_usage(event, window, cx)
+                    })),
+            );
+        }
+        if let Some(event) = current.filter(|e| *e >= start && *e <= end) {
+            graph = graph.child(
+                div()
+                    .absolute()
+                    .left(px(position(event)))
+                    .top(px(0.))
+                    .w(px(1.))
+                    .h(px(height))
+                    .bg(rgb(0xffffff)),
+            );
+        }
+        div().flex().flex_col().gap_2()
+            .child(div().flex().flex_wrap().gap_2()
+                .child(button("timeline-previous", self.t("Previous range", "上一范围", "前の範囲", "이전 범위"), false, |this, cx| { this.timeline.pan(false); cx.notify(); }, cx))
+                .child(button("timeline-next", self.t("Next range", "下一范围", "次の範囲", "다음 범위"), false, |this, cx| { this.timeline.pan(true); cx.notify(); }, cx))
+                .child(button("timeline-zoom-in", self.t("Zoom in", "放大", "拡大", "확대"), false, |this, cx| { this.timeline.zoom(true, this.pipeline.as_ref().map(|p| p.event_id)); cx.notify(); }, cx))
+                .child(button("timeline-zoom-out", self.t("Zoom out", "缩小", "縮小", "축소"), false, |this, cx| { this.timeline.zoom(false, this.pipeline.as_ref().map(|p| p.event_id)); cx.notify(); }, cx)))
+            .child(format!("{}: {start}–{end} / {}", self.t("Event IDs", "事件 ID", "イベント ID", "이벤트 ID"), self.timeline.model.max_event))
+            .child(self.t("Blue: actions · orange: loaded resource usage · red: loaded pixel history · green: loaded bookmarks", "蓝：操作 · 橙：已加载资源使用 · 红：已加载像素历史 · 绿：已加载书签", "青：アクション・橙：読込済みリソース使用・赤：読込済みピクセル履歴・緑：読込済みブックマーク", "파랑: 작업 · 주황: 불러온 리소스 사용 · 빨강: 불러온 픽셀 기록 · 초록: 불러온 북마크"))
+            .child(div().id("timeline-scroll").test_support().max_h(px(180.)).overflow_scroll().child(graph))
+            .into_any_element()
+    }
+
     fn capture_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.tab == CaptureTab::Annotations && self.annotations.editor.is_none() {
             if let Some((_, doc)) = &self.annotations.notes {
@@ -5940,6 +6181,9 @@ impl Workspace {
             }
         }
         if let Some(snapshot) = &self.snapshot {
+            if self.timeline.model.action_count != snapshot.actions.len() {
+                self.timeline.reset(&snapshot.actions);
+            }
             if self.event_tree.len() != snapshot.actions.len() {
                 self.event_tree.reset(&snapshot.actions);
             }
@@ -9819,6 +10063,7 @@ impl Workspace {
                             this.shader_data = None; this.shader_constants = None; this.shader_bindings = None;
                             this.shader_editor = None;
                             this.structure = StructureView::default();
+                            this.timeline = TimelineView::default();
                             this.mesh = MeshView::default();
                             this.input_page = None;
                             this.debug_vertex_selection = None;
@@ -9854,6 +10099,7 @@ impl Workspace {
                     .when(self.session.as_ref().and_then(Session::remote_server_url).is_some(), |row| row.child(button(
                         "capture-remote-browser", self.t("Remote files", "远程文件", "リモートファイル", "원격 파일"), self.show_remote_browser,
                         |this, cx| { this.show_remote_browser = !this.show_remote_browser; cx.notify(); }, cx)))
+                    .child(button("capture-timeline", self.t("Timeline", "时间线", "タイムライン", "타임라인"), self.timeline.shown, |this, cx| { this.timeline.shown = !this.timeline.shown; cx.notify(); }, cx))
                     .child(button(
                         "capture-upstream",
                         upstream,
@@ -9868,6 +10114,7 @@ impl Workspace {
                     )),
             )
             .when(self.show_remote_browser && self.session.as_ref().and_then(Session::remote_server_url).is_some(), |view| view.child(self.remote_browser_view(true, cx)))
+            .when(self.timeline.shown, |view| view.child(self.timeline_view(cx)))
             .child(div().text_sm().text_color(rgb(0x9eacc0)).child(title))
             .child(
                 div()
@@ -11395,6 +11642,7 @@ fn main() {
                         shader_edit_encoding,
                         shader_edit_command,
                         structure: StructureView::default(),
+                        timeline: TimelineView::default(),
                         mesh: MeshView::default(),
                         input_page: None,
                         vertex_instance,
@@ -11481,6 +11729,26 @@ fn main() {
 mod ui_tests {
     use super::*;
     use gpui_kit::{ScrollDelta, TestAppContext, base::Root, point, test::TestWindowExt};
+
+    #[test]
+    fn timeline_zoom_and_pan_handle_the_full_event_id_range() {
+        let mut view = TimelineView::default();
+        view.model.max_event = u32::MAX;
+        view.end = u32::MAX;
+        view.zoom(true, Some(u32::MAX));
+        assert_eq!(view.end, u32::MAX);
+        assert_eq!(u64::from(view.end) - u64::from(view.start) + 1, 1u64 << 31);
+        view.pan(false);
+        assert!(view.end < u32::MAX);
+        view.zoom(false, None);
+        assert_eq!((view.start, view.end), (0, u32::MAX));
+        for _ in 0..32 {
+            view.zoom(true, Some(u32::MAX));
+        }
+        assert_eq!((view.start, view.end), (u32::MAX, u32::MAX));
+        view.pan(false);
+        assert_eq!(view.start, u32::MAX - 1);
+    }
 
     #[gpui_kit::test]
     fn capture_workspace_back_button_returns_to_home(cx: &mut TestAppContext) {
@@ -11609,6 +11877,7 @@ mod ui_tests {
                         shader_edit_encoding,
                         shader_edit_command,
                         structure: StructureView::default(),
+                        timeline: TimelineView::default(),
                         mesh: MeshView::default(),
                         input_page: None,
                         vertex_instance,
@@ -11916,6 +12185,8 @@ mod ui_tests {
                                     depth: 0,
                                     parent: -1,
                                     flags: 2,
+                                    marker_color_bits: None,
+                                    marker_name: None,
                                     indices: 3,
                                     instances: 1,
                                     base_vertex: Some(0),
@@ -11946,6 +12217,8 @@ mod ui_tests {
                                     depth: 1,
                                     parent: 0,
                                     flags: 2,
+                                    marker_color_bits: None,
+                                    marker_name: None,
                                     indices: 3,
                                     instances: 1,
                                     base_vertex: Some(0),
@@ -11963,6 +12236,8 @@ mod ui_tests {
                                     depth: 0,
                                     parent: -1,
                                     flags: 2,
+                                    marker_color_bits: None,
+                                    marker_name: None,
                                     indices: 3,
                                     instances: 1,
                                     base_vertex: Some(0),
@@ -12083,6 +12358,7 @@ mod ui_tests {
                         shader_edit_encoding,
                         shader_edit_command,
                         structure: StructureView::default(),
+                        timeline: TimelineView::default(),
                         mesh: MeshView::default(),
                         input_page: None,
                         vertex_instance,
@@ -12189,6 +12465,43 @@ mod ui_tests {
                 cx.notify();
             })
         });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("capture-timeline", cx);
+            window.render_frame(cx);
+            assert!(window.find(("timeline-action", 1usize)).visible());
+            window.click(("timeline-marker", 0usize), cx);
+            window.render_frame(cx);
+            assert!(window.try_find(("timeline-action", 1usize)).is_none());
+            window.click(("timeline-marker", 0usize), cx);
+            window.render_frame(cx);
+            window.click("timeline-zoom-in", cx);
+        })
+        .unwrap();
+        cx.update(|cx| assert!(view.read(cx).timeline.start > 0));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("timeline-zoom-out", cx);
+            window.render_frame(cx);
+            window.click(("timeline-action", 1usize), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 43));
+        events.lock().unwrap().clear();
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.selected = None;
+                view.pipeline = None;
+                cx.notify();
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("capture-timeline", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
 
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);

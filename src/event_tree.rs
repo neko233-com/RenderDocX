@@ -155,6 +155,8 @@ mod tests {
             depth: 0,
             parent,
             flags: 0,
+            marker_color_bits: None,
+            marker_name: None,
             indices: 0,
             instances: 0,
             base_vertex: Some(0),

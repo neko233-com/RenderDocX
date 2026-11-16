@@ -58,6 +58,8 @@ void json_string(const char *value, size_t length)
   std::cout << '"';
 }
 
+uint32_t float_bits(float value) { uint32_t bits = 0; std::memcpy(&bits, &value, sizeof(bits)); return bits; }
+
 void json_string(const rdcstr &value) { json_string(value.c_str(), value.size()); }
 void write_reflected_constant(const ShaderConstant &value);
 void write_reflected_type(const ShaderConstantType &value)
@@ -426,7 +428,9 @@ void write_snapshot(IReplayController *controller, const ReplayOptions &options,
     if(index) std::cout << ',';
     std::cout << "{\"event_id\":" << action.eventId << ",\"action_id\":" << action.actionId
               << ",\"depth\":" << node.depth << ",\"parent\":" << node.parent
-              << ",\"flags\":" << uint32_t(action.flags) << ",\"indices\":" << action.numIndices
+              << ",\"flags\":" << uint32_t(action.flags) << ",\"marker_color_bits\":[" << float_bits(action.markerColor.x) << ',' << float_bits(action.markerColor.y) << ',' << float_bits(action.markerColor.z) << ',' << float_bits(action.markerColor.w) << "],\"marker_name\":";
+    json_string(action.customName);
+    std::cout << ",\"indices\":" << action.numIndices
               << ",\"instances\":" << action.numInstances
               << ",\"base_vertex\":" << action.baseVertex << ",\"index_offset\":" << action.indexOffset
               << ",\"vertex_offset\":" << action.vertexOffset << ",\"instance_offset\":" << action.instanceOffset

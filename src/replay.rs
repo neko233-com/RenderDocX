@@ -47,6 +47,10 @@ pub struct Action {
     pub depth: usize,
     pub parent: i64,
     pub flags: u32,
+    #[serde(default)]
+    pub marker_color_bits: Option<[u32; 4]>,
+    #[serde(default)]
+    pub marker_name: Option<String>,
     pub indices: u32,
     pub instances: u32,
     #[serde(default)]

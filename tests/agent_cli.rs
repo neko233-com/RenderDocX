@@ -2490,6 +2490,22 @@ fn real_remote_replay_loopback() {
         .expect("draw action")["event_id"]
         .as_u64()
         .unwrap();
+    let timeline = agent.send(
+        &serde_json::json!({"command":"timeline", "start":event, "end":event, "limit":128})
+            .to_string(),
+    );
+    assert_eq!(timeline["ok"], true, "{timeline}");
+    assert!(
+        timeline["data"]["timeline"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["event_id"] == event)
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"timeline","start":2,"end":1}"#)["error"]["code"],
+        "invalid_arguments"
+    );
     let selected =
         agent.send(&serde_json::json!({"command":"select", "event_id":event}).to_string());
     assert_eq!(selected["ok"], true, "{selected}");
