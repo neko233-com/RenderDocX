@@ -950,7 +950,7 @@ int run(const std::string &capture, bool structure_worker)
   MeshFormat selected_mesh;
   uint32_t mesh_instance = 0, mesh_view = 0, mesh_stage = 0;
   bool history_ready = false;
-  uint32_t history_event = 0, history_index = 0, history_mip = 0, history_slice = 0, history_sample = 0, history_x = 0, history_y = 0;
+  uint32_t history_event = 0, history_index = 0, history_mip = 0, history_slice = 0, history_sample = 0, history_x = 0, history_y = 0, history_cast = 0;
   rdcarray<PixelModification> cached_history;
   rdcarray<CounterResult> counter_results;
   uint64_t counter_generation = 0;
@@ -1676,13 +1676,15 @@ int run(const std::string &capture, bool structure_worker)
     {
       if(!selected) { error("Select an event before inspecting pixel history"); continue; }
       std::istringstream arguments(command.substr(8));
-      std::string index_text, mip_text, slice_text, sample_text, x_text, y_text, offset_text, limit_text, extra;
-      uint64_t index = 0, mip = 0, slice = 0, sample = 0, x = 0, y = 0, offset = 0, limit = 0;
-      if(!(arguments >> index_text >> mip_text >> slice_text >> sample_text >> x_text >> y_text >> offset_text >> limit_text) || (arguments >> extra) ||
+      std::string index_text, mip_text, slice_text, sample_text, x_text, y_text, offset_text, limit_text, cast_text, extra;
+      uint64_t index = 0, mip = 0, slice = 0, sample = 0, x = 0, y = 0, offset = 0, limit = 0, cast = 0;
+      if(!(arguments >> index_text >> mip_text >> slice_text >> sample_text >> x_text >> y_text >> offset_text >> limit_text) ||
          !decimal(index_text, index) || !decimal(mip_text, mip) || !decimal(slice_text, slice) ||
          (sample_text != "resolve" && !decimal(sample_text, sample)) || !decimal(x_text, x) || !decimal(y_text, y) ||
          !decimal(offset_text, offset) || !decimal(limit_text, limit) || index >= texture_ids.size() || limit == 0 || limit > 128)
       { error("Invalid pixel history request"); continue; }
+      if((arguments >> cast_text) && (!decimal(cast_text, cast) || cast > 9 || (arguments >> extra)))
+      { error("Invalid texture cast"); continue; }
       const TextureRef &texture = texture_ids[size_t(index)];
       if(mip >= texture.mips || mip >= 32 || !texture.width || !texture.height || !texture.samples)
       { error("Invalid texture dimensions, mip or sample count"); continue; }
@@ -1694,15 +1696,15 @@ int run(const std::string &capture, bool structure_worker)
       const uint32_t actual_sample = sample_text == "resolve" ? (texture.samples > 1 ? UINT32_MAX : 0U) : uint32_t(sample);
       mesh_ready = false;
       if(!history_ready || history_event != selected_event || history_index != index || history_mip != mip || history_slice != slice ||
-         history_sample != actual_sample || history_x != x || history_y != y)
+         history_sample != actual_sample || history_x != x || history_y != y || history_cast != cast)
       {
         history_ready = false;
         cached_history = rdcarray<PixelModification>();
-        cached_history = replay.controller->PixelHistory(texture.id, uint32_t(x), uint32_t(y), Subresource(uint32_t(mip), uint32_t(slice), actual_sample), CompType::Typeless);
+        cached_history = replay.controller->PixelHistory(texture.id, uint32_t(x), uint32_t(y), Subresource(uint32_t(mip), uint32_t(slice), actual_sample), CompType(cast));
         result = replay.controller->GetFatalErrorStatus();
         if(!result.OK()) { error(result_message(result)); break; }
         history_event = selected_event; history_index = uint32_t(index); history_mip = uint32_t(mip); history_slice = uint32_t(slice);
-        history_sample = actual_sample; history_x = uint32_t(x); history_y = uint32_t(y); history_ready = true;
+        history_sample = actual_sample; history_x = uint32_t(x); history_y = uint32_t(y); history_cast = uint32_t(cast); history_ready = true;
       }
       if(offset > cached_history.size()) { error("Pixel history offset is out of range"); continue; }
       const size_t start = size_t(offset), end = start + (std::min)(size_t(limit), cached_history.size() - start);
@@ -1717,13 +1719,15 @@ int run(const std::string &capture, bool structure_worker)
     {
       if(!selected) { error("Select an event before computing texture statistics"); continue; }
       std::istringstream arguments(command.substr(6));
-      std::string index_text, mip_text, slice_text, sample_text, min_text, max_text, mask_text, extra;
-      uint64_t index = 0, mip = 0, slice = 0, sample = 0, min_bits = 0, max_bits = 0, mask = 0;
-      if(!(arguments >> index_text >> mip_text >> slice_text >> sample_text >> min_text >> max_text >> mask_text) || (arguments >> extra) ||
+      std::string index_text, mip_text, slice_text, sample_text, min_text, max_text, mask_text, cast_text, extra;
+      uint64_t index = 0, mip = 0, slice = 0, sample = 0, min_bits = 0, max_bits = 0, mask = 0, cast = 0;
+      if(!(arguments >> index_text >> mip_text >> slice_text >> sample_text >> min_text >> max_text >> mask_text) ||
          !decimal(index_text, index) || !decimal(mip_text, mip) || !decimal(slice_text, slice) ||
          (sample_text != "resolve" && !decimal(sample_text, sample)) || !decimal(min_text, min_bits) || !decimal(max_text, max_bits) || !decimal(mask_text, mask) ||
          index >= texture_ids.size() || min_bits > UINT32_MAX || max_bits > UINT32_MAX || mask > 15)
       { error("Invalid texture statistics request"); continue; }
+      if((arguments >> cast_text) && (!decimal(cast_text, cast) || cast > 9 || (arguments >> extra)))
+      { error("Invalid texture cast"); continue; }
       const TextureRef &texture = texture_ids[size_t(index)];
       if(mip >= texture.mips || mip >= 32 || !texture.width || !texture.height || !texture.samples)
       { error("Invalid texture dimensions, mip or sample count"); continue; }
@@ -1737,11 +1741,11 @@ int run(const std::string &capture, bool structure_worker)
       { error("Invalid histogram range"); continue; }
       const uint32_t actual_sample = sample_text == "resolve" ? (texture.samples > 1 ? UINT32_MAX : 0U) : uint32_t(sample);
       const Subresource sub(uint32_t(mip), uint32_t(slice), actual_sample);
-      const auto extrema = replay.controller->GetMinMax(texture.id, sub, CompType::Typeless);
+      const auto extrema = replay.controller->GetMinMax(texture.id, sub, CompType(cast));
       result = replay.controller->GetFatalErrorStatus();
       if(!result.OK()) { error(result_message(result)); break; }
       const rdcfixedarray<bool, 4> channels = {(mask & 1) != 0, (mask & 2) != 0, (mask & 4) != 0, (mask & 8) != 0};
-      const rdcarray<uint32_t> histogram = replay.controller->GetHistogram(texture.id, sub, CompType::Typeless, lo, hi, channels);
+      const rdcarray<uint32_t> histogram = replay.controller->GetHistogram(texture.id, sub, CompType(cast), lo, hi, channels);
       result = replay.controller->GetFatalErrorStatus();
       if(!result.OK()) { error(result_message(result)); break; }
       uint32_t low[4], high[4]; std::memcpy(low, &extrema.first, sizeof(low)); std::memcpy(high, &extrema.second, sizeof(high));
@@ -1757,12 +1761,14 @@ int run(const std::string &capture, bool structure_worker)
     {
       if(!selected) { error("Select an event before picking a pixel"); continue; }
       std::istringstream arguments(command.substr(6));
-      std::string index_text, mip_text, slice_text, sample_text, x_text, y_text, extra;
-      uint64_t index = 0, mip = 0, slice = 0, sample = 0, x = 0, y = 0;
-      if(!(arguments >> index_text >> mip_text >> slice_text >> sample_text >> x_text >> y_text) || (arguments >> extra) ||
+      std::string index_text, mip_text, slice_text, sample_text, x_text, y_text, cast_text, extra;
+      uint64_t index = 0, mip = 0, slice = 0, sample = 0, x = 0, y = 0, cast = 0;
+      if(!(arguments >> index_text >> mip_text >> slice_text >> sample_text >> x_text >> y_text) ||
          !decimal(index_text, index) || !decimal(mip_text, mip) || !decimal(slice_text, slice) ||
          (sample_text != "resolve" && !decimal(sample_text, sample)) || !decimal(x_text, x) || !decimal(y_text, y) || index >= texture_ids.size())
       { error("Invalid pixel request"); continue; }
+      if((arguments >> cast_text) && (!decimal(cast_text, cast) || cast > 9 || (arguments >> extra)))
+      { error("Invalid texture cast"); continue; }
       const TextureRef &texture = texture_ids[size_t(index)];
       if(mip >= texture.mips || mip >= 32 || !texture.width || !texture.height || !texture.samples)
       { error("Invalid texture dimensions, mip or sample count"); continue; }
@@ -1772,7 +1778,7 @@ int run(const std::string &capture, bool structure_worker)
       if(x >= width || y >= height || slice >= depth || (sample_text != "resolve" && sample >= texture.samples))
       { error("Pixel selection is out of range"); continue; }
       const uint32_t actual_sample = sample_text == "resolve" ? (texture.samples > 1 ? UINT32_MAX : 0U) : uint32_t(sample);
-      PixelValue pixel = replay.controller->PickPixel(texture.id, uint32_t(x), uint32_t(y), Subresource(uint32_t(mip), uint32_t(slice), actual_sample), CompType::Typeless);
+      PixelValue pixel = replay.controller->PickPixel(texture.id, uint32_t(x), uint32_t(y), Subresource(uint32_t(mip), uint32_t(slice), actual_sample), CompType(cast));
       result = replay.controller->GetFatalErrorStatus();
       if(!result.OK()) { error(result_message(result)); break; }
       uint32_t bits[4]; std::memcpy(bits, &pixel, sizeof(bits));

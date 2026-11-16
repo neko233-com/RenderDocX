@@ -190,6 +190,11 @@ fn real_d3d11_mesh_draw_order() {
             .unwrap()
             .starts_with(b"\x89PNG\r\n\x1a\n")
     );
+    for command in ["pick_pixel", "texture_statistics", "pixel_history"] {
+        let result = agent.send(&serde_json::json!({"command":command,"index":texture_index,"x":0,"y":0,"analysis_type_cast":2}).to_string());
+        assert_eq!(result["ok"], true, "{command}: {result}");
+        assert_eq!(result["data"]["selection"]["analysis_type_cast"], 2);
+    }
     agent.quit();
 }
 

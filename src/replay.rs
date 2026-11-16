@@ -644,8 +644,18 @@ pub struct TextureSelection {
     pub slice: u32,
     pub sample: Option<u32>,
     pub channel: Option<u32>,
-    /// RenderDoc CompType for PNG preview/export; pixel analysis remains typeless.
+    /// RenderDoc CompType for PNG preview/export.
     pub preview_type_cast: u32,
+    /// RenderDoc CompType for picking, statistics and pixel history.
+    pub analysis_type_cast: u32,
+}
+
+fn cast_suffix(value: u32) -> String {
+    if value == 0 {
+        String::new()
+    } else {
+        format!(" {value}")
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -788,6 +798,7 @@ impl TextureSelection {
         };
         if self.mip >= texture.mips
             || self.preview_type_cast > 9
+            || self.analysis_type_cast > 9
             || self.mip > i32::MAX as u32
             || self.slice >= slices
             || self.slice > i32::MAX as u32
@@ -1607,8 +1618,10 @@ impl Transport for Process {
             .unwrap_or_else(|| "resolve".into());
         writeln!(
             input,
-            "history {index} {} {} {requested} {x} {y} {offset} {limit}",
-            selection.mip, selection.slice
+            "history {index} {} {} {requested} {x} {y} {offset} {limit}{}",
+            selection.mip,
+            selection.slice,
+            cast_suffix(selection.analysis_type_cast)
         )
         .and_then(|_| input.flush())
         .map_err(|e| e.to_string())?;
@@ -1662,12 +1675,13 @@ impl Transport for Process {
             .unwrap_or_else(|| "resolve".into());
         writeln!(
             input,
-            "stats {index} {} {} {requested} {} {} {}",
+            "stats {index} {} {} {requested} {} {} {}{}",
             selection.mip,
             selection.slice,
             request.min.to_bits(),
             request.max.to_bits(),
-            request.mask()
+            request.mask(),
+            cast_suffix(selection.analysis_type_cast)
         )
         .and_then(|_| input.flush())
         .map_err(|e| e.to_string())?;
@@ -1758,8 +1772,10 @@ impl Transport for Process {
             .unwrap_or_else(|| "resolve".into());
         writeln!(
             input,
-            "pixel {index} {} {} {requested} {x} {y}",
-            selection.mip, selection.slice
+            "pixel {index} {} {} {requested} {x} {y}{}",
+            selection.mip,
+            selection.slice,
+            cast_suffix(selection.analysis_type_cast)
         )
         .and_then(|_| input.flush())
         .map_err(|e| e.to_string())?;
@@ -1974,11 +1990,7 @@ impl Transport for Process {
                 .channel
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "all".into());
-            let suffix = if selection.preview_type_cast == 0 {
-                String::new()
-            } else {
-                format!(" {}", selection.preview_type_cast)
-            };
+            let suffix = cast_suffix(selection.preview_type_cast);
             format!(
                 "save2 {index} {} {} {sample} {channel} {encoded}{suffix}",
                 selection.mip, selection.slice
@@ -3218,11 +3230,15 @@ mod tests {
             sample: Some(0),
             channel: Some(3),
             preview_type_cast: 0,
+            analysis_type_cast: 0,
         };
         assert!(selection.validate(&texture).is_ok());
         selection.preview_type_cast = 10;
         assert!(selection.validate(&texture).is_err());
         selection.preview_type_cast = 0;
+        selection.analysis_type_cast = 10;
+        assert!(selection.validate(&texture).is_err());
+        selection.analysis_type_cast = 0;
         assert!(selection.validate_pixel(&texture, 1, 1).is_ok());
         assert!(selection.validate_pixel(&texture, 2, 1).is_err());
         assert!(selection.validate_pixel(&texture, 1, 2).is_err());

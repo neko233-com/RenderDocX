@@ -537,6 +537,7 @@ impl Workspace {
             mip,
             slice,
             preview_type_cast,
+            analysis_type_cast: preview_type_cast,
             ..TextureSelection::default()
         };
         let Some(texture) = self
@@ -7737,12 +7738,17 @@ impl Workspace {
                             .map(|v| v.to_string())
                             .unwrap_or_else(|| all_label.to_owned())
                     ))
-                    .when(selection.preview_type_cast != 0, |view| view
-                        .child(format!("{}: {} · {}", self.t("Preview/export type cast", "预览与导出类型转换", "プレビュー・書き出しの型変換", "미리보기·내보내기 형식 변환"), selection.preview_type_cast,
-                            self.t("Pixel analysis uses the original type", "像素分析使用原始类型", "ピクセル解析には元の型を使用", "픽셀 분석은 원래 형식을 사용")))
-                        .child(button("texture-clear-preview-cast", self.t("Clear preview cast", "清除预览类型转换", "プレビューの型変換を解除", "미리보기 형식 변환 지우기"), false, |this, cx| {
+                    .when(selection.preview_type_cast != 0 || selection.analysis_type_cast != 0, |view| view
+                        .child(format!("{}: {} · {}: {}", self.t("Preview/export type", "预览与导出类型", "プレビュー・書き出しの型", "미리보기·내보내기 형식"), selection.preview_type_cast,
+                            self.t("Analysis type", "分析类型", "解析の型", "분석 형식"), selection.analysis_type_cast))
+                        .child(button("texture-clear-preview-cast", self.t("Clear type casts", "清除类型转换", "型変換を解除", "형식 변환 지우기"), false, |this, cx| {
                             this.texture_selection.preview_type_cast = 0;
+                            this.texture_selection.analysis_type_cast = 0;
                             this.preview = None;
+                            this.pixel = None;
+                            this.pixel_history = None;
+                            this.history_selected = None;
+                            this.statistics = None;
                             cx.notify();
                         }, cx)))
                     .child(
@@ -10841,6 +10847,7 @@ mod ui_tests {
             assert_eq!(view.read(cx).texture_selection.mip, 1);
             assert_eq!(view.read(cx).texture_selection.slice, 1);
             assert_eq!(view.read(cx).texture_selection.preview_type_cast, 2);
+            assert_eq!(view.read(cx).texture_selection.analysis_type_cast, 2);
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.click("events-tab", cx);
@@ -10973,7 +10980,8 @@ mod ui_tests {
                 slice: 1,
                 sample: Some(0),
                 channel: Some(0),
-                preview_type_cast: 0
+                preview_type_cast: 0,
+                analysis_type_cast: 0
             }]
         );
         cx.update(|cx| {
