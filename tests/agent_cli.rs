@@ -71,6 +71,60 @@ fn invoke(args: &[&str]) -> (bool, Value) {
 
 #[cfg(windows)]
 #[test]
+#[ignore = "requires the D3D11 fixture and a matching RenderDoc replay bridge"]
+fn real_d3d11_mesh_draw_order() {
+    use std::{os::windows::process::CommandExt, path::PathBuf};
+    let bridge = PathBuf::from(std::env::var_os("RENDERDOCX_TEST_BRIDGE").unwrap());
+    let fixture = std::env::var_os("RENDERDOCX_TEST_FIXTURE").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(fixture)
+        .arg(bridge.parent().unwrap().join("renderdoc.dll"))
+        .arg(dir.path().join("frame"))
+        .creation_flags(0x08000000)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "fixture: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let capture = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("RENDERDOCX_CAPTURE="))
+        .unwrap();
+    let mut agent = Agent::new(bridge.to_str());
+    let opened = agent.send(&serde_json::json!({"command":"open","path":capture}).to_string());
+    assert_eq!(opened["ok"], true, "{opened}");
+    let draw = opened["data"]["capture"]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|action| {
+            action["name"]
+                .as_str()
+                .is_some_and(|name| name.contains("DrawIndexed"))
+        })
+        .expect("indexed draw")["event_id"]
+        .as_u64()
+        .unwrap();
+    let selected = agent.send(&serde_json::json!({"command":"select","event_id":draw}).to_string());
+    assert_eq!(selected["ok"], true, "{selected}");
+    let mesh = agent.send(r#"{"command":"mesh","stage":"vs_out"}"#);
+    assert_eq!(mesh["ok"], true, "{mesh}");
+    let page = agent.send(r#"{"command":"mesh_draw","offset":0,"count":3}"#);
+    assert_eq!(page["ok"], true, "{page}");
+    assert_eq!(page["data"]["page"]["rows"][0]["vertex"], 0);
+    assert_eq!(
+        page["data"]["page"]["rows"][0]["position"],
+        serde_json::json!([3.0, 3.0, 0.0, 1.0])
+    );
+    assert_eq!(page["data"]["page"]["rows"][1]["vertex"], 1);
+    agent.quit();
+}
+
+#[cfg(windows)]
+#[test]
 #[ignore = "requires RENDERDOCX_TEST_BRIDGE and RENDERDOCX_TEST_OPENGL_FIXTURE plus an OpenGL 3.3 driver"]
 fn real_opengl_vertex_inputs_include_generic_and_normalized_values() {
     use std::os::windows::process::CommandExt;

@@ -4853,23 +4853,51 @@ impl Workspace {
             page.rows
                 .iter()
                 .map(|row| {
+                    let index = match (row.raw_index, row.vertex) {
+                        (Some(raw), Some(vertex)) => format!("{raw} → {vertex}"),
+                        (None, Some(vertex)) => vertex.to_string(),
+                        (Some(raw), None) => raw.to_string(),
+                        _ => "—".to_owned(),
+                    };
                     if row.restart {
                         format!(
-                            "{}: {}",
+                            "{}: {index} · {}",
                             row.row,
                             self.t("Restart", "重启", "リスタート", "재시작")
                         )
                     } else if let Some(position) = &row.position {
-                        format!(
-                            "{}: {} → {position:?}",
-                            row.row,
-                            row.vertex.unwrap_or_default()
-                        )
+                        format!("{}: {index} → {position:?}", row.row)
                     } else {
                         format!(
-                            "{}: {}",
+                            "{}: {index} · {}",
                             row.row,
-                            self.t("Unavailable", "不可用", "利用不可", "사용 불가")
+                            match row.unavailable {
+                                Some("index_out_of_bounds") => self.t(
+                                    "Index out of bounds",
+                                    "索引越界",
+                                    "インデックスが範囲外",
+                                    "인덱스 범위 초과"
+                                ),
+                                Some("vertex_out_of_bounds") => self.t(
+                                    "Vertex out of bounds",
+                                    "顶点越界",
+                                    "頂点が範囲外",
+                                    "정점 범위 초과"
+                                ),
+                                Some("vertex_buffer_unavailable") => self.t(
+                                    "Vertex buffer unavailable",
+                                    "顶点缓冲区不可用",
+                                    "頂点バッファーを利用できません",
+                                    "정점 버퍼를 사용할 수 없음"
+                                ),
+                                Some("unsupported_format") => self.t(
+                                    "Unsupported format",
+                                    "格式暂不支持",
+                                    "未対応の形式",
+                                    "지원하지 않는 형식"
+                                ),
+                                _ => self.t("Unavailable", "不可用", "利用不可", "사용 불가"),
+                            }
                         )
                     }
                 })
