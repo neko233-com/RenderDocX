@@ -127,6 +127,18 @@ void write_debug_variables(const rdcarray<ShaderVariable> &variables)
   std::cout << ']';
 }
 
+void write_debug_trace(uint32_t event, const ShaderDebugTrace &trace)
+{
+  std::cout << "\nRENDERDOCX/1 {\"type\":\"debug_started\",\"event_id\":" << event
+            << ",\"stage\":" << uint32_t(trace.stage) << ",\"inputs\":";
+  write_debug_variables(trace.inputs);
+  std::cout << ",\"constant_blocks\":"; write_debug_variables(trace.constantBlocks);
+  std::cout << ",\"read_only_resources\":"; write_debug_variables(trace.readOnlyResources);
+  std::cout << ",\"read_write_resources\":"; write_debug_variables(trace.readWriteResources);
+  std::cout << ",\"samplers\":"; write_debug_variables(trace.samplers);
+  std::cout << "}" << std::endl;
+}
+
 struct PendingAction
 {
   const ActionDescription *action;
@@ -621,7 +633,8 @@ int run(const std::string &capture, bool structure_worker)
     // A live debugger can hold backend replay state. Do not allow unrelated replay
     // operations to mutate that state between ContinueDebug calls.
     if(debug.trace && command != "debug_next" && command != "debug_stop" &&
-       command.compare(0, 13, "debug_vertex ") != 0 && command.compare(0, 7, "select ") != 0)
+       command.compare(0, 13, "debug_vertex ") != 0 && command.compare(0, 12, "debug_pixel ") != 0 &&
+       command.compare(0, 7, "select ") != 0)
     { error("Stop the shader debug trace before other replay operations"); continue; }
     if(command.compare(0, 13, "debug_vertex ") == 0)
     {
@@ -650,14 +663,38 @@ int run(const std::string &capture, bool structure_worker)
       if(!result.OK()) { error(result_message(result)); break; }
       if(!debug.trace || !debug.trace->debugger)
       { debug.reset(); error("RenderDoc could not create a vertex debug trace"); continue; }
-      std::cout << "\nRENDERDOCX/1 {\"type\":\"debug_started\",\"event_id\":" << selected_event
-                << ",\"stage\":" << uint32_t(debug.trace->stage) << ",\"inputs\":";
-      write_debug_variables(debug.trace->inputs);
-      std::cout << ",\"constant_blocks\":"; write_debug_variables(debug.trace->constantBlocks);
-      std::cout << ",\"read_only_resources\":"; write_debug_variables(debug.trace->readOnlyResources);
-      std::cout << ",\"read_write_resources\":"; write_debug_variables(debug.trace->readWriteResources);
-      std::cout << ",\"samplers\":"; write_debug_variables(debug.trace->samplers);
-      std::cout << "}" << std::endl;
+      if(debug.trace->stage != ShaderStage::Vertex)
+      { debug.reset(); error("RenderDoc returned a different shader stage"); continue; }
+      write_debug_trace(selected_event, *debug.trace);
+      continue;
+    }
+    if(command.compare(0, 12, "debug_pixel ") == 0)
+    {
+      std::istringstream arguments(command.substr(12));
+      std::string x_text, y_text, sample_text, primitive_text, view_text, extra;
+      uint64_t x = 0, y = 0, sample = 0, primitive = 0, view = 0;
+      if(!(arguments >> x_text >> y_text >> sample_text >> primitive_text >> view_text) || (arguments >> extra) ||
+         !decimal(x_text, x) || !decimal(y_text, y) || !decimal(sample_text, sample) ||
+         !decimal(primitive_text, primitive) || !decimal(view_text, view) ||
+         x > UINT32_MAX || y > UINT32_MAX || sample > UINT32_MAX || primitive > UINT32_MAX || view > UINT32_MAX)
+      { error("Invalid pixel debug request"); continue; }
+      if(!selected || draw_vertices.find(selected_event) == draw_vertices.end())
+      { error("Select a draw event before debugging a pixel"); continue; }
+      if(replay.controller->GetPipelineState().GetShader(ShaderStage::Pixel) == ResourceId())
+      { error("No pixel shader is bound"); continue; }
+      DebugPixelInputs inputs;
+      inputs.sample = uint32_t(sample); inputs.primitive = uint32_t(primitive); inputs.view = uint32_t(view);
+      debug.reset();
+      debug_finished = false;
+      mesh_ready = false;
+      debug.trace = replay.controller->DebugPixel(uint32_t(x), uint32_t(y), inputs);
+      result = replay.controller->GetFatalErrorStatus();
+      if(!result.OK()) { error(result_message(result)); break; }
+      if(!debug.trace || !debug.trace->debugger)
+      { debug.reset(); error("RenderDoc could not create a pixel debug trace"); continue; }
+      if(debug.trace->stage != ShaderStage::Pixel)
+      { debug.reset(); error("RenderDoc returned a different shader stage"); continue; }
+      write_debug_trace(selected_event, *debug.trace);
       continue;
     }
     if(command == "debug_next")

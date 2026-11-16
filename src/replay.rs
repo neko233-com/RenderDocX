@@ -334,6 +334,16 @@ pub struct DebugStates {
     pub states: Vec<DebugState>,
 }
 
+/// `None` uses RenderDoc's NoPreference sentinel for the corresponding selector.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+pub struct PixelDebugSelection {
+    pub x: u32,
+    pub y: u32,
+    pub sample: Option<u32>,
+    pub primitive: Option<u32>,
+    pub view: Option<u32>,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Buffer {
     pub name: String,
@@ -927,6 +937,9 @@ trait Transport: Send {
     ) -> Result<DebugTrace, String> {
         Err("Shader debugging is not supported by this transport".into())
     }
+    fn debug_pixel(&mut self, _selection: PixelDebugSelection) -> Result<DebugTrace, String> {
+        Err("Shader debugging is not supported by this transport".into())
+    }
     fn debug_next(&mut self) -> Result<DebugStates, String> {
         Err("Shader debugging is not supported by this transport".into())
     }
@@ -1421,6 +1434,26 @@ impl Transport for Process {
         }
     }
 
+    fn debug_pixel(&mut self, selection: PixelDebugSelection) -> Result<DebugTrace, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(
+            input,
+            "debug_pixel {} {} {} {} {}",
+            selection.x,
+            selection.y,
+            selection.sample.unwrap_or(u32::MAX),
+            selection.primitive.unwrap_or(u32::MAX),
+            selection.view.unwrap_or(u32::MAX)
+        )
+        .and_then(|_| input.flush())
+        .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::DebugStarted(trace) if trace.stage == 4 => Ok(trace),
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected shader debug response".into()),
+        }
+    }
+
     fn debug_next(&mut self) -> Result<DebugStates, String> {
         let input = self.input.as_mut().ok_or("Replay session has closed")?;
         writeln!(input, "debug_next")
@@ -1717,6 +1750,20 @@ impl Session {
             .lock()
             .map_err(|e| e.to_string())?
             .debug_vertex(vertex, instance, index, view)
+    }
+
+    pub fn debug_pixel(&self, selection: PixelDebugSelection) -> Result<DebugTrace, String> {
+        if [selection.sample, selection.primitive, selection.view]
+            .into_iter()
+            .flatten()
+            .any(|value| value == u32::MAX)
+        {
+            return Err("Use null for RenderDoc's NoPreference selector".into());
+        }
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .debug_pixel(selection)
     }
 
     pub fn debug_next(&self) -> Result<DebugStates, String> {

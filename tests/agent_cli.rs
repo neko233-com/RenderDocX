@@ -304,7 +304,7 @@ fn agent_jsonl_session_has_correlated_errors_and_clean_shutdown() {
     assert_eq!(reply["schema"], "renderdocx.agent.v1");
     assert_eq!(reply["id"], 17);
     assert_eq!(reply["error"]["code"], "no_capture");
-    for command in ["debug_vertex", "debug_next", "debug_stop"] {
+    for command in ["debug_vertex", "debug_pixel", "debug_next", "debug_stop"] {
         assert_eq!(
             agent.send(&serde_json::json!({"command":command}).to_string())["error"]["code"],
             "no_capture"
@@ -1479,6 +1479,28 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         .iter()
         .find(|entry| entry["event_id"] == history_draw_event && entry["passed"] == true)
         .expect("history draw fragment");
+    let pixel_debug = agent.send(&serde_json::json!({"command":"debug_pixel","x":8,"y":8,"sample":0,"primitive":draw["primitive"]}).to_string());
+    assert_eq!(pixel_debug["ok"], true, "{pixel_debug}");
+    assert_eq!(pixel_debug["data"]["trace"]["stage"], 4);
+    assert_eq!(pixel_debug["data"]["trace"]["event_id"], history_draw_event);
+    assert_eq!(
+        agent.send(r#"{"command":"debug_pixel","x":8,"y":8,"sample":4294967295}"#)["error"]["code"],
+        "invalid_arguments"
+    );
+    let mut pixel_steps = 0;
+    loop {
+        let batch = agent.send(r#"{"command":"debug_next"}"#);
+        assert_eq!(batch["ok"], true, "{batch}");
+        for state in batch["data"]["batch"]["states"].as_array().unwrap() {
+            assert_eq!(state["step"], pixel_steps);
+            pixel_steps += 1;
+        }
+        if batch["data"]["batch"]["finished"] == true {
+            break;
+        }
+    }
+    assert!(pixel_steps > 1);
+    assert_eq!(agent.send(r#"{"command":"debug_stop"}"#)["ok"], true);
     let pre = &draw["pre"]["color"]["float_values"];
     let post = &draw["post"]["color"]["float_values"];
     for (values, expected) in [

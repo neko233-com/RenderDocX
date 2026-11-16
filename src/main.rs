@@ -18,10 +18,10 @@ use renderdocx::{
     },
     replay::{
         DebugState, DebugTrace, HistogramRequest, MeshInfo, MeshSelection,
-        PIXEL_HISTORY_PAGE_LIMIT, Pipeline, Pixel, PixelHistoryPage, RESOURCE_USAGE_PAGE_LIMIT,
-        ResourceUsagePage, SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session, ShaderReport, Snapshot,
-        StructurePage, StructuredNode, TextureSelection, TextureStatistics, resource_type_name,
-        resource_usage_name,
+        PIXEL_HISTORY_PAGE_LIMIT, Pipeline, Pixel, PixelDebugSelection, PixelHistoryPage,
+        RESOURCE_USAGE_PAGE_LIMIT, ResourceUsagePage, SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session,
+        ShaderReport, Snapshot, StructurePage, StructuredNode, TextureSelection, TextureStatistics,
+        resource_type_name, resource_usage_name,
     },
     vertex_input::{INPUT_PAGE_LIMIT, InputPage},
 };
@@ -36,14 +36,73 @@ struct TexturePreview {
     _directory: tempfile::TempDir,
 }
 
-struct VertexDebugView {
-    vertex: u32,
-    instance: u32,
-    index: u32,
+#[derive(Clone, Copy)]
+enum ShaderDebugContext {
+    Vertex {
+        vertex: u32,
+        instance: u32,
+        index: u32,
+    },
+    Pixel(PixelDebugSelection),
+}
+
+struct ShaderDebugView {
+    context: ShaderDebugContext,
     trace: DebugTrace,
     states: Vec<DebugState>,
     position: usize,
     disassembly: String,
+}
+
+fn collect_shader_debug(
+    session: &Session,
+    event: u32,
+    context: ShaderDebugContext,
+) -> Result<ShaderDebugView, String> {
+    let stage = match context {
+        ShaderDebugContext::Vertex { .. } => 0,
+        ShaderDebugContext::Pixel(_) => 4,
+    };
+    let shader = session.shader(stage, None)?;
+    if shader.event_id != event {
+        return Err("Shader response belongs to another event".into());
+    }
+    let trace = match context {
+        ShaderDebugContext::Vertex {
+            vertex,
+            instance,
+            index,
+        } => session.debug_vertex(vertex, instance, index, 0)?,
+        ShaderDebugContext::Pixel(selection) => session.debug_pixel(selection)?,
+    };
+    let collected = (|| {
+        if trace.event_id != event {
+            return Err("Debug trace belongs to another event".to_owned());
+        }
+        let mut states = Vec::new();
+        loop {
+            let batch = session.debug_next()?;
+            if batch.event_id != event {
+                return Err("Debug states belong to another event".to_owned());
+            }
+            states.extend(batch.states);
+            if batch.finished {
+                break;
+            }
+        }
+        Ok(ShaderDebugView {
+            context,
+            trace,
+            states,
+            position: 0,
+            disassembly: shader.disassembly,
+        })
+    })();
+    let stopped = session.debug_stop();
+    match (collected, stopped) {
+        (Ok(view), Ok(())) => Ok(view),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    }
 }
 
 #[derive(Default)]
@@ -232,7 +291,7 @@ struct Workspace {
     mesh: MeshView,
     input_page: Option<InputPage>,
     debug_vertex_selection: Option<(u32, u32, u32)>,
-    vertex_debug: Option<VertexDebugView>,
+    debug_view: Option<ShaderDebugView>,
     selected_resource: Option<usize>,
     usage_page: Option<ResourceUsagePage>,
     open_revision: u64,
@@ -767,7 +826,7 @@ impl Workspace {
                         this.mesh = MeshView::default();
                         this.input_page = None;
                         this.debug_vertex_selection = None;
-                        this.vertex_debug = None;
+                        this.debug_view = None;
                         this.selected_resource = None;
                         this.usage_page = None;
                         this.replay_pending = false;
@@ -842,7 +901,7 @@ impl Workspace {
         self.mesh = MeshView::default();
         self.input_page = None;
         self.debug_vertex_selection = None;
-        self.vertex_debug = None;
+        self.debug_view = None;
         let open_revision = self.open_revision;
         self.status = Some(
             self.t(
@@ -1212,11 +1271,54 @@ impl Workspace {
     }
 
     fn debug_selected_vertex(&mut self, cx: &mut Context<Self>) {
+        if let Some((vertex, instance, index)) = self.debug_vertex_selection {
+            self.start_shader_debug(
+                ShaderDebugContext::Vertex {
+                    vertex,
+                    instance,
+                    index,
+                },
+                cx,
+            );
+        }
+    }
+
+    fn debug_selected_pixel(&mut self, cx: &mut Context<Self>) {
+        let coordinates = self
+            .pixel_x
+            .read(cx)
+            .value()
+            .parse::<u32>()
+            .ok()
+            .zip(self.pixel_y.read(cx).value().parse::<u32>().ok());
+        let Some((x, y)) = coordinates else {
+            self.status = Some(
+                self.t(
+                    "Enter nonnegative integer pixel coordinates.",
+                    "请输入非负整数像素坐标。",
+                    "非負の整数ピクセル座標を入力してください。",
+                    "음이 아닌 정수 픽셀 좌표를 입력하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let selection = PixelDebugSelection {
+            x,
+            y,
+            sample: self.texture_selection.sample,
+            primitive: None,
+            view: None,
+        };
+        self.start_shader_debug(ShaderDebugContext::Pixel(selection), cx);
+    }
+
+    fn start_shader_debug(&mut self, context: ShaderDebugContext, cx: &mut Context<Self>) {
         if self.replay_pending || self.export_pending || self.resource_pending {
             return;
         }
-        let (Some((vertex, instance, index)), Some(session), Some(event)) = (
-            self.debug_vertex_selection,
+        let (Some(session), Some(event)) = (
             self.session.clone(),
             self.pipeline.as_ref().map(|pipeline| pipeline.event_id),
         ) else {
@@ -1224,7 +1326,7 @@ impl Workspace {
         };
         let revision = self.open_revision;
         let selection_revision = self.selection_revision;
-        self.vertex_debug = None;
+        self.debug_view = None;
         self.mesh = MeshView::default();
         self.resource_pending = true;
         self.status = Some(
@@ -1237,43 +1339,9 @@ impl Workspace {
             .to_owned(),
         );
         cx.notify();
-        let task = cx.background_executor().spawn(async move {
-            let shader = session.shader(0, None)?;
-            if shader.event_id != event {
-                return Err("Shader response belongs to another event".to_owned());
-            }
-            let trace = session.debug_vertex(vertex, instance, index, 0)?;
-            let collected = (|| {
-                if trace.event_id != event {
-                    return Err("Debug trace belongs to another event".to_owned());
-                }
-                let mut states = Vec::new();
-                loop {
-                    let batch = session.debug_next()?;
-                    if batch.event_id != event {
-                        return Err("Debug states belong to another event".to_owned());
-                    }
-                    states.extend(batch.states);
-                    if batch.finished {
-                        break;
-                    }
-                }
-                Ok(VertexDebugView {
-                    vertex,
-                    instance,
-                    index,
-                    trace,
-                    states,
-                    position: 0,
-                    disassembly: shader.disassembly,
-                })
-            })();
-            let stopped = session.debug_stop();
-            match (collected, stopped) {
-                (Ok(view), Ok(())) => Ok(view),
-                (Err(error), _) | (_, Err(error)) => Err(error),
-            }
-        });
+        let task = cx
+            .background_executor()
+            .spawn(async move { collect_shader_debug(&session, event, context) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -1283,17 +1351,17 @@ impl Workspace {
                 this.resource_pending = false;
                 match result {
                     Ok(view) => {
-                        this.vertex_debug = Some(view);
+                        this.debug_view = Some(view);
                         this.status = None;
                     }
                     Err(error) => {
                         this.status = Some(format!(
                             "{}: {error}",
                             this.t(
-                                "Vertex debugging failed",
-                                "顶点调试失败",
-                                "頂点デバッグに失敗しました",
-                                "정점 디버깅 실패"
+                                "Shader debugging failed",
+                                "着色器调试失败",
+                                "シェーダーデバッグに失敗しました",
+                                "셰이더 디버깅 실패"
                             )
                         ))
                     }
@@ -1303,7 +1371,6 @@ impl Workspace {
         })
         .detach();
     }
-
     fn read_vertex_input(&mut self, offset: u32, cx: &mut Context<Self>) {
         if self.replay_pending || self.export_pending || self.resource_pending {
             self.status = Some(
@@ -2288,6 +2355,156 @@ impl Workspace {
         .detach();
     }
 
+    fn shader_debug_panel(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let debug = self.debug_view.as_ref()?;
+        let previous = button(
+            "vertex-debug-previous",
+            self.t("Previous step", "上一步", "前のステップ", "이전 단계"),
+            false,
+            |this, cx| {
+                if let Some(debug) = &mut this.debug_view {
+                    debug.position = debug.position.saturating_sub(1);
+                    cx.notify();
+                }
+            },
+            cx,
+        );
+        let next = button(
+            "vertex-debug-next",
+            self.t("Next step", "下一步", "次のステップ", "다음 단계"),
+            false,
+            |this, cx| {
+                if let Some(debug) = &mut this.debug_view {
+                    if debug.position + 1 < debug.states.len() {
+                        debug.position += 1;
+                        cx.notify();
+                    }
+                }
+            },
+            cx,
+        );
+        let context = match debug.context {
+            ShaderDebugContext::Vertex {
+                vertex,
+                instance,
+                index,
+            } => format!(
+                "{} {vertex} · {} {instance} · {} {index}",
+                self.t("Vertex", "顶点", "頂点", "정점"),
+                self.t("Instance", "实例", "インスタンス", "인스턴스"),
+                self.t("Index", "索引", "インデックス", "인덱스")
+            ),
+            ShaderDebugContext::Pixel(selection) => format!(
+                "{} ({}, {}) · {} {} · {} {} · {} {}",
+                self.t("Pixel", "像素", "ピクセル", "픽셀"),
+                selection.x,
+                selection.y,
+                self.t("Sample", "采样", "サンプル", "샘플"),
+                selection
+                    .sample
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "—".into()),
+                self.t("Primitive", "图元", "プリミティブ", "프리미티브"),
+                selection
+                    .primitive
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "—".into()),
+                self.t("View", "视图", "ビュー", "뷰"),
+                selection
+                    .view
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "—".into())
+            ),
+        };
+        let mut view = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(div().text_sm().text_color(rgb(0x82aaff)).child(self.t(
+                "SHADER DEBUG TRACE",
+                "着色器调试轨迹",
+                "シェーダーデバッグトレース",
+                "셰이더 디버그 추적",
+            )))
+            .child(format!(
+                "{context} · {} {}",
+                self.t("Event", "事件", "イベント", "이벤트"),
+                debug.trace.event_id
+            ))
+            .child(div().flex().gap_2().child(previous).child(next));
+        if let Some(state) = debug.states.get(debug.position) {
+            view = view
+                .child(div().id("vertex-debug-step").test_support().child(format!(
+                    "{} {} / {} · {} {} · {} {}",
+                    self.t("Step", "步骤", "ステップ", "단계"),
+                    state.step,
+                    debug.states.len(),
+                    self.t("Next instruction", "下一条指令", "次の命令", "다음 명령"),
+                    state.next_instruction,
+                    self.t("Flags", "标志", "フラグ", "플래그"),
+                    state.flags
+                )))
+                .child(format!(
+                    "{}: {}",
+                    self.t("Call stack", "调用栈", "呼び出し履歴", "호출 스택"),
+                    state.callstack.join(" → ")
+                ))
+                .child(self.t("Variable changes", "变量变化", "変数の変化", "변수 변경"))
+                .children(state.changes.iter().map(|change| {
+                    div().text_sm().child(format!(
+                        "{} → {}",
+                        shader_debug::display_variable(&change.before),
+                        shader_debug::display_variable(&change.after)
+                    ))
+                }));
+        } else {
+            view = view.child(self.t(
+                "No debug states were returned.",
+                "未返回调试状态。",
+                "デバッグ状態が返されませんでした。",
+                "디버그 상태가 반환되지 않았습니다.",
+            ));
+        }
+        let groups = [
+            (
+                self.t("Inputs", "输入", "入力", "입력"),
+                &debug.trace.inputs,
+            ),
+            (
+                self.t("Constant blocks", "常量块", "定数ブロック", "상수 블록"),
+                &debug.trace.constant_blocks,
+            ),
+            (
+                self.t(
+                    "Read-only resources",
+                    "只读资源",
+                    "読み取り専用リソース",
+                    "읽기 전용 리소스",
+                ),
+                &debug.trace.read_only_resources,
+            ),
+            (
+                self.t(
+                    "Read-write resources",
+                    "读写资源",
+                    "読み書きリソース",
+                    "읽기/쓰기 리소스",
+                ),
+                &debug.trace.read_write_resources,
+            ),
+            (
+                self.t("Samplers", "采样器", "サンプラー", "샘플러"),
+                &debug.trace.samplers,
+            ),
+        ];
+        view = view.children(groups.into_iter().filter(|(_, variables)| !variables.is_empty()).map(|(label, variables)| {
+            div().flex().flex_col().gap_2().child(label).children(variables.iter().map(|variable| div().text_sm().child(shader_debug::display_variable(variable))))
+        }))
+            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t("Unsupported value types are shown as native-endian bytes; source mapping is not yet available.", "未解码的类型显示原生字节序的原始字节；暂不支持源码映射。", "未対応の型はネイティブエンディアンの生バイトで表示します。ソース対応は未実装です。", "지원하지 않는 유형은 네이티브 엔디언 원시 바이트로 표시합니다. 소스 매핑은 아직 지원되지 않습니다.")))
+            .child(div().id("vertex-debug-disassembly").test_support().text_sm().child(debug.disassembly.clone()));
+        Some(view.into_any_element())
+    }
+
     fn capture_view(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(snapshot) = &self.snapshot {
             if self.event_tree.len() != snapshot.actions.len() {
@@ -2695,7 +2912,7 @@ impl Workspace {
                                         {
                                             if let Some(selection) = selection {
                                                 this.debug_vertex_selection = Some(selection);
-                                                this.vertex_debug = None;
+                                                this.debug_view = None;
                                                 cx.notify();
                                             }
                                         }
@@ -3341,122 +3558,14 @@ impl Workspace {
                         ));
                 }
             }
-            if let Some(debug) = &self.vertex_debug {
-                let previous = button(
-                    "vertex-debug-previous",
-                    self.t("Previous step", "上一步", "前のステップ", "이전 단계"),
-                    false,
-                    |this, cx| {
-                        if let Some(debug) = &mut this.vertex_debug {
-                            debug.position = debug.position.saturating_sub(1);
-                            cx.notify();
-                        }
-                    },
-                    cx,
-                );
-                let next = button(
-                    "vertex-debug-next",
-                    self.t("Next step", "下一步", "次のステップ", "다음 단계"),
-                    false,
-                    |this, cx| {
-                        if let Some(debug) = &mut this.vertex_debug {
-                            if debug.position + 1 < debug.states.len() {
-                                debug.position += 1;
-                                cx.notify();
-                            }
-                        }
-                    },
-                    cx,
-                );
-                view = view
-                    .child(div().text_sm().text_color(rgb(0x82aaff)).child(self.t(
-                        "VERTEX DEBUG TRACE",
-                        "顶点调试轨迹",
-                        "頂点デバッグトレース",
-                        "정점 디버그 추적",
-                    )))
-                    .child(format!(
-                        "{} {} · {} {} · {} {} · {} {}",
-                        self.t("Vertex", "顶点", "頂点", "정점"),
-                        debug.vertex,
-                        self.t("Instance", "实例", "インスタンス", "인스턴스"),
-                        debug.instance,
-                        self.t("Index", "索引", "インデックス", "인덱스"),
-                        debug.index,
-                        event_label,
-                        debug.trace.event_id
-                    ))
-                    .child(div().flex().gap_2().child(previous).child(next));
-                if let Some(state) = debug.states.get(debug.position) {
-                    view = view
-                        .child(div().id("vertex-debug-step").test_support().child(format!(
-                            "{} {} / {} · {} {} · {} {}",
-                            self.t("Step", "步骤", "ステップ", "단계"),
-                            state.step,
-                            debug.states.len(),
-                            self.t("Next instruction", "下一条指令", "次の命令", "다음 명령"),
-                            state.next_instruction,
-                            self.t("Flags", "标志", "フラグ", "플래그"),
-                            state.flags
-                        )))
-                        .child(format!(
-                            "{}: {}",
-                            self.t("Call stack", "调用栈", "呼び出し履歴", "호출 스택"),
-                            state.callstack.join(" → ")
-                        ))
-                        .child(self.t("Variable changes", "变量变化", "変数の変化", "변수 변경"))
-                        .children(state.changes.iter().map(|change| {
-                            div().text_sm().child(format!(
-                                "{} → {}",
-                                shader_debug::display_variable(&change.before),
-                                shader_debug::display_variable(&change.after)
-                            ))
-                        }));
-                } else {
-                    view = view.child(self.t(
-                        "No debug states were returned.",
-                        "未返回调试状态。",
-                        "デバッグ状態が返されませんでした。",
-                        "디버그 상태가 반환되지 않았습니다.",
-                    ));
+            if self
+                .debug_view
+                .as_ref()
+                .is_some_and(|debug| matches!(debug.context, ShaderDebugContext::Vertex { .. }))
+            {
+                if let Some(panel) = self.shader_debug_panel(cx) {
+                    view = view.child(panel);
                 }
-                let groups = [
-                    (
-                        self.t("Inputs", "输入", "入力", "입력"),
-                        &debug.trace.inputs,
-                    ),
-                    (
-                        self.t("Constant blocks", "常量块", "定数ブロック", "상수 블록"),
-                        &debug.trace.constant_blocks,
-                    ),
-                    (
-                        self.t(
-                            "Read-only resources",
-                            "只读资源",
-                            "読み取り専用リソース",
-                            "읽기 전용 리소스",
-                        ),
-                        &debug.trace.read_only_resources,
-                    ),
-                    (
-                        self.t(
-                            "Read-write resources",
-                            "读写资源",
-                            "読み書きリソース",
-                            "읽기/쓰기 리소스",
-                        ),
-                        &debug.trace.read_write_resources,
-                    ),
-                    (
-                        self.t("Samplers", "采样器", "サンプラー", "샘플러"),
-                        &debug.trace.samplers,
-                    ),
-                ];
-                view = view.children(groups.into_iter().filter(|(_, variables)| !variables.is_empty()).map(|(label, variables)| {
-                        div().flex().flex_col().gap_2().child(label).children(variables.iter().map(|variable| div().text_sm().child(shader_debug::display_variable(variable))))
-                    }))
-                    .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t("Unsupported value types are shown as native-endian bytes; source mapping is not yet available.", "未解码的类型显示原生字节序的原始字节；暂不支持源码映射。", "未対応の型はネイティブエンディアンの生バイトで表示します。ソース対応は未実装です。", "지원하지 않는 유형은 네이티브 엔디언 원시 바이트로 표시합니다. 소스 매핑은 아직 지원되지 않습니다.")))
-                    .child(div().id("vertex-debug-disassembly").test_support().text_sm().child(debug.disassembly.clone()));
             }
             view
         } else if self.tab == CaptureTab::Mesh {
@@ -3821,6 +3930,15 @@ impl Workspace {
             let pixel = self.pixel.clone();
             let history = self.pixel_history.clone();
             let history_selected = self.history_selected;
+            let pixel_debug_panel = if self
+                .debug_view
+                .as_ref()
+                .is_some_and(|debug| matches!(debug.context, ShaderDebugContext::Pixel(_)))
+            {
+                self.shader_debug_panel(cx)
+            } else {
+                None
+            };
             let pixel_title = self.t(
                 "Pixel coordinates (top-left)",
                 "像素坐标（左上角为原点）",
@@ -4023,8 +4141,11 @@ impl Workspace {
                                 |this, cx| this.pick_texture_pixel(cx),
                                 cx,
                             ))
-                            .child(button("pixel-history", history_label, false, |this, cx| this.read_pixel_history(0, false, cx), cx)),
+                            .child(button("pixel-history", history_label, false, |this, cx| this.read_pixel_history(0, false, cx), cx))
+                            .child(button("pixel-debug-start", self.t("Debug pixel", "调试像素", "ピクセルをデバッグ", "픽셀 디버깅"), true, |this, cx| this.debug_selected_pixel(cx), cx)),
                     )
+                    .child(div().text_sm().text_color(rgb(0x91a7c0)).child(self.t("Pixel debugging uses the selected draw and sample; RenderDoc chooses the primitive and view. The selected texture need not be bound to that draw.", "像素调试使用当前绘制事件和采样；图元及视图由 RenderDoc 选择。所选纹理不一定绑定到该绘制。", "ピクセルデバッグは選択中の描画とサンプルを使用し、プリミティブとビューは RenderDoc が選択します。選択したテクスチャが描画にバインドされているとは限りません。", "픽셀 디버깅은 선택한 그리기와 샘플을 사용하며 프리미티브와 뷰는 RenderDoc이 선택합니다. 선택한 텍스처가 해당 그리기에 바인딩되어 있지 않을 수 있습니다.")))
+                    .when_some(pixel_debug_panel, |view, panel| view.child(panel))
                     .when_some(pixel, |view, pixel| {
                         let bits = pixel
                             .bits
@@ -4087,6 +4208,11 @@ impl Workspace {
                                 view = view.child(div().id("pixel-history-detail").test_support().child(format!("{event_label} {event} · {primitive_label} {primitive} · {}", if failures.is_empty() { passed_label.to_owned() } else { failures.join(", ") })))
                                     .child(div().id("pixel-history-jump").test_support().text_color(rgb(0x82aaff)).cursor_pointer().child(jump_label)
                                         .on_click(cx.listener(move |this, _, window, cx| this.jump_to_usage(event, window, cx))));
+                                if entry.event_id == page.event_id {
+                                    let selection = PixelDebugSelection { x: page.x, y: page.y, sample: (page.sample != u32::MAX).then_some(page.sample), primitive: (entry.primitive != u32::MAX).then_some(entry.primitive), view: None };
+                                    view = view.child(button("pixel-history-debug", self.t("Debug this fragment", "调试此片元", "このフラグメントをデバッグ", "이 프래그먼트 디버깅"), true,
+                                        move |this, cx| this.start_shader_debug(ShaderDebugContext::Pixel(selection), cx), cx));
+                                }
                                 if entry.direct_shader_write { view = view.child(direct_write_label); }
                                 if entry.unbound_pixel_shader { view = view.child(unbound_shader_label); }
                                 for (label, value) in [(before_label, &entry.pre), (shader_output_label, &entry.shader_output), (after_label, &entry.post)] {
@@ -4463,7 +4589,7 @@ impl Workspace {
                             this.mesh = MeshView::default();
                             this.input_page = None;
                             this.debug_vertex_selection = None;
-                            this.vertex_debug = None;
+                            this.debug_view = None;
                             this.selected_resource = None;
                             this.usage_page = None;
                             this.preview = None;
@@ -5759,7 +5885,7 @@ fn main() {
                         mesh: MeshView::default(),
                         input_page: None,
                         debug_vertex_selection: None,
-                        vertex_debug: None,
+                        debug_view: None,
                         selected_resource: None,
                         usage_page: None,
                         open_revision: 0,
@@ -5895,7 +6021,7 @@ mod ui_tests {
                         mesh: MeshView::default(),
                         input_page: None,
                         debug_vertex_selection: None,
-                        vertex_debug: None,
+                        debug_view: None,
                         selected_resource: None,
                         usage_page: None,
                         open_revision: 0,
@@ -6209,7 +6335,7 @@ mod ui_tests {
                         mesh: MeshView::default(),
                         input_page: None,
                         debug_vertex_selection: None,
-                        vertex_debug: None,
+                        debug_view: None,
                         selected_resource: None,
                         usage_page: None,
                         open_revision: 0,
@@ -7230,7 +7356,7 @@ mod ui_tests {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
                 loop {
                     cx.run_until_parked();
-                    if cx.update(|cx| view.read(cx).vertex_debug.is_some()) {
+                    if cx.update(|cx| view.read(cx).debug_view.is_some()) {
                         break;
                     }
                     assert!(
@@ -7241,8 +7367,15 @@ mod ui_tests {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
                 cx.update(|cx| {
-                    let debug = view.read(cx).vertex_debug.as_ref().unwrap();
-                    assert_eq!((debug.vertex, debug.instance, debug.index), (0, 0, 0));
+                    let debug = view.read(cx).debug_view.as_ref().unwrap();
+                    assert!(matches!(
+                        debug.context,
+                        ShaderDebugContext::Vertex {
+                            vertex: 0,
+                            instance: 0,
+                            index: 0
+                        }
+                    ));
                     assert_eq!(debug.trace.event_id, draw_event);
                     assert!(debug.states.len() > 1);
                     assert!(debug.disassembly.contains("vs_4_0"));
@@ -7254,16 +7387,12 @@ mod ui_tests {
                     window.click("vertex-debug-next", cx);
                 })
                 .unwrap();
-                cx.update(|cx| {
-                    assert_eq!(view.read(cx).vertex_debug.as_ref().unwrap().position, 1)
-                });
+                cx.update(|cx| assert_eq!(view.read(cx).debug_view.as_ref().unwrap().position, 1));
                 cx.update_window(handle.into(), |_, window, cx| {
                     window.click("vertex-debug-previous", cx);
                 })
                 .unwrap();
-                cx.update(|cx| {
-                    assert_eq!(view.read(cx).vertex_debug.as_ref().unwrap().position, 0)
-                });
+                cx.update(|cx| assert_eq!(view.read(cx).debug_view.as_ref().unwrap().position, 0));
                 cx.update_window(handle.into(), |_, window, cx| {
                     window.click("mesh-tab", cx);
                 })
@@ -7434,8 +7563,169 @@ mod ui_tests {
                 cx.update_window(handle.into(), |_, window, cx| {
                     window.render_frame(cx);
                     assert!(window.find(history_draw_index).visible());
+                    window.click("textures-tab", cx);
+                    window.click(SharedString::from(format!("texture-{color_index}")), cx);
+                    window.scroll(
+                        "capture-details-scroll",
+                        ScrollDelta::Pixels(point(px(0.), px(2000.))),
+                        cx,
+                    );
+                    window.render_frame(cx);
+                    for _ in 0..20 {
+                        let target = window.find("pixel-history");
+                        if target.visible() {
+                            break;
+                        }
+                        window.scroll(
+                            "capture-details-scroll",
+                            ScrollDelta::Pixels(point(px(0.), px(-100.))),
+                            cx,
+                        );
+                    }
+                    window.click("pixel-history", cx);
                 })
                 .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                let (row, primitive, x, y) = loop {
+                    cx.run_until_parked();
+                    if let Some(found) = cx.update(|cx| {
+                        view.read(cx).pixel_history.as_ref().and_then(|page| {
+                            let row = page.entries.iter().position(|entry| {
+                                entry.event_id == history_draw_event && entry.passed
+                            })?;
+                            Some((row, page.entries[row].primitive, page.x, page.y))
+                        })
+                    }) {
+                        break found;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "pixel history for debugging did not load: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                };
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    for _ in 0..30 {
+                        let target = window.find(("pixel-history-row", row));
+                        if target.visible() {
+                            break;
+                        }
+                        let viewport = window.find("capture-details-scroll").bounds();
+                        let delta = if target.bounds().origin.y < viewport.origin.y {
+                            100.0
+                        } else {
+                            -100.0
+                        };
+                        window.scroll(
+                            "capture-details-scroll",
+                            ScrollDelta::Pixels(point(px(0.), px(delta))),
+                            cx,
+                        );
+                    }
+                    window.click(("pixel-history-row", row), cx);
+                    for _ in 0..20 {
+                        let target = window.find("pixel-history-debug");
+                        if target.visible() {
+                            break;
+                        }
+                        let viewport = window.find("capture-details-scroll").bounds();
+                        let delta = if target.bounds().origin.y < viewport.origin.y {
+                            100.0
+                        } else {
+                            -100.0
+                        };
+                        window.scroll(
+                            "capture-details-scroll",
+                            ScrollDelta::Pixels(point(px(0.), px(delta))),
+                            cx,
+                        );
+                    }
+                    window.click("pixel-history-debug", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| view.read(cx).debug_view.is_some()) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "pixel debug did not finish: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update(|cx| {
+                    let debug = view.read(cx).debug_view.as_ref().unwrap();
+                    let ShaderDebugContext::Pixel(selection) = debug.context else {
+                        panic!("expected pixel trace")
+                    };
+                    assert_eq!((selection.x, selection.y), (x, y));
+                    assert_eq!(
+                        selection.primitive,
+                        (primitive != u32::MAX).then_some(primitive)
+                    );
+                    assert_eq!(debug.trace.event_id, history_draw_event);
+                    assert_eq!(debug.trace.stage, 4);
+                    assert!(debug.states.len() > 1);
+                    assert!(debug.disassembly.contains("ps_4_0"));
+                });
+                cx.update_window(handle.into(), |_, window, cx| {
+                    for _ in 0..30 {
+                        let target = window.find("pixel-debug-start");
+                        if target.visible() {
+                            break;
+                        }
+                        let viewport = window.find("capture-details-scroll").bounds();
+                        let delta = if target.bounds().origin.y < viewport.origin.y {
+                            100.0
+                        } else {
+                            -100.0
+                        };
+                        window.scroll(
+                            "capture-details-scroll",
+                            ScrollDelta::Pixels(point(px(0.), px(delta))),
+                            cx,
+                        );
+                    }
+                    window.click("pixel-debug-start", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| view.read(cx).debug_view.as_ref().is_some_and(|debug| matches!(debug.context, ShaderDebugContext::Pixel(selection) if selection.primitive.is_none()))) { break; }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "default pixel debug did not finish: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| window.click("mesh-tab", cx))
+                    .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx)
+                            .mesh
+                            .info
+                            .as_ref()
+                            .is_some_and(|mesh| mesh.event_id == history_draw_event)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "replay did not recover after pixel debug: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
             }
             if let Some(fixture) = std::env::var_os("RENDERDOCX_TEST_OPENGL_FIXTURE") {
                 use std::os::windows::process::CommandExt;
