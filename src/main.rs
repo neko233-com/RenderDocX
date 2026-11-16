@@ -407,6 +407,46 @@ impl Workspace {
         }
     }
 
+    fn may_close_window(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.resource_pending || self.replay_pending || self.export_pending {
+            self.status = Some(
+                self.t(
+                    "Wait for the current operation to finish before closing.",
+                    "请等待当前操作完成后再关闭。",
+                    "現在の処理が完了してから閉じてください。",
+                    "현재 작업이 끝난 후 창을 닫아 주세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return false;
+        }
+        if self.annotation_dirty(cx) {
+            self.status = Some(
+                self.t(
+                    "Save or discard the comment draft before closing.",
+                    "关闭前请先保存或放弃注释草稿。",
+                    "閉じる前にコメントを保存または破棄してください。",
+                    "닫기 전에 댓글 초안을 저장하거나 취소하세요.",
+                )
+                .to_owned(),
+            );
+            self.tab = CaptureTab::Annotations;
+            cx.notify();
+            return false;
+        }
+        true
+    }
+
+    fn install_close_guard(window: &Window, cx: &App, workspace: &Entity<Self>) {
+        let workspace = workspace.downgrade();
+        window.on_window_should_close(cx, move |_, cx| {
+            workspace
+                .update(cx, |workspace, cx| workspace.may_close_window(cx))
+                .unwrap_or(true)
+        });
+    }
+
     fn load_annotations(&mut self, cx: &mut Context<Self>) {
         if self.resource_pending || self.replay_pending || self.export_pending {
             return;
@@ -796,12 +836,28 @@ impl Workspace {
             return;
         };
         let Some(key) = resource.rename_key.as_deref() else {
-            self.status = Some("Resource ID unavailable; update the replay bridge".into());
+            self.status = Some(
+                self.t(
+                    "Resource ID unavailable; update the replay bridge.",
+                    "资源 ID 不可用，请更新回放桥。",
+                    "リソース ID を取得できません。リプレイブリッジを更新してください。",
+                    "리소스 ID를 사용할 수 없습니다. 재생 브리지를 업데이트하세요.",
+                )
+                .to_owned(),
+            );
             cx.notify();
             return;
         };
         let Some((_, document)) = self.annotations.renames.as_ref() else {
-            self.status = Some("Resource names are unavailable; reopen the capture".into());
+            self.status = Some(
+                self.t(
+                    "Resource names are unavailable; reopen the capture.",
+                    "资源名称不可用，请重新打开捕获文件。",
+                    "リソース名を取得できません。キャプチャを開き直してください。",
+                    "리소스 이름을 사용할 수 없습니다. 캡처를 다시 여세요.",
+                )
+                .to_owned(),
+            );
             cx.notify();
             return;
         };
@@ -8104,6 +8160,7 @@ fn main() {
                         launch_env_operation: EnvOperation::Set,
                         launch_env_separator: EnvSeparator::Platform,
                     });
+                    Workspace::install_close_guard(window, cx, &entity);
                     if let Some(path) = initial_capture {
                         entity.update(cx, |view, cx| view.open(path, cx));
                     }
@@ -8387,6 +8444,35 @@ mod ui_tests {
             assert!(view.read(cx).status.is_some());
             assert!(view.read(cx).snapshot.is_none());
         });
+        cx.update_window(handle.into(), |_, window, cx| {
+            Workspace::install_close_guard(window, cx, &view);
+            let editor = cx.new(|cx| TextareaState::new(window, cx).default_value("unsaved"));
+            view.update(cx, |view, _| {
+                view.annotations.notes = Some((
+                    AnnotationSection {
+                        name: "notes".into(),
+                        exists: false,
+                        version: "1".into(),
+                        hex: String::new(),
+                    },
+                    serde_json::json!({"comments":"saved"}),
+                ));
+                view.annotations.editor = Some(editor);
+            });
+        })
+        .unwrap();
+        let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+        assert!(!visual.simulate_close());
+        cx.update(|cx| {
+            assert!(view.read(cx).tab == CaptureTab::Annotations);
+            view.update(cx, |view, _| {
+                view.annotations.editor = None;
+                view.resource_pending = true;
+            });
+        });
+        assert!(!visual.simulate_close());
+        cx.update(|cx| view.update(cx, |view, _| view.resource_pending = false));
+        assert!(visual.simulate_close());
     }
 
     #[gpui_kit::test]

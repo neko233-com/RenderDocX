@@ -19,6 +19,6 @@ The frame information, replay debug messages and recorded frame statistics are a
 
 An initial descriptor inspector pages the selected event's descriptor accesses or fixed-size stores through RenderDoc, including logical locations, resource references and sampler fields. Variable-sized store enumeration, richer typed presentation and cross-API descriptor validation remain outstanding.
 
-Version-one capture notes and bookmarks can be read and explicitly saved through RenderDoc sections from GPUI and the agent CLI. Concurrent-writer checks are best-effort rather than an atomic lock; window-close draft protection, external-editor interoperability and broader platform validation remain outstanding.
+Version-one capture notes and bookmarks can be read and explicitly saved through RenderDoc sections from GPUI and the agent CLI. Concurrent-writer checks are best-effort rather than an atomic lock; ordinary window-close requests are blocked for unsaved drafts and in-flight operations. Forced termination, external-editor interoperability and broader platform validation remain outstanding.
 
 CodeGraph233 is configured for the Rust application and tests; the local index is ignored by Git. With the currently installed 0.3.1 server, C++ sources are not indexed and must still be inspected directly. Run `codegraph233 index --root . --jobs 1` to refresh the Rust graph; graph references are navigation aids and must be checked against the source.
