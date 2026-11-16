@@ -2,7 +2,7 @@
 
 The supplied upstream snapshot has version macros for RenderDoc 1.48 but no Git metadata. Establish its exact commit before treating it as a reproducible upstream baseline. Keep capture and replay in the matching RenderDoc core; the public replay API includes C++ types, so use a version-matched C ABI bridge with explicit ownership, thread affinity, and error handling rather than guessing the ABI from Rust. The application API in `renderdoc/api/app/renderdoc_app.h` is a separate, versioned in-process capture interface.
 
-The current workspace invokes upstream executables. `renderdoccmd capture` does not give this workspace a target-control session, progress, or a list of saved captures. `qrenderdoc` remains necessary to inspect a capture and for full capture options. There is no native `.rdc` parser, live session, or capture/replay implementation in the Rust frontend.
+The current workspace invokes upstream executables. For launch it passes the ident printed by `renderdoccmd capture` to `qrenderdoc --targetcontrol`, but does not itself own the target-control session, progress, or list of saved captures. `qrenderdoc` remains necessary to inspect a capture and for full capture options. There is no native `.rdc` parser, live session, or capture/replay implementation in the Rust frontend.
 
 Remaining work includes:
 

@@ -1,0 +1,5 @@
+{
+  "name": "RenderDocX.Editor",
+  "rootNamespace": "RenderDocX.Editor",
+  "includePlatforms": ["Editor"]
+}

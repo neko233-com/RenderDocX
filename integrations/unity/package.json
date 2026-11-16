@@ -1,0 +1,7 @@
+{
+  "name": "com.neko233.renderdocx",
+  "version": "0.1.0",
+  "displayName": "RenderDocX Integration",
+  "description": "Editor handoff and optional external GPU capture helpers for RenderDocX.",
+  "unity": "2020.3"
+}

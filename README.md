@@ -2,7 +2,7 @@
 
 RenderDocX is an in-progress Rust + GPUI desktop frontend for [RenderDoc](https://github.com/baldurk/renderdoc). Its goal is a clearer, more usable graphics-debugging experience while retaining RenderDoc's capture, replay, and file semantics.
 
-**Status: early prototype, not a replacement for RenderDoc.** The current GPUI workspace can select and open `.rdc`/`.cap` files in the installed `qrenderdoc`, start a target using `renderdoccmd capture`, and open the upstream UI. Detailed capture control and inspection remain in the upstream UI. Starting a process does not establish that capture or replay succeeded.
+**Status: early prototype, not a replacement for RenderDoc.** The current GPUI workspace can select and open `.rdc`/`.cap` files in the installed `qrenderdoc`, start a target using `renderdoccmd capture`, and open the upstream UI. On launch it uses the target ident reported by `renderdoccmd` to start `qrenderdoc` with `--targetcontrol`. Detailed capture control and inspection remain in the upstream UI. Starting these processes does not establish that the target connection, capture, or replay succeeded.
 
 The interface detects the system language on startup and supports English, Simplified Chinese, Japanese, and Korean, with a manual language override. Its settings are stored in the operating system's user configuration directory.
 
@@ -20,7 +20,7 @@ Launching an application uses RenderDoc's default capture options and accepts no
 
 ## Unity and Tuanjie
 
-Unity's built-in RenderDoc integration can load RenderDoc in the Editor and capture from the Game or Scene view on supported platform/API combinations. Standalone players can be launched through RenderDoc. See the [Unity manual](https://docs.unity3d.com/Manual/RenderDocIntegration.html) and the engine version's documentation. Tuanjie is expected to follow its own supported integration and API matrix; no independent Tuanjie compatibility claim is made yet. RenderDocX does not yet receive Editor capture events directly or replace Unity's RenderDoc UI integration.
+Unity's built-in RenderDoc integration can load RenderDoc in the Editor and capture from the Game or Scene view on supported platform/API combinations. Standalone players can be launched through RenderDoc. See the [Unity manual](https://docs.unity3d.com/Manual/RenderDocIntegration.html) and the engine version's documentation. An early [Unity package](integrations/unity/README.md) adds Editor handoff of saved captures and an optional wrapper for Unity's experimental external GPU profiler API. Tuanjie compatibility has not been established. RenderDocX does not yet receive Editor capture events directly or replace Unity's RenderDoc UI integration.
 
 ## Source and compatibility
 

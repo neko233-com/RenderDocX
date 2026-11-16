@@ -168,8 +168,25 @@ impl Render for Workspace {
                         false,
                         |this, cx| {
                             if let Some(path) = rfd::FileDialog::new().pick_file() {
-                                let result = backend::launch_capture(&this.settings, &path);
-                                this.result(result, cx);
+                                let settings = this.settings.clone();
+                                this.status = Some(
+                                    this.t(
+                                        "Starting capture target…",
+                                        "正在启动捕获目标…",
+                                        "キャプチャ対象を起動中…",
+                                        "캡처 대상을 시작하는 중…",
+                                    )
+                                    .to_owned(),
+                                );
+                                cx.notify();
+                                let job = cx.background_executor().spawn(async move {
+                                    backend::launch_capture(&settings, &path)
+                                });
+                                cx.spawn(async move |this, cx| {
+                                    let result = job.await;
+                                    let _ = this.update(cx, |this, cx| this.result(result, cx));
+                                })
+                                .detach();
                             }
                         },
                         cx,
@@ -259,17 +276,36 @@ impl Render for Workspace {
 fn main() {
     Application::new().run(|cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1040.), px(760.)), cx);
+        let settings = Settings::load();
+        let initial_capture = std::env::var_os("RENDERDOCX_OPEN_CAPTURE")
+            .or_else(|| std::env::args_os().nth(1))
+            .map(std::path::PathBuf::from);
+        let status = initial_capture.map(|path| match backend::open_capture(&settings, &path) {
+            Ok(()) => settings
+                .language
+                .text(
+                    "Started RenderDoc to open the capture.",
+                    "已启动 RenderDoc 打开捕获文件。",
+                    "キャプチャを開くため RenderDoc を起動しました。",
+                    "캡처를 열기 위해 RenderDoc을 시작했습니다.",
+                )
+                .to_owned(),
+            Err(error) => format!(
+                "{}: {error}",
+                settings.language.text(
+                    "Could not open capture",
+                    "无法打开捕获文件",
+                    "キャプチャを開けません",
+                    "캡처를 열 수 없습니다"
+                )
+            ),
+        });
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |_, cx| {
-                cx.new(|_| Workspace {
-                    settings: Settings::load(),
-                    status: None,
-                })
-            },
+            |_, cx| cx.new(|_| Workspace { settings, status }),
         )
         .expect("Failed to open RenderDocX window");
         cx.activate(true);
