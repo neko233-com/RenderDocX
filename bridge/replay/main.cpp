@@ -278,7 +278,19 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
     std::cout << ",\"rasters\":"; bind(stats.rasters); std::cout << ",\"redundants\":" << stats.rasters.redundants << ",\"viewports\":"; array(stats.rasters.viewports); std::cout << ",\"rects\":"; array(stats.rasters.rects); std::cout << '}';
     std::cout << ",\"outputs\":"; bind(stats.outputs); std::cout << ",\"bindslots\":"; array(stats.outputs.bindslots); std::cout << '}';
   }
-  std::cout << "},\"actions\":[";
+  std::cout << "},\"counters\":[";
+  const rdcarray<GPUCounter> available_counters = controller->EnumerateCounters();
+  for(size_t i = 0; i < available_counters.size(); ++i)
+  {
+    if(i) std::cout << ',';
+    const CounterDescription counter = controller->DescribeCounter(available_counters[i]);
+    std::cout << "{\"id\":" << uint32_t(counter.counter) << ",\"name\":"; json_string(counter.name);
+    std::cout << ",\"category\":"; json_string(counter.category);
+    std::cout << ",\"description\":"; json_string(counter.description);
+    std::cout << ",\"result_type\":" << uint32_t(counter.resultType) << ",\"result_byte_width\":" << counter.resultByteWidth
+              << ",\"unit\":" << uint32_t(counter.unit) << ",\"uuid\":[" << counter.uuid.words[0] << ',' << counter.uuid.words[1] << ',' << counter.uuid.words[2] << ',' << counter.uuid.words[3] << "]}";
+  }
+  std::cout << "],\"actions\":[";
   size_t index = 0;
   while(!pending.empty())
   {
@@ -730,6 +742,9 @@ int run(const std::string &capture, bool structure_worker)
   bool history_ready = false;
   uint32_t history_event = 0, history_index = 0, history_mip = 0, history_slice = 0, history_sample = 0, history_x = 0, history_y = 0;
   rdcarray<PixelModification> cached_history;
+  rdcarray<CounterResult> counter_results;
+  uint64_t counter_generation = 0;
+  bool counters_ready = false;
 
   std::string command;
   while(std::getline(std::cin, command))
@@ -875,6 +890,72 @@ int run(const std::string &capture, bool structure_worker)
       debug.reset();
       debug_finished = false;
       std::cout << "\nRENDERDOCX/1 {\"type\":\"debug_stopped\"}" << std::endl;
+      continue;
+    }
+    if(command.compare(0, 14, "counter_fetch ") == 0)
+    {
+      std::istringstream arguments(command.substr(14));
+      std::string value;
+      const auto available = replay.controller->EnumerateCounters();
+      std::set<uint32_t> valid;
+      for(GPUCounter counter : available) valid.insert(uint32_t(counter));
+      std::set<uint32_t> unique;
+      rdcarray<GPUCounter> requested;
+      bool valid_request = true;
+      while(arguments >> value)
+      {
+        uint64_t id = 0;
+        if(!decimal(value, id) || id > UINT32_MAX || !valid.count(uint32_t(id)) || !unique.insert(uint32_t(id)).second)
+        { valid_request = false; break; }
+        requested.push_back(GPUCounter(uint32_t(id)));
+      }
+      if(!valid_request || requested.empty()) { error("Invalid GPU counter selection"); continue; }
+      counters_ready = false;
+      counter_results = replay.controller->FetchCounters(requested);
+      result = replay.controller->GetFatalErrorStatus();
+      if(!result.OK()) { error(result_message(result)); break; }
+      mesh_ready = false;
+      history_ready = false;
+      cached_history = rdcarray<PixelModification>();
+      if(selected) replay.controller->SetFrameEvent(selected_event, true);
+      result = replay.controller->GetFatalErrorStatus();
+      if(!result.OK()) { error(result_message(result)); break; }
+      ++counter_generation;
+      counters_ready = true;
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"counter_fetch\",\"generation\":\"" << counter_generation
+                << "\",\"total\":\"" << counter_results.size() << "\"}" << std::endl;
+      continue;
+    }
+    if(command.compare(0, 13, "counter_page ") == 0)
+    {
+      std::istringstream arguments(command.substr(13));
+      std::string gen_text, offset_text, limit_text, extra;
+      uint64_t gen = 0, offset = 0, limit = 0;
+      if(!(arguments >> gen_text >> offset_text >> limit_text) || (arguments >> extra) ||
+         !decimal(gen_text, gen) || !decimal(offset_text, offset) || !decimal(limit_text, limit) ||
+         !counters_ready || gen != counter_generation || offset > counter_results.size() || limit == 0 || limit > 128)
+      { error("Invalid or stale GPU counter page"); continue; }
+      const size_t start = size_t(offset), end = start + (std::min)(size_t(limit), counter_results.size() - start);
+      bool supported = true;
+      for(size_t i = start; i < end; ++i)
+      {
+        const auto width = replay.controller->DescribeCounter(counter_results[i].counter).resultByteWidth;
+        if(width != 4 && width != 8) { supported = false; break; }
+      }
+      if(!supported) { error("Unsupported counter result width"); continue; }
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"counter_page\",\"generation\":\"" << gen << "\",\"offset\":\"" << offset
+                << "\",\"total\":\"" << counter_results.size() << "\",\"entries\":[";
+      for(size_t i = start; i < end; ++i)
+      {
+        if(i != start) std::cout << ',';
+        const CounterResult &entry = counter_results[i];
+        const CounterDescription desc = replay.controller->DescribeCounter(entry.counter);
+        uint64_t bits = 0;
+        if(desc.resultByteWidth == 4) { uint32_t raw; std::memcpy(&raw, &entry.value, sizeof(raw)); bits = raw; }
+        else if(desc.resultByteWidth == 8) std::memcpy(&bits, &entry.value, sizeof(bits));
+        std::cout << "{\"event_id\":" << entry.eventId << ",\"counter\":" << uint32_t(entry.counter) << ",\"bits\":\"" << bits << "\"}";
+      }
+      std::cout << "]}" << std::endl;
       continue;
     }
     if(command.compare(0, 6, "usage ") == 0)

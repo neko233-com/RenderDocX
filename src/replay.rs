@@ -138,6 +138,8 @@ pub struct Snapshot {
     pub debug_messages: Vec<DebugMessage>,
     #[serde(default)]
     pub frame_statistics: Option<serde_json::Value>,
+    #[serde(default)]
+    pub counters: Vec<CounterDescription>,
     pub actions: Vec<Action>,
     pub resource_count: usize,
     pub texture_count: usize,
@@ -148,6 +150,56 @@ pub struct Snapshot {
     pub textures: Vec<Texture>,
     #[serde(default)]
     pub buffers: Vec<Buffer>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CounterDescription {
+    pub id: u32,
+    pub name: String,
+    pub category: String,
+    pub description: String,
+    pub result_type: u32,
+    pub result_byte_width: u32,
+    pub unit: u32,
+    pub uuid: [u32; 4],
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CounterFetch {
+    pub generation: String,
+    pub total: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CounterEntry {
+    pub event_id: u32,
+    pub counter: u32,
+    pub bits: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CounterPage {
+    pub generation: String,
+    pub offset: String,
+    pub total: String,
+    pub entries: Vec<CounterEntry>,
+}
+
+pub const COUNTER_PAGE_LIMIT: u32 = 128;
+
+impl CounterEntry {
+    pub fn display_value(&self, description: &CounterDescription) -> String {
+        let Ok(bits) = self.bits.parse::<u64>() else {
+            return "?".into();
+        };
+        match (description.result_type, description.result_byte_width) {
+            (4, 4) => (bits as u32).to_string(),
+            (4, 8) => bits.to_string(),
+            (_, 4) => f32::from_bits(bits as u32).to_string(),
+            (_, 8) => f64::from_bits(bits).to_string(),
+            _ => "?".into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -732,6 +784,8 @@ pub struct Pipeline {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Reply {
     Snapshot(Snapshot),
+    CounterFetch(CounterFetch),
+    CounterPage(CounterPage),
     ResourceUsage(ResourceUsagePage),
     Selected {
         event_id: u32,
@@ -972,6 +1026,17 @@ fn validate_snapshot(snapshot: &Snapshot) -> Result<(), String> {
 
 trait Transport: Send {
     fn select(&mut self, event: u32) -> Result<Pipeline, String>;
+    fn counter_fetch(&mut self, _ids: &[u32]) -> Result<CounterFetch, String> {
+        Err("GPU counters are not supported by this transport".into())
+    }
+    fn counter_page(
+        &mut self,
+        _generation: u64,
+        _offset: u64,
+        _limit: u32,
+    ) -> Result<CounterPage, String> {
+        Err("GPU counters are not supported by this transport".into())
+    }
     fn resource_usage(
         &mut self,
         _index: u32,
@@ -1086,6 +1151,60 @@ trait Transport: Send {
 }
 
 impl Transport for Process {
+    fn counter_fetch(&mut self, ids: &[u32]) -> Result<CounterFetch, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        write!(input, "counter_fetch").map_err(|e| e.to_string())?;
+        for id in ids {
+            write!(input, " {id}").map_err(|e| e.to_string())?;
+        }
+        writeln!(input)
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::CounterFetch(fetch)
+                if fetch.generation.parse::<u64>().is_ok()
+                    && fetch.total.parse::<u64>().is_ok() =>
+            {
+                Ok(fetch)
+            }
+            Reply::Error { message } => Err(message),
+            _ => Err("Invalid GPU counter fetch response".into()),
+        }
+    }
+
+    fn counter_page(
+        &mut self,
+        generation: u64,
+        offset: u64,
+        limit: u32,
+    ) -> Result<CounterPage, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(input, "counter_page {generation} {offset} {limit}")
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::CounterPage(page) => {
+                let total = page
+                    .total
+                    .parse::<u64>()
+                    .map_err(|_| "Invalid GPU counter total")?;
+                if page.generation != generation.to_string()
+                    || page.offset != offset.to_string()
+                    || offset > total
+                    || page.entries.len() as u64 != (total - offset).min(u64::from(limit))
+                    || page
+                        .entries
+                        .iter()
+                        .any(|entry| entry.bits.parse::<u64>().is_err())
+                {
+                    return Err("Invalid GPU counter page".into());
+                }
+                Ok(page)
+            }
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected GPU counter page response".into()),
+        }
+    }
     fn pixel_history(
         &mut self,
         event: u32,
@@ -1695,6 +1814,37 @@ pub struct Session {
 }
 
 impl Session {
+    pub fn counter_fetch(&self, ids: &[u32]) -> Result<CounterFetch, String> {
+        if ids.is_empty()
+            || ids
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != ids.len()
+        {
+            return Err("GPU counter selection must not be empty or contain duplicates".into());
+        }
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .counter_fetch(ids)
+    }
+
+    pub fn counter_page(
+        &self,
+        generation: u64,
+        offset: u64,
+        limit: u32,
+    ) -> Result<CounterPage, String> {
+        if limit == 0 || limit > COUNTER_PAGE_LIMIT {
+            return Err("Invalid GPU counter page limit".into());
+        }
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .counter_page(generation, offset, limit)
+    }
     pub fn open(settings: &Settings, capture: &Path) -> Result<(Self, Snapshot), String> {
         let executable = find_tool(&settings.replay_bridge, "renderdocx-replay")?;
         let executable = std::fs::canonicalize(&executable).unwrap_or(executable);
@@ -2543,6 +2693,38 @@ mod tests {
         request.min = -f32::MAX;
         request.max = f32::MAX;
         assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn gpu_counter_values_preserve_integer_and_float_bits() {
+        let mut description = CounterDescription {
+            id: 1,
+            name: "counter".into(),
+            category: String::new(),
+            description: String::new(),
+            result_type: 4,
+            result_byte_width: 8,
+            unit: 0,
+            uuid: [0; 4],
+        };
+        let entry = CounterEntry {
+            event_id: 3,
+            counter: 1,
+            bits: u64::MAX.to_string(),
+        };
+        assert_eq!(entry.display_value(&description), u64::MAX.to_string());
+        description.result_type = 1;
+        description.result_byte_width = 4;
+        let entry = CounterEntry {
+            bits: f32::INFINITY.to_bits().to_string(),
+            ..entry
+        };
+        assert_eq!(entry.display_value(&description), "inf");
+        let reply = read_reply(&mut Cursor::new("RENDERDOCX/1 {\"type\":\"counter_page\",\"generation\":\"1\",\"offset\":\"0\",\"total\":\"1\",\"entries\":[{\"event_id\":3,\"counter\":1,\"bits\":\"18446744073709551615\"}]}\n")).unwrap();
+        let Reply::CounterPage(page) = reply else {
+            panic!("expected counter page")
+        };
+        assert_eq!(page.entries[0].bits, u64::MAX.to_string());
     }
 
     #[test]

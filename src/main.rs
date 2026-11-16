@@ -18,11 +18,12 @@ use renderdocx::{
         LiveSession, capture_directory, capture_notice, enumerate, parse_target_pid,
     },
     replay::{
-        ComputeDebugSelection, DebugState, DebugTrace, HistogramRequest, MeshInfo, MeshSelection,
-        PIXEL_HISTORY_PAGE_LIMIT, Pipeline, Pixel, PixelDebugSelection, PixelHistoryPage,
-        RESOURCE_USAGE_PAGE_LIMIT, ResourceUsagePage, SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session,
-        ShaderReport, ShaderSourceFile, Snapshot, StructurePage, StructuredNode, TextureSelection,
-        TextureStatistics, resource_type_name, resource_usage_name,
+        COUNTER_PAGE_LIMIT, ComputeDebugSelection, CounterPage, DebugState, DebugTrace,
+        HistogramRequest, MeshInfo, MeshSelection, PIXEL_HISTORY_PAGE_LIMIT, Pipeline, Pixel,
+        PixelDebugSelection, PixelHistoryPage, RESOURCE_USAGE_PAGE_LIMIT, ResourceUsagePage,
+        SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session, ShaderReport, ShaderSourceFile, Snapshot,
+        StructurePage, StructuredNode, TextureSelection, TextureStatistics, resource_type_name,
+        resource_usage_name,
     },
     vertex_input::{INPUT_PAGE_LIMIT, InputPage},
 };
@@ -262,6 +263,7 @@ enum CaptureTab {
     Resources,
     Messages,
     Statistics,
+    Counters,
 }
 #[derive(Clone, Copy)]
 enum TextureField {
@@ -314,6 +316,8 @@ struct Workspace {
     compute_thread: Entity<InputState>,
     selected_resource: Option<usize>,
     selected_message: Option<usize>,
+    selected_counters: std::collections::BTreeSet<u32>,
+    counter_page: Option<CounterPage>,
     usage_page: Option<ResourceUsagePage>,
     open_revision: u64,
     selection_revision: u64,
@@ -850,6 +854,8 @@ impl Workspace {
                         this.debug_view = None;
                         this.selected_resource = None;
                         this.selected_message = None;
+                        this.selected_counters.clear();
+                        this.counter_page = None;
                         this.usage_page = None;
                         this.replay_pending = false;
                         this.export_pending = false;
@@ -1144,6 +1150,88 @@ impl Workspace {
                                 "着色器查看失败",
                                 "シェーダーを表示できません",
                                 "셰이더 확인 실패"
+                            )
+                        ));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn read_counters(&mut self, offset: u64, reuse: bool, cx: &mut Context<Self>) {
+        if self.replay_pending
+            || self.export_pending
+            || self.resource_pending
+            || self.selected_counters.is_empty()
+        {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let ids: Vec<u32> = self.selected_counters.iter().copied().collect();
+        let generation = if reuse {
+            self.counter_page
+                .as_ref()
+                .and_then(|p| p.generation.parse::<u64>().ok())
+        } else {
+            None
+        };
+        if reuse && generation.is_none() {
+            return;
+        }
+        self.resource_pending = true;
+        if !reuse {
+            self.counter_page = None;
+            self.mesh.info = None;
+            self.mesh.bytes = None;
+            self.pixel_history = None;
+            self.history_selected = None;
+        }
+        let revision = self.open_revision;
+        self.status = Some(
+            self.t(
+                "Collecting GPU counters…",
+                "正在采集 GPU 计数器…",
+                "GPU カウンターを収集中…",
+                "GPU 카운터 수집 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            let generation = match generation {
+                Some(generation) => generation,
+                None => session
+                    .counter_fetch(&ids)?
+                    .generation
+                    .parse::<u64>()
+                    .map_err(|_| "Invalid GPU counter generation")?,
+            };
+            session.counter_page(generation, offset, COUNTER_PAGE_LIMIT)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision {
+                    return;
+                }
+                this.resource_pending = false;
+                match result {
+                    Ok(page) => {
+                        this.counter_page = Some(page);
+                        this.status = None;
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "GPU counter collection failed",
+                                "GPU 计数器采集失败",
+                                "GPU カウンターの収集に失敗",
+                                "GPU 카운터 수집 실패"
                             )
                         ));
                     }
@@ -2850,6 +2938,7 @@ impl Workspace {
             _ => Vec::new(),
         };
         let count = match self.tab {
+            CaptureTab::Counters => snapshot.counters.len(),
             CaptureTab::Statistics => snapshot
                 .frame_statistics
                 .as_ref()
@@ -3128,7 +3217,54 @@ impl Workspace {
         let status = self.status.clone();
         let preview_path = self.preview.as_ref().map(|preview| preview.path.clone());
 
-        let list = if self.tab == CaptureTab::Statistics {
+        let list = if self.tab == CaptureTab::Counters {
+            uniform_list(
+                "capture-counters",
+                count,
+                cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                    range
+                        .filter_map(|index| {
+                            let counter = this.snapshot.as_ref()?.counters.get(index)?;
+                            let id = counter.id;
+                            let text = format!(
+                                "{} {} · {}",
+                                if this.selected_counters.contains(&id) {
+                                    "☑"
+                                } else {
+                                    "☐"
+                                },
+                                counter.category,
+                                counter.name
+                            );
+                            Some(
+                                div()
+                                    .id(("gpu-counter", index))
+                                    .test_support()
+                                    .h(px(32.))
+                                    .px_3()
+                                    .overflow_hidden()
+                                    .cursor_pointer()
+                                    .child(text)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if !this.resource_pending
+                                            && !this.replay_pending
+                                            && !this.export_pending
+                                        {
+                                            if !this.selected_counters.insert(id) {
+                                                this.selected_counters.remove(&id);
+                                            }
+                                            this.counter_page = None;
+                                            cx.notify();
+                                        }
+                                    })),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .flex_1()
+            .into_any_element()
+        } else if self.tab == CaptureTab::Statistics {
             let lines: std::sync::Arc<Vec<String>> = std::sync::Arc::new(
                 snapshot
                     .frame_statistics
@@ -3712,7 +3848,135 @@ impl Workspace {
             .into_any_element()
         };
 
-        let detail_view = if self.tab == CaptureTab::Statistics {
+        let detail_view = if self.tab == CaptureTab::Counters {
+            let page = self.counter_page.as_ref();
+            let offset = page.and_then(|p| p.offset.parse::<u64>().ok()).unwrap_or(0);
+            let total = page.and_then(|p| p.total.parse::<u64>().ok()).unwrap_or(0);
+            let next = offset.saturating_add(page.map_or(0, |p| p.entries.len() as u64));
+            let mut detail = div()
+                .p_3()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(self.t(
+                    "GPU performance counters",
+                    "GPU 性能计数器",
+                    "GPU パフォーマンスカウンター",
+                    "GPU 성능 카운터",
+                ))
+                .child(format!(
+                    "{}: {}",
+                    self.t("Selected", "已选择", "選択済み", "선택됨"),
+                    self.selected_counters.len()
+                ))
+                .child(button(
+                    "counter-fetch",
+                    self.t("Collect", "采集", "収集", "수집"),
+                    false,
+                    |this, cx| this.read_counters(0, false, cx),
+                    cx,
+                ));
+            for counter in snapshot
+                .counters
+                .iter()
+                .filter(|counter| self.selected_counters.contains(&counter.id))
+            {
+                detail = detail.child(div().text_sm().child(format!(
+                    "{} · {}: {}",
+                    counter.category, counter.name, counter.description
+                )));
+            }
+            if let Some(page) = page {
+                detail = detail.child(format!("{offset}–{next} / {total}")).child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(button(
+                            "counter-prev",
+                            self.t("Previous", "上一页", "前へ", "이전"),
+                            false,
+                            |this, cx| {
+                                if let Some(page) = &this.counter_page {
+                                    if let Ok(offset) = page.offset.parse::<u64>() {
+                                        if offset > 0 {
+                                            this.read_counters(
+                                                offset
+                                                    .saturating_sub(u64::from(COUNTER_PAGE_LIMIT)),
+                                                true,
+                                                cx,
+                                            );
+                                        }
+                                    }
+                                }
+                            },
+                            cx,
+                        ))
+                        .child(button(
+                            "counter-next",
+                            self.t("Next", "下一页", "次へ", "다음"),
+                            false,
+                            |this, cx| {
+                                if let Some(page) = &this.counter_page {
+                                    if let (Ok(offset), Ok(total)) =
+                                        (page.offset.parse::<u64>(), page.total.parse::<u64>())
+                                    {
+                                        let next = offset.saturating_add(page.entries.len() as u64);
+                                        if next < total {
+                                            this.read_counters(next, true, cx);
+                                        }
+                                    }
+                                }
+                            },
+                            cx,
+                        )),
+                );
+                for (index, entry) in page.entries.iter().enumerate() {
+                    let event = entry.event_id;
+                    let text = if let Some(counter) = snapshot
+                        .counters
+                        .iter()
+                        .find(|counter| counter.id == entry.counter)
+                    {
+                        let unit = match counter.unit {
+                            0 | 3 => "",
+                            1 => "s",
+                            2 => "%",
+                            4 => "B",
+                            5 => self.t("cycles", "周期", "サイクル", "사이클"),
+                            6 => "Hz",
+                            7 => "V",
+                            8 => "°C",
+                            _ => "?",
+                        };
+                        format!(
+                            "E{event} · {}: {} {unit}",
+                            counter.name,
+                            entry.display_value(counter)
+                        )
+                    } else {
+                        format!("E{event} · #{}: {}", entry.counter, entry.bits)
+                    };
+                    detail = detail.child(
+                        div()
+                            .id(("counter-result", index))
+                            .cursor_pointer()
+                            .text_sm()
+                            .child(text)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.jump_to_usage(event, window, cx)
+                            })),
+                    );
+                }
+            } else {
+                detail = detail.child(self.t(
+                    "Select counters and collect their values.",
+                    "选择计数器后开始采集。",
+                    "カウンターを選んで収集します。",
+                    "카운터를 선택한 후 수집하세요.",
+                ));
+            }
+            detail
+        } else if self.tab == CaptureTab::Statistics {
             div().p_3().flex().flex_col().gap_2()
                 .child(self.t("Frame statistics", "帧统计", "フレーム統計", "프레임 통계"))
                 .child(self.t("Values come from RenderDoc's recorded frame statistics. If recorded is false, the capture has no statistics.", "数据来自 RenderDoc 记录的帧统计；recorded 为 false 表示捕获文件没有统计数据。", "RenderDoc が記録した統計です。recorded が false の場合は利用できません。", "RenderDoc에서 기록한 통계입니다. recorded가 false이면 통계를 사용할 수 없습니다."))
@@ -5167,6 +5431,8 @@ impl Workspace {
                             this.debug_vertex_selection = None;
                             this.debug_view = None;
                             this.selected_resource = None;
+                            this.selected_counters.clear();
+                            this.counter_page = None;
                             this.usage_page = None;
                             this.preview = None;
                             this.pixel = None;
@@ -5359,6 +5625,21 @@ impl Workspace {
                                         self.tab == CaptureTab::Statistics,
                                         |this, cx| {
                                             this.tab = CaptureTab::Statistics;
+                                            cx.notify();
+                                        },
+                                        cx,
+                                    ))
+                                    .child(button(
+                                        "counters-tab",
+                                        self.t(
+                                            "GPU counters",
+                                            "GPU 计数器",
+                                            "GPU カウンター",
+                                            "GPU 카운터",
+                                        ),
+                                        self.tab == CaptureTab::Counters,
+                                        |this, cx| {
+                                            this.tab = CaptureTab::Counters;
                                             cx.notify();
                                         },
                                         cx,
@@ -6495,6 +6776,8 @@ fn main() {
                         compute_thread,
                         selected_resource: None,
                         selected_message: None,
+                        selected_counters: Default::default(),
+                        counter_page: None,
                         usage_page: None,
                         open_revision: 0,
                         selection_revision: 0,
@@ -6591,6 +6874,7 @@ mod ui_tests {
                             frame_info: None,
                             debug_messages: Vec::new(),
                             frame_statistics: None,
+                            counters: Vec::new(),
                             actions: Vec::new(),
                             resource_count: 0,
                             texture_count: 0,
@@ -6641,6 +6925,8 @@ mod ui_tests {
                         compute_thread,
                         selected_resource: None,
                         selected_message: None,
+                        selected_counters: Default::default(),
+                        counter_page: None,
                         usage_page: None,
                         open_revision: 0,
                         selection_revision: 0,
@@ -6819,6 +7105,7 @@ mod ui_tests {
                             frame_info: None,
                             debug_messages: Vec::new(),
                             frame_statistics: None,
+                            counters: Vec::new(),
                             actions: vec![
                                 renderdocx::replay::Action {
                                     event_id: 42,
@@ -6971,6 +7258,8 @@ mod ui_tests {
                         compute_thread,
                         selected_resource: None,
                         selected_message: None,
+                        selected_counters: Default::default(),
+                        counter_page: None,
                         usage_page: None,
                         open_revision: 0,
                         selection_revision: 0,

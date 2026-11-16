@@ -774,6 +774,35 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let opened = agent.send(&request);
     assert_eq!(opened["ok"], true, "{opened}");
     let capture_data = &opened["data"]["capture"];
+    let counters = capture_data["counters"].as_array().unwrap();
+    if let Some(counter) = counters.first() {
+        let id = counter["id"].as_u64().unwrap();
+        let fetched =
+            agent.send(&serde_json::json!({"command":"counter_fetch","counters":[id]}).to_string());
+        assert_eq!(fetched["ok"], true, "{fetched}");
+        let generation = fetched["data"]["fetch"]["generation"].as_str().unwrap();
+        let total = fetched["data"]["fetch"]["total"]
+            .as_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        let page = agent.send(&serde_json::json!({"command":"counter_page","generation":generation,"offset":"0","limit":1}).to_string());
+        assert_eq!(page["ok"], true, "{page}");
+        assert_eq!(
+            page["data"]["page"]["entries"].as_array().unwrap().len(),
+            total.min(1) as usize
+        );
+        if total > 0 {
+            assert_eq!(page["data"]["page"]["entries"][0]["counter"], id);
+        }
+        let next =
+            agent.send(&serde_json::json!({"command":"counter_fetch","counters":[id]}).to_string());
+        assert_eq!(next["ok"], true, "{next}");
+        let stale = agent.send(
+            &serde_json::json!({"command":"counter_page","generation":generation}).to_string(),
+        );
+        assert_eq!(stale["error"]["code"], "replay_counter_failed");
+    }
     assert_eq!(
         capture_data["resources"].as_array().unwrap().len(),
         capture_data["resource_count"].as_u64().unwrap() as usize
