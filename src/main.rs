@@ -6192,7 +6192,7 @@ impl Workspace {
         .detach();
     }
 
-    fn export_mesh_draw_csv(&mut self, cx: &mut Context<Self>) {
+    fn export_mesh_draw_csv(&mut self, attributes: bool, cx: &mut Context<Self>) {
         if self.replay_pending || self.export_pending || self.resource_pending {
             return;
         }
@@ -6207,7 +6207,11 @@ impl Workspace {
         let filter = self.mesh.filter;
         let task_sizes = self.mesh.task_sizes.clone();
         let Some(destination) = rfd::FileDialog::new()
-            .set_file_name("mesh-positions.csv")
+            .set_file_name(if attributes {
+                "mesh-attributes.csv"
+            } else {
+                "mesh-positions.csv"
+            })
             .add_filter("CSV", &["csv"])
             .save_file()
         else {
@@ -6217,24 +6221,46 @@ impl Workspace {
         let revision = self.open_revision;
         self.export_pending = true;
         self.status = Some(
-            self.t(
-                "Exporting mesh positions…",
-                "正在导出网格位置…",
-                "メッシュ位置を書き出し中…",
-                "메시 위치를 내보내는 중…",
-            )
+            if attributes {
+                self.t(
+                    "Exporting mesh attributes…",
+                    "正在导出网格属性…",
+                    "メッシュ属性を書き出し中…",
+                    "메시 속성을 내보내는 중…",
+                )
+            } else {
+                self.t(
+                    "Exporting mesh positions…",
+                    "正在导出网格位置…",
+                    "メッシュ位置を書き出し中…",
+                    "메시 위치를 내보내는 중…",
+                )
+            }
             .to_owned(),
         );
         cx.notify();
         let task = cx.background_executor().spawn(async move {
             let info = session.mesh(event, selection)?;
-            renderdocx::mesh_export::write_csv_filtered(
-                &destination,
-                &info,
-                &task_sizes,
-                filter,
-                |kind, offset, length| session.mesh_read(event, selection, kind, offset, length),
-            )
+            let read = |kind: &str, offset: u64, length: u32| {
+                session.mesh_read(event, selection, kind, offset, length)
+            };
+            if attributes {
+                renderdocx::mesh_export::write_attributes_csv(
+                    &destination,
+                    &info,
+                    &task_sizes,
+                    filter,
+                    read,
+                )
+            } else {
+                renderdocx::mesh_export::write_csv_filtered(
+                    &destination,
+                    &info,
+                    &task_sizes,
+                    filter,
+                    read,
+                )
+            }
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -6246,12 +6272,21 @@ impl Workspace {
                 this.status = Some(match result {
                     Ok(rows) => format!(
                         "{}: {label} ({rows})",
-                        this.t(
-                            "Mesh positions exported",
-                            "网格位置已导出",
-                            "メッシュ位置を書き出しました",
-                            "메시 위치를 내보냈습니다"
-                        )
+                        if attributes {
+                            this.t(
+                                "Mesh attributes exported",
+                                "网格属性已导出",
+                                "メッシュ属性を書き出しました",
+                                "메시 속성을 내보냈습니다",
+                            )
+                        } else {
+                            this.t(
+                                "Mesh positions exported",
+                                "网格位置已导出",
+                                "メッシュ位置を書き出しました",
+                                "메시 위치를 내보냈습니다",
+                            )
+                        }
                     ),
                     Err(error) => format!(
                         "{}: {error}",
@@ -8138,6 +8173,25 @@ impl Workspace {
                         (Some(raw), None) => raw.to_string(),
                         _ => "—".to_owned(),
                     };
+                    let attributes = row
+                        .attributes
+                        .iter()
+                        .map(|attr| {
+                            let value = attr
+                                .values
+                                .as_ref()
+                                .map(|v| v.join(", "))
+                                .or_else(|| attr.hex.clone())
+                                .unwrap_or_else(|| "—".into());
+                            format!("{}={value}", attr.name)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" · ");
+                    let attributes = if attributes.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {attributes}")
+                    };
                     if row.restart {
                         format!(
                             "{}: {index} · {}",
@@ -8145,10 +8199,10 @@ impl Workspace {
                             self.t("Restart", "重启", "リスタート", "재시작")
                         )
                     } else if let Some(position) = &row.position {
-                        format!("{}: {index} → {position:?}", row_label)
+                        format!("{}: {index} → {position:?}{attributes}", row_label)
                     } else {
                         format!(
-                            "{}: {index} · {}",
+                            "{}: {index} · {}{attributes}",
                             row_label,
                             match row.unavailable {
                                 Some("index_out_of_bounds") => self.t(
@@ -12885,7 +12939,8 @@ impl Workspace {
                                         .when(self.mesh.selection.stage == 4 && self.mesh.kind == MeshBufferKind::Draw, |view| view
                                             .when(self.mesh.info.as_ref().is_some_and(|info| !info.meshlets.is_empty()), |view| view.child(button("mesh-filter-meshlet", self.t("Next meshlet", "下一个网格组", "次のメッシュレット", "다음 메시렛"), matches!(self.mesh.filter, renderdocx::mesh_draw::MeshFilter::Meshlet(_)), |this, cx| this.cycle_mesh_filter(false, cx), cx)))
                                             .when(!self.mesh.task_sizes.is_empty(), |view| view.child(button("mesh-filter-task", self.t("Next task group", "下一个任务组", "次のタスクグループ", "다음 태스크 그룹"), matches!(self.mesh.filter, renderdocx::mesh_draw::MeshFilter::Task(_)), |this, cx| this.cycle_mesh_filter(true, cx), cx))))
-                                        .child(button("mesh-export-csv", self.t("Export positions CSV", "导出位置 CSV", "位置を CSV で書き出す", "위치 CSV 내보내기"), false, |this, cx| this.export_mesh_draw_csv(cx), cx))
+                                        .child(button("mesh-export-csv", self.t("Export positions CSV", "导出位置 CSV", "位置を CSV で書き出す", "위치 CSV 내보내기"), false, |this, cx| this.export_mesh_draw_csv(false, cx), cx))
+                                        .child(button("mesh-export-attributes", self.t("Export attributes CSV", "导出属性 CSV", "属性を CSV で書き出す", "속성 CSV 내보내기"), false, |this, cx| this.export_mesh_draw_csv(true, cx), cx))
                                         .child(button(
                                             "mesh-stage",
                                             self.t(

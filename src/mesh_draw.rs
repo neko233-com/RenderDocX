@@ -1,5 +1,6 @@
 //! Draw-order position rows built from RenderDoc post-transform mesh buffers.
 use crate::{
+    buffer_format::ScalarFormat,
     mesh_indices, mesh_positions,
     replay::{BUFFER_PAGE_LIMIT, MeshInfo},
 };
@@ -121,6 +122,17 @@ pub struct DrawRow {
     pub restart: bool,
     pub position: Option<Vec<f32>>,
     pub unavailable: Option<&'static str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attributes: Vec<AttributeValue>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AttributeValue {
+    pub name: String,
+    pub per_primitive: bool,
+    pub values: Option<Vec<String>>,
+    pub hex: Option<String>,
+    pub unavailable: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -237,6 +249,7 @@ where
                         restart: false,
                         position: None,
                         unavailable: Some("index_out_of_bounds"),
+                        attributes: Vec::new(),
                     });
                     continue;
                 }
@@ -270,7 +283,105 @@ where
             restart,
             position,
             unavailable,
+            attributes: Vec::new(),
         });
+    }
+    for attr in &info.attributes {
+        let width = attr.component_width;
+        let len = width.checked_mul(attr.components).unwrap_or(0);
+        let field_offset = attr.byte_offset.parse::<u64>().ok();
+        let fmt = match (attr.base_type, width) {
+            (0 | 2, 4) => Some(ScalarFormat::F32),
+            (1, 8) => Some(ScalarFormat::F64),
+            (3 | 5 | 9, 4) => Some(ScalarFormat::I32),
+            (7, 8) => Some(ScalarFormat::I64),
+            (4 | 6 | 10 | 11 | 12, 4) => Some(ScalarFormat::U32),
+            (8 | 14, 8) => Some(ScalarFormat::U64),
+            _ => None,
+        };
+        let primitive_base = info.per_primitive_offset.parse::<u64>().ok();
+        let stride = if attr.per_primitive {
+            info.per_primitive_stride
+        } else {
+            info.vertex_stride
+        };
+        let address = |row: &DrawRow| -> Option<u64> {
+            if row.restart
+                || row.vertex.is_none()
+                || !info.vertex_bound
+                || len == 0
+                || len > BUFFER_PAGE_LIMIT
+                || stride == 0
+                || field_offset?.checked_add(u64::from(len))? > u64::from(stride)
+            {
+                return None;
+            }
+            let index = if attr.per_primitive {
+                if info.primitive_vertices == 0 {
+                    return None;
+                }
+                u64::from(row.row / info.primitive_vertices)
+            } else {
+                u64::from(row.vertex?)
+            };
+            let base = if attr.per_primitive {
+                primitive_base?
+            } else {
+                0
+            };
+            base.checked_add(index.checked_mul(u64::from(stride))?)?
+                .checked_add(field_offset?)
+        };
+        let mut offsets: Vec<u64> = rows.iter().filter_map(address).collect();
+        offsets.sort_unstable();
+        offsets.dedup();
+        let mut decoded: HashMap<u64, (String, Option<Vec<String>>)> = HashMap::new();
+        let mut first = 0;
+        while first < offsets.len() {
+            let mut end = first + 1;
+            while end < offsets.len()
+                && offsets[end]
+                    .saturating_sub(offsets[first])
+                    .saturating_add(u64::from(len))
+                    <= u64::from(BUFFER_PAGE_LIMIT)
+            {
+                end += 1;
+            }
+            let amount = offsets[end - 1] - offsets[first] + u64::from(len);
+            let data = read("vertex", offsets[first], amount as u32)?;
+            for &absolute in &offsets[first..end] {
+                let start = (absolute - offsets[first]) as usize;
+                if let Some(bytes) = data.get(start..start + len as usize) {
+                    let hex = bytes.iter().map(|b| format!("{b:02x}")).collect();
+                    let values = fmt.map(|fmt| {
+                        bytes
+                            .chunks_exact(width as usize)
+                            .map(|value| fmt.value(value))
+                            .collect()
+                    });
+                    decoded.insert(absolute, (hex, values));
+                }
+            }
+            first = end;
+        }
+        for row in &mut rows {
+            let found = address(row).and_then(|offset| decoded.get(&offset));
+            row.attributes.push(AttributeValue {
+                name: attr.name.clone(),
+                per_primitive: attr.per_primitive,
+                hex: found.map(|item| item.0.clone()),
+                values: found.and_then(|item| item.1.clone()),
+                unavailable: if row.restart {
+                    Some("restart")
+                } else if found.is_none() {
+                    Some("attribute_unavailable")
+                } else if fmt.is_none() {
+                    Some("unsupported_format")
+                } else {
+                    None
+                },
+            });
+        }
     }
     Ok(DrawPage {
         offset,
@@ -282,6 +393,67 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn decodes_vertex_and_per_primitive_attributes_in_draw_order() {
+        use crate::replay::MeshAttribute;
+        let info = MeshInfo {
+            stage: 4,
+            vertex_bound: true,
+            vertex_stride: 4,
+            num_indices: 4,
+            component_type: 1,
+            component_byte_width: 4,
+            component_count: 1,
+            primitive_vertices: 2,
+            per_primitive_offset: "16".into(),
+            per_primitive_stride: 4,
+            attributes: vec![
+                MeshAttribute {
+                    name: "position".into(),
+                    base_type: 0,
+                    components: 1,
+                    component_width: 4,
+                    byte_offset: "0".into(),
+                    per_primitive: false,
+                },
+                MeshAttribute {
+                    name: "primitive_id".into(),
+                    base_type: 4,
+                    components: 1,
+                    component_width: 4,
+                    byte_offset: "0".into(),
+                    per_primitive: true,
+                },
+            ],
+            ..Default::default()
+        };
+        let mut data: Vec<u8> = [1f32, 2f32, 3f32, 4f32]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        data.extend(7u32.to_le_bytes());
+        data.extend(9u32.to_le_bytes());
+        let result = page(&info, 0, 4, |_, offset, length| {
+            let begin = offset as usize;
+            Ok(data
+                .get(begin..begin.saturating_add(length as usize))
+                .unwrap_or_default()
+                .to_vec())
+        })
+        .unwrap();
+        assert_eq!(
+            result.rows[0].attributes[0].values.as_ref().unwrap(),
+            &["1"]
+        );
+        assert_eq!(
+            result.rows[1].attributes[1].values.as_ref().unwrap(),
+            &["7"]
+        );
+        assert_eq!(
+            result.rows[2].attributes[1].values.as_ref().unwrap(),
+            &["9"]
+        );
+    }
     #[test]
     fn filters_meshlets_and_task_groups_with_absolute_indices() {
         use crate::replay::MeshletInfo;

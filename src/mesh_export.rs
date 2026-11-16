@@ -98,6 +98,101 @@ where
     Ok(total)
 }
 
+/// Export all reflected output attributes without replacing an existing file.
+pub fn write_attributes_csv<F>(
+    path: &Path,
+    info: &MeshInfo,
+    tasks: &[[u32; 3]],
+    filter: mesh_draw::MeshFilter,
+    mut read: F,
+) -> Result<u32, String>
+where
+    F: FnMut(&str, u64, u32) -> Result<Vec<u8>, String>,
+{
+    if info.attributes.is_empty() {
+        return Err("Output attribute reflection is unavailable".into());
+    }
+    let (_, total) = mesh_draw::filter_range(info, tasks, filter)?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut temp = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|e| format!("Cannot create temporary CSV: {e}"))?;
+    fn quoted(value: &str) -> String {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    }
+    {
+        let mut output = BufWriter::new(temp.as_file_mut());
+        write!(output, "row,meshlet,meshlet_row,raw_index,vertex,restart")
+            .map_err(|e| e.to_string())?;
+        for attr in &info.attributes {
+            write!(
+                output,
+                ",{},{}",
+                quoted(&attr.name),
+                quoted(&format!("{}.status", attr.name))
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        writeln!(output).map_err(|e| e.to_string())?;
+        let mut offset = 0;
+        while offset < total {
+            let page = mesh_draw::filtered_page(
+                info,
+                tasks,
+                filter,
+                offset,
+                mesh_draw::PAGE_LIMIT,
+                &mut read,
+            )?;
+            if page.rows.is_empty() {
+                return Err("Mesh export made no progress".into());
+            }
+            for row in &page.rows {
+                let optional =
+                    |value: Option<u32>| value.map(|n| n.to_string()).unwrap_or_default();
+                write!(
+                    output,
+                    "{},{},{},{},{},{}",
+                    row.row,
+                    optional(row.meshlet),
+                    optional(row.meshlet_row),
+                    optional(row.raw_index),
+                    optional(row.vertex),
+                    row.restart
+                )
+                .map_err(|e| e.to_string())?;
+                for value in &row.attributes {
+                    let text = value
+                        .values
+                        .as_ref()
+                        .map(|v| v.join(" "))
+                        .or_else(|| value.hex.clone())
+                        .unwrap_or_default();
+                    write!(
+                        output,
+                        ",{},{}",
+                        quoted(&text),
+                        quoted(value.unavailable.unwrap_or_default())
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+                writeln!(output).map_err(|e| e.to_string())?;
+            }
+            offset = offset
+                .checked_add(page.rows.len() as u32)
+                .ok_or("Mesh export offset overflow")?;
+        }
+        output
+            .flush()
+            .map_err(|e| format!("Cannot finish CSV: {e}"))?;
+    }
+    temp.persist_noclobber(path)
+        .map_err(|e| format!("Cannot create CSV destination: {}", e.error))?;
+    Ok(total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

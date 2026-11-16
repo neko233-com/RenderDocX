@@ -151,6 +151,16 @@ pub struct MeshletInfo {
     pub vertices: u32,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct MeshAttribute {
+    pub name: String,
+    pub base_type: u32,
+    pub components: u32,
+    pub component_width: u32,
+    pub byte_offset: String,
+    pub per_primitive: bool,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct MeshInfo {
     pub event_id: u32,
@@ -192,6 +202,10 @@ pub struct MeshInfo {
     pub task_payload: Vec<ReflectedConstant>,
     #[serde(default)]
     pub task_payload_scalar_layout: bool,
+    #[serde(default)]
+    pub attributes: Vec<MeshAttribute>,
+    #[serde(default)]
+    pub primitive_vertices: u32,
     pub status: String,
 }
 

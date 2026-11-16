@@ -262,6 +262,17 @@ fn real_vulkan_mesh_shader_debug_trace() {
         (Some(1), Some(0))
     );
     assert_eq!(rows[6]["vertex"], 6);
+    let color = rows[0]["attributes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == "outColor")
+        .expect("mesh color output");
+    assert_eq!(
+        color["values"],
+        serde_json::json!(["1", "0", "0", "1"]),
+        "{color}"
+    );
     let filtered = agent.send(r#"{"command":"mesh_draw","offset":0,"count":64,"meshlet":1}"#);
     assert_eq!(filtered["ok"], true, "{filtered}");
     assert_eq!(filtered["data"]["page"]["total"], 6);
@@ -286,6 +297,26 @@ fn real_vulkan_mesh_shader_debug_trace() {
             .ends_with(",meshlet,meshlet_row")
     );
     assert_eq!(csv.lines().count(), 13);
+    let attributes_path = dir.path().join("attributes.csv");
+    let attributes_export = agent.send(
+        &serde_json::json!({"command":"mesh_attributes_export","path":attributes_path,"meshlet":1})
+            .to_string(),
+    );
+    assert_eq!(attributes_export["ok"], true, "{attributes_export}");
+    assert_eq!(attributes_export["data"]["rows"], 6);
+    let attributes_csv = std::fs::read_to_string(&attributes_path).unwrap();
+    assert!(attributes_csv.lines().next().unwrap().contains("outColor"));
+    assert!(attributes_csv.contains("\"1 0 0 1\""));
+    assert_eq!(attributes_csv.lines().count(), 7);
+    let duplicate = agent.send(
+        &serde_json::json!({"command":"mesh_attributes_export","path":attributes_path,"meshlet":1})
+            .to_string(),
+    );
+    assert_eq!(duplicate["error"]["code"], "mesh_export_failed");
+    assert_eq!(
+        std::fs::read_to_string(&attributes_path).unwrap(),
+        attributes_csv
+    );
     let shader = agent.send(r#"{"command":"shader","stage":"mesh"}"#);
     assert_eq!(shader["ok"], true, "{shader}");
     let trace = agent.send(r#"{"command":"debug_mesh","group":[0,0,0],"thread":[0,0,0]}"#);
@@ -464,6 +495,10 @@ fn real_d3d11_mesh_draw_order() {
     assert_eq!(
         page["data"]["page"]["rows"][0]["position"],
         serde_json::json!([3.0, 3.0, 0.0, 1.0])
+    );
+    assert_eq!(
+        page["data"]["page"]["rows"][0]["attributes"][0]["values"],
+        serde_json::json!(["3", "3", "0", "1"])
     );
     assert_eq!(page["data"]["page"]["rows"][1]["vertex"], 1);
     let export_path = dir.path().join("positions.csv");
@@ -851,6 +886,13 @@ fn capabilities_advertises_versioned_machine_readable_contract() {
             .as_array()
             .unwrap()
             .iter()
+            .any(|name| name == "mesh_attributes_export")
+    );
+    assert!(
+        value["serve_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
             .any(|name| name == "task_payload")
     );
     assert!(
@@ -942,6 +984,7 @@ fn agent_jsonl_session_has_correlated_errors_and_clean_shutdown() {
         "debug_compute",
         "debug_mesh",
         "task_payload",
+        "mesh_attributes_export",
         "debug_next",
         "debug_stop",
         "debug_messages",

@@ -120,6 +120,10 @@ fn usage() -> Value {
         .as_array_mut()
         .expect("capabilities commands")
         .push(json!("task_payload"));
+    capabilities["serve_commands"]
+        .as_array_mut()
+        .expect("capabilities commands")
+        .push(json!("mesh_attributes_export"));
     capabilities["task_payload_page_limit"] = json!(renderdocx::task_payload::PAGE_LIMIT);
     capabilities
 }
@@ -1189,7 +1193,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     )),
                 }
             }
-            "mesh_draw_export" => {
+            "mesh_draw_export" | "mesh_attributes_export" => {
                 let path = request
                     .get("path")
                     .and_then(Value::as_str)
@@ -1198,10 +1202,14 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     (None, _, _, _) => Err(("no_capture", "No capture is open".into())),
                     (Some(_), None, _, _) => Err(("no_mesh", "Query mesh data first".into())),
                     (Some((session, _)), Some((event, selection, info)), Some(path), Ok(filter)) => {
-                        mesh_filter_tasks(session, *event, *selection, filter).and_then(|tasks|
-                            renderdocx::mesh_export::write_csv_filtered(std::path::Path::new(path), info, &tasks, filter, |kind, offset, length| {
-                                session.mesh_read(*event, *selection, kind, offset, length)
-                            })).map(|rows| json!({"event_id":event,"selection":selection,"path":path,"rows":rows}))
+                        mesh_filter_tasks(session, *event, *selection, filter).and_then(|tasks| {
+                            let read = |kind: &str, offset: u64, length: u32| session.mesh_read(*event, *selection, kind, offset, length);
+                            if command == "mesh_attributes_export" {
+                                renderdocx::mesh_export::write_attributes_csv(std::path::Path::new(path), info, &tasks, filter, read)
+                            } else {
+                                renderdocx::mesh_export::write_csv_filtered(std::path::Path::new(path), info, &tasks, filter, read)
+                            }
+                        }).map(|rows| json!({"event_id":event,"selection":selection,"path":path,"rows":rows}))
                           .map_err(|error| ("mesh_export_failed", error))
                     }
                     _ => Err(("invalid_arguments", "mesh_draw_export requires a path".into())),
