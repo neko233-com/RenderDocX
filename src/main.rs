@@ -472,6 +472,7 @@ struct Workspace {
     selected_buffer: Option<usize>,
     buffer_offset: u64,
     buffer_data: Option<Vec<u8>>,
+    buffer_binding_range: Option<renderdocx::buffer_binding::BufferBindingRange>,
     resource_pending: bool,
     selected_shader: Option<usize>,
     shader_data: Option<ShaderReport>,
@@ -1707,6 +1708,7 @@ impl Workspace {
                         this.texture_selection = TextureSelection::default();
                         this.tab = CaptureTab::Events;
                         this.selected_buffer = None;
+                        this.buffer_binding_range = None;
                         this.buffer_data = None;
                         this.resource_pending = false;
                         this.selected_shader = None;
@@ -1823,6 +1825,7 @@ impl Workspace {
         self.history_selected = None;
         self.statistics = None;
         self.buffer_data = None;
+        self.buffer_binding_range = None;
         self.shader_data = None;
         self.shader_constants = None;
         self.shader_bindings = None;
@@ -1892,6 +1895,9 @@ impl Workspace {
             cx.notify();
             return;
         }
+        if self.selected_buffer != Some(index) {
+            self.buffer_binding_range = None;
+        }
         self.selected_buffer = Some(index);
         self.buffer_offset = offset;
         self.buffer_data = None;
@@ -1919,13 +1925,18 @@ impl Workspace {
         else {
             return;
         };
-        if offset > size {
+        let range = self
+            .buffer_binding_range
+            .filter(|range| range.index == index);
+        let start = range.map_or(0, |range| range.start);
+        let end = range.map_or(size, |range| range.end.min(size));
+        if offset < start || offset > end {
             return;
         }
         let Ok(buffer_index) = u32::try_from(index) else {
             return;
         };
-        let length = (size - offset).min(BUFFER_VIEW_PAGE) as u32;
+        let length = (end - offset).min(BUFFER_VIEW_PAGE) as u32;
         self.resource_pending = true;
         self.status = Some(
             self.t(
@@ -1969,6 +1980,29 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    fn open_bound_buffer(
+        &mut self,
+        range: renderdocx::buffer_binding::BufferBindingRange,
+        cx: &mut Context<Self>,
+    ) {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            return;
+        }
+        let valid = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.buffers.get(range.index))
+            .and_then(|buffer| buffer.length.parse::<u64>().ok())
+            .is_some_and(|length| range.start <= range.end && range.end <= length);
+        if !valid {
+            return;
+        }
+        self.selected_buffer = Some(range.index);
+        self.buffer_binding_range = Some(range);
+        self.tab = CaptureTab::Buffers;
+        self.read_buffer(range.index, range.start, cx);
     }
 
     fn read_shader(&mut self, stage: usize, target: Option<u32>, cx: &mut Context<Self>) {
@@ -6063,6 +6097,13 @@ impl Workspace {
                                     .child(div().overflow_hidden().child(name))
                                     .child(div().text_color(rgb(0x91a7c0)).child(size))
                                     .on_click(cx.listener(move |this, _, _, cx| {
+                                        if this.replay_pending
+                                            || this.export_pending
+                                            || this.resource_pending
+                                        {
+                                            return;
+                                        }
+                                        this.buffer_binding_range = None;
                                         this.read_buffer(index, 0, cx)
                                     })),
                             )
@@ -7504,14 +7545,10 @@ impl Workspace {
                                         self.t("Byte range", "字节范围", "バイト範囲", "바이트 범위"), text("byte_offset"), text("byte_size"),
                                         text("first_mip"), text("num_mips"), self.t("slice", "切片", "スライス", "슬라이스"), text("first_slice"), text("num_slices")));
                                     if let Some(resource) = resource {
-                                        if let Some((buffer_index, buffer)) = snapshot.buffers.iter().enumerate().find(|(_, buffer)| buffer.resource_index == Some(resource)) {
-                                            let offset = descriptor.get("byte_offset").and_then(|v| v.as_str()).and_then(|v| v.parse::<u64>().ok());
-                                            let size = buffer.length.parse::<u64>().ok();
-                                            if let Some(offset) = offset.filter(|offset| size.is_some_and(|size| *offset <= size)) {
+                                        if let Ok(range) = renderdocx::buffer_binding::resolve(descriptor, &snapshot.buffers) {
                                                 view = view.child(div().id(("shader-binding-buffer", row_index)).test_support().cursor_pointer().text_color(rgb(0x91cfff))
-                                                    .child(self.t("Open buffer resource at offset", "在偏移处打开缓冲区资源", "オフセットでバッファーを開く", "오프셋에서 버퍼 리소스 열기"))
-                                                    .on_click(cx.listener(move |this, _, _, cx| { this.tab = CaptureTab::Buffers; this.read_buffer(buffer_index, offset, cx); })));
-                                            }
+                                                    .child(self.t("Open bound buffer range", "打开绑定的缓冲区范围", "バインド範囲を開く", "바인딩된 버퍼 범위 열기"))
+                                                    .on_click(cx.listener(move |this, _, _, cx| this.open_bound_buffer(range, cx))));
                                         }
                                         if let Some(texture_index) = snapshot.textures.iter().position(|texture| texture.resource_index == Some(resource)) {
                                             let mip = descriptor.get("first_mip").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok());
@@ -7726,7 +7763,9 @@ impl Workspace {
                     if let Some(index) = this.selected_buffer {
                         this.read_buffer(
                             index,
-                            this.buffer_offset.saturating_sub(BUFFER_VIEW_PAGE),
+                            this.buffer_offset
+                                .saturating_sub(BUFFER_VIEW_PAGE)
+                                .max(this.buffer_binding_range.map_or(0, |range| range.start)),
                             cx,
                         );
                     }
@@ -7740,10 +7779,14 @@ impl Workspace {
                 |this, cx| {
                     if let Some(index) = this.selected_buffer {
                         let size = this
-                            .snapshot
-                            .as_ref()
-                            .and_then(|s| s.buffers.get(index))
-                            .and_then(|b| b.length.parse::<u64>().ok())
+                            .buffer_binding_range
+                            .map(|range| range.end)
+                            .or_else(|| {
+                                this.snapshot
+                                    .as_ref()
+                                    .and_then(|s| s.buffers.get(index))
+                                    .and_then(|b| b.length.parse::<u64>().ok())
+                            })
                             .unwrap_or(0);
                         let offset = this.buffer_offset.saturating_add(BUFFER_VIEW_PAGE);
                         if offset < size {
@@ -7782,6 +7825,37 @@ impl Workspace {
                         ),
                     )
                     .child(format!("{bytes_label}: {}", buffer.length))
+                    .when_some(self.buffer_binding_range, |view, range| {
+                        view.child(format!(
+                            "{}: {}–{}",
+                            self.t("Bound range", "绑定范围", "バインド範囲", "바인딩 범위"),
+                            range.start,
+                            range.end
+                        ))
+                        .child(button(
+                            "buffer-full-resource",
+                            self.t(
+                                "View full resource",
+                                "查看完整资源",
+                                "リソース全体を表示",
+                                "전체 리소스 보기",
+                            ),
+                            false,
+                            |this, cx| {
+                                if this.replay_pending
+                                    || this.export_pending
+                                    || this.resource_pending
+                                {
+                                    return;
+                                }
+                                this.buffer_binding_range = None;
+                                if let Some(index) = this.selected_buffer {
+                                    this.read_buffer(index, 0, cx);
+                                }
+                            },
+                            cx,
+                        ))
+                    })
                     .child(format!("{flags_label}: 0x{:08X}", buffer.creation_flags))
                     .child(
                         div()
@@ -10378,6 +10452,7 @@ fn main() {
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_data: None,
+                        buffer_binding_range: None,
                         resource_pending: false,
                         selected_shader: None,
                         shader_data: None,
@@ -10572,6 +10647,7 @@ mod ui_tests {
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_data: None,
+                        buffer_binding_range: None,
                         resource_pending: false,
                         selected_shader: None,
                         shader_data: None,
@@ -10999,6 +11075,7 @@ mod ui_tests {
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_data: None,
+                        buffer_binding_range: None,
                         resource_pending: false,
                         selected_shader: None,
                         shader_data: None,
@@ -11380,6 +11457,26 @@ mod ui_tests {
             assert!(view.read(cx).tab == CaptureTab::Buffers);
             assert_eq!(view.read(cx).selected_buffer, Some(0));
             assert_eq!(view.read(cx).buffer_offset, 4);
+            assert_eq!(view.read(cx).buffer_data.as_ref().unwrap().len(), 12);
+            assert_eq!(view.read(cx).buffer_binding_range.unwrap().end, 16);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("buffer-next", cx);
+            window.click("buffer-prev", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).buffer_offset, 4));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("buffer-full-resource", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(view.read(cx).buffer_offset, 0);
+            assert_eq!(view.read(cx).buffer_data.as_ref().unwrap().len(), 256);
+            assert!(view.read(cx).buffer_binding_range.is_none());
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.click("shaders-tab", cx);

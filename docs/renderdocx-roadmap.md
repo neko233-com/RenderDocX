@@ -25,7 +25,7 @@ The shader inspector can switch between disassembly and captured source files, d
 
 Shader reflection reports include constant block layouts, nested variables, resources and samplers in both CLI and GPUI. Both expose paged runtime bindings and resource navigation; the CLI can request a constant block array element using RenderDoc's dynamic binding and value decoder, and GPUI can step between elements. A D3D11 compute capture verifies a read/write resource, constant binding and value; GPUI fixtures test element navigation and binding-to-resource navigation. Other APIs, inline data and real capture GUI interaction remain outstanding.
 
-Runtime binding rows display descriptor ranges and sampler parameters, and can open a matching buffer at its resource offset or a texture at its first mip and slice. The buffer viewer is a resource view and is not constrained to the descriptor range. Fixture interactions cover both links; real capture UI and non-D3D11 binding types remain unverified.
+Runtime binding rows display descriptor ranges and sampler parameters, and can open a matching buffer constrained to its binding range or a texture at its first mip and slice. The buffer viewer can switch back to the full resource; the CLI also supports binding-relative reads. Fixture interactions cover both links and bounded paging, while a D3D11 capture validates a bound constant-buffer read. Real capture UI and non-D3D11 binding types remain unverified.
 
 An initial descriptor inspector pages the selected event's descriptor accesses or fixed-size stores through RenderDoc, including logical locations, resource references and sampler fields. Variable-sized store enumeration, richer typed presentation and cross-API descriptor validation remain outstanding.
 

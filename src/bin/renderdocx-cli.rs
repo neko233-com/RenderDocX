@@ -43,7 +43,7 @@ fn usage() -> Value {
         {"name":"select","arguments":["capture.rdc","event_id"],"description":"Replay a capture to an event."},
         {"name":"serve","arguments":[],"description":"Serve sequential JSONL requests using a persistent replay session."},
         {"name":"capabilities","arguments":[],"description":"Describe the commands currently implemented."}
-    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","shader_bindings","shader_constants","shader_export","shader_apply","shader_revert","debug_vertex","debug_pixel","debug_compute","debug_collect","debug_state","debug_breakpoint","debug_navigate","debug_next","debug_stop","vertex_input","mesh","mesh_read","mesh_draw","mesh_draw_export","structure","structure_buffer","read_buffer","resource_usage","resource_rename","annotation_read","annotation_write","descriptors","debug_messages","clear_debug_messages","counter_fetch","counter_page","pick_pixel","pixel_history","texture_statistics","export_texture","close","target_list","target_launch","target_connect","target_connect_pid","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"mesh_draw_page_limit":renderdocx::mesh_draw::PAGE_LIMIT,"shader_binding_page_limit":renderdocx::replay::SHADER_BINDING_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"counter_page_limit":renderdocx::replay::COUNTER_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
+    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","shader_bindings","shader_binding_read","shader_constants","shader_export","shader_apply","shader_revert","debug_vertex","debug_pixel","debug_compute","debug_collect","debug_state","debug_breakpoint","debug_navigate","debug_next","debug_stop","vertex_input","mesh","mesh_read","mesh_draw","mesh_draw_export","structure","structure_buffer","read_buffer","resource_usage","resource_rename","annotation_read","annotation_write","descriptors","debug_messages","clear_debug_messages","counter_fetch","counter_page","pick_pixel","pixel_history","texture_statistics","export_texture","close","target_list","target_launch","target_connect","target_connect_pid","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"mesh_draw_page_limit":renderdocx::mesh_draw::PAGE_LIMIT,"shader_binding_page_limit":renderdocx::replay::SHADER_BINDING_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"counter_page_limit":renderdocx::replay::COUNTER_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
 }
 
 fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
@@ -896,6 +896,49 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     (Some((session, _)), Some(event), Some(stage), Some(kind), Some(offset), Some(limit)) => session.shader_bindings(event, stage as u32, kind, offset, limit)
                         .map(|page| json!({"page":page})).map_err(|error| ("replay_shader_bindings_failed", error)),
                     _ => Err(("invalid_arguments", "shader_bindings requires stage and kind, with optional decimal-string offset and limit".into())),
+                }
+            }
+            "shader_binding_read" => {
+                let stage = request
+                    .get("stage")
+                    .and_then(Value::as_str)
+                    .and_then(|stage| SHADER_STAGES.iter().position(|name| *name == stage));
+                let kind = request
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .filter(|kind| matches!(*kind, "constants" | "read_only" | "read_write"));
+                let row = request
+                    .get("row")
+                    .and_then(Value::as_str)
+                    .and_then(|value| value.parse::<u64>().ok());
+                let offset = request
+                    .get("offset")
+                    .and_then(Value::as_str)
+                    .and_then(|value| value.parse::<u64>().ok());
+                let length = request
+                    .get("length")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+                    .filter(|value| *value <= BUFFER_PAGE_LIMIT);
+                match (&opened, selected_event, stage, kind, row, offset, length) {
+                    (None, _, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some(_), None, _, _, _, _, _) => Err(("no_event", "Select an event first".into())),
+                    (Some((session, snapshot)), Some(event), Some(stage), Some(kind), Some(row), Some(offset), Some(length)) => {
+                        let result = (|| -> Result<_, String> {
+                            let page = session.shader_bindings(event, stage as u32, kind, row, 1)?;
+                            let descriptor = page.entries.first().and_then(|entry| entry.get("descriptor")).ok_or("Shader binding is unavailable")?;
+                            let range = renderdocx::buffer_binding::resolve(descriptor, &snapshot.buffers)?;
+                            let available = range.end - range.start;
+                            if offset > available { return Err("Relative offset exceeds the binding".into()); }
+                            let actual = u32::try_from((available - offset).min(u64::from(length))).map_err(|e| e.to_string())?;
+                            let absolute = range.start.checked_add(offset).ok_or("Buffer offset overflow")?;
+                            let bytes = session.read_buffer(u32::try_from(range.index).map_err(|e| e.to_string())?, absolute, actual)?;
+                            let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+                            Ok(json!({"event_id":event,"buffer_index":range.index,"binding_start":range.start.to_string(),"binding_end":range.end.to_string(),"offset":offset.to_string(),"length":bytes.len(),"hex":hex}))
+                        })();
+                        result.map_err(|error| ("replay_shader_binding_read_failed", error))
+                    }
+                    _ => Err(("invalid_arguments", "shader_binding_read requires stage, kind, decimal-string row and offset, and length".into())),
                 }
             }
             "shader_constants" => {

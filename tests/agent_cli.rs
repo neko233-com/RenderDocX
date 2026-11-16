@@ -260,6 +260,12 @@ fn real_d3d11_mesh_draw_order() {
         constants["data"]["page"]["entries"][0]["descriptor"]["resource_present"],
         true
     );
+    let bytes = agent.send(r#"{"command":"shader_binding_read","stage":"compute","kind":"constants","row":"0","offset":"0","length":4}"#);
+    assert_eq!(bytes["ok"], true, "{bytes}");
+    assert_eq!(bytes["data"]["hex"], "2a000000");
+    let clipped = agent.send(r#"{"command":"shader_binding_read","stage":"compute","kind":"constants","row":"0","offset":"15","length":8}"#);
+    assert_eq!(clipped["ok"], true, "{clipped}");
+    assert_eq!(clipped["data"]["length"], 1);
     agent.quit();
 }
 
