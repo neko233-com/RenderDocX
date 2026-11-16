@@ -282,15 +282,63 @@ impl Layout {
         let mut single_definition = false;
         loop {
             let mut flags = false;
-            if tokens.get(i..i + 5).is_some_and(|v| {
-                (v == ["[", "[", "single", "]", "]"] || v == ["[", "[", "fixed", "]", "]"])
-                    && tokens.get(i + 5) == Some(&"struct")
-            }) {
-                if single_definition {
-                    return Err("Only one fixed definition is supported".into());
+            let mut struct_size = None;
+            let mut struct_alignment = None;
+            let annotation_start = i;
+            let mut scan = i;
+            while tokens.get(scan..scan + 2) == Some(&["[", "["]) {
+                let mut end = scan + 2;
+                while end + 1 < tokens.len() && tokens.get(end..end + 2) != Some(&["]", "]"]) {
+                    end += 1;
                 }
-                single_definition = true;
-                i += 5;
+                if end + 1 >= tokens.len() {
+                    break;
+                }
+                scan = end + 2;
+            }
+            if scan != i && tokens.get(scan) == Some(&"struct") {
+                while i < scan {
+                    let name = *tokens.get(i + 2).ok_or("Invalid struct annotation")?;
+                    match name {
+                        "single" | "fixed" => {
+                            if single_definition || tokens.get(i + 3..i + 5) != Some(&["]", "]"]) {
+                                return Err("Invalid fixed struct annotation".into());
+                            }
+                            single_definition = true;
+                            i += 5;
+                        }
+                        "size" | "byte_size" | "align" | "alignment" => {
+                            if tokens.get(i + 3) != Some(&"(")
+                                || tokens.get(i + 5..i + 8) != Some(&[")", "]", "]"])
+                            {
+                                return Err("Invalid struct annotation".into());
+                            }
+                            let value = tokens
+                                .get(i + 4)
+                                .and_then(|v| v.parse::<u32>().ok())
+                                .ok_or("Invalid struct annotation value")?
+                                as usize;
+                            let slot = if matches!(name, "size" | "byte_size") {
+                                &mut struct_size
+                            } else {
+                                &mut struct_alignment
+                            };
+                            if slot.replace(value).is_some() {
+                                return Err("Duplicate struct annotation".into());
+                            }
+                            if matches!(name, "align" | "alignment")
+                                && value != 0
+                                && !value.is_power_of_two()
+                            {
+                                return Err("Struct alignment must be a power of two".into());
+                            }
+                            i += 8;
+                        }
+                        _ => return Err("Unsupported struct annotation".into()),
+                    }
+                }
+            } else {
+                i = annotation_start;
             }
             if tokens.get(i..i + 4).is_some_and(|slice| {
                 slice == ["[", "[", "flags", "]"] || slice == ["[", "[", "mask", "]"]
@@ -329,13 +377,27 @@ impl Layout {
                 if tokens.get(end + 1) != Some(&";") {
                     return Err("Expected semicolon after struct".into());
                 }
-                let layout = Arc::new(Self::parse_body(
-                    &tokens[body..end],
-                    &definitions,
-                    &enums,
-                    packing,
-                    true,
-                )?);
+                let mut layout =
+                    Self::parse_body(&tokens[body..end], &definitions, &enums, packing, true)?;
+                if let Some(override_alignment) =
+                    struct_alignment.filter(|alignment| *alignment != 0)
+                {
+                    layout.natural_alignment = override_alignment;
+                    layout.alignment = if packing.tight_arrays() {
+                        override_alignment
+                    } else {
+                        16
+                    };
+                    layout.stride =
+                        align(layout.used, layout.alignment).ok_or("Layout size overflow")?;
+                }
+                if let Some(size) = struct_size.filter(|size| *size != 0) {
+                    if size < layout.stride {
+                        return Err("Explicit struct size is smaller than the derived size".into());
+                    }
+                    layout.stride = size;
+                }
+                let layout = Arc::new(layout);
                 definitions.insert(name, layout.clone());
                 last = Some(layout);
                 i = end + 2;
@@ -1254,6 +1316,32 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn struct_size_and_alignment_annotations_control_nested_layouts() {
+        let layout =
+            Layout::parse("[[size(32)]] [[align(8)]] struct S { uint a; uint b; }; S data[2];")
+                .unwrap();
+        assert_eq!(layout.stride(), 64);
+        let page = layout.decode(0, &[0; 64]).unwrap();
+        assert_eq!(page.rows[0].fields[0].offset, "0");
+        assert_eq!(page.rows[0].fields[2].offset, "32");
+        let root = Layout::parse(
+            "[[byte_size(128)]] [[alignment(16)]] [[single]] struct S { float4 a; };",
+        )
+        .unwrap();
+        assert!(root.is_single());
+        assert_eq!(root.stride(), 128);
+        assert_eq!(root.decode(0, &[0; 128]).unwrap().fixed.unwrap().len(), 1);
+        let aligned = Layout::parse(
+            "struct S { uint a; }; [[align(16)]] struct T { S value; }; uint x; T y;",
+        )
+        .unwrap();
+        let page = aligned.decode(0, &[0; 32]).unwrap();
+        assert_eq!(page.rows[0].fields[1].offset, "16");
+        assert!(Layout::parse("[[size(2)]] struct S { uint x; }; S value;").is_err());
+        assert!(Layout::parse("[[align(3)]] struct S { uint x; }; S value;").is_err());
+        assert!(Layout::parse("[[size(8)]] [[byte_size(16)]] struct S { uint x; };").is_err());
+    }
     #[test]
     fn fixed_layout_and_repeat_navigation_follow_the_original_origin() {
         for source in [

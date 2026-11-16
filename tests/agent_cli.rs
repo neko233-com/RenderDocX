@@ -2028,6 +2028,12 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         "{fixed}"
     );
     assert_eq!(fixed["data"]["page"]["rows"], serde_json::json!([]));
+    let sized = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"4", "length":8, "layout":"[[size(8)]] [[align(4)]] struct S { float x; }; S value;"}).to_string());
+    assert_eq!(sized["data"]["page"]["stride"], "8", "{sized}");
+    assert_eq!(
+        sized["data"]["page"]["rows"][0]["fields"][0]["values"][0][0], "3",
+        "{sized}"
+    );
     assert_eq!(layout_page["data"]["page"]["stride"], "8", "{layout_page}");
     assert_eq!(
         layout_page["data"]["page"]["rows"][0]["fields"][0]["values"][0],

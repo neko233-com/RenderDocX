@@ -14041,7 +14041,7 @@ mod ui_tests {
             window.click("buffer-layout-input", cx);
             window.press("ctrl-a", cx);
             window.input(
-                "#pack(cbuffer) enum State : uint { Ready = 1 }; struct V { float2 p; State id:3; uint :29; }; V v; ushort q[2]; uint end;",
+                "#pack(cbuffer) enum State : uint { Ready = 1 }; [[size(32)]] struct V { float2 p; State id:3; uint :29; }; V v[2]; ushort q[2]; uint end;",
                 cx,
             );
             window.click("buffer-layout-apply", cx);
@@ -14050,9 +14050,9 @@ mod ui_tests {
         cx.run_until_parked();
         cx.update(|cx| {
             let view = view.read(cx);
-            assert_eq!(view.buffer_layout.as_ref().unwrap().stride(), 40);
-            assert_eq!(view.buffer_page_size(), 240);
-            assert_eq!(view.buffer_data.as_ref().unwrap().len(), 240);
+            assert_eq!(view.buffer_layout.as_ref().unwrap().stride(), 72);
+            assert_eq!(view.buffer_page_size(), 216);
+            assert_eq!(view.buffer_data.as_ref().unwrap().len(), 216);
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
@@ -14068,8 +14068,8 @@ mod ui_tests {
         .unwrap();
         cx.run_until_parked();
         cx.update(|cx| {
-            assert_eq!(view.read(cx).buffer_offset, 240);
-            assert_eq!(view.read(cx).buffer_data.as_ref().unwrap().len(), 60);
+            assert_eq!(view.read(cx).buffer_offset, 216);
+            assert_eq!(view.read(cx).buffer_data.as_ref().unwrap().len(), 84);
         });
         cx.update(|cx| {
             view.update(cx, |view, cx| {
@@ -15574,6 +15574,27 @@ mod ui_tests {
                     );
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 };
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        let view = view.read(cx);
+                        !view.replay_pending
+                            && !view.resource_pending
+                            && !view.export_pending
+                            && view
+                                .pipeline
+                                .as_ref()
+                                .is_some_and(|pipeline| pipeline.event_id == history_draw_event)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "pixel debug prerequisites did not settle"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
                 cx.update_window(handle.into(), |_, window, cx| {
                     window.render_frame(cx);
                     for _ in 0..30 {
@@ -15593,7 +15614,9 @@ mod ui_tests {
                             cx,
                         );
                     }
+                    assert!(window.find(("pixel-history-row", row)).visible());
                     window.click(("pixel-history-row", row), cx);
+                    window.render_frame(cx);
                     for _ in 0..20 {
                         let target = window.find("pixel-history-debug");
                         if target.visible() {
@@ -15613,6 +15636,8 @@ mod ui_tests {
                     }
                     let input = view.read(cx).pixel_debug_view.clone();
                     input.update(cx, |input, cx| input.set_value("0", window, cx));
+                    window.render_frame(cx);
+                    assert!(window.find("pixel-history-debug").visible());
                     window.click("pixel-history-debug", cx);
                 })
                 .unwrap();
