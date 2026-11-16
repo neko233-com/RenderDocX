@@ -32,3 +32,5 @@ pub mod task_payload;
 pub mod texture_overlay;
 pub mod timeline;
 pub mod vertex_input;
+
+pub mod texture_view;

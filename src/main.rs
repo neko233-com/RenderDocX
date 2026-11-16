@@ -5961,16 +5961,15 @@ impl Workspace {
         cx.notify();
     }
 
-    // RenderDoc's headless output is 512×360; fit centers the selected mip.
+    // RenderDoc's headless output is 512×360; fit centers the base extent.
     fn preview_fitted_transform(&self) -> Option<(f32, [f32; 2])> {
         let texture = self
             .snapshot
             .as_ref()?
             .textures
             .get(self.selected_texture?)?;
-        let mip = self.texture_selection.mip;
-        let width = texture.width.checked_shr(mip).unwrap_or(0).max(1) as f32;
-        let height = texture.height.checked_shr(mip).unwrap_or(0).max(1) as f32;
+        let width = texture.width.max(1) as f32;
+        let height = texture.height.max(1) as f32;
         let scale = (512.0 / width).min(360.0 / height);
         Some((
             scale,
@@ -5991,15 +5990,60 @@ impl Workspace {
     fn finish_preview_drag(
         &mut self,
         position: gpui::Point<gpui::Pixels>,
-        factor: f32,
+        bounds: Bounds<gpui::Pixels>,
+        inside: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some((start, scale, offset)) = self.preview_drag.take() else {
             return;
         };
-        let dx = f32::from(position.x - start.x) * factor;
-        let dy = f32::from(position.y - start.y) * factor;
+        let width = f32::from(bounds.size.width);
+        let height = f32::from(bounds.size.height);
+        let display_scale = (width / 512.0).min(height / 360.0);
+        if display_scale <= 0.0 {
+            return;
+        }
+        let dx = f32::from(position.x - start.x) / display_scale;
+        let dy = f32::from(position.y - start.y) / display_scale;
         if dx.abs() < 1.0 && dy.abs() < 1.0 {
+            if !inside {
+                return;
+            }
+            let Some(texture) = self
+                .snapshot
+                .as_ref()
+                .and_then(|s| self.selected_texture.and_then(|i| s.textures.get(i)))
+            else {
+                return;
+            };
+            // 1D preview height differs by replay backend; do not invent a mapping.
+            if texture.dimension == 1 {
+                return;
+            }
+            let local_x =
+                f32::from(position.x - bounds.origin.x) - (width - 512.0 * display_scale) / 2.0;
+            let local_y =
+                f32::from(position.y - bounds.origin.y) - (height - 360.0 * display_scale) / 2.0;
+            let output = [local_x / display_scale, local_y / display_scale];
+            if output[0] < 0.0 || output[0] >= 512.0 || output[1] < 0.0 || output[1] >= 360.0 {
+                return;
+            }
+            let Some([x, y]) = renderdocx::texture_view::texel_at(
+                output,
+                scale,
+                offset,
+                [texture.width, texture.height],
+                self.texture_selection.mip,
+                self.texture_selection.preview_flip_y,
+            ) else {
+                return;
+            };
+            self.pixel_x
+                .update(cx, |input, cx| input.set_value(&x.to_string(), window, cx));
+            self.pixel_y
+                .update(cx, |input, cx| input.set_value(&y.to_string(), window, cx));
+            self.pick_texture_pixel(cx);
             return;
         }
         self.texture_selection.preview_scale = Some(scale);
@@ -9058,24 +9102,14 @@ impl Workspace {
             )
             .on_mouse_up(
                 gpui::MouseButton::Left,
-                cx.listener(move |this, event: &gpui::MouseUpEvent, _, cx| {
-                    let bounds = up.get();
-                    let display_scale = (f32::from(bounds.size.width) / 512.0)
-                        .min(f32::from(bounds.size.height) / 360.0);
-                    if display_scale > 0.0 {
-                        this.finish_preview_drag(event.position, 1.0 / display_scale, cx);
-                    }
+                cx.listener(move |this, event: &gpui::MouseUpEvent, window, cx| {
+                    this.finish_preview_drag(event.position, up.get(), true, window, cx);
                 }),
             )
             .on_mouse_up_out(
                 gpui::MouseButton::Left,
-                cx.listener(move |this, event: &gpui::MouseUpEvent, _, cx| {
-                    let bounds = up_out.get();
-                    let display_scale = (f32::from(bounds.size.width) / 512.0)
-                        .min(f32::from(bounds.size.height) / 360.0);
-                    if display_scale > 0.0 {
-                        this.finish_preview_drag(event.position, 1.0 / display_scale, cx);
-                    }
+                cx.listener(move |this, event: &gpui::MouseUpEvent, window, cx| {
+                    this.finish_preview_drag(event.position, up_out.get(), false, window, cx);
                 }),
             )
             .child(img(path).size_full().object_fit(gpui::ObjectFit::Contain))
@@ -9509,10 +9543,10 @@ impl Workspace {
         let export_label = self.t("Export PNG", "导出 PNG", "PNG を書き出す", "PNG 내보내기");
         let preview_label = self.t("Preview", "预览", "プレビュー", "미리 보기");
         let preview_note = self.t(
-            "Native RenderDoc display. Scroll to zoom; drag and release to pan.",
-            "RenderDoc 原生显示。滚轮缩放，拖动并松开以平移。",
-            "RenderDoc ネイティブ表示。スクロールで拡大縮小、ドラッグして移動。",
-            "RenderDoc 네이티브 표시. 스크롤로 확대/축소하고 드래그 후 놓아 이동합니다.",
+            "Click a 2D or 3D preview to pick a pixel; scroll to zoom and drag to pan.",
+            "点击 2D 或 3D 预览读取像素；滚轮缩放，拖动平移。",
+            "2D・3D プレビューをクリックしてピクセルを取得。スクロールで拡大縮小、ドラッグで移動。",
+            "2D 또는 3D 미리보기를 클릭해 픽셀을 읽고, 스크롤로 확대하고 드래그해 이동합니다.",
         );
         let export_note = self.t(
             "Existing files are never replaced.",
@@ -15391,6 +15425,19 @@ mod ui_tests {
             reveal_details(window, "texture-preview-image", cx);
             assert!(window.find("texture-preview-image").visible());
             assert!(window.find("texture-preview-image").bounds().size.height > px(0.));
+            window.click("texture-preview-image", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let state = view.read(cx);
+            let pixel = state.pixel.as_ref().expect("preview click picks a pixel");
+            assert_eq!((pixel.x, pixel.y, pixel.mip), (4, 4, 1));
+            assert_eq!(state.preview_fitted_transform().unwrap().0, 22.5);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            reveal_details(window, "texture-preview-image", cx);
             window.scroll(
                 "texture-preview-image",
                 ScrollDelta::Lines(point(0., 1.)),
@@ -18267,11 +18314,29 @@ mod ui_tests {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
                 cx.update_window(handle.into(), |_, window, cx| {
-                    window.scroll(
-                        "capture-details-scroll",
-                        ScrollDelta::Pixels(point(px(0.), px(-700.))),
-                        cx,
+                    reveal_details(window, "texture-preview-image", cx);
+                    window.click("texture-preview-image", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx).pixel.as_ref().is_some_and(|pixel| {
+                            pixel.event_id == draw_event && pixel.x == 8 && pixel.y == 8
+                        })
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real preview pixel click did not load: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
                     );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    reveal_details(window, "histogram-analyze", cx);
                     window.click("histogram-analyze", cx);
                 })
                 .unwrap();
