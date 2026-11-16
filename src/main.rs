@@ -2,7 +2,7 @@ use gpui_kit as gpui;
 use gpui_kit::TestSupportExt;
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState, Textarea, TextareaState},
     theme::{Theme, ThemeMode},
 };
 use gpui_kit::{
@@ -10,6 +10,7 @@ use gpui_kit::{
     WindowOptions, div, img, prelude::*, px, rgb, size, uniform_list,
 };
 use renderdocx::{
+    annotations,
     backend::{self, Settings},
     debug_navigation::{DebugNavigator, SourceStep},
     i18n::Language,
@@ -18,13 +19,13 @@ use renderdocx::{
         LiveSession, capture_directory, capture_notice, enumerate, parse_target_pid,
     },
     replay::{
-        COUNTER_PAGE_LIMIT, ComputeDebugSelection, CounterPage, DESCRIPTOR_PAGE_LIMIT, DebugState,
-        DebugTrace, DescriptorPage, HistogramRequest, MeshInfo, MeshSelection,
-        PIXEL_HISTORY_PAGE_LIMIT, Pipeline, Pixel, PixelDebugSelection, PixelHistoryPage,
-        RESOURCE_USAGE_PAGE_LIMIT, ResourceUsagePage, SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session,
-        ShaderReport, ShaderSourceFile, Snapshot, StructurePage, StructuredNode, TextureSelection,
-        TextureStatistics, debug_message_category_name, debug_message_source_name,
-        resource_type_name, resource_usage_name,
+        AnnotationSection, COUNTER_PAGE_LIMIT, ComputeDebugSelection, CounterPage,
+        DESCRIPTOR_PAGE_LIMIT, DebugState, DebugTrace, DescriptorPage, HistogramRequest, MeshInfo,
+        MeshSelection, PIXEL_HISTORY_PAGE_LIMIT, Pipeline, Pixel, PixelDebugSelection,
+        PixelHistoryPage, RESOURCE_USAGE_PAGE_LIMIT, ResourceUsagePage, SHADER_STAGES,
+        STRUCTURE_PAGE_LIMIT, Session, ShaderReport, ShaderSourceFile, Snapshot, StructurePage,
+        StructuredNode, TextureSelection, TextureStatistics, debug_message_category_name,
+        debug_message_source_name, resource_type_name, resource_usage_name,
     },
     vertex_input::{INPUT_PAGE_LIMIT, InputPage},
 };
@@ -37,6 +38,13 @@ use event_tree::{EventRow, EventTree};
 struct TexturePreview {
     path: PathBuf,
     _directory: tempfile::TempDir,
+}
+
+#[derive(Default)]
+struct AnnotationView {
+    notes: Option<(AnnotationSection, serde_json::Value)>,
+    bookmarks: Option<(AnnotationSection, serde_json::Value)>,
+    editor: Option<Entity<TextareaState>>,
 }
 
 #[derive(Clone, Copy)]
@@ -266,6 +274,7 @@ enum CaptureTab {
     Statistics,
     Counters,
     Descriptors,
+    Annotations,
 }
 #[derive(Clone, Copy)]
 enum TextureField {
@@ -333,6 +342,8 @@ struct Workspace {
     counter_page: Option<CounterPage>,
     descriptor_store: Option<usize>,
     descriptor_page: Option<DescriptorPage>,
+    annotations: AnnotationView,
+    bookmark_text: Entity<InputState>,
     usage_page: Option<ResourceUsagePage>,
     open_revision: u64,
     selection_revision: u64,
@@ -359,6 +370,146 @@ struct Workspace {
 }
 
 impl Workspace {
+    fn annotation_dirty(&self, cx: &Context<Self>) -> bool {
+        match (&self.annotations.notes, &self.annotations.editor) {
+            (Some((_, doc)), Some(editor)) => {
+                editor.read(cx).value().as_ref()
+                    != doc
+                        .get("comments")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+            }
+            _ => false,
+        }
+    }
+
+    fn load_annotations(&mut self, cx: &mut Context<Self>) {
+        if self.resource_pending || self.replay_pending || self.export_pending {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        self.resource_pending = true;
+        let revision = self.open_revision;
+        self.status = Some(
+            self.t(
+                "Loading annotations…",
+                "正在加载注释与书签…",
+                "注釈とブックマークを読み込み中…",
+                "주석과 북마크를 불러오는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            let notes = session.annotation_read("notes")?;
+            let notes_doc = notes.document()?;
+            let bookmarks = session.annotation_read("bookmarks")?;
+            let bookmarks_doc = bookmarks.document()?;
+            annotations::bookmarks(&bookmarks_doc)?;
+            Ok::<_, String>((notes, notes_doc, bookmarks, bookmarks_doc))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision {
+                    return;
+                }
+                this.resource_pending = false;
+                match result {
+                    Ok((notes, notes_doc, bookmarks, bookmarks_doc)) => {
+                        this.annotations.notes = Some((notes, notes_doc));
+                        this.annotations.bookmarks = Some((bookmarks, bookmarks_doc));
+                        this.annotations.editor = None;
+                        this.status = None;
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Could not load annotations",
+                                "无法加载注释与书签",
+                                "注釈を読み込めません",
+                                "주석을 불러올 수 없습니다"
+                            )
+                        ))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn save_annotation(
+        &mut self,
+        name: &'static str,
+        document: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        if self.resource_pending || self.replay_pending || self.export_pending {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let section = if name == "notes" {
+            &self.annotations.notes
+        } else {
+            &self.annotations.bookmarks
+        };
+        let Some((section, _)) = section else { return };
+        let section = section.clone();
+        self.resource_pending = true;
+        let revision = self.open_revision;
+        self.status = Some(
+            self.t(
+                "Saving annotations…",
+                "正在保存注释与书签…",
+                "注釈を保存中…",
+                "주석 저장 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            let saved = session.annotation_write(&section, &document)?;
+            Ok::<_, String>((saved, document))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision {
+                    return;
+                }
+                this.resource_pending = false;
+                match result {
+                    Ok((section, document)) => {
+                        if name == "notes" {
+                            this.annotations.notes = Some((section, document));
+                        } else {
+                            this.annotations.bookmarks = Some((section, document));
+                        }
+                        this.status = None;
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Could not save annotations",
+                                "无法保存注释与书签",
+                                "注釈を保存できません",
+                                "주석을 저장할 수 없습니다"
+                            )
+                        ))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
     fn message_source_label(&self, source: u32) -> &'static str {
         match source {
             0 => "API",
@@ -1005,6 +1156,20 @@ impl Workspace {
     }
 
     fn open(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.annotation_dirty(cx) {
+            self.status = Some(
+                self.t(
+                    "Save or discard the comment draft first.",
+                    "请先保存或放弃注释草稿。",
+                    "コメントを保存または破棄してください。",
+                    "먼저 댓글을 저장하거나 취소하세요.",
+                )
+                .to_owned(),
+            );
+            self.tab = CaptureTab::Annotations;
+            cx.notify();
+            return;
+        }
         if self.replay_pending || self.export_pending || self.resource_pending {
             self.status = Some(
                 self.t(
@@ -1082,6 +1247,7 @@ impl Workspace {
                         this.counter_page = None;
                         this.descriptor_store = None;
                         this.descriptor_page = None;
+                        this.annotations = AnnotationView::default();
                         this.usage_page = None;
                         this.replay_pending = false;
                         this.export_pending = false;
@@ -3327,7 +3493,21 @@ impl Workspace {
         Some(view.into_any_element())
     }
 
-    fn capture_view(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn capture_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.tab == CaptureTab::Annotations && self.annotations.editor.is_none() {
+            if let Some((_, doc)) = &self.annotations.notes {
+                let text = doc
+                    .get("comments")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                self.annotations.editor = Some(cx.new(|cx| {
+                    TextareaState::new(window, cx)
+                        .default_value(text)
+                        .auto_grow(4, 16)
+                }));
+            }
+        }
         if let Some(snapshot) = &self.snapshot {
             if self.event_tree.len() != snapshot.actions.len() {
                 self.event_tree.reset(&snapshot.actions);
@@ -3359,6 +3539,12 @@ impl Workspace {
             _ => Vec::new(),
         };
         let count = match self.tab {
+            CaptureTab::Annotations => self
+                .annotations
+                .bookmarks
+                .as_ref()
+                .and_then(|(_, doc)| annotations::bookmarks(doc).ok())
+                .map_or(0, |items| items.len()),
             CaptureTab::Descriptors => snapshot.descriptor_stores.len() + 1,
             CaptureTab::Counters => snapshot.counters.len(),
             CaptureTab::Statistics => snapshot
@@ -3639,7 +3825,40 @@ impl Workspace {
         let status = self.status.clone();
         let preview_path = self.preview.as_ref().map(|preview| preview.path.clone());
 
-        let list = if self.tab == CaptureTab::Descriptors {
+        let list = if self.tab == CaptureTab::Annotations {
+            uniform_list(
+                "annotation-bookmarks",
+                count,
+                cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                    let items = this
+                        .annotations
+                        .bookmarks
+                        .as_ref()
+                        .and_then(|(_, doc)| annotations::bookmarks(doc).ok())
+                        .unwrap_or_default();
+                    range
+                        .filter_map(|index| {
+                            let (event, text) = items.get(index)?.clone();
+                            Some(
+                                div()
+                                    .id(("annotation-bookmark", index))
+                                    .test_support()
+                                    .h(px(32.))
+                                    .px_3()
+                                    .overflow_hidden()
+                                    .cursor_pointer()
+                                    .child(format!("E{event} · {text}"))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.jump_to_usage(event, window, cx)
+                                    })),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .flex_1()
+            .into_any_element()
+        } else if self.tab == CaptureTab::Descriptors {
             uniform_list(
                 "descriptor-stores",
                 count,
@@ -4322,7 +4541,131 @@ impl Workspace {
             .into_any_element()
         };
 
-        let detail_view = if self.tab == CaptureTab::Descriptors {
+        let detail_view = if self.tab == CaptureTab::Annotations {
+            let mut detail = div().p_3().flex().flex_col().gap_2().child(self.t(
+                "Comments and bookmarks",
+                "注释与书签",
+                "コメントとブックマーク",
+                "댓글과 북마크",
+            ));
+            if let Some(editor) = &self.annotations.editor {
+                let label = self.t(
+                    "Capture comments",
+                    "捕获注释",
+                    "キャプチャコメント",
+                    "캡처 댓글",
+                );
+                detail = detail
+                    .child(label)
+                    .child(Textarea::new(editor).aria_label(label))
+                    .child(button(
+                        "annotation-save-notes",
+                        self.t("Save comments", "保存注释", "コメントを保存", "댓글 저장"),
+                        false,
+                        |this, cx| {
+                            let doc = this.annotations.notes.as_ref().map(|(_, doc)| doc.clone());
+                            let text = this
+                                .annotations
+                                .editor
+                                .as_ref()
+                                .map(|editor| editor.read(cx).value().to_string());
+                            if let (Some(doc), Some(text)) = (doc, text) {
+                                match annotations::set_comment(&doc, &text) {
+                                    Ok(doc) => this.save_annotation("notes", doc, cx),
+                                    Err(error) => {
+                                        this.status = Some(error);
+                                        cx.notify();
+                                    }
+                                }
+                            }
+                        },
+                        cx,
+                    ))
+                    .child(button(
+                        "annotation-discard-notes",
+                        self.t("Discard draft", "放弃草稿", "下書きを破棄", "초안 취소"),
+                        false,
+                        |this, cx| {
+                            this.annotations.editor = None;
+                            this.status = None;
+                            cx.notify();
+                        },
+                        cx,
+                    ));
+            }
+            let label = self.t(
+                "Bookmark text",
+                "书签文字",
+                "ブックマークのテキスト",
+                "북마크 텍스트",
+            );
+            detail = detail
+                .child(label)
+                .child(
+                    Input::new(&self.bookmark_text)
+                        .id("bookmark-text")
+                        .aria_label(label)
+                        .w_full(),
+                )
+                .child(button(
+                    "bookmark-save",
+                    self.t(
+                        "Save bookmark for current event",
+                        "为当前事件保存书签",
+                        "現在のイベントにブックマークを保存",
+                        "현재 이벤트에 북마크 저장",
+                    ),
+                    false,
+                    |this, cx| {
+                        let event = this.pipeline.as_ref().map(|p| p.event_id);
+                        let text = this.bookmark_text.read(cx).value().to_string();
+                        let doc = this
+                            .annotations
+                            .bookmarks
+                            .as_ref()
+                            .map(|(_, doc)| doc.clone());
+                        if let (Some(event), Some(doc)) = (event, doc) {
+                            match annotations::set_bookmark(&doc, event, Some(&text)) {
+                                Ok(doc) => this.save_annotation("bookmarks", doc, cx),
+                                Err(error) => {
+                                    this.status = Some(error);
+                                    cx.notify();
+                                }
+                            }
+                        }
+                    },
+                    cx,
+                ))
+                .child(button(
+                    "bookmark-remove",
+                    self.t(
+                        "Remove current bookmark",
+                        "移除当前事件书签",
+                        "現在のブックマークを削除",
+                        "현재 북마크 제거",
+                    ),
+                    false,
+                    |this, cx| {
+                        let event = this.pipeline.as_ref().map(|p| p.event_id);
+                        let doc = this
+                            .annotations
+                            .bookmarks
+                            .as_ref()
+                            .map(|(_, doc)| doc.clone());
+                        if let (Some(event), Some(doc)) = (event, doc) {
+                            match annotations::set_bookmark(&doc, event, None) {
+                                Ok(doc) => this.save_annotation("bookmarks", doc, cx),
+                                Err(error) => {
+                                    this.status = Some(error);
+                                    cx.notify();
+                                }
+                            }
+                        }
+                    },
+                    cx,
+                ));
+            detail
+        } else if self.tab == CaptureTab::Descriptors {
             let page = self.descriptor_page.as_ref();
             let mut detail = div().p_3().flex().flex_col().gap_2().child(self.t(
                 "Descriptor inspector",
@@ -6067,6 +6410,17 @@ impl Workspace {
                         back,
                         false,
                         |this, cx| {
+                            if this.resource_pending || this.replay_pending || this.export_pending {
+                                this.status = Some(this.t("Wait for the current operation.", "请等待当前操作完成。", "現在の処理が完了するまでお待ちください。", "현재 작업이 끝날 때까지 기다려 주세요.").to_owned());
+                                cx.notify();
+                                return;
+                            }
+                            if this.annotation_dirty(cx) {
+                                this.status = Some(this.t("Save or discard the comment draft first.", "请先保存或放弃注释草稿。", "コメントを保存または破棄してください。", "먼저 댓글을 저장하거나 취소하세요.").to_owned());
+                                this.tab = CaptureTab::Annotations;
+                                cx.notify();
+                                return;
+                            }
                             this.open_revision += 1;
                             this.session = None;
                             this.snapshot = None;
@@ -6303,6 +6657,8 @@ impl Workspace {
                                     ))
                                     .child(button("descriptors-tab", self.t("Descriptors", "描述符", "ディスクリプター", "디스크립터"), self.tab == CaptureTab::Descriptors,
                                         |this, cx| { this.tab = CaptureTab::Descriptors; if this.descriptor_page.is_none() { this.read_descriptors(this.descriptor_store, 0, cx); } cx.notify(); }, cx))
+                                    .child(button("annotations-tab", self.t("Annotations", "注释与书签", "注釈", "주석"), self.tab == CaptureTab::Annotations,
+                                        |this, cx| { this.tab = CaptureTab::Annotations; if this.annotations.notes.is_none() { this.load_annotations(cx); } cx.notify(); }, cx))
                                     .child(
                                         div()
                                             .self_center()
@@ -6743,9 +7099,9 @@ fn button(
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.snapshot.is_some() {
-            return self.capture_view(cx).into_any_element();
+            return self.capture_view(window, cx).into_any_element();
         }
         let title = self.t(
             "A clearer view of every frame.",
@@ -7470,6 +7826,7 @@ fn main() {
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let message_search = cx.new(|cx| InputState::new(window, cx));
+                    let bookmark_text = cx.new(|cx| InputState::new(window, cx));
                     let stats_min = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_x = cx.new(|cx| InputState::new(window, cx).default_value("0"));
@@ -7544,6 +7901,8 @@ fn main() {
                         counter_page: None,
                         descriptor_store: None,
                         descriptor_page: None,
+                        annotations: AnnotationView::default(),
+                        bookmark_text,
                         usage_page: None,
                         open_revision: 0,
                         selection_revision: 0,
@@ -7620,6 +7979,7 @@ mod ui_tests {
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let message_search = cx.new(|cx| InputState::new(window, cx));
+                    let bookmark_text = cx.new(|cx| InputState::new(window, cx));
                     let stats_min = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_x = cx.new(|cx| InputState::new(window, cx).default_value("0"));
@@ -7711,6 +8071,8 @@ mod ui_tests {
                         counter_page: None,
                         descriptor_store: None,
                         descriptor_page: None,
+                        annotations: AnnotationView::default(),
+                        bookmark_text,
                         usage_page: None,
                         open_revision: 0,
                         selection_revision: 0,
@@ -7869,6 +8231,7 @@ mod ui_tests {
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let message_search = cx.new(|cx| InputState::new(window, cx));
+                    let bookmark_text = cx.new(|cx| InputState::new(window, cx));
                     let stats_min = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_x = cx.new(|cx| InputState::new(window, cx).default_value("0"));
@@ -8062,6 +8425,8 @@ mod ui_tests {
                         counter_page: None,
                         descriptor_store: None,
                         descriptor_page: None,
+                        annotations: AnnotationView::default(),
+                        bookmark_text,
                         usage_page: None,
                         open_revision: 0,
                         selection_revision: 0,

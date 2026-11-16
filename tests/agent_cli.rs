@@ -313,6 +313,8 @@ fn agent_jsonl_session_has_correlated_errors_and_clean_shutdown() {
         "debug_messages",
         "clear_debug_messages",
         "descriptors",
+        "annotation_read",
+        "annotation_write",
     ] {
         assert_eq!(
             agent.send(&serde_json::json!({"command":command}).to_string())["error"]["code"],
@@ -771,6 +773,55 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let (success, result) = invoke(&["--bridge", bridge, "select", capture, &event]);
     assert!(success, "event replay failed: {result}");
     assert_eq!(result["event_id"].as_u64().unwrap().to_string(), event);
+
+    // Annotation writes are exercised on a copy, never on the fixture capture.
+    let annotation_copy = dir.path().join("annotations-copy.rdc");
+    std::fs::copy(capture, &annotation_copy).unwrap();
+    let mut annotation_agent = Agent::new(Some(bridge));
+    let opened_copy = annotation_agent
+        .send(&serde_json::json!({"command":"open","path":annotation_copy}).to_string());
+    assert_eq!(opened_copy["ok"], true, "{opened_copy}");
+    let read = annotation_agent.send(r#"{"command":"annotation_read","name":"notes"}"#);
+    assert_eq!(read["ok"], true, "{read}");
+    let original = read["data"]["section"].clone();
+    let mut document = read["data"]["document"].clone();
+    document["comments"] = serde_json::json!("你好\nRenderDocX");
+    document["test-extra"] = serde_json::json!({"preserved":true});
+    let saved = annotation_agent.send(
+        &serde_json::json!({"command":"annotation_write","section":original,"document":document})
+            .to_string(),
+    );
+    assert_eq!(saved["ok"], true, "{saved}");
+    let stale = annotation_agent.send(
+        &serde_json::json!({"command":"annotation_write","section":original,"document":document})
+            .to_string(),
+    );
+    assert_eq!(
+        stale["error"]["code"], "replay_annotation_failed",
+        "{stale}"
+    );
+    let bookmark_read =
+        annotation_agent.send(r#"{"command":"annotation_read","name":"bookmarks"}"#);
+    assert_eq!(bookmark_read["ok"], true, "{bookmark_read}");
+    let mut bookmark_doc = bookmark_read["data"]["document"].clone();
+    bookmark_doc["Bookmarks"] = serde_json::json!([{"eventId":draw_event,"text":"draw"}]);
+    let bookmark_saved = annotation_agent.send(&serde_json::json!({"command":"annotation_write","section":bookmark_read["data"]["section"],"document":bookmark_doc}).to_string());
+    assert_eq!(bookmark_saved["ok"], true, "{bookmark_saved}");
+    annotation_agent.quit();
+    let mut reopened = Agent::new(Some(bridge));
+    assert_eq!(
+        reopened.send(&serde_json::json!({"command":"open","path":annotation_copy}).to_string())["ok"],
+        true
+    );
+    assert_eq!(
+        reopened.send(r#"{"command":"annotation_read","name":"notes"}"#)["data"]["document"],
+        document
+    );
+    assert_eq!(
+        reopened.send(r#"{"command":"annotation_read","name":"bookmarks"}"#)["data"]["document"],
+        bookmark_doc
+    );
+    reopened.quit();
 
     let mut agent = Agent::new(Some(bridge));
     let request = serde_json::json!({"id":1,"command":"open","path":capture}).to_string();

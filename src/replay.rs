@@ -175,6 +175,34 @@ pub struct DescriptorPage {
 pub const DESCRIPTOR_PAGE_LIMIT: u32 = 128;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AnnotationSection {
+    pub name: String,
+    pub exists: bool,
+    pub version: String,
+    pub hex: String,
+}
+
+impl AnnotationSection {
+    pub fn document(&self) -> Result<serde_json::Value, String> {
+        if !self.exists {
+            return Ok(serde_json::json!({}));
+        }
+        if self.version != "1" {
+            return Err("Unsupported annotation section version".into());
+        }
+        let len =
+            u32::try_from(self.hex.len() / 2).map_err(|_| "Annotation section is too large")?;
+        let bytes = decode_buffer_hex(&self.hex, len)?;
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| format!("Invalid annotation JSON: {e}"))?;
+        if !value.is_object() {
+            return Err("Annotation section must contain a JSON object".into());
+        }
+        Ok(value)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CounterDescription {
     pub id: u32,
     pub name: String,
@@ -840,6 +868,7 @@ pub struct Pipeline {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Reply {
     Snapshot(Snapshot),
+    AnnotationSection(AnnotationSection),
     Descriptors(DescriptorPage),
     DebugMessages {
         messages: Vec<DebugMessage>,
@@ -1093,6 +1122,16 @@ fn validate_snapshot(snapshot: &Snapshot) -> Result<(), String> {
 
 trait Transport: Send {
     fn select(&mut self, event: u32) -> Result<Pipeline, String>;
+    fn annotation_read(&mut self, _name: &str) -> Result<AnnotationSection, String> {
+        Err("Annotation sections are not supported by this transport".into())
+    }
+    fn annotation_write(
+        &mut self,
+        _section: &AnnotationSection,
+        _document: &serde_json::Value,
+    ) -> Result<AnnotationSection, String> {
+        Err("Annotation sections are not supported by this transport".into())
+    }
     fn descriptors(
         &mut self,
         _event: u32,
@@ -1230,6 +1269,89 @@ trait Transport: Send {
 }
 
 impl Transport for Process {
+    fn annotation_read(&mut self, name: &str) -> Result<AnnotationSection, String> {
+        if capture_stamp(&self.capture).as_ref() != self.capture_stamp.as_ref()
+            || self.capture_stamp.is_none()
+        {
+            return Err("Capture changed since it was opened".into());
+        }
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(input, "section_read {name}")
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        let section = match self.read()? {
+            Reply::AnnotationSection(section) if section.name == name => section,
+            Reply::Error { message } => return Err(message),
+            _ => return Err("Unexpected annotation section response".into()),
+        };
+        if capture_stamp(&self.capture).as_ref() != self.capture_stamp.as_ref() {
+            return Err("Capture changed while reading annotations".into());
+        }
+        section.document()?;
+        Ok(section)
+    }
+
+    fn annotation_write(
+        &mut self,
+        section: &AnnotationSection,
+        document: &serde_json::Value,
+    ) -> Result<AnnotationSection, String> {
+        if !document.is_object() {
+            return Err("Annotation document must be an object".into());
+        }
+        section.document()?;
+        if capture_stamp(&self.capture).as_ref() != self.capture_stamp.as_ref()
+            || self.capture_stamp.is_none()
+        {
+            return Err("Capture changed since it was opened".into());
+        }
+        self.structure_worker = None;
+        let before = self.capture_stamp.clone();
+        if capture_stamp(&self.capture) != before {
+            return Err("Capture changed while preparing annotation save".into());
+        }
+        let bytes = serde_json::to_vec(document).map_err(|e| e.to_string())?;
+        let encoded: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        let expected = if !section.exists {
+            "-"
+        } else if section.hex.is_empty() {
+            "_"
+        } else {
+            &section.hex
+        };
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(
+            input,
+            "section_write {} {expected} {}",
+            section.name,
+            if encoded.is_empty() { "_" } else { &encoded }
+        )
+        .and_then(|_| input.flush())
+        .map_err(|e| e.to_string())?;
+        let response = self.read();
+        let after = capture_stamp(&self.capture);
+        match response {
+            Ok(Reply::AnnotationSection(saved))
+                if saved.name == section.name
+                    && saved.exists
+                    && saved.version == "1"
+                    && saved.hex == encoded
+                    && after.is_some() =>
+            {
+                self.capture_stamp = after;
+                Ok(saved)
+            }
+            other => {
+                if after != before {
+                    self.capture_stamp = None;
+                }
+                match other {
+                    Err(message) | Ok(Reply::Error { message }) => Err(message),
+                    _ => Err("Unexpected annotation save response".into()),
+                }
+            }
+        }
+    }
     fn descriptors(
         &mut self,
         event: u32,
@@ -1937,6 +2059,37 @@ pub struct Session {
 }
 
 impl Session {
+    pub fn annotation_read(&self, name: &str) -> Result<AnnotationSection, String> {
+        if name != "notes" && name != "bookmarks" {
+            return Err("Unknown annotation section".into());
+        }
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .annotation_read(name)
+    }
+    pub fn annotation_write(
+        &self,
+        section: &AnnotationSection,
+        document: &serde_json::Value,
+    ) -> Result<AnnotationSection, String> {
+        if section.name != "notes" && section.name != "bookmarks" {
+            return Err("Unknown annotation section".into());
+        }
+        if section.name == "bookmarks" {
+            crate::annotations::bookmarks(&section.document()?)?;
+            crate::annotations::bookmarks(document)?;
+        } else if document
+            .get("comments")
+            .is_some_and(|value| !value.is_string())
+        {
+            return Err("Comments must be a string".into());
+        }
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .annotation_write(section, document)
+    }
     pub fn descriptors(
         &self,
         event: u32,

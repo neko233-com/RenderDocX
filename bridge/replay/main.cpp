@@ -260,6 +260,22 @@ bool decimal(const std::string &text, uint64_t &value)
   return true;
 }
 
+bool decode_section_hex(const std::string &text, bytebuf &bytes)
+{
+  if(text == "_") return true;
+  if(text.empty() || text.size() % 2 != 0) return false;
+  auto digit = [](char c) -> int { if(c >= '0' && c <= '9') return c - '0'; if(c >= 'a' && c <= 'f') return c - 'a' + 10; return -1; };
+  for(size_t i = 0; i < text.size(); i += 2)
+  { int a = digit(text[i]), b = digit(text[i + 1]); if(a < 0 || b < 0) return false; bytes.push_back(byte((a << 4) | b)); }
+  return true;
+}
+
+void write_section_hex(const bytebuf &bytes)
+{
+  static const char hex[] = "0123456789abcdef";
+  for(byte b : bytes) std::cout << hex[b >> 4] << hex[b & 15];
+}
+
 void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids,
                     std::vector<TextureRef> &texture_ids, std::vector<BufferRef> &buffer_ids,
                     std::map<uint32_t, uint32_t> &event_chunks,
@@ -832,6 +848,44 @@ int run(const std::string &capture, bool structure_worker)
       std::cout << "\nRENDERDOCX/1 {\"type\":\"debug_messages\",\"messages\":[";
       for(size_t i = 0; i < messages.size(); ++i) { if(i) std::cout << ','; write_debug_message(messages[i]); }
       std::cout << "]}" << std::endl;
+      continue;
+    }
+    if(command.compare(0, 13, "section_read ") == 0 || command.compare(0, 14, "section_write ") == 0)
+    {
+      const bool writing = command.compare(0, 14, "section_write ") == 0;
+      std::istringstream arguments(command.substr(writing ? 14 : 13));
+      std::string name, expected, payload, extra;
+      if(!(arguments >> name) || (name != "notes" && name != "bookmarks") ||
+         (writing && !(arguments >> expected >> payload)) || (arguments >> extra))
+      { error("Invalid annotation section request"); continue; }
+      const SectionType type = name == "notes" ? SectionType::Notes : SectionType::Bookmarks;
+      bytebuf expected_bytes, new_bytes;
+      if(writing && ((expected != "-" && !decode_section_hex(expected, expected_bytes)) || !decode_section_hex(payload, new_bytes)))
+      { error("Invalid annotation section encoding"); continue; }
+      ICaptureFile *file = RENDERDOC_OpenCaptureFile();
+      if(!file) { error("RenderDoc could not open capture metadata"); continue; }
+      ResultDetails open = file->OpenFile(capture.c_str(), "rdc", nullptr);
+      if(!open.OK()) { std::string message = result_message(open); file->Shutdown(); error(message); continue; }
+      const int32_t section = file->FindSectionByType(type);
+      const bool exists = section >= 0;
+      const uint64_t version = exists ? file->GetSectionProperties(section).version : 0;
+      bytebuf original;
+      if(exists) original = file->GetSectionContents(section);
+      if(writing && ((expected == "-") != !exists || (exists && (version != 1 || original != expected_bytes))))
+      { file->Shutdown(); error("Annotation section changed or has an unsupported version"); continue; }
+      if(writing)
+      {
+        SectionProperties props; props.type = type; props.version = 1;
+        ResultDetails saved = file->WriteSection(props, new_bytes);
+        if(!saved.OK()) { std::string message = result_message(saved); file->Shutdown(); error(message); continue; }
+        original = new_bytes;
+      }
+      file->Shutdown();
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"annotation_section\",\"name\":";
+      json_string(name.c_str(), name.size());
+      std::cout << ",\"exists\":" << ((exists || writing) ? "true" : "false") << ",\"version\":\"" << (writing ? 1 : version) << "\",\"hex\":\"";
+      write_section_hex(original);
+      std::cout << "\"}" << std::endl;
       continue;
     }
     if(command.compare(0, 12, "descriptors ") == 0)

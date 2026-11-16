@@ -1,3 +1,4 @@
+pub mod annotations;
 pub mod backend;
 pub mod debug_navigation;
 pub mod i18n;

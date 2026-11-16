@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "strategy": "generic",
+  "profile": "code",
+  "roots": [
+    {
+      "key": "app",
+      "path": "src",
+      "role": "frontend"
+    },
+    {
+      "key": "tests",
+      "path": "tests",
+      "role": "test"
+    }
+  ],
+  "languages": [
+    "rust"
+  ],
+  "exclude": [],
+  "config_dirs": [],
+  "features": {
+    "code": true,
+    "type_deps": true,
+    "prefabs": false,
+    "shaders": false,
+    "assets": false,
+    "meta": false,
+    "config_tables": false,
+    "guid_map": false
+  },
+  "guid_map": []
+}
