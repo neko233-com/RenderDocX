@@ -3307,6 +3307,58 @@ impl Session {
         Ok(page)
     }
 
+    pub fn find_texture_raw(
+        &self,
+        event: u32,
+        index: u32,
+        texture: &Texture,
+        selection: RawTextureSelection,
+        offset: u64,
+        length: Option<u64>,
+        pattern: &[u8],
+    ) -> Result<(Option<u64>, u64), String> {
+        selection.validate(texture)?;
+        if pattern.is_empty() {
+            return Err("Empty byte pattern".into());
+        }
+        let revision = self.revision.load(Ordering::SeqCst);
+        let mut process = self.process.lock().map_err(|error| error.to_string())?;
+        let check = || {
+            if self.revision.load(Ordering::SeqCst) == revision {
+                Ok(())
+            } else {
+                Err("Replay selection changed".to_owned())
+            }
+        };
+        check()?;
+        let initial = process.read_texture_raw(event, index, selection, 0, 0)?;
+        let total = initial
+            .total
+            .parse::<u64>()
+            .map_err(|_| "Invalid raw texture length")?;
+        if offset > total {
+            return Err("Raw texture offset is out of range".into());
+        }
+        let length = length.unwrap_or(total - offset);
+        if length > total - offset {
+            return Err("Raw texture range is out of bounds".into());
+        }
+        let found = crate::buffer_search::find(
+            offset,
+            length,
+            pattern,
+            |cursor, count| {
+                let page = process.read_texture_raw(event, index, selection, cursor, count)?;
+                if page.total != initial.total {
+                    return Err("Raw texture size changed".into());
+                }
+                decode_buffer_hex(&page.hex, count)
+            },
+            check,
+        )?;
+        Ok((found, total))
+    }
+
     pub fn read_buffer(&self, index: u32, offset: u64, length: u32) -> Result<Vec<u8>, String> {
         if length > BUFFER_PAGE_LIMIT || offset.checked_add(u64::from(length)).is_none() {
             return Err("Invalid buffer range".into());
@@ -4450,6 +4502,130 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn raw_texture_search_crosses_pages_and_detects_revision_changes() {
+        use super::*;
+        struct FakeRaw {
+            data: Vec<u8>,
+            revision: Arc<AtomicU64>,
+            change: bool,
+        }
+        impl Transport for FakeRaw {
+            fn select(&mut self, _: u32) -> Result<Pipeline, String> {
+                Err("unused".into())
+            }
+            fn read_texture_raw(
+                &mut self,
+                event: u32,
+                index: u32,
+                selection: RawTextureSelection,
+                offset: u64,
+                length: u32,
+            ) -> Result<RawTexturePage, String> {
+                let end = (offset as usize + length as usize).min(self.data.len());
+                let hex = self.data[offset as usize..end]
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                if self.change && length > 0 {
+                    self.revision.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(RawTexturePage {
+                    event_id: event,
+                    index,
+                    mip: selection.mip,
+                    slice: selection.slice,
+                    sample: selection.sample,
+                    offset: offset.to_string(),
+                    total: self.data.len().to_string(),
+                    hex,
+                })
+            }
+        }
+        let mut data = vec![0u8; BUFFER_PAGE_LIMIT as usize + 8];
+        let start = BUFFER_PAGE_LIMIT as usize - 2;
+        data[start..start + 5].copy_from_slice(&[1, 1, 1, 2, 3]);
+        let texture = Texture {
+            name: String::new(),
+            resource_index: None,
+            width: 1,
+            height: 1,
+            depth: 1,
+            dimension: 2,
+            mips: 1,
+            array_size: 1,
+            samples: 1,
+            bytes: "0".into(),
+            format_name: String::new(),
+            format_type: 0,
+            component_type: 0,
+            component_count: 4,
+            component_byte_width: 1,
+        };
+        let revision = Arc::new(AtomicU64::new(0));
+        let session = Session {
+            process: Arc::new(Mutex::new(Box::new(FakeRaw {
+                data: data.clone(),
+                revision: revision.clone(),
+                change: false,
+            }))),
+            revision: revision.clone(),
+            remote_url: None,
+        };
+        let (found, total) = session
+            .find_texture_raw(
+                1,
+                0,
+                &texture,
+                RawTextureSelection::default(),
+                0,
+                None,
+                &[1, 1, 2, 3],
+            )
+            .unwrap();
+        assert_eq!(found, Some((start + 1) as u64));
+        assert_eq!(total, data.len() as u64);
+        assert!(
+            session
+                .find_texture_raw(1, 0, &texture, RawTextureSelection::default(), 0, None, &[])
+                .is_err()
+        );
+        assert!(
+            session
+                .find_texture_raw(
+                    1,
+                    0,
+                    &texture,
+                    RawTextureSelection::default(),
+                    total,
+                    Some(1),
+                    &[1]
+                )
+                .is_err()
+        );
+        let changed = Session {
+            process: Arc::new(Mutex::new(Box::new(FakeRaw {
+                data,
+                revision: revision.clone(),
+                change: true,
+            }))),
+            revision,
+            remote_url: None,
+        };
+        assert!(
+            changed
+                .find_texture_raw(
+                    1,
+                    0,
+                    &texture,
+                    RawTextureSelection::default(),
+                    0,
+                    None,
+                    &[1]
+                )
+                .is_err()
+        );
+    }
     #[test]
     fn texture_export_formats_follow_known_extensions_and_wire_values() {
         use super::TextureExportFormat as F;

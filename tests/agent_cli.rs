@@ -484,6 +484,17 @@ fn real_opengl_vertex_inputs_include_generic_and_normalized_values() {
     assert_eq!(first["data"]["page"]["hex"], "ff0000ff00ff00ff", "{first}");
     let last = agent.send(&serde_json::json!({"command":"read_texture_raw", "index":texture, "offset":"8", "length":16}).to_string());
     assert_eq!(last["data"]["page"]["hex"], "0000ffffffff00ff", "{last}");
+    let found = agent.send(&serde_json::json!({"command":"find_texture_raw", "index":texture, "offset":"0", "hex":"00 ff 00 ff"}).to_string());
+    assert_eq!(found["data"]["offset"], "2", "{found}");
+    let overlapping = agent.send(&serde_json::json!({"command":"find_texture_raw", "index":texture, "offset":"3", "hex":"00 ff 00 ff"}).to_string());
+    assert_eq!(overlapping["data"]["offset"], "4", "{overlapping}");
+    let missing = agent.send(&serde_json::json!({"command":"find_texture_raw", "index":texture, "offset":"0", "length":"3", "hex":"00 ff 00 ff"}).to_string());
+    assert!(missing["data"]["offset"].is_null(), "{missing}");
+    let invalid = agent.send(&serde_json::json!({"command":"find_texture_raw", "index":texture, "offset":"15", "length":"2", "hex":"00"}).to_string());
+    assert_eq!(
+        invalid["error"]["code"], "raw_texture_search_failed",
+        "{invalid}"
+    );
     let top = agent
         .send(&serde_json::json!({"command":"pick_pixel","index":texture,"x":0,"y":0}).to_string());
     assert_eq!(top["ok"], true, "{top}");
@@ -1949,6 +1960,8 @@ fn real_d3d11_capture_is_inspected_and_selected() {
             .collect::<String>(),
         "{last_page}"
     );
+    let found = agent.send(&serde_json::json!({"command":"find_texture_raw", "index":layered_index, "mip":1, "slice":1, "offset":"4", "hex":"ff ff 00 ff"}).to_string());
+    assert_eq!(found["data"]["offset"], "4", "{found}");
     let invalid_page = agent.send(&serde_json::json!({"command":"read_texture_raw", "index":layered_index, "mip":1, "slice":1, "offset":"65", "length":1}).to_string());
     assert_eq!(
         invalid_page["error"]["code"], "raw_texture_read_failed",

@@ -532,6 +532,15 @@ enum TextureField {
 }
 const BUFFER_VIEW_PAGE: u64 = 256;
 
+struct RawTextureSearchHit {
+    event: u32,
+    index: usize,
+    selection_revision: u64,
+    selection: renderdocx::replay::RawTextureSelection,
+    offset: u64,
+    pattern: Vec<u8>,
+}
+
 struct BufferSearchHit {
     open_revision: u64,
     selection_revision: u64,
@@ -574,6 +583,9 @@ struct Workspace {
     selected_texture: Option<usize>,
     texture_selection: TextureSelection,
     texture_raw_page: Option<renderdocx::replay::RawTexturePage>,
+    texture_raw_seek: Entity<InputState>,
+    texture_raw_search: Entity<InputState>,
+    texture_raw_last: Option<RawTextureSearchHit>,
     pixel_x: Entity<InputState>,
     pixel_y: Entity<InputState>,
     pixel_debug_primitive: Entity<InputState>,
@@ -710,6 +722,7 @@ impl Workspace {
         self.texture_selection = selection;
         self.preview = None;
         self.texture_raw_page = None;
+        self.texture_raw_last = None;
         self.pixel = None;
         self.pixel_history = None;
         self.history_selected = None;
@@ -2605,6 +2618,7 @@ impl Workspace {
                         this.export_pending = false;
                         this.preview = None;
                         this.texture_raw_page = None;
+                        this.texture_raw_last = None;
                         this.pixel = None;
                         this.pixel_history = None;
                         this.history_selected = None;
@@ -2691,6 +2705,7 @@ impl Workspace {
         self.replay_pending = true;
         self.preview = None;
         self.texture_raw_page = None;
+        self.texture_raw_last = None;
         self.pixel = None;
         self.pixel_history = None;
         self.history_selected = None;
@@ -3914,6 +3929,7 @@ impl Workspace {
                         this.debug_view = None;
                         this.preview = None;
                         this.texture_raw_page = None;
+                        this.texture_raw_last = None;
                         this.pixel = None;
                         this.pixel_history = None;
                         this.statistics = None;
@@ -5113,6 +5129,7 @@ impl Workspace {
         }
         self.preview = None;
         self.texture_raw_page = None;
+        self.texture_raw_last = None;
         self.pixel = None;
         self.statistics = None;
         self.pixel_history = None;
@@ -5321,6 +5338,202 @@ impl Workspace {
                     ),
                 });
                 cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn seek_texture_raw(&mut self, cx: &mut Context<Self>) {
+        let value = renderdocx::buffer_binding::parse_offset(
+            self.texture_raw_seek.read(cx).value().as_ref(),
+        );
+        let total = self
+            .texture_raw_page
+            .as_ref()
+            .and_then(|page| page.total.parse::<u64>().ok());
+        match value {
+            Some(offset) if total.is_none_or(|total| offset <= total) => {
+                self.texture_raw_last = None;
+                self.read_texture_raw_page(offset, cx);
+            }
+            _ => {
+                self.status = Some(
+                    self.t(
+                        "Enter a valid raw byte offset (decimal or 0x).",
+                        "请输入有效的原始字节偏移（十进制或 0x）。",
+                        "有効な生バイトオフセットを入力してください（10 進数または 0x）。",
+                        "유효한 원시 바이트 오프셋을 입력하세요 (10진수 또는 0x).",
+                    )
+                    .to_owned(),
+                );
+                cx.notify();
+            }
+        }
+    }
+
+    fn find_texture_raw(&mut self, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            return;
+        }
+        let (Some(event), Some(session), Some(index)) = (
+            self.pipeline.as_ref().map(|pipeline| pipeline.event_id),
+            self.session.clone(),
+            self.selected_texture,
+        ) else {
+            self.status = Some(
+                self.t(
+                    "Select an event and texture first.",
+                    "请先选择事件和纹理。",
+                    "先にイベントとテクスチャを選択してください。",
+                    "먼저 이벤트와 텍스처를 선택하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let Some(texture) = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.textures.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        if texture.samples > 1 && self.texture_selection.sample.is_none() {
+            self.status = Some(
+                self.t(
+                    "Select an individual sample for raw data.",
+                    "查看原始数据需要选择单个采样。",
+                    "生データには個別のサンプルを選択してください。",
+                    "원시 데이터에는 개별 샘플을 선택하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let selection = renderdocx::replay::RawTextureSelection {
+            mip: self.texture_selection.mip,
+            slice: self.texture_selection.slice,
+            sample: self.texture_selection.sample.unwrap_or(0),
+        };
+        if selection.validate(&texture).is_err() {
+            self.status = Some(
+                self.t(
+                    "Invalid raw texture selection.",
+                    "原始纹理选择无效。",
+                    "生テクスチャの選択が無効です。",
+                    "원시 텍스처 선택이 잘못되었습니다.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let Some(pattern) =
+            renderdocx::buffer_search::parse_hex(self.texture_raw_search.read(cx).value().as_ref())
+        else {
+            self.status = Some(
+                self.t(
+                    "Enter a nonempty sequence of hexadecimal bytes.",
+                    "请输入非空的十六进制字节序列。",
+                    "空でない 16 進バイト列を入力してください。",
+                    "비어 있지 않은 16진수 바이트를 입력하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let mut offset = self
+            .texture_raw_page
+            .as_ref()
+            .and_then(|page| page.offset.parse::<u64>().ok())
+            .unwrap_or(0);
+        if let Some(hit) = self.texture_raw_last.as_ref().filter(|hit| {
+            hit.event == event
+                && hit.index == index
+                && hit.selection_revision == self.selection_revision
+                && hit.selection == selection
+                && hit.offset == offset
+                && hit.pattern == pattern
+        }) {
+            offset = hit.offset.saturating_add(1);
+        }
+        let Ok(wire_index) = u32::try_from(index) else {
+            return;
+        };
+        let open = self.open_revision;
+        let revision = self.selection_revision;
+        let display_selection = self.texture_selection;
+        self.resource_pending = true;
+        self.status = Some(
+            self.t(
+                "Searching raw texture…",
+                "正在搜索原始纹理…",
+                "生テクスチャを検索中…",
+                "원시 텍스처를 검색하는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            let result = session.find_texture_raw(
+                event, wire_index, &texture, selection, offset, None, &pattern,
+            );
+            (result, pattern)
+        });
+        cx.spawn(async move |this, cx| {
+            let (result, pattern) = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != open || this.selection_revision != revision {
+                    return;
+                }
+                this.resource_pending = false;
+                if this.selected_texture != Some(index)
+                    || this.texture_selection != display_selection
+                {
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok((Some(found), _)) => {
+                        this.texture_raw_last = Some(RawTextureSearchHit {
+                            event,
+                            index,
+                            selection_revision: revision,
+                            selection,
+                            offset: found,
+                            pattern,
+                        });
+                        this.read_texture_raw_page(found, cx);
+                    }
+                    Ok((None, _)) => {
+                        this.status = Some(
+                            this.t(
+                                "No further match in the raw texture.",
+                                "原始纹理中没有后续匹配。",
+                                "生テクスチャに次の一致はありません。",
+                                "원시 텍스처에 다음 일치 항목이 없습니다.",
+                            )
+                            .to_owned(),
+                        );
+                        cx.notify();
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Raw texture search failed",
+                                "原始纹理搜索失败",
+                                "生テクスチャの検索に失敗しました",
+                                "원시 텍스처 검색 실패"
+                            )
+                        ));
+                        cx.notify();
+                    }
+                }
             });
         })
         .detach();
@@ -6399,6 +6612,7 @@ impl Workspace {
         let revision = self.open_revision;
         self.preview = None;
         self.texture_raw_page = None;
+        self.texture_raw_last = None;
         self.pixel = None;
         self.export_pending = true;
         self.status = Some(
@@ -7539,6 +7753,36 @@ impl Workspace {
             .into_any_element()
     }
 
+    #[inline(never)]
+    fn texture_raw_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div().flex().flex_col().gap_2()
+                    .child(self.t("Raw export uses native bytes without channel extraction or type casts; 3D exports contain the whole mip volume.", "原始导出保留原生字节，不应用通道提取或类型转换；3D 导出包含整个 mip 体积。", "生データはチャンネル抽出や型変換を行わず、3D では mip 全体を書き出します。", "원시 내보내기는 채널 추출이나 형식 변환 없이 3D mip 전체를 포함합니다."))
+                    .child(div().flex().flex_wrap().gap_2()
+                        .child(button("texture-raw-read", self.t("Read raw bytes", "读取原始字节", "生バイトを取得", "원시 바이트 읽기"), false, |this, cx| this.read_texture_raw_page(0, cx), cx))
+                        .child(Input::new(&self.texture_raw_seek).id("texture-raw-seek-input").aria_label(self.t("Raw byte offset", "原始字节偏移", "生バイトオフセット", "원시 바이트 오프셋")).w(px(120.)))
+                        .child(button("texture-raw-seek", self.t("Go", "跳转", "移動", "이동"), false, |this, cx| this.seek_texture_raw(cx), cx)))
+                    .child(div().flex().flex_wrap().gap_2()
+                        .child(Input::new(&self.texture_raw_search).id("texture-raw-search-input").aria_label(self.t("Hex bytes", "十六进制字节", "16 進バイト", "16진수 바이트")).w(px(150.)))
+                        .child(button("texture-raw-search", self.t("Find next", "查找下一个", "次を検索", "다음 찾기"), false, |this, cx| this.find_texture_raw(cx), cx)))
+                    .when_some(self.texture_raw_page.clone(), |view, page| {
+                        let offset = page.offset.parse::<u64>().unwrap_or(0);
+                        let total = page.total.parse::<u64>().unwrap_or(0);
+                        let next = offset.saturating_add((page.hex.len() / 2) as u64);
+                        let lines = page.hex.as_bytes().chunks(32).enumerate().map(|(index, bytes)| {
+                            let content = std::str::from_utf8(bytes).unwrap_or("");
+                            let spaced = content.as_bytes().chunks(2).filter_map(|pair| std::str::from_utf8(pair).ok()).collect::<Vec<_>>().join(" ");
+                            format!("{:016x}  {spaced}", offset + (index as u64 * 16))
+                        }).collect::<Vec<_>>();
+                        view.when_some(self.texture_raw_last.as_ref().filter(|hit| hit.offset == offset && hit.index == page.index as usize && hit.event == page.event_id && hit.selection_revision == self.selection_revision), |view, hit| view.child(format!("{}: {}", self.t("Match at byte", "匹配字节偏移", "一致したバイト位置", "일치 바이트 위치"), hit.offset)))
+                            .child(format!("{}: {} / {}", self.t("Raw byte offset", "原始字节偏移", "生バイトオフセット", "원시 바이트 오프셋"), page.offset, page.total))
+                            .child(div().flex().gap_2()
+                                .child(button("texture-raw-prev", self.t("Previous", "上一页", "前へ", "이전"), false, move |this, cx| this.read_texture_raw_page(offset.saturating_sub(256), cx), cx))
+                                .child(button("texture-raw-next", self.t("Next", "下一页", "次へ", "다음"), false, move |this, cx| { if next < total { this.read_texture_raw_page(next, cx); } }, cx)))
+                            .children(lines.into_iter().enumerate().map(|(index, line)| div().id(("texture-raw-line", index)).test_support().text_sm().child(line)))
+                    })
+            .into_any_element()
+    }
+
     fn capture_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.tab == CaptureTab::Annotations && self.annotations.editor.is_none() {
             if let Some((_, doc)) = &self.annotations.notes {
@@ -8574,6 +8818,7 @@ impl Workspace {
                                         this.texture_selection = TextureSelection::default();
                                         this.preview = None;
                                         this.texture_raw_page = None;
+                                        this.texture_raw_last = None;
                                         this.pixel = None;
                                         this.pixel_history = None;
                                         this.history_selected = None;
@@ -10904,6 +11149,7 @@ impl Workspace {
                             this.texture_selection.analysis_type_cast = 0;
                             this.preview = None;
                         this.texture_raw_page = None;
+                        this.texture_raw_last = None;
                             this.pixel = None;
                             this.pixel_history = None;
                             this.history_selected = None;
@@ -10940,23 +11186,7 @@ impl Workspace {
                             .child(export)
                             .child(button("texture-export-raw", self.t("Export raw subresource", "导出原始子资源", "生サブリソースを出力", "원시 하위 리소스 내보내기"), false, |this, cx| this.export_texture_raw(cx), cx)),
                     )
-                    .child(self.t("Raw export uses native bytes without channel extraction or type casts; 3D exports contain the whole mip volume.", "原始导出保留原生字节，不应用通道提取或类型转换；3D 导出包含整个 mip 体积。", "生データはチャンネル抽出や型変換を行わず、3D では mip 全体を書き出します。", "원시 내보내기는 채널 추출이나 형식 변환 없이 3D mip 전체를 포함합니다."))
-                    .child(button("texture-raw-read", self.t("Read raw bytes", "读取原始字节", "生バイトを取得", "원시 바이트 읽기"), false, |this, cx| this.read_texture_raw_page(0, cx), cx))
-                    .when_some(self.texture_raw_page.clone(), |view, page| {
-                        let offset = page.offset.parse::<u64>().unwrap_or(0);
-                        let total = page.total.parse::<u64>().unwrap_or(0);
-                        let next = offset.saturating_add((page.hex.len() / 2) as u64);
-                        let lines = page.hex.as_bytes().chunks(32).enumerate().map(|(index, bytes)| {
-                            let content = std::str::from_utf8(bytes).unwrap_or("");
-                            let spaced = content.as_bytes().chunks(2).filter_map(|pair| std::str::from_utf8(pair).ok()).collect::<Vec<_>>().join(" ");
-                            format!("{:016x}  {spaced}", offset + (index as u64 * 16))
-                        }).collect::<Vec<_>>();
-                        view.child(format!("{}: {} / {}", self.t("Raw byte offset", "原始字节偏移", "生バイトオフセット", "원시 바이트 오프셋"), page.offset, page.total))
-                            .child(div().flex().gap_2()
-                                .child(button("texture-raw-prev", self.t("Previous", "上一页", "前へ", "이전"), false, move |this, cx| this.read_texture_raw_page(offset.saturating_sub(256), cx), cx))
-                                .child(button("texture-raw-next", self.t("Next", "下一页", "次へ", "다음"), false, move |this, cx| { if next < total { this.read_texture_raw_page(next, cx); } }, cx)))
-                            .children(lines.into_iter().enumerate().map(|(index, line)| div().id(("texture-raw-line", index)).test_support().text_sm().child(line)))
-                    })
+                    .child(self.texture_raw_panel(cx))
                     .child(div().text_sm().text_color(rgb(0x91a7c0)).child(pixel_title))
                     .child(
                         div()
@@ -11814,6 +12044,7 @@ impl Workspace {
                             this.usage_page = None;
                             this.preview = None;
                         this.texture_raw_page = None;
+                        this.texture_raw_last = None;
                             this.pixel = None;
                             this.pixel_history = None;
                             this.history_selected = None;
@@ -13311,6 +13542,9 @@ fn main() {
                     });
                     let buffer_format_name = cx.new(|cx| InputState::new(window, cx));
                     let buffer_search = cx.new(|cx| InputState::new(window, cx));
+                    let texture_raw_seek =
+                        cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let texture_raw_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
                     let message_search = cx.new(|cx| InputState::new(window, cx));
@@ -13366,6 +13600,9 @@ fn main() {
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_raw_page: None,
+                        texture_raw_seek,
+                        texture_raw_search,
+                        texture_raw_last: None,
                         pixel_x,
                         pixel_y,
                         pixel_debug_primitive,
@@ -13494,6 +13731,40 @@ mod ui_tests {
     use gpui_kit::InputEvent as PlatformInputEvent;
     use gpui_kit::{ScrollDelta, TestAppContext, base::Root, point, test::TestWindowExt};
 
+    fn reveal_details(window: &mut Window, id: &'static str, cx: &mut App) {
+        for _ in 0..60 {
+            window.render_frame(cx);
+            let target = window.find(id);
+            let viewport = window.find("capture-details-scroll").bounds();
+            let bounds = target.bounds();
+            if target.visible()
+                && bounds.origin.y >= viewport.origin.y
+                && bounds.origin.y + bounds.size.height <= viewport.origin.y + viewport.size.height
+            {
+                return;
+            }
+            let delta = if bounds.origin.y < viewport.origin.y {
+                100.0
+            } else {
+                -100.0
+            };
+            window.dispatch_event(
+                gpui::ScrollEvent {
+                    position: point(
+                        viewport.origin.x + viewport.size.width - px(4.),
+                        viewport.origin.y + viewport.size.height / 2.,
+                    ),
+                    delta: ScrollDelta::Pixels(point(px(0.), px(delta))),
+                    modifiers: window.modifiers(),
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+        }
+        panic!("Could not reveal {id}");
+    }
+
     #[test]
     fn timeline_zoom_and_pan_handle_the_full_event_id_range() {
         let mut view = TimelineView::default();
@@ -13576,6 +13847,9 @@ mod ui_tests {
                     });
                     let buffer_format_name = cx.new(|cx| InputState::new(window, cx));
                     let buffer_search = cx.new(|cx| InputState::new(window, cx));
+                    let texture_raw_seek =
+                        cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let texture_raw_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
                     let message_search = cx.new(|cx| InputState::new(window, cx));
@@ -13649,6 +13923,9 @@ mod ui_tests {
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_raw_page: None,
+                        texture_raw_seek,
+                        texture_raw_search,
+                        texture_raw_last: None,
                         pixel_x,
                         pixel_y,
                         pixel_debug_primitive,
@@ -13968,6 +14245,9 @@ mod ui_tests {
                     });
                     let buffer_format_name = cx.new(|cx| InputState::new(window, cx));
                     let buffer_search = cx.new(|cx| InputState::new(window, cx));
+                    let texture_raw_seek =
+                        cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let texture_raw_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
                     let message_search = cx.new(|cx| InputState::new(window, cx));
@@ -14152,6 +14432,9 @@ mod ui_tests {
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_raw_page: None,
+                        texture_raw_seek,
+                        texture_raw_search,
+                        texture_raw_last: None,
                         pixel_x,
                         pixel_y,
                         pixel_debug_primitive,
@@ -14601,15 +14884,15 @@ mod ui_tests {
         .unwrap();
         assert_eq!(*events.lock().unwrap(), vec![42]);
         cx.update_window(handle.into(), |_, window, cx| {
-            window.scroll(
-                "capture-details-scroll",
-                ScrollDelta::Pixels(point(px(0.), px(2000.))),
-                cx,
-            );
+            reveal_details(window, "texture-next-mip", cx);
             window.click("texture-next-mip", cx);
+            reveal_details(window, "texture-next-slice", cx);
             window.click("texture-next-slice", cx);
+            reveal_details(window, "texture-next-sample", cx);
             window.click("texture-next-sample", cx);
+            reveal_details(window, "texture-next-channel", cx);
             window.click("texture-next-channel", cx);
+            reveal_details(window, "texture-preview", cx);
             window.click("texture-preview", cx)
         })
         .unwrap();
@@ -14648,11 +14931,7 @@ mod ui_tests {
             );
             assert!(window.find("texture-preview-image").visible());
             assert!(window.find("texture-preview-image").bounds().size.height > px(0.));
-            window.scroll(
-                "capture-details-scroll",
-                ScrollDelta::Pixels(point(px(0.), px(2000.))),
-                cx,
-            );
+            reveal_details(window, "texture-next-channel", cx);
             window.click("texture-next-channel", cx);
         })
         .unwrap();
@@ -14669,9 +14948,30 @@ mod ui_tests {
             window.render_frame(cx);
             assert!(window.try_find(("texture-raw-line", 0usize)).is_some());
             assert!(window.try_find("texture-raw-next").is_some());
+            assert!(window.try_find("texture-raw-search").is_some());
+            view.update(cx, |view, cx| {
+                view.texture_raw_search
+                    .update(cx, |input, cx| input.set_value("fe ff 00", window, cx));
+                view.find_texture_raw(cx);
+            });
         })
         .unwrap();
-        cx.update(|cx| view.update(cx, |view, cx| view.read_texture_raw_page(256, cx)));
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                view.read(cx).texture_raw_page.as_ref().unwrap().offset,
+                "254"
+            );
+            assert_eq!(view.read(cx).texture_raw_last.as_ref().unwrap().offset, 254);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.texture_raw_seek
+                    .update(cx, |input, cx| input.set_value("0x100", window, cx));
+                view.seek_texture_raw(cx);
+            });
+        })
+        .unwrap();
         cx.run_until_parked();
         cx.update(|cx| {
             let page = view.read(cx).texture_raw_page.as_ref().unwrap();
