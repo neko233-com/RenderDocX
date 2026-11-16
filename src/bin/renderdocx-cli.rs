@@ -944,11 +944,15 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     .get("length")
                     .and_then(Value::as_u64)
                     .and_then(|v| u32::try_from(v).ok());
+                let origin = match request.get("origin") {
+                    None => offset,
+                    Some(value) => value.as_str().and_then(|value| value.parse::<u64>().ok()),
+                };
                 let layout = request.get("layout").and_then(Value::as_str);
-                match (&opened, selected_event, index, offset, length, layout) {
-                    (None, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
-                    (Some(_), None, _, _, _, _) => Err(("no_event", "Select an event before reading buffers".into())),
-                    (Some((session, snapshot)), Some(event), Some(index), Some(offset), Some(length), Some(text)) => {
+                match (&opened, selected_event, index, offset, length, layout, origin) {
+                    (None, _, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some(_), None, _, _, _, _, _) => Err(("no_event", "Select an event before reading buffers".into())),
+                    (Some((session, snapshot)), Some(event), Some(index), Some(offset), Some(length), Some(text), Some(origin)) => {
                         let size = snapshot.buffers.get(index as usize).and_then(|b| b.length.parse::<u64>().ok());
                         if length > BUFFER_PAGE_LIMIT || size.is_none_or(|size| offset > size || u64::from(length) > size - offset) {
                             Err(("invalid_arguments", "Buffer range is out of bounds or exceeds the page limit".into()))
@@ -956,7 +960,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                             renderdocx::buffer_layout::Layout::parse(text)
                                 .map_err(|error| ("invalid_layout", error))
                                 .and_then(|layout| session.read_buffer(index, offset, length)
-                                    .and_then(|bytes| layout.decode(offset, &bytes))
+                                    .and_then(|bytes| layout.decode_at(origin, offset, &bytes))
                                     .map(|page| json!({"event_id":event,"index":index,"page":page}))
                                     .map_err(|error| ("buffer_decode_failed", error)))
                         }

@@ -96,6 +96,12 @@ pub struct Layout {
     natural_alignment: usize,
     used: usize,
     packing: Packing,
+    repeat: Option<Repeat>,
+}
+#[derive(Clone, Debug)]
+struct Repeat {
+    offset: usize,
+    fixed_fields: Vec<Field>,
 }
 #[derive(Serialize)]
 pub struct FieldValue {
@@ -130,6 +136,10 @@ pub struct Row {
 pub struct Page {
     pub packing: &'static str,
     pub stride: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fixed: Option<Vec<FieldValue>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repeat_offset: Option<String>,
     pub rows: Vec<Row>,
     pub trailing_hex: String,
 }
@@ -385,7 +395,31 @@ impl Layout {
                 .map(|layout| (*layout).clone())
                 .ok_or_else(|| "Layout must contain fields".into());
         }
-        Self::parse_body(&tokens[i..], &definitions, &enums, packing, false)
+        let body = &tokens[i..];
+        if body.ends_with(&["[", "]", ";"]) {
+            let name = *body
+                .get(body.len().saturating_sub(4))
+                .ok_or("Missing array name")?;
+            let mut sized = body.to_vec();
+            sized.insert(sized.len() - 2, "2");
+            let mut layout = Self::parse_body(&sized, &definitions, &enums, packing, false)?;
+            let mut field = layout.fields.pop().ok_or("Missing repeated field")?;
+            if field.name != name || field.count != 2 || field.bit_size.is_some() {
+                return Err("Invalid unbounded array".into());
+            }
+            let offset = field.offset;
+            field.offset = 0;
+            field.count = 1;
+            layout.stride = field.array_stride;
+            layout.repeat = Some(Repeat {
+                offset,
+                fixed_fields: std::mem::take(&mut layout.fields),
+            });
+            layout.fields.push(field);
+            Ok(layout)
+        } else {
+            Self::parse_body(body, &definitions, &enums, packing, false)
+        }
     }
 
     fn parse_body(
@@ -907,163 +941,218 @@ impl Layout {
             natural_alignment,
             used: cursor,
             packing,
+            repeat: None,
         })
     }
-    pub fn decode(&self, offset: u64, bytes: &[u8]) -> Result<Page, String> {
-        offset
-            .checked_add(bytes.len() as u64)
-            .ok_or("Buffer range overflow")?;
-        let mut chunks = bytes.chunks_exact(self.stride);
-        let mut rows = Vec::new();
-        for (index, bytes) in chunks.by_ref().enumerate() {
-            let row_offset = offset + (index * self.stride) as u64;
-            let mut fields = Vec::new();
-            let mut pending = Vec::new();
-            for field in self.fields.iter().rev() {
-                pending.push((field, 0usize, String::new()));
+    fn decode_fields(
+        source: &[Field],
+        row_offset: u64,
+        bytes: &[u8],
+    ) -> Result<Vec<FieldValue>, String> {
+        let mut fields = Vec::new();
+        let mut pending = Vec::new();
+        for field in source.iter().rev() {
+            pending.push((field, 0usize, String::new()));
+        }
+        while let Some((field, parent, prefix)) = pending.pop() {
+            let name = if prefix.is_empty() {
+                field.name.clone()
+            } else {
+                format!("{prefix}.{}", field.name)
+            };
+            let field_start = parent + field.offset;
+            if let Some(nested) = &field.nested {
+                for item in (0..field.count).rev() {
+                    let prefix = if field.count > 1 {
+                        format!("{name}[{item}]")
+                    } else {
+                        name.clone()
+                    };
+                    let start = field_start + item * nested.stride;
+                    for child in nested.fields.iter().rev() {
+                        pending.push((child, start, prefix.clone()));
+                    }
+                }
+                continue;
             }
-            while let Some((field, parent, prefix)) = pending.pop() {
-                let name = if prefix.is_empty() {
-                    field.name.clone()
+            let width = field.format.width();
+            if let Some(bits) = field.bit_size {
+                let byte_count =
+                    ((field.bit_offset as usize + bits as usize).div_ceil(8)).min(width);
+                let mut raw = [0u8; 8];
+                let data = bytes
+                    .get(field_start..field_start + byte_count)
+                    .ok_or("Incomplete bitfield")?;
+                raw[..byte_count].copy_from_slice(data);
+                let mask = if bits == 64 {
+                    u64::MAX
                 } else {
-                    format!("{prefix}.{}", field.name)
+                    (1u64 << bits) - 1
                 };
-                let field_start = parent + field.offset;
-                if let Some(nested) = &field.nested {
-                    for item in (0..field.count).rev() {
-                        let prefix = if field.count > 1 {
-                            format!("{name}[{item}]")
+                let value = (u64::from_le_bytes(raw) >> field.bit_offset) & mask;
+                let signed = matches!(
+                    field.format,
+                    ScalarFormat::I8 | ScalarFormat::I16 | ScalarFormat::I32 | ScalarFormat::I64
+                );
+                let signed_value = if signed {
+                    ((value << (64 - bits)) as i64) >> (64 - bits)
+                } else {
+                    0
+                };
+                let numeric = if signed {
+                    signed_value.to_string()
+                } else {
+                    value.to_string()
+                };
+                let enum_bits = if signed {
+                    (signed_value as u64)
+                        & if width == 8 {
+                            u64::MAX
                         } else {
-                            name.clone()
-                        };
-                        let start = field_start + item * nested.stride;
-                        for child in nested.fields.iter().rev() {
-                            pending.push((child, start, prefix.clone()));
+                            (1u64 << (width * 8)) - 1
                         }
-                    }
-                    continue;
-                }
-                let width = field.format.width();
-                if let Some(bits) = field.bit_size {
-                    let byte_count =
-                        ((field.bit_offset as usize + bits as usize).div_ceil(8)).min(width);
-                    let mut raw = [0u8; 8];
-                    let data = bytes
-                        .get(field_start..field_start + byte_count)
-                        .ok_or("Incomplete bitfield")?;
-                    raw[..byte_count].copy_from_slice(data);
-                    let mask = if bits == 64 {
-                        u64::MAX
-                    } else {
-                        (1u64 << bits) - 1
-                    };
-                    let value = (u64::from_le_bytes(raw) >> field.bit_offset) & mask;
-                    let signed = matches!(
-                        field.format,
-                        ScalarFormat::I8
-                            | ScalarFormat::I16
-                            | ScalarFormat::I32
-                            | ScalarFormat::I64
-                    );
-                    let signed_value = if signed {
-                        ((value << (64 - bits)) as i64) >> (64 - bits)
-                    } else {
-                        0
-                    };
-                    let numeric = if signed {
-                        signed_value.to_string()
-                    } else {
-                        value.to_string()
-                    };
-                    let enum_bits = if signed {
-                        (signed_value as u64)
-                            & if width == 8 {
-                                u64::MAX
-                            } else {
-                                (1u64 << (width * 8)) - 1
-                            }
-                    } else {
-                        value
-                    };
-                    fields.push(FieldValue {
-                        name,
-                        offset: (row_offset + field_start as u64).to_string(),
-                        matrix_rows: None,
-                        matrix_columns: None,
-                        row_major: None,
-                        packed: None,
-                        enum_type: field
-                            .enum_def
-                            .as_ref()
-                            .map(|definition| definition.name.clone()),
-                        enum_flags: field.enum_def.as_ref().map(|definition| definition.flags),
-                        enum_names: field
-                            .enum_def
-                            .as_ref()
-                            .map(|definition| vec![definition.names(enum_bits)]),
-                        bit_offset: Some(field.bit_offset),
-                        bit_size: Some(bits),
-                        values: vec![vec![numeric]],
-                    });
-                    continue;
-                }
-                let mut values = Vec::new();
-                let mut enum_names = field.enum_def.as_ref().map(|_| Vec::new());
-                for item in 0..field.count {
-                    if let Some(packed) = field.packed {
-                        let start = field_start + item * field.array_stride;
-                        values.push(packed.decode(u32::from_le_bytes(
-                            bytes[start..start + 4].try_into().unwrap(),
-                        )));
-                        continue;
-                    }
-                    let base = field_start + item * field.array_stride;
-                    if let (Some(definition), Some(names)) = (&field.enum_def, &mut enum_names) {
-                        let mut raw = [0u8; 8];
-                        raw[..width].copy_from_slice(&bytes[base..base + width]);
-                        names.push(definition.names(u64::from_le_bytes(raw)));
-                    }
-                    let mut components = Vec::new();
-                    for row in 0..field.matrix_rows {
-                        for column in 0..field.components {
-                            let start = if field.matrix_rows == 1 {
-                                base + column * width
-                            } else if field.row_major {
-                                base + row * field.matrix_stride + column * width
-                            } else {
-                                base + column * field.matrix_stride + row * width
-                            };
-                            components.push(field.format.value(&bytes[start..start + width]));
-                        }
-                    }
-                    values.push(components);
-                }
+                } else {
+                    value
+                };
                 fields.push(FieldValue {
                     name,
                     offset: (row_offset + field_start as u64).to_string(),
-                    matrix_rows: (field.matrix_rows > 1).then_some(field.matrix_rows),
-                    matrix_columns: (field.matrix_rows > 1).then_some(field.components),
-                    row_major: (field.matrix_rows > 1).then_some(field.row_major),
-                    packed: field.packed.map(PackedFormat::name),
+                    matrix_rows: None,
+                    matrix_columns: None,
+                    row_major: None,
+                    packed: None,
                     enum_type: field
                         .enum_def
                         .as_ref()
                         .map(|definition| definition.name.clone()),
                     enum_flags: field.enum_def.as_ref().map(|definition| definition.flags),
-                    enum_names,
-                    bit_offset: None,
-                    bit_size: None,
-                    values,
+                    enum_names: field
+                        .enum_def
+                        .as_ref()
+                        .map(|definition| vec![definition.names(enum_bits)]),
+                    bit_offset: Some(field.bit_offset),
+                    bit_size: Some(bits),
+                    values: vec![vec![numeric]],
                 });
+                continue;
             }
+            let mut values = Vec::new();
+            let mut enum_names = field.enum_def.as_ref().map(|_| Vec::new());
+            for item in 0..field.count {
+                if let Some(packed) = field.packed {
+                    let start = field_start + item * field.array_stride;
+                    values.push(
+                        packed.decode(u32::from_le_bytes(
+                            bytes
+                                .get(start..start + 4)
+                                .ok_or("Incomplete packed field")?
+                                .try_into()
+                                .unwrap(),
+                        )),
+                    );
+                    continue;
+                }
+                let base = field_start + item * field.array_stride;
+                if let (Some(definition), Some(names)) = (&field.enum_def, &mut enum_names) {
+                    let mut raw = [0u8; 8];
+                    raw[..width].copy_from_slice(
+                        bytes
+                            .get(base..base + width)
+                            .ok_or("Incomplete enum field")?,
+                    );
+                    names.push(definition.names(u64::from_le_bytes(raw)));
+                }
+                let mut components = Vec::new();
+                for row in 0..field.matrix_rows {
+                    for column in 0..field.components {
+                        let start = if field.matrix_rows == 1 {
+                            base + column * width
+                        } else if field.row_major {
+                            base + row * field.matrix_stride + column * width
+                        } else {
+                            base + column * field.matrix_stride + row * width
+                        };
+                        components.push(
+                            field
+                                .format
+                                .value(bytes.get(start..start + width).ok_or("Incomplete field")?),
+                        );
+                    }
+                }
+                values.push(components);
+            }
+            fields.push(FieldValue {
+                name,
+                offset: (row_offset + field_start as u64).to_string(),
+                matrix_rows: (field.matrix_rows > 1).then_some(field.matrix_rows),
+                matrix_columns: (field.matrix_rows > 1).then_some(field.components),
+                row_major: (field.matrix_rows > 1).then_some(field.row_major),
+                packed: field.packed.map(PackedFormat::name),
+                enum_type: field
+                    .enum_def
+                    .as_ref()
+                    .map(|definition| definition.name.clone()),
+                enum_flags: field.enum_def.as_ref().map(|definition| definition.flags),
+                enum_names,
+                bit_offset: None,
+                bit_size: None,
+                values,
+            });
+        }
+        Ok(fields)
+    }
+
+    pub fn repeat_offset(&self) -> Option<usize> {
+        self.repeat.as_ref().map(|repeat| repeat.offset)
+    }
+
+    pub fn decode(&self, offset: u64, bytes: &[u8]) -> Result<Page, String> {
+        self.decode_at(offset, offset, bytes)
+    }
+
+    /// `origin` is the beginning of the complete layout, even for later pages.
+    pub fn decode_at(&self, origin: u64, offset: u64, bytes: &[u8]) -> Result<Page, String> {
+        offset
+            .checked_add(bytes.len() as u64)
+            .ok_or("Buffer range overflow")?;
+        let mut fixed = None;
+        let mut repeat_offset = None;
+        let mut row_offset = offset;
+        let mut row_bytes = bytes;
+        if let Some(repeat) = &self.repeat {
+            let start = origin
+                .checked_add(repeat.offset as u64)
+                .ok_or("Buffer range overflow")?;
+            repeat_offset = Some(start.to_string());
+            if offset == origin {
+                if bytes.len() < repeat.offset {
+                    return Err("Incomplete fixed prefix".into());
+                }
+                fixed = Some(Self::decode_fields(
+                    &repeat.fixed_fields,
+                    origin,
+                    &bytes[..repeat.offset],
+                )?);
+                row_bytes = &bytes[repeat.offset..];
+                row_offset = start;
+            } else if offset < start || (offset - start) % self.stride as u64 != 0 {
+                return Err("Page offset is not aligned to the repeated array".into());
+            }
+        }
+        let mut chunks = row_bytes.chunks_exact(self.stride);
+        let mut rows = Vec::new();
+        for (index, row) in chunks.by_ref().enumerate() {
+            let offset = row_offset + (index * self.stride) as u64;
             rows.push(Row {
-                offset: row_offset.to_string(),
-                fields,
+                offset: offset.to_string(),
+                fields: Self::decode_fields(&self.fields, offset, row)?,
             });
         }
         Ok(Page {
             packing: self.packing.name(),
             stride: self.stride.to_string(),
+            fixed,
+            repeat_offset,
             rows,
             trailing_hex: chunks
                 .remainder()
@@ -1077,6 +1166,38 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unbounded_root_arrays_keep_the_original_prefix_across_pages() {
+        let layout = Layout::parse("#pack(std430) uint header; vec2 data[];").unwrap();
+        assert_eq!(layout.repeat_offset(), Some(8));
+        assert_eq!(layout.stride(), 8);
+        let bytes = [
+            7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 0, 0, 128, 64,
+        ];
+        let first = layout.decode_at(0, 0, &bytes[..16]).unwrap();
+        assert_eq!(first.fixed.unwrap()[0].values[0][0], "7");
+        assert_eq!(first.repeat_offset.as_deref(), Some("8"));
+        assert_eq!(first.rows[0].offset, "8");
+        assert_eq!(first.rows[0].fields[0].values[0], ["1", "2"]);
+        let next = layout.decode_at(0, 16, &bytes[16..]).unwrap();
+        assert!(next.fixed.is_none());
+        assert_eq!(next.rows[0].offset, "16");
+        assert_eq!(next.rows[0].fields[0].values[0], ["3", "4"]);
+        assert!(layout.decode_at(0, 9, &bytes[..8]).is_err());
+        assert!(layout.decode_at(0, 0, &bytes[..4]).is_err());
+        assert!(Layout::parse("struct S { float v[]; }; S value;").is_err());
+        assert!(Layout::parse("float a[]; uint b;").is_err());
+        let structures =
+            Layout::parse("struct S { float a; uint b; }; uint header; S data[];").unwrap();
+        assert_eq!(structures.repeat_offset(), Some(4));
+        assert_eq!(structures.stride(), 8);
+        assert_eq!(
+            structures.decode_at(0, 0, &[0; 12]).unwrap().rows[0]
+                .fields
+                .len(),
+            2
+        );
+    }
     #[test]
     fn bitfields_follow_upstream_rollover_and_sign_extension() {
         let layout =
@@ -1322,7 +1443,6 @@ mod tests {
             "struct A { A self; };",
             "struct A { B b; }; struct B { uint x; };",
             "struct A { uint x; }; struct A { uint y; };",
-            "struct A { uint x; }; A a[];",
             "struct A { uint x; }; [[unorm]] A a;",
         ] {
             assert!(Layout::parse(bad).is_err(), "{bad}");
@@ -1433,7 +1553,7 @@ mod tests {
         for bad in [
             "",
             "float x",
-            "float x[];",
+            "float x[]; uint y;",
             "#pack(invalid) float x;",
             "float x; float x;",
             "struct S {};",
