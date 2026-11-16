@@ -606,6 +606,8 @@ struct Workspace {
     tab: CaptureTab,
     selected_texture: Option<usize>,
     texture_selection: TextureSelection,
+    texture_saved_selection: std::collections::HashMap<usize, (TextureSelection, u64)>,
+    texture_custom_revision: u64,
     texture_black_point: Entity<InputState>,
     texture_white_point: Entity<InputState>,
     texture_hdr_multiplier: Entity<InputState>,
@@ -726,28 +728,47 @@ struct Workspace {
 }
 
 impl Workspace {
-    fn open_attachment_texture(
+    fn switch_texture(
         &mut self,
         index: usize,
-        mip: u32,
-        slice: u32,
-        preview_type_cast: u32,
+        attachment: Option<(u32, u32, u32)>,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        let selection = TextureSelection {
-            mip,
-            slice,
-            preview_type_cast,
-            analysis_type_cast: preview_type_cast,
-            ..TextureSelection::default()
-        };
+    ) -> bool {
+        if !self.preview_edit_ready(cx) {
+            return false;
+        }
         let Some(texture) = self
             .snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.textures.get(index))
         else {
-            return;
+            return false;
         };
+        let mut selection = if self.selected_texture == Some(index) {
+            self.texture_selection
+        } else {
+            let saved = self.texture_saved_selection.get(&index).copied();
+            let mut value = saved.map(|(selection, _)| selection).unwrap_or_default();
+            // Upstream defaults to a global Y flip unless per-texture Y flip is enabled.
+            value.preview_flip_y = self.texture_selection.preview_flip_y;
+            value.preview_linear_as_gamma = self.texture_selection.preview_linear_as_gamma;
+            value.preview_overlay = self.texture_selection.preview_overlay;
+            value.preview_background = self.texture_selection.preview_background;
+            value.export = self.texture_selection.export;
+            if saved.is_some_and(|(_, revision)| revision != self.texture_custom_revision)
+                || !self.texture_custom_active
+            {
+                value.preview_custom_shader = false;
+            }
+            value
+        };
+        if let Some((mip, slice, cast)) = attachment {
+            selection.mip = mip;
+            selection.slice = slice;
+            selection.preview_type_cast = cast;
+            selection.analysis_type_cast = cast;
+        }
         if selection.validate(texture).is_err() {
             self.status = Some(
                 self.t(
@@ -759,11 +780,30 @@ impl Workspace {
                 .to_owned(),
             );
             cx.notify();
-            return;
+            return false;
         }
-        self.tab = CaptureTab::Textures;
+        if self.selected_texture != Some(index) {
+            if let Some(previous) = self.selected_texture {
+                self.texture_saved_selection.insert(
+                    previous,
+                    (self.texture_selection, self.texture_custom_revision),
+                );
+            }
+        }
         self.selected_texture = Some(index);
         self.texture_selection = selection;
+        let [black, white] = selection.display_range.unwrap_or([0.0, 1.0]);
+        self.texture_black_point.update(cx, |input, cx| {
+            input.set_value(black.to_string(), window, cx)
+        });
+        self.texture_white_point.update(cx, |input, cx| {
+            input.set_value(white.to_string(), window, cx)
+        });
+        if let Some(multiplier) = selection.preview_hdr_multiplier {
+            self.texture_hdr_multiplier.update(cx, |input, cx| {
+                input.set_value(multiplier.to_string(), window, cx)
+            });
+        }
         self.preview = None;
         self.texture_raw_page = None;
         self.texture_raw_last = None;
@@ -773,6 +813,21 @@ impl Workspace {
         self.statistics = None;
         self.status = None;
         cx.notify();
+        true
+    }
+
+    fn open_attachment_texture(
+        &mut self,
+        index: usize,
+        mip: u32,
+        slice: u32,
+        preview_type_cast: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.switch_texture(index, Some((mip, slice, preview_type_cast)), window, cx) {
+            self.tab = CaptureTab::Textures;
+        }
     }
 
     fn resource_display_name<'a>(&'a self, index: Option<usize>, fallback: &'a str) -> &'a str {
@@ -2803,6 +2858,8 @@ impl Workspace {
                         this.pipeline = None;
                         this.selected_texture = None;
                         this.texture_selection = TextureSelection::default();
+                        this.texture_saved_selection.clear();
+                        this.texture_custom_revision = 0;
                         this.texture_custom_active = false;
                         this.texture_custom_open = false;
                         this.texture_custom_encodings.clear();
@@ -6279,6 +6336,10 @@ impl Workspace {
                 this.resource_pending = false;
                 match result {
                     Ok((result, processor_diagnostics)) => {
+                        if clear || result.compiled {
+                            this.texture_custom_revision =
+                                this.texture_custom_revision.wrapping_add(1);
+                        }
                         this.texture_custom_active = result.active;
                         this.texture_custom_diagnostics =
                             [processor_diagnostics, result.diagnostics]
@@ -11085,17 +11146,8 @@ impl Workspace {
                                     .hover(|row| row.bg(rgb(0x263950)))
                                     .child(div().overflow_hidden().child(name))
                                     .child(div().text_color(rgb(0x91a7c0)).child(dimensions))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.selected_texture = Some(index);
-                                        this.texture_selection = TextureSelection::default();
-                                        this.preview = None;
-                                        this.texture_raw_page = None;
-                                        this.texture_raw_last = None;
-                                        this.pixel = None;
-                                        this.pixel_history = None;
-                                        this.history_selected = None;
-                                        this.statistics = None;
-                                        cx.notify();
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.switch_texture(index, None, window, cx);
                                     })),
                             )
                         })
@@ -12609,7 +12661,7 @@ impl Workspace {
                                             if let (Some(mip), Some(slice)) = (mip, slice) {
                                                 view = view.child(div().id(("shader-binding-texture", row_index)).test_support().cursor_pointer().text_color(rgb(0x91cfff))
                                                     .child(self.t("Open texture view", "打开纹理视图", "テクスチャービューを開く", "텍스처 뷰 열기"))
-                                                    .on_click(cx.listener(move |this, _, _, cx| this.open_attachment_texture(texture_index, mip, slice, cast, cx))));
+                                                    .on_click(cx.listener(move |this, _, window, cx| this.open_attachment_texture(texture_index, mip, slice, cast, window, cx))));
                                             }
                                         }
                                     }
@@ -14195,9 +14247,9 @@ impl Workspace {
                                     .child(line)
                                     .when_some(target, |row, index| {
                                         row.cursor_pointer().text_color(rgb(0x91cfff)).on_click(
-                                            cx.listener(move |this, _, _, cx| {
+                                            cx.listener(move |this, _, window, cx| {
                                                 this.open_attachment_texture(
-                                                    index, mip, slice, cast, cx,
+                                                    index, mip, slice, cast, window, cx,
                                                 )
                                             }),
                                         )
@@ -14224,9 +14276,9 @@ impl Workspace {
                                     ))
                                     .when_some(target, |row, index| {
                                         row.cursor_pointer().text_color(rgb(0x91cfff)).on_click(
-                                            cx.listener(move |this, _, _, cx| {
+                                            cx.listener(move |this, _, window, cx| {
                                                 this.open_attachment_texture(
-                                                    index, mip, slice, cast, cx,
+                                                    index, mip, slice, cast, window, cx,
                                                 )
                                             }),
                                         )
@@ -14251,9 +14303,9 @@ impl Workspace {
                                 ))
                                 .when_some(target, |row, index| {
                                     row.cursor_pointer().text_color(rgb(0x91cfff)).on_click(
-                                        cx.listener(move |this, _, _, cx| {
+                                        cx.listener(move |this, _, window, cx| {
                                             this.open_attachment_texture(
-                                                index, mip, slice, cast, cx,
+                                                index, mip, slice, cast, window, cx,
                                             )
                                         }),
                                     )
@@ -14367,6 +14419,7 @@ impl Workspace {
                             this.event_annotation_values.clear();
                             this.session = None;
                             this.snapshot = None;
+                            this.texture_saved_selection.clear();
                             this.message_generation += 1;
                             this.message_poll_pending = false;
                             this.message_visible.clear();
@@ -16046,6 +16099,8 @@ fn main() {
                         tab: CaptureTab::Events,
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
+                        texture_saved_selection: std::collections::HashMap::new(),
+                        texture_custom_revision: 0,
                         texture_black_point,
                         texture_white_point,
                         texture_hdr_multiplier,
@@ -16812,6 +16867,8 @@ mod ui_tests {
                         tab: CaptureTab::Events,
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
+                        texture_saved_selection: std::collections::HashMap::new(),
+                        texture_custom_revision: 0,
                         texture_black_point,
                         texture_white_point,
                         texture_hdr_multiplier,
@@ -17385,6 +17442,8 @@ mod ui_tests {
                         tab: CaptureTab::Events,
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
+                        texture_saved_selection: std::collections::HashMap::new(),
+                        texture_custom_revision: 0,
                         texture_black_point,
                         texture_white_point,
                         texture_hdr_multiplier,
@@ -17732,6 +17791,11 @@ mod ui_tests {
         cx.update(|cx| {
             assert!(view.read(cx).tab == CaptureTab::Textures);
             assert_eq!(view.read(cx).selected_texture, Some(0));
+            assert_eq!(view.read(cx).texture_selection.mip, 1);
+            assert_eq!(view.read(cx).texture_selection.preview_type_cast, 2);
+            view.update(cx, |view, _| {
+                view.texture_selection = TextureSelection::default()
+            });
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
@@ -17954,6 +18018,42 @@ mod ui_tests {
             })
         });
         cx.update(|cx| assert_eq!(view.read(cx).saved_custom_shaders[0].name, "visual.hlsl"));
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                let old_index = view.selected_texture.unwrap();
+                let old_selection = view.texture_selection;
+                let old_active = view.texture_custom_active;
+                let old_revision = view.texture_custom_revision;
+                let original_count = view.snapshot.as_ref().unwrap().textures.len();
+                let texture = view.snapshot.as_ref().unwrap().textures[old_index].clone();
+                view.snapshot.as_mut().unwrap().textures.push(texture);
+                view.texture_selection.display_range = Some([0.125, 0.875]);
+                view.texture_selection.preview_channels = Some([true, false, true, false]);
+                view.texture_selection.preview_custom_shader = true;
+                view.texture_custom_active = true;
+                assert!(view.switch_texture(original_count, None, window, cx));
+                assert_eq!(view.texture_selection.display_range, None);
+                assert!(view.switch_texture(old_index, None, window, cx));
+                assert_eq!(view.texture_selection.display_range, Some([0.125, 0.875]));
+                assert_eq!(
+                    view.texture_selection.preview_channels,
+                    Some([true, false, true, false])
+                );
+                assert!(view.texture_selection.preview_custom_shader);
+                assert_eq!(view.texture_black_point.read(cx).value(), "0.125");
+                assert!(view.switch_texture(original_count, None, window, cx));
+                view.texture_custom_revision += 1;
+                assert!(view.switch_texture(old_index, None, window, cx));
+                assert!(!view.texture_selection.preview_custom_shader);
+                assert!(!view.switch_texture(old_index, Some((u32::MAX, 0, 0)), window, cx));
+                view.snapshot.as_mut().unwrap().textures.pop();
+                view.texture_saved_selection.clear();
+                view.texture_selection = old_selection;
+                view.texture_custom_active = old_active;
+                view.texture_custom_revision = old_revision;
+            });
+        })
+        .unwrap();
         exercise_overlay_pixel(cx, &view, handle);
         cx.update(|cx| view.update(cx, |view, cx| view.read_texture_raw_page(0, cx)));
         cx.run_until_parked();
@@ -19163,6 +19263,11 @@ mod ui_tests {
                         view.event_tree.set_show_api(false);
                         view.snapshot = Some(real_snapshot);
                         view.session = Some(real_session);
+                        view.selected_texture = None;
+                        view.texture_selection = TextureSelection::default();
+                        view.texture_saved_selection.clear();
+                        view.texture_custom_revision = 0;
+                        view.texture_custom_active = false;
                         view.selected = None;
                         view.pipeline = None;
                         view.tab = CaptureTab::Events;
@@ -19508,8 +19613,14 @@ mod ui_tests {
                     }
                     assert!(
                         std::time::Instant::now() < deadline,
-                        "real preview pixel click did not load: {:?}",
-                        cx.update(|cx| view.read(cx).status.clone())
+                        "real preview pixel click did not load: status={:?}, pixel={:?}, selection={:?}",
+                        cx.update(|cx| view.read(cx).status.clone()),
+                        cx.update(|cx| view.read(cx).pixel.as_ref().map(|pixel| (
+                            pixel.x,
+                            pixel.y,
+                            pixel.event_id
+                        ))),
+                        cx.update(|cx| view.read(cx).texture_selection)
                     );
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
