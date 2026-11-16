@@ -9725,9 +9725,10 @@ impl Workspace {
                                     .fields
                                     .into_iter()
                                     .map(|field| {
+                                        let values =
+                                            field.display_values.as_ref().unwrap_or(&field.values);
                                         let value = if let Some(names) = &field.enum_names {
-                                            field
-                                                .values
+                                            values
                                                 .iter()
                                                 .zip(names)
                                                 .map(|(value, names)| {
@@ -9741,8 +9742,7 @@ impl Workspace {
                                                 .collect::<Vec<_>>()
                                                 .join(", ")
                                         } else if let Some(columns) = field.matrix_columns {
-                                            field
-                                                .values
+                                            values
                                                 .iter()
                                                 .map(|matrix| {
                                                     let rows = matrix
@@ -9755,8 +9755,7 @@ impl Workspace {
                                                 .collect::<Vec<_>>()
                                                 .join(", ")
                                         } else {
-                                            field
-                                                .values
+                                            values
                                                 .iter()
                                                 .map(|value| format!("[{}]", value.join(", ")))
                                                 .collect::<Vec<_>>()
@@ -14041,7 +14040,7 @@ mod ui_tests {
             window.click("buffer-layout-input", cx);
             window.press("ctrl-a", cx);
             window.input(
-                "#pack(cbuffer) enum State : uint { Ready = 1 }; [[size(32)]] struct V { float2 p; State id:3; uint :29; }; V v[2]; ushort q[2]; uint end;",
+                "#pack(cbuffer) enum State : uint { Ready = 1 }; [[size(32)]] struct V { float2 p; State id:3; uint :29; }; V v[2]; ushort q[2]; [[hex]] uint end;",
                 cx,
             );
             window.click("buffer-layout-apply", cx);
@@ -14051,6 +14050,13 @@ mod ui_tests {
         cx.update(|cx| {
             let view = view.read(cx);
             assert_eq!(view.buffer_layout.as_ref().unwrap().stride(), 72);
+            let page = view
+                .buffer_layout
+                .as_ref()
+                .unwrap()
+                .decode(0, view.buffer_data.as_ref().unwrap())
+                .unwrap();
+            assert_eq!(page.rows[0].fields.last().unwrap().display, Some("hex"));
             assert_eq!(view.buffer_page_size(), 216);
             assert_eq!(view.buffer_data.as_ref().unwrap().len(), 216);
         });

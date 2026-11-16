@@ -2035,6 +2035,20 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         "{sized}"
     );
     assert_eq!(layout_page["data"]["page"]["stride"], "8", "{layout_page}");
+    let display = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"4", "length":8, "layout":"xint h; [[binary]] int b;"}).to_string());
+    assert_eq!(
+        display["data"]["page"]["rows"][0]["fields"][0]["display_values"][0][0], "40400000",
+        "{display}"
+    );
+    assert_eq!(
+        display["data"]["page"]["rows"][0]["fields"][1]["display_values"][0][0],
+        "01000000010000000000000000000000",
+        "{display}"
+    );
+    assert_eq!(
+        display["data"]["page"]["rows"][0]["fields"][0]["values"][0][0], "1077936128",
+        "{display}"
+    );
     assert_eq!(
         layout_page["data"]["page"]["rows"][0]["fields"][0]["values"][0],
         serde_json::json!(["3", "3"]),

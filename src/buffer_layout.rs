@@ -10,6 +10,7 @@ use std::{
 struct Field {
     name: String,
     format: ScalarFormat,
+    display: Option<DisplayFormat>,
     components: usize,
     matrix_rows: usize,
     row_major: bool,
@@ -22,6 +23,25 @@ struct Field {
     bit_size: Option<u32>,
     count: usize,
     offset: usize,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DisplayFormat {
+    Hex,
+    Binary,
+}
+impl DisplayFormat {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Hex => "hex",
+            Self::Binary => "binary",
+        }
+    }
+    fn format(self, value: u64, width: usize) -> String {
+        match self {
+            Self::Hex => format!("{value:0digits$X}", digits = width * 2),
+            Self::Binary => format!("{value:0digits$b}", digits = width * 8),
+        }
+    }
 }
 #[derive(Clone, Debug)]
 struct EnumDefinition {
@@ -128,6 +148,10 @@ pub struct FieldValue {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bit_size: Option<u32>,
     pub values: Vec<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_values: Option<Vec<Vec<String>>>,
 }
 #[derive(Serialize)]
 pub struct Row {
@@ -196,6 +220,10 @@ fn align(value: usize, alignment: usize) -> Option<usize> {
 fn base_type(name: &str) -> Option<ScalarFormat> {
     ScalarFormat::parse(name).or_else(|| {
         Some(match name {
+            "xbyte" => ScalarFormat::U8,
+            "xshort" => ScalarFormat::U16,
+            "xint" => ScalarFormat::U32,
+            "xlong" => ScalarFormat::U64,
             "char" | "int8_t" => ScalarFormat::I8,
             "uint8_t" => ScalarFormat::U8,
             "int16_t" => ScalarFormat::I16,
@@ -542,6 +570,7 @@ impl Layout {
             let mut normalization = None;
             let mut packed_name = None;
             let mut major = None;
+            let mut display = None;
             while t.get(i) == Some(&"[") && t.get(i + 1) == Some(&"[") {
                 let annotation = *t.get(i + 2).ok_or("Invalid annotation")?;
                 i += 3;
@@ -569,6 +598,10 @@ impl Layout {
                         i += 3;
                     }
                     "pad" | "padding" if !padding => padding = true,
+                    "hex" | "hexadecimal" if display.is_none() => {
+                        display = Some(DisplayFormat::Hex)
+                    }
+                    "bin" | "binary" if display.is_none() => display = Some(DisplayFormat::Binary),
                     "row_major" | "col_major" if major.is_none() => {
                         major = Some(annotation == "row_major")
                     }
@@ -603,7 +636,12 @@ impl Layout {
                         .checked_add(bits.div_ceil(8))
                         .ok_or("Layout size overflow")?;
                 }
-                if unsigned || normalization.is_some() || packed_name.is_some() || major.is_some() {
+                if unsigned
+                    || normalization.is_some()
+                    || packed_name.is_some()
+                    || major.is_some()
+                    || display.is_some()
+                {
                     return Err("Unsupported annotation or qualifier on struct field".into());
                 }
                 let name = *t.get(i).ok_or("Missing field name")?;
@@ -661,6 +699,7 @@ impl Layout {
                     fields.push(Field {
                         name: name.to_owned(),
                         format: ScalarFormat::Bool,
+                        display: None,
                         components: 1,
                         matrix_rows: 1,
                         row_major: false,
@@ -680,7 +719,11 @@ impl Layout {
             }
             let enum_def = enums.get(typename).cloned();
             if enum_def.is_some()
-                && (unsigned || normalization.is_some() || packed_name.is_some() || major.is_some())
+                && (unsigned
+                    || normalization.is_some()
+                    || packed_name.is_some()
+                    || major.is_some()
+                    || display.is_some())
             {
                 return Err("Unsupported qualifier on enum field".into());
             }
@@ -700,7 +743,10 @@ impl Layout {
                 (definition.format, 1, 1)
             } else if let Some((_, format, count)) = alias {
                 (format, 1, count)
-            } else if let Some((left, right)) = typename.split_once('x') {
+            } else if let Some((left, right)) = typename
+                .rsplit_once('x')
+                .filter(|(left, right)| !left.is_empty() && matches!(*right, "2" | "3" | "4"))
+            {
                 let (base, first) = left.split_at(left.len().saturating_sub(1));
                 let dimension = |text: &str| match text {
                     "2" => Some(2),
@@ -750,6 +796,35 @@ impl Layout {
                     ScalarFormat::I32 => ScalarFormat::U32,
                     ScalarFormat::I64 => ScalarFormat::U64,
                     _ => return Err("Invalid unsigned type".into()),
+                };
+            }
+            if typename.starts_with("xbyte")
+                || typename.starts_with("xshort")
+                || typename.starts_with("xint")
+                || typename.starts_with("xlong")
+            {
+                if display.is_none() {
+                    display = Some(DisplayFormat::Hex);
+                }
+            }
+            if display.is_some() {
+                if packed_name.is_some() || normalization.is_some() {
+                    return Err(
+                        "Hex and binary display are unsupported on packed or normalized fields"
+                            .into(),
+                    );
+                }
+                format = match format {
+                    ScalarFormat::I8 => ScalarFormat::U8,
+                    ScalarFormat::I16 => ScalarFormat::U16,
+                    ScalarFormat::I32 => ScalarFormat::U32,
+                    ScalarFormat::I64 => ScalarFormat::U64,
+                    ScalarFormat::U8
+                    | ScalarFormat::U16
+                    | ScalarFormat::U32
+                    | ScalarFormat::U64
+                    | ScalarFormat::Bool => format,
+                    _ => return Err("Hex and binary display require an integer or bool".into()),
                 };
             }
             let packed = packed_name
@@ -875,6 +950,7 @@ impl Layout {
                     fields.push(Field {
                         name: name.to_owned(),
                         format,
+                        display,
                         components: 1,
                         matrix_rows: 1,
                         row_major: false,
@@ -1000,6 +1076,7 @@ impl Layout {
                 fields.push(Field {
                     name: name.to_owned(),
                     format,
+                    display,
                     components,
                     matrix_rows,
                     row_major,
@@ -1134,10 +1211,15 @@ impl Layout {
                     bit_offset: Some(field.bit_offset),
                     bit_size: Some(bits),
                     values: vec![vec![numeric]],
+                    display: field.display.map(DisplayFormat::name),
+                    display_values: field
+                        .display
+                        .map(|display| vec![vec![display.format(value, width)]]),
                 });
                 continue;
             }
             let mut values = Vec::new();
+            let mut display_values = field.display.map(|_| Vec::new());
             let mut enum_names = field.enum_def.as_ref().map(|_| Vec::new());
             for item in 0..field.count {
                 if let Some(packed) = field.packed {
@@ -1164,6 +1246,7 @@ impl Layout {
                     names.push(definition.names(u64::from_le_bytes(raw)));
                 }
                 let mut components = Vec::new();
+                let mut display_components = Vec::new();
                 for row in 0..field.matrix_rows {
                     for column in 0..field.components {
                         let start = if field.matrix_rows == 1 {
@@ -1173,14 +1256,25 @@ impl Layout {
                         } else {
                             base + column * field.matrix_stride + row * width
                         };
-                        components.push(
-                            field
-                                .format
-                                .value(bytes.get(start..start + width).ok_or("Incomplete field")?),
-                        );
+                        let data = bytes.get(start..start + width).ok_or("Incomplete field")?;
+                        let value = field.format.value(data);
+                        if let Some(display) = field.display {
+                            if field.format == ScalarFormat::Bool {
+                                display_components.push(value.clone());
+                            } else {
+                                let mut raw = [0u8; 8];
+                                raw[..width].copy_from_slice(data);
+                                display_components
+                                    .push(display.format(u64::from_le_bytes(raw), width));
+                            }
+                        }
+                        components.push(value);
                     }
                 }
                 values.push(components);
+                if let Some(output) = &mut display_values {
+                    output.push(display_components);
+                }
             }
             fields.push(FieldValue {
                 name,
@@ -1198,6 +1292,8 @@ impl Layout {
                 bit_offset: None,
                 bit_size: None,
                 values,
+                display: field.display.map(DisplayFormat::name),
+                display_values,
             });
         }
         Ok(fields)
@@ -1316,6 +1412,55 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hexadecimal_and_binary_display_preserve_unsigned_bit_patterns() {
+        let layout = Layout::parse("[[hex]] int signed_value; [[binary]] ubyte bits; xshort alias; [[hexadecimal]] short2 vector;").unwrap();
+        let mut bytes = vec![0; layout.stride()];
+        bytes[0..4].copy_from_slice(&(-1i32).to_le_bytes());
+        bytes[4] = 5;
+        bytes[6..8].copy_from_slice(&0xabcdu16.to_le_bytes());
+        bytes[8..12].copy_from_slice(&[0xff, 0xff, 0x34, 0x12]);
+        let page = layout.decode(0, &bytes).unwrap();
+        let fields = &page.rows[0].fields;
+        assert_eq!(fields[0].values[0][0], "4294967295");
+        assert_eq!(fields[0].display, Some("hex"));
+        assert_eq!(fields[0].display_values.as_ref().unwrap()[0][0], "FFFFFFFF");
+        assert_eq!(fields[1].display_values.as_ref().unwrap()[0][0], "00000101");
+        assert_eq!(fields[2].display_values.as_ref().unwrap()[0][0], "ABCD");
+        assert_eq!(
+            fields[3].display_values.as_ref().unwrap()[0],
+            ["FFFF", "1234"]
+        );
+        let bitfield = Layout::parse("[[hex]] int low:4; [[bin]] uint high:4;")
+            .unwrap()
+            .decode(0, &[0xfa, 0, 0, 0])
+            .unwrap();
+        assert_eq!(
+            bitfield.rows[0].fields[0].display_values.as_ref().unwrap()[0][0],
+            "0000000A"
+        );
+        assert_eq!(
+            bitfield.rows[0].fields[1].display_values.as_ref().unwrap()[0][0],
+            "00000000000000000000000000001111"
+        );
+        let matrix = Layout::parse("xint2x2 m;").unwrap();
+        assert_eq!(
+            matrix.decode(0, &[0; 16]).unwrap().rows[0].fields[0]
+                .display_values
+                .as_ref()
+                .unwrap()[0]
+                .len(),
+            4
+        );
+        for bad in [
+            "[[hex]] float value;",
+            "[[binary]] [[packed(r10g10b10a2_uint)]] uint4 value;",
+            "[[hex]] [[unorm]] ubyte value;",
+            "enum E : uint { A = 1 }; [[hex]] E value;",
+        ] {
+            assert!(Layout::parse(bad).is_err(), "{bad}");
+        }
+    }
     #[test]
     fn struct_size_and_alignment_annotations_control_nested_layouts() {
         let layout =
