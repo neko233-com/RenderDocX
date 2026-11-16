@@ -533,6 +533,7 @@ struct Workspace {
     remote_directory_url: Option<String>,
     remote_browse_pending: bool,
     remote_browse_revision: u64,
+    show_remote_browser: bool,
     show_launch_config: bool,
     launch_arguments: Entity<InputState>,
     launch_delay: Entity<InputState>,
@@ -1288,6 +1289,251 @@ impl Workspace {
         .detach();
     }
 
+    fn remote_browser_view(&mut self, show_url: bool, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
+            .id("remote-browser-panel")
+            .test_support()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .max_h(px(300.))
+            .overflow_y_scroll()
+            .when(show_url, |view| {
+                view.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(self.t(
+                            "Remote server address",
+                            "远程服务器地址",
+                            "リモートサーバーアドレス",
+                            "원격 서버 주소",
+                        ))
+                        .child(
+                            Input::new(&self.remote_target_url)
+                                .id("capture-remote-url")
+                                .aria_label(self.t(
+                                    "Remote server address",
+                                    "远程服务器地址",
+                                    "リモートサーバーアドレス",
+                                    "원격 서버 주소",
+                                ))
+                                .w(px(260.)),
+                        ),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(self.t(
+                                "Remote directory",
+                                "远程目录",
+                                "リモートディレクトリ",
+                                "원격 디렉터리",
+                            ))
+                            .child(
+                                Input::new(&self.remote_browser_path)
+                                    .id("remote-browser-path")
+                                    .aria_label(self.t(
+                                        "Remote directory",
+                                        "远程目录",
+                                        "リモートディレクトリ",
+                                        "원격 디렉터리",
+                                    ))
+                                    .w(px(300.)),
+                            ),
+                    )
+                    .child(button(
+                        "remote-browser-home",
+                        self.t("Browse home", "浏览主目录", "ホームを参照", "홈 탐색"),
+                        false,
+                        |this, cx| this.browse_remote(None, cx),
+                        cx,
+                    ))
+                    .child(button(
+                        "remote-browser-roots",
+                        self.t(
+                            "Filesystem roots",
+                            "文件系统根目录",
+                            "ファイルシステムルート",
+                            "파일 시스템 루트",
+                        ),
+                        false,
+                        |this, cx| this.browse_remote(Some("/".to_owned()), cx),
+                        cx,
+                    ))
+                    .child(button(
+                        "remote-browser-open",
+                        self.t(
+                            "Browse directory",
+                            "浏览目录",
+                            "ディレクトリを参照",
+                            "디렉터리 탐색",
+                        ),
+                        false,
+                        |this, cx| {
+                            let path = this.remote_browser_path.read(cx).value().to_string();
+                            if !path.is_empty() {
+                                this.browse_remote(Some(path), cx);
+                            }
+                        },
+                        cx,
+                    )),
+            )
+            .when_some(
+                self.remote_directory.clone().filter(|_| {
+                    self.remote_directory_url.as_deref()
+                        == Some(self.remote_target_url.read(cx).value().as_ref())
+                }),
+                |view, directory| {
+                    let current = directory.path.clone();
+                    let parent = renderdocx::live::remote_parent(&current);
+                    let mut entries = directory.entries.clone();
+                    entries.sort_by(|a, b| {
+                        (b.flags & 1)
+                            .cmp(&(a.flags & 1))
+                            .then_with(|| a.name.cmp(&b.name))
+                    });
+                    view.child(div().text_sm().child(format!(
+                        "{}: {}",
+                        self.t(
+                            "Remote directory",
+                            "远程目录",
+                            "リモートディレクトリ",
+                            "원격 디렉터리"
+                        ),
+                        current
+                    )))
+                    .when_some(parent, |view, parent| {
+                        view.child(button(
+                            "remote-browser-parent",
+                            self.t(
+                                "Parent directory",
+                                "上级目录",
+                                "親ディレクトリ",
+                                "상위 디렉터리",
+                            ),
+                            false,
+                            move |this, cx| this.browse_remote(Some(parent.clone()), cx),
+                            cx,
+                        ))
+                    })
+                    .children(entries.into_iter().filter_map(|entry| {
+                        let path = renderdocx::live::remote_join(&current, &entry.name)?;
+                        let is_directory = entry.flags & 1 != 0;
+                        let capture =
+                            !is_directory && entry.name.to_ascii_lowercase().ends_with(".rdc");
+                        let size = entry.size.parse::<u64>().ok()?;
+                        let label =
+                            format!("{}{}", if is_directory { "📁 " } else { "📄 " }, entry.name);
+                        let open_path = path.clone();
+                        Some(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .items_center()
+                                .child(div().child(label))
+                                .when(is_directory, |row| {
+                                    row.child(
+                                        div()
+                                            .id(SharedString::from(format!("remote-dir-{path}")))
+                                            .test_support()
+                                            .cursor_pointer()
+                                            .child(self.t("Open", "打开", "開く", "열기"))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.browse_remote(Some(open_path.clone()), cx)
+                                            })),
+                                    )
+                                })
+                                .when(is_directory, |row| {
+                                    let working_path = path.clone();
+                                    row.child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "remote-workdir-{path}"
+                                            )))
+                                            .test_support()
+                                            .cursor_pointer()
+                                            .child(self.t(
+                                                "Use as working directory",
+                                                "用作工作目录",
+                                                "作業ディレクトリに設定",
+                                                "작업 디렉터리로 사용",
+                                            ))
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.remote_working_directory.update(
+                                                    cx,
+                                                    |input, cx| {
+                                                        input.set_value(
+                                                            working_path.clone(),
+                                                            window,
+                                                            cx,
+                                                        )
+                                                    },
+                                                )
+                                            })),
+                                    )
+                                })
+                                .when(!is_directory, |row| {
+                                    let select_path = path.clone();
+                                    row.child(
+                                        div()
+                                            .id(SharedString::from(format!("remote-select-{path}")))
+                                            .test_support()
+                                            .cursor_pointer()
+                                            .child(self.t(
+                                                "Use as application",
+                                                "用作应用",
+                                                "アプリとして使用",
+                                                "앱으로 사용",
+                                            ))
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.remote_app_path.update(cx, |input, cx| {
+                                                    input.set_value(select_path.clone(), window, cx)
+                                                })
+                                            })),
+                                    )
+                                })
+                                .when(capture && size > 0, |row| {
+                                    let download_path = path.clone();
+                                    row.child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "remote-download-{path}"
+                                            )))
+                                            .test_support()
+                                            .cursor_pointer()
+                                            .child(self.t(
+                                                "Download and replay",
+                                                "下载并回放",
+                                                "ダウンロードして再生",
+                                                "다운로드 후 리플레이",
+                                            ))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.download_remote(
+                                                    download_path.clone(),
+                                                    size,
+                                                    cx,
+                                                )
+                                            })),
+                                    )
+                                }),
+                        )
+                    }))
+                },
+            )
+            .into_any_element()
+    }
+
     fn browse_remote(&mut self, path: Option<String>, cx: &mut Context<Self>) {
         if self.remote_browse_pending {
             return;
@@ -1310,6 +1556,10 @@ impl Workspace {
         self.remote_browse_revision += 1;
         let revision = self.remote_browse_revision;
         let settings = self.settings.clone();
+        let active_session = self
+            .session
+            .clone()
+            .filter(|session| session.is_remote_server(&url));
         let request_url = url.clone();
         self.status = Some(
             self.t(
@@ -1322,7 +1572,10 @@ impl Workspace {
         );
         cx.notify();
         let task = cx.background_executor().spawn(async move {
-            renderdocx::live::browse_remote(&settings, &request_url, path.as_deref())
+            match active_session {
+                Some(session) => session.remote_list(path.as_deref()),
+                None => renderdocx::live::browse_remote(&settings, &request_url, path.as_deref()),
+            }
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -1382,6 +1635,10 @@ impl Workspace {
         }
         let url = self.remote_target_url.read(cx).value().to_string();
         let settings = self.settings.clone();
+        let active_session = self
+            .session
+            .clone()
+            .filter(|session| session.is_remote_server(&url));
         self.remote_browse_pending = true;
         self.remote_browse_revision += 1;
         let revision = self.remote_browse_revision;
@@ -1398,13 +1655,16 @@ impl Workspace {
         let request_url = url.clone();
         let task = cx.background_executor().spawn(async move {
             let directory = capture_directory()?;
-            renderdocx::live::download_remote_capture(
-                &settings,
-                &request_url,
-                &path,
-                size,
-                &directory,
-            )
+            match active_session {
+                Some(session) => session.remote_download(&path, size, &directory),
+                None => renderdocx::live::download_remote_capture(
+                    &settings,
+                    &request_url,
+                    &path,
+                    size,
+                    &directory,
+                ),
+            }
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -1881,6 +2141,30 @@ impl Workspace {
         }
         self.open_revision += 1;
         let revision = self.open_revision;
+        let previous_remote = self.session.clone().filter(|session| {
+            remote
+                .as_deref()
+                .is_some_and(|url| session.is_remote_server(url))
+        });
+        let replacing_remote = previous_remote.is_some();
+        if replacing_remote && !path.is_file() {
+            self.status = Some(
+                self.t(
+                    "Capture file does not exist.",
+                    "捕获文件不存在。",
+                    "キャプチャファイルが存在しません。",
+                    "캡처 파일이 없습니다.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        if replacing_remote {
+            self.message_generation += 1;
+            self.message_poll_pending = false;
+            self.replay_pending = true;
+        }
         let settings = self.settings.clone();
         let capture = path.clone();
         self.status = Some(
@@ -1894,6 +2178,9 @@ impl Workspace {
         );
         cx.notify();
         let task = cx.background_executor().spawn(async move {
+            if let Some(previous) = previous_remote {
+                previous.close()?;
+            }
             let (session, snapshot) = Session::open_remote(&settings, &path, remote.as_deref())?;
             let renames = session.annotation_read("renames").and_then(|section| {
                 let document = section.document()?;
@@ -1987,6 +2274,13 @@ impl Workspace {
                         });
                     }
                     Err(error) => {
+                        if replacing_remote {
+                            this.replay_pending = false;
+                            this.session = None;
+                            this.snapshot = None;
+                            this.capture = None;
+                            this.pipeline = None;
+                        }
                         this.status = Some(format!(
                             "{}: {error}",
                             this.t(
@@ -9326,6 +9620,9 @@ impl Workspace {
                         },
                         cx,
                     ))
+                    .when(self.session.as_ref().and_then(Session::remote_server_url).is_some(), |row| row.child(button(
+                        "capture-remote-browser", self.t("Remote files", "远程文件", "リモートファイル", "원격 파일"), self.show_remote_browser,
+                        |this, cx| { this.show_remote_browser = !this.show_remote_browser; cx.notify(); }, cx)))
                     .child(button(
                         "capture-upstream",
                         upstream,
@@ -9339,6 +9636,7 @@ impl Workspace {
                         cx,
                     )),
             )
+            .when(self.show_remote_browser && self.session.as_ref().and_then(Session::remote_server_url).is_some(), |view| view.child(self.remote_browser_view(true, cx)))
             .child(div().text_sm().text_color(rgb(0x9eacc0)).child(title))
             .child(
                 div()
@@ -10509,47 +10807,7 @@ impl Render for Workspace {
                         cx.notify();
                     } else { this.launch_live_with_remote(PathBuf::from(app), Some(url), cx); }
                 }, cx)))
-            .child(div().flex().flex_wrap().gap_2()
-                .child(div().flex().flex_col().gap_1().child(self.t("Remote directory", "远程目录", "リモートディレクトリ", "원격 디렉터리")).child(Input::new(&self.remote_browser_path).id("remote-browser-path").aria_label(self.t("Remote directory", "远程目录", "リモートディレクトリ", "원격 디렉터리")).w(px(300.))))
-                .child(button("remote-browser-home", self.t("Browse home", "浏览主目录", "ホームを参照", "홈 탐색"), false, |this, cx| this.browse_remote(None, cx), cx))
-                .child(button("remote-browser-roots", self.t("Filesystem roots", "文件系统根目录", "ファイルシステムルート", "파일 시스템 루트"), false, |this, cx| this.browse_remote(Some("/".to_owned()), cx), cx))
-                .child(button("remote-browser-open", self.t("Browse directory", "浏览目录", "ディレクトリを参照", "디렉터리 탐색"), false, |this, cx| {
-                    let path = this.remote_browser_path.read(cx).value().to_string();
-                    if !path.is_empty() { this.browse_remote(Some(path), cx); }
-                }, cx)))
-            .when_some(self.remote_directory.clone().filter(|_| self.remote_directory_url.as_deref() == Some(self.remote_target_url.read(cx).value().as_ref())), |view, directory| {
-                let current = directory.path.clone();
-                let parent = renderdocx::live::remote_parent(&current);
-                let mut entries = directory.entries.clone();
-                entries.sort_by(|a,b| (b.flags & 1).cmp(&(a.flags & 1)).then_with(|| a.name.cmp(&b.name)));
-                view.child(div().text_sm().child(format!("{}: {}", self.t("Remote directory", "远程目录", "リモートディレクトリ", "원격 디렉터리"), current)))
-                    .when_some(parent, |view, parent| view.child(button("remote-browser-parent", self.t("Parent directory", "上级目录", "親ディレクトリ", "상위 디렉터리"), false, move |this, cx| this.browse_remote(Some(parent.clone()), cx), cx)))
-                    .children(entries.into_iter().filter_map(|entry| {
-                        let path = renderdocx::live::remote_join(&current, &entry.name)?;
-                        let is_directory = entry.flags & 1 != 0;
-                        let capture = !is_directory && entry.name.to_ascii_lowercase().ends_with(".rdc");
-                        let size = entry.size.parse::<u64>().ok()?;
-                        let label = format!("{}{}", if is_directory { "📁 " } else { "📄 " }, entry.name);
-                        let open_path = path.clone();
-                        Some(div().flex().flex_wrap().gap_2().items_center()
-                            .child(div().child(label))
-                            .when(is_directory, |row| row.child(div().id(SharedString::from(format!("remote-dir-{path}"))).test_support().cursor_pointer().child(self.t("Open", "打开", "開く", "열기")).on_click(cx.listener(move |this, _, _, cx| this.browse_remote(Some(open_path.clone()), cx)))))
-                            .when(is_directory, |row| {
-                                let working_path = path.clone();
-                                row.child(div().id(SharedString::from(format!("remote-workdir-{path}"))).test_support().cursor_pointer().child(self.t("Use as working directory", "用作工作目录", "作業ディレクトリに設定", "작업 디렉터리로 사용"))
-                                    .on_click(cx.listener(move |this, _, window, cx| this.remote_working_directory.update(cx, |input, cx| input.set_value(working_path.clone(), window, cx)))))
-                            })
-                            .when(!is_directory, |row| {
-                                let select_path = path.clone();
-                                row.child(div().id(SharedString::from(format!("remote-select-{path}"))).test_support().cursor_pointer().child(self.t("Use as application", "用作应用", "アプリとして使用", "앱으로 사용"))
-                                    .on_click(cx.listener(move |this, _, window, cx| this.remote_app_path.update(cx, |input, cx| input.set_value(select_path.clone(), window, cx)))))
-                            })
-                            .when(capture && size > 0, |row| {
-                                let download_path = path.clone();
-                                row.child(div().id(SharedString::from(format!("remote-download-{path}"))).test_support().cursor_pointer().child(self.t("Download and replay", "下载并回放", "ダウンロードして再生", "다운로드 후 리플레이")).on_click(cx.listener(move |this, _, _, cx| this.download_remote(download_path.clone(), size, cx))))
-                            }))
-                    }))
-            })
+            .child(self.remote_browser_view(false, cx))
             .when(!live_targets.is_empty(), |view| {
                 view.child(
                     div()
@@ -10919,6 +11177,7 @@ fn main() {
                         remote_directory_url: None,
                         remote_browse_pending: false,
                         remote_browse_revision: 0,
+                        show_remote_browser: false,
                         show_launch_config: false,
                         launch_arguments,
                         launch_delay,
@@ -11127,6 +11386,7 @@ mod ui_tests {
                         remote_directory_url: None,
                         remote_browse_pending: false,
                         remote_browse_revision: 0,
+                        show_remote_browser: false,
                         show_launch_config: false,
                         launch_arguments,
                         launch_delay,
@@ -11307,7 +11567,8 @@ mod ui_tests {
     #[gpui_kit::test]
     fn clicking_an_action_replays_its_exact_event(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
-        let (session, events, selections) = renderdocx::replay::test_support::recording_session();
+        let (session, events, selections) =
+            renderdocx::replay::test_support::recording_remote_session();
         let (handle, view) = cx.update(|cx| {
             let bounds = Bounds::centered(None, size(px(1040.), px(760.)), cx);
             gpui_kit::open_window(
@@ -11573,6 +11834,7 @@ mod ui_tests {
                         remote_directory_url: None,
                         remote_browse_pending: false,
                         remote_browse_revision: 0,
+                        show_remote_browser: false,
                         show_launch_config: false,
                         launch_arguments,
                         launch_delay,
@@ -11590,6 +11852,31 @@ mod ui_tests {
             .unwrap()
         });
         let handle = handle.downcast::<Root>().unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.remote_target_url
+                    .update(cx, |input, cx| input.set_value("fixture", window, cx))
+            });
+            window.render_frame(cx);
+            window.click("capture-remote-browser", cx);
+            window.render_frame(cx);
+            window.click("remote-browser-home", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                view.read(cx).remote_directory.as_ref().unwrap().path,
+                "/home"
+            )
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("capture-remote-browser", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(window.find(1usize).visible());

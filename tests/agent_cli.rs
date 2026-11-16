@@ -2448,6 +2448,25 @@ fn real_remote_replay_loopback() {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     assert_eq!(opened["ok"], true, "{opened}");
+    let mut other = Agent::new(bridge.to_str());
+    let busy = other.send(&listing_request);
+    assert_eq!(busy["error"]["code"], "remote_list_failed", "{busy}");
+    other.quit();
+    let active_listing = agent.send(&listing_request);
+    assert_eq!(active_listing["ok"], true, "{active_listing}");
+    let missing = agent.send(&serde_json::json!({"command":"open", "path":dir.path().join("missing.rdc"), "remote_url":url}).to_string());
+    assert_eq!(missing["error"]["code"], "replay_open_failed", "{missing}");
+    assert_eq!(agent.send(r#"{"command":"snapshot"}"#)["ok"], true);
+    let active_download = agent.send(
+        &serde_json::json!({"command":"remote_download", "url":url, "path":capture,
+        "size":size, "capture_directory":dir.path()})
+        .to_string(),
+    );
+    assert_eq!(active_download["ok"], true, "{active_download}");
+    assert_eq!(
+        std::fs::read(active_download["data"]["path"].as_str().unwrap()).unwrap(),
+        std::fs::read(capture).unwrap()
+    );
     let event = opened["data"]["capture"]["actions"]
         .as_array()
         .unwrap()
@@ -2511,6 +2530,12 @@ fn real_remote_replay_loopback() {
     );
     assert_eq!(data["ok"], true, "{data}");
     assert_eq!(data["data"]["hex"], "0000000000004040");
+    let switched = agent.send(&serde_json::json!({"command":"open", "path":active_download["data"]["path"], "remote_url":url}).to_string());
+    assert_eq!(switched["ok"], true, "{switched}");
+    assert_eq!(
+        agent.send(&serde_json::json!({"command":"select", "event_id":event}).to_string())["ok"],
+        true
+    );
     assert_eq!(agent.send(r#"{"command":"close"}"#)["ok"], true);
     let local_open = agent.send(&serde_json::json!({"command":"open", "path":capture}).to_string());
     assert_eq!(local_open["ok"], true, "{local_open}");

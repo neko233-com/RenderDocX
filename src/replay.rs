@@ -1150,6 +1150,8 @@ enum Reply {
     DebugStarted(DebugTrace),
     DebugStates(DebugStates),
     DebugStopped,
+    RemoteDirectory(crate::live::RemoteDirectory),
+    RemoteCopy,
     Structure(StructurePage),
     Callstack(EventCallstack),
     Mesh(MeshInfo),
@@ -1575,6 +1577,12 @@ trait Transport: Send {
     }
     fn debug_stop(&mut self) -> Result<(), String> {
         Err("Shader debugging is not supported by this transport".into())
+    }
+    fn remote_list(&mut self, _path: Option<&str>) -> Result<crate::live::RemoteDirectory, String> {
+        Err("Remote browsing is not supported by this transport".into())
+    }
+    fn remote_copy(&mut self, _source: &str, _destination: &Path) -> Result<(), String> {
+        Err("Remote download is not supported by this transport".into())
     }
     fn callstack(&mut self, _event: u32, _resolve: bool) -> Result<EventCallstack, String> {
         Err("Event callstack inspection is not supported by this transport".into())
@@ -2139,6 +2147,67 @@ impl Transport for Process {
         Ok(bytes)
     }
 
+    fn remote_list(&mut self, path: Option<&str>) -> Result<crate::live::RemoteDirectory, String> {
+        let path = path.unwrap_or("");
+        if path.contains('\0') {
+            return Err("Invalid remote path".into());
+        }
+        let encoded = if path.is_empty() {
+            "_".to_owned()
+        } else {
+            path.as_bytes().iter().map(|b| format!("{b:02x}")).collect()
+        };
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(input, "remote_list {encoded}")
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::RemoteDirectory(directory)
+                if directory
+                    .entries
+                    .iter()
+                    .all(|e| e.size.parse::<u64>().is_ok()) =>
+            {
+                Ok(directory)
+            }
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected remote directory response".into()),
+        }
+    }
+
+    fn remote_copy(&mut self, source: &str, destination: &Path) -> Result<(), String> {
+        let destination = destination
+            .to_str()
+            .ok_or("Invalid local destination path")?;
+        if source.is_empty()
+            || source.contains('\0')
+            || destination.is_empty()
+            || destination.contains('\0')
+        {
+            return Err("Invalid remote copy path".into());
+        }
+        let encode = |s: &str| {
+            s.as_bytes()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        };
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(
+            input,
+            "remote_copy {} {}",
+            encode(source),
+            encode(destination)
+        )
+        .and_then(|_| input.flush())
+        .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::RemoteCopy => Ok(()),
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected remote copy response".into()),
+        }
+    }
+
     fn callstack(&mut self, event: u32, resolve: bool) -> Result<EventCallstack, String> {
         let stamp = self
             .capture_stamp
@@ -2578,9 +2647,54 @@ impl Drop for Process {
 pub struct Session {
     process: Arc<Mutex<Box<dyn Transport>>>,
     revision: Arc<AtomicU64>,
+    remote_url: Option<String>,
 }
 
 impl Session {
+    pub fn remote_server_url(&self) -> Option<&str> {
+        self.remote_url.as_deref()
+    }
+    pub fn is_remote_server(&self, url: &str) -> bool {
+        self.remote_url.as_deref() == Some(url)
+    }
+    pub fn remote_list(&self, path: Option<&str>) -> Result<crate::live::RemoteDirectory, String> {
+        if self.remote_url.is_none() {
+            return Err("This capture does not use a remote server".into());
+        }
+        if path.is_some_and(|p| p.is_empty() || p.contains('\0')) {
+            return Err("Invalid remote path".into());
+        }
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .remote_list(path)
+    }
+    pub fn remote_download(&self, source: &str, size: u64, root: &Path) -> Result<PathBuf, String> {
+        if self.remote_url.is_none()
+            || source.is_empty()
+            || source.contains('\0')
+            || size == 0
+            || !root.is_absolute()
+            || !root.is_dir()
+        {
+            return Err("Invalid remote capture path, size or download directory".into());
+        }
+        let folder = tempfile::Builder::new()
+            .prefix("remote-file-")
+            .tempdir_in(root)
+            .map_err(|e| e.to_string())?;
+        let path = folder.path().join("capture.rdc");
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .remote_copy(source, &path)?;
+        let metadata = path.metadata().map_err(|e| e.to_string())?;
+        if !metadata.is_file() || metadata.len() != size {
+            return Err("Downloaded capture size differs from remote listing".into());
+        }
+        let _ = folder.keep();
+        Ok(path)
+    }
     pub fn annotation_read(&self, name: &str) -> Result<AnnotationSection, String> {
         if name != "notes" && name != "bookmarks" && name != "renames" && name != "edits" {
             return Err("Unknown annotation section".into());
@@ -2695,6 +2809,7 @@ impl Session {
             Self {
                 process: Arc::new(Mutex::new(Box::new(process))),
                 revision: Arc::new(AtomicU64::new(0)),
+                remote_url: remote.map(str::to_owned),
             },
             snapshot,
         ))
@@ -3302,6 +3417,19 @@ pub mod test_support {
                 .collect())
         }
 
+        fn remote_list(
+            &mut self,
+            path: Option<&str>,
+        ) -> Result<crate::live::RemoteDirectory, String> {
+            Ok(crate::live::RemoteDirectory {
+                home: "/home".into(),
+                path: path.unwrap_or("/home").into(),
+                drivers: vec!["D3D11".into()],
+                proxies: vec![],
+                entries: vec![],
+            })
+        }
+
         fn callstack(&mut self, event: u32, resolve: bool) -> Result<EventCallstack, String> {
             Ok(EventCallstack {
                 event_id: event,
@@ -3585,6 +3713,16 @@ pub mod test_support {
         }
     }
 
+    pub fn recording_remote_session() -> (
+        Session,
+        Arc<Mutex<Vec<u32>>>,
+        Arc<Mutex<Vec<TextureSelection>>>,
+    ) {
+        let (mut session, events, selections) = recording_session();
+        session.remote_url = Some("fixture".into());
+        (session, events, selections)
+    }
+
     pub fn recording_session() -> (
         Session,
         Arc<Mutex<Vec<u32>>>,
@@ -3598,6 +3736,7 @@ pub mod test_support {
                 selections.clone(),
             )))),
             revision: Arc::new(AtomicU64::new(0)),
+            remote_url: None,
         };
         (session, events, selections)
     }
@@ -3908,6 +4047,7 @@ mod tests {
                 fails: false,
             }))),
             revision: Arc::new(AtomicU64::new(0)),
+            remote_url: None,
         };
         let old = session.next_revision();
         let current = session.next_revision();
@@ -3942,6 +4082,7 @@ mod tests {
                 resume: resume_rx,
             }))),
             revision: Arc::new(AtomicU64::new(0)),
+            remote_url: None,
         };
         let revision = session.next_revision();
         let old_session = session.clone();
@@ -3968,6 +4109,7 @@ mod tests {
                 fails: true,
             }))),
             revision: Arc::new(AtomicU64::new(0)),
+            remote_url: None,
         };
         let revision = session.next_revision();
         assert_eq!(session.select(4, revision).unwrap_err(), "replay failed");

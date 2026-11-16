@@ -178,9 +178,17 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     Some(v) => v.as_str().filter(|s| !s.is_empty()).map(Some),
                 };
                 match (url, path) {
-                    (Some(url), Some(path)) => browse_remote(&settings, url, path)
-                        .map(|directory| json!({"directory":directory}))
-                        .map_err(|e| ("remote_list_failed", e)),
+                    (Some(url), Some(path)) => {
+                        let directory = match &opened {
+                            Some((session, _)) if session.is_remote_server(url) => {
+                                session.remote_list(path)
+                            }
+                            _ => browse_remote(&settings, url, path),
+                        };
+                        directory
+                            .map(|directory| json!({"directory":directory}))
+                            .map_err(|e| ("remote_list_failed", e))
+                    }
                     _ => Err((
                         "invalid_arguments",
                         "remote_list requires url and optional path".into(),
@@ -206,7 +214,14 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     .and_then(|s| s.parse::<u64>().ok())
                     .filter(|n| *n > 0);
                 match (url, path, directory, size) {
-                    (Some(url), Some(path), Some(directory), Some(size)) => download_remote_capture(&settings, url, path, size, PathBuf::from(directory).as_path()).map(|path| json!({"path":path})).map_err(|e| ("remote_download_failed",e)),
+                    (Some(url), Some(path), Some(directory), Some(size)) => {
+                        let root = PathBuf::from(directory);
+                        let result = match &opened {
+                            Some((session, _)) if session.is_remote_server(url) => session.remote_download(path, size, &root),
+                            _ => download_remote_capture(&settings, url, path, size, &root),
+                        };
+                        result.map(|path| json!({"path":path})).map_err(|e| ("remote_download_failed",e))
+                    },
                     _ => Err(("invalid_arguments", "remote_download requires url, path, capture_directory and nonzero decimal-string size".into())),
                 }
             }
@@ -403,21 +418,33 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         "remote_url must be a nonempty string".into(),
                     ))
                 }
-                Some(path) => match Session::open_remote(
-                    &settings,
-                    PathBuf::from(path).as_path(),
-                    request.get("remote_url").and_then(Value::as_str),
-                ) {
-                    Ok((session, snapshot)) => {
-                        let value = json!({"capture": &snapshot});
-                        opened = Some((session, snapshot));
+                Some(path) => {
+                    let remote = request.get("remote_url").and_then(Value::as_str);
+                    if remote.is_some_and(|url| {
+                        opened
+                            .as_ref()
+                            .is_some_and(|(session, _)| session.is_remote_server(url))
+                    }) && PathBuf::from(path).is_file()
+                    {
+                        if let Some((session, _)) = opened.take() {
+                            let _ = session.close();
+                        }
                         selected_event = None;
                         pipeline = None;
                         mesh_selection = None;
-                        Ok(value)
                     }
-                    Err(message) => Err(("replay_open_failed", message)),
-                },
+                    match Session::open_remote(&settings, PathBuf::from(path).as_path(), remote) {
+                        Ok((session, snapshot)) => {
+                            let value = json!({"capture": &snapshot});
+                            opened = Some((session, snapshot));
+                            selected_event = None;
+                            pipeline = None;
+                            mesh_selection = None;
+                            Ok(value)
+                        }
+                        Err(message) => Err(("replay_open_failed", message)),
+                    }
+                }
                 None => Err(("invalid_arguments", "open requires a nonempty path".into())),
             },
             "snapshot" => match &opened {

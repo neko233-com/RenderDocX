@@ -1068,6 +1068,51 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       std::cout << "]}" << std::endl;
       continue;
     }
+    if(command.compare(0, 12, "remote_list ") == 0 || command.compare(0, 12, "remote_copy ") == 0)
+    {
+      if(!replay.remote) { error("This capture does not use a remote server"); continue; }
+      const bool copy = command.compare(0, 12, "remote_copy ") == 0;
+      std::istringstream args(command.substr(12));
+      std::string first, second, extra;
+      bytebuf first_bytes, second_bytes;
+      if(!(args >> first) || (copy && !(args >> second)) || (args >> extra) ||
+         !decode_section_hex(first, first_bytes) || (copy && !decode_section_hex(second, second_bytes)))
+      { error("Invalid remote file request"); continue; }
+      if(std::find(first_bytes.begin(), first_bytes.end(), byte(0)) != first_bytes.end() ||
+         std::find(second_bytes.begin(), second_bytes.end(), byte(0)) != second_bytes.end())
+      { error("Invalid remote path"); continue; }
+      const std::string first_path(first_bytes.begin(), first_bytes.end());
+      const std::string second_path(second_bytes.begin(), second_bytes.end());
+      if(copy)
+      {
+        if(first_path.empty() || second_path.empty()) { error("Invalid remote copy path"); continue; }
+        replay.remote->CopyCaptureFromRemote(first_path.c_str(), second_path.c_str(), nullptr);
+        std::cout << "\nRENDERDOCX/1 {\"type\":\"remote_copy\"}" << std::endl;
+        continue;
+      }
+      const rdcstr home = replay.remote->GetHomeFolder();
+      const rdcstr path = first_path.empty() ? home : rdcstr(first_path.c_str());
+      if(path.empty()) { error("Remote server returned an empty directory"); continue; }
+      const auto files = replay.remote->ListFolder(path);
+      const auto drivers = replay.remote->RemoteSupportedReplays();
+      const auto proxies = replay.remote->LocalProxies();
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"remote_directory\",\"home\":"; json_string(home);
+      std::cout << ",\"path\":"; json_string(path);
+      std::cout << ",\"drivers\":[";
+      for(size_t i = 0; i < drivers.size(); ++i) { if(i) std::cout << ','; json_string(drivers[i]); }
+      std::cout << "],\"proxies\":[";
+      for(size_t i = 0; i < proxies.size(); ++i) { if(i) std::cout << ','; json_string(proxies[i]); }
+      std::cout << "],\"entries\":[";
+      for(size_t i = 0; i < files.size(); ++i)
+      {
+        if(i) std::cout << ',';
+        std::cout << "{\"name\":"; json_string(files[i].filename);
+        std::cout << ",\"flags\":" << uint32_t(files[i].flags) << ",\"last_modified\":" << files[i].lastmod
+                  << ",\"size\":\"" << files[i].size << "\"}";
+      }
+      std::cout << "]}" << std::endl;
+      continue;
+    }
     if(command.compare(0, 10, "callstack ") == 0)
     {
       std::istringstream args(command.substr(10));
