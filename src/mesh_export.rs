@@ -76,7 +76,11 @@ mod tests {
             num_indices: 2,
             ..Default::default()
         };
-        let read = |_: &str, offset: u64, _: u32| Ok((offset as f32).to_le_bytes().to_vec());
+        let read = |_: &str, offset: u64, length: u32| {
+            Ok((0..length / 4)
+                .flat_map(|i| ((offset + u64::from(i * 4)) as f32).to_le_bytes())
+                .collect())
+        };
         assert_eq!(write_csv(&path, &info, read).unwrap(), 2);
         let result = std::fs::read_to_string(&path).unwrap();
         assert!(result.contains("0,,0,false,0,,,,\n1,,1,false,4,,,,\n"));

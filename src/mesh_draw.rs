@@ -1,5 +1,8 @@
 //! Draw-order position rows built from RenderDoc post-transform mesh buffers.
-use crate::{mesh_indices, mesh_positions, replay::MeshInfo};
+use crate::{
+    mesh_indices, mesh_positions,
+    replay::{BUFFER_PAGE_LIMIT, MeshInfo},
+};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -46,6 +49,45 @@ where
         .component_count
         .saturating_mul(info.component_byte_width);
     let mut cache: HashMap<u32, Option<Vec<f32>>> = HashMap::new();
+    if supported && info.vertex_bound {
+        let mut vertices: Vec<u32> = match &indices {
+            Some(indices) => indices.iter().filter_map(|index| index.vertex).collect(),
+            None => (offset..offset + count).collect(),
+        };
+        vertices.sort_unstable();
+        vertices.dedup();
+        let mut first = 0;
+        while first < vertices.len() {
+            let mut end = first + 1;
+            while end < vertices.len()
+                && vertices[end - 1].checked_add(1) == Some(vertices[end])
+                && u64::from(vertices[end] - vertices[first]) * u64::from(info.vertex_stride)
+                    + u64::from(width)
+                    <= u64::from(BUFFER_PAGE_LIMIT)
+            {
+                end += 1;
+            }
+            let start = u64::from(vertices[first]) * u64::from(info.vertex_stride);
+            let length = u64::from(vertices[end - 1] - vertices[first])
+                * u64::from(info.vertex_stride)
+                + u64::from(width);
+            let bytes = read("vertex", start, length as u32)?;
+            for &vertex in &vertices[first..end] {
+                let relative = u64::from(vertex - vertices[first]) * u64::from(info.vertex_stride);
+                let position = usize::try_from(relative)
+                    .ok()
+                    .and_then(|begin| {
+                        let finish = begin.checked_add(width as usize)?;
+                        let element = bytes.get(begin..finish)?;
+                        mesh_positions::decode(info, element, start.checked_add(relative)?)
+                    })
+                    .and_then(|mut positions| positions.pop())
+                    .map(|position| position.values);
+                cache.insert(vertex, position);
+            }
+            first = end;
+        }
+    }
     let mut rows = Vec::with_capacity(count as usize);
     for i in 0..count {
         let row = offset + i;
@@ -76,14 +118,6 @@ where
             unavailable = Some("unsupported_format");
             None
         } else if let Some(vertex) = vertex {
-            if !cache.contains_key(&vertex) {
-                let start = u64::from(vertex) * u64::from(info.vertex_stride);
-                let bytes = read("vertex", start, width)?;
-                let position = mesh_positions::decode(info, &bytes, start)
-                    .and_then(|mut positions| positions.pop())
-                    .map(|position| position.values);
-                cache.insert(vertex, position);
-            }
             let result = cache.get(&vertex).cloned().flatten();
             if result.is_none() {
                 unavailable = Some("vertex_out_of_bounds");
@@ -161,13 +195,77 @@ mod tests {
         };
         let page = page(&info, 1, 4, |kind, offset, length| {
             assert_eq!(kind, "vertex");
-            assert_eq!(length, 4);
-            Ok((offset as f32).to_le_bytes().to_vec())
+            assert_eq!(length, 8);
+            Ok((0..length / 4)
+                .flat_map(|i| ((offset + u64::from(i * 4)) as f32).to_le_bytes())
+                .collect())
         })
         .unwrap();
         assert_eq!(page.rows.len(), 2);
         assert_eq!(page.rows[0].vertex, Some(1));
         assert_eq!(page.rows[1].position, Some(vec![8.0]));
         assert!(super::page(&info, 0, PAGE_LIMIT + 1, |_, _, _| unreachable!()).is_err());
+    }
+
+    #[test]
+    fn batches_adjacent_vertices_but_not_sparse_ranges() {
+        let info = MeshInfo {
+            stage: 1,
+            index_bound: true,
+            index_stride: 1,
+            vertex_bound: true,
+            vertex_stride: 4,
+            component_type: 1,
+            component_byte_width: 4,
+            component_count: 1,
+            num_indices: 4,
+            ..Default::default()
+        };
+        let mut reads = Vec::new();
+        let result = page(&info, 0, 4, |kind, offset, length| {
+            if kind == "index" {
+                return Ok(vec![2, 1, 2, 9]);
+            }
+            reads.push((offset, length));
+            Ok((0..length / 4)
+                .flat_map(|i| ((offset / 4 + u64::from(i)) as f32).to_le_bytes())
+                .collect())
+        })
+        .unwrap();
+        assert_eq!(reads, [(4, 8), (36, 4)]);
+        assert_eq!(
+            result
+                .rows
+                .iter()
+                .map(|row| row.position.clone())
+                .collect::<Vec<_>>(),
+            [
+                Some(vec![2.0]),
+                Some(vec![1.0]),
+                Some(vec![2.0]),
+                Some(vec![9.0])
+            ]
+        );
+    }
+
+    #[test]
+    fn grouped_short_read_preserves_individual_bounds() {
+        let info = MeshInfo {
+            stage: 1,
+            vertex_bound: true,
+            vertex_stride: 4,
+            component_type: 1,
+            component_byte_width: 4,
+            component_count: 1,
+            num_indices: 2,
+            ..Default::default()
+        };
+        let result = page(&info, 0, 2, |_, _, length| {
+            assert_eq!(length, 8);
+            Ok(7.0f32.to_le_bytes().to_vec())
+        })
+        .unwrap();
+        assert_eq!(result.rows[0].position, Some(vec![7.0]));
+        assert_eq!(result.rows[1].unavailable, Some("vertex_out_of_bounds"));
     }
 }
