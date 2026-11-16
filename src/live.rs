@@ -101,11 +101,23 @@ pub struct LaunchConfiguration {
 }
 impl LaunchConfiguration {
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_remote()?;
+        if self
+            .working_directory
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute() || !path.is_dir())
+        {
+            return Err("Invalid local working directory".into());
+        }
+        Ok(())
+    }
+
+    pub fn validate_remote(&self) -> Result<(), String> {
         if self.arguments.contains('\0')
             || self
                 .working_directory
                 .as_ref()
-                .is_some_and(|path| !path.is_absolute() || !path.is_dir())
+                .is_some_and(|path| path.to_str().is_none_or(|value| value.contains('\0')))
         {
             return Err("Invalid arguments or working directory".into());
         }
@@ -449,6 +461,40 @@ impl LiveSession {
         session.capture_template = Some(template);
         Ok(session)
     }
+    pub fn launch_remote(
+        settings: &Settings,
+        url: &str,
+        app: &str,
+        config: &LaunchConfiguration,
+    ) -> Result<Self, String> {
+        if !valid_remote_url(url) || app.trim().is_empty() || app.contains('\0') {
+            return Err("Invalid remote server URL or application path".into());
+        }
+        config.validate_remote()?;
+        let mut args: Vec<std::ffi::OsString> = vec![
+            "--launch-remote2".into(),
+            app.into(),
+            url.into(),
+            config.arguments.as_str().into(),
+            config
+                .working_directory
+                .as_deref()
+                .unwrap_or(Path::new(""))
+                .as_os_str()
+                .into(),
+        ];
+        args.extend(
+            config
+                .options
+                .wire()
+                .into_iter()
+                .map(|value| value.to_string().into()),
+        );
+        let refs: Vec<&std::ffi::OsStr> = args.iter().map(|arg| arg.as_os_str()).collect();
+        let timeout = Duration::from_secs(30 + u64::from(config.options.delay_for_debugger));
+        Self::start(settings, &refs, Some(&config.environment), timeout)
+    }
+
     pub fn connect(settings: &Settings, ident: u32) -> Result<Self, String> {
         if ident == 0 {
             return Err("Target ident must be nonzero".into());

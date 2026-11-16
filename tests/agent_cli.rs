@@ -2489,3 +2489,100 @@ fn remote_open_rejects_invalid_url() {
     }
     agent.quit();
 }
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires matching RenderDoc server and live D3D11 fixtures"]
+fn real_remote_target_launch_and_capture_loopback() {
+    use std::{
+        net::TcpListener,
+        os::windows::process::CommandExt,
+        path::PathBuf,
+        time::{Duration, Instant},
+    };
+    struct Server(Child);
+    impl Drop for Server {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    struct Stop(PathBuf);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            let _ = std::fs::write(&self.0, b"stop");
+        }
+    }
+    let bridge = PathBuf::from(std::env::var_os("RENDERDOCX_TEST_BRIDGE").unwrap());
+    let fixture = PathBuf::from(std::env::var_os("RENDERDOCX_TEST_LIVE_FIXTURE").unwrap());
+    let server_exe = std::env::var_os("RENDERDOCX_TEST_REMOTE_SERVER").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let stop = dir.path().join("stop.flag");
+    let _stop = Stop(stop.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let _server = Server(
+        Command::new(server_exe)
+            .arg(port.to_string())
+            .creation_flags(0x08000000)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    let mut agent = Agent::new(bridge.to_str());
+    let request = serde_json::json!({"command":"target_launch", "path":fixture,
+        "remote_url":format!("127.0.0.1:{port}"), "configuration": {
+        "arguments":format!("\"{}\"",stop.display()), "working_directory":dir.path(),
+        "options":{"allow_vsync":false,"soft_memory_limit":64},
+        "environment":[{"name":"RENDERDOCX_FIXTURE_MARKER","value":"开始:中间:结束", "operation":"set","separator":"no_sep"}]}});
+    let launched = agent.send(&request.to_string());
+    assert_eq!(launched["ok"], true, "{launched}");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let info_path = PathBuf::from(format!("{}.info", stop.display()));
+    while !info_path.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let info = std::fs::read_to_string(info_path).expect("remote fixture settings");
+    assert!(info.starts_with("1 1 0 "), "{info}");
+    let mut ready = false;
+    while !ready && Instant::now() < deadline {
+        let events = agent.send(r#"{"command":"target_events"}"#);
+        ready = events["data"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["type"] == "api" && e["supported"] == true && e["presenting"] == true);
+        if !ready {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    assert!(ready, "remote target did not become ready");
+    assert_eq!(
+        agent.send(r#"{"command":"target_trigger","frames":1}"#)["ok"],
+        true
+    );
+    let mut captured = false;
+    while !captured && Instant::now() < deadline {
+        let events = agent.send(r#"{"command":"target_events"}"#);
+        captured = events["data"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["type"] == "capture");
+        if !captured {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    assert!(captured, "remote target did not capture");
+    assert_eq!(agent.send(r#"{"command":"target_close"}"#)["ok"], true);
+    std::fs::write(&stop, b"stop").unwrap();
+    let done = PathBuf::from(format!("{}.done", stop.display()));
+    while !done.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(done.exists(), "fixture did not exit");
+    agent.quit();
+}

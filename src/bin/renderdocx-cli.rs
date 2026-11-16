@@ -189,19 +189,25 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         },
                     ),
                 };
-                match (&target, app, template, configuration) {
-                    (Some(_), _, _, _) => {
-                        Err(("target_open", "Close the existing target first".into()))
-                    }
-                    (None, Some(app), Some(template), Some(configuration))
-                        if configuration.validate().is_ok() =>
-                    {
-                        match LiveSession::launch(
-                            &settings,
-                            PathBuf::from(app).as_path(),
-                            PathBuf::from(template).as_path(),
-                            &configuration,
-                        ) {
+                let remote = match request.get("remote_url") {
+                    None => Some(None),
+                    Some(value) => value.as_str().filter(|s| !s.trim().is_empty()).map(Some),
+                };
+                match (&target, app, template, configuration, remote) {
+                    (Some(_), _, _, _, _) => Err(("target_open", "Close the existing target first".into())),
+                    (None, Some(_), template, Some(configuration), Some(remote))
+                        if (remote.is_some() && configuration.validate_remote().is_err()) ||
+                           (remote.is_none() && (template.is_none() || configuration.validate().is_err())) =>
+                        Err(("invalid_arguments", "Invalid target launch configuration or missing capture_directory".into())),
+                    (None, Some(app), template, Some(configuration), Some(remote)) => {
+                        let result = match remote {
+                            Some(url) => LiveSession::launch_remote(&settings, url, app, &configuration),
+                            None => match template {
+                                Some(directory) => LiveSession::launch(&settings, PathBuf::from(app).as_path(), PathBuf::from(directory).as_path(), &configuration),
+                                None => Err("A local capture_directory is required".into()),
+                            },
+                        };
+                        match result {
                             Ok(session) => {
                                 let value = json!({"target":session.connected, "capture_template":session.capture_template});
                                 target = Some(session);
@@ -210,11 +216,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                             Err(error) => Err(("target_launch_failed", error)),
                         }
                     }
-                    _ => Err((
-                        "invalid_arguments",
-                        "target_launch requires path, capture_directory and a valid configuration"
-                            .into(),
-                    )),
+                    _ => Err(("invalid_arguments", "target_launch requires path, a valid configuration and either remote_url or capture_directory".into())),
                 }
             }
             "target_connect" => {

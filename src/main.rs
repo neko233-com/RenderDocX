@@ -526,6 +526,8 @@ struct Workspace {
     live_targets: Vec<u32>,
     live_target_url: Option<String>,
     remote_target_url: Entity<InputState>,
+    remote_app_path: Entity<InputState>,
+    remote_working_directory: Entity<InputState>,
     show_launch_config: bool,
     launch_arguments: Entity<InputState>,
     launch_delay: Entity<InputState>,
@@ -1282,6 +1284,15 @@ impl Workspace {
     }
 
     fn launch_live(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.launch_live_with_remote(path, None, cx);
+    }
+
+    fn launch_live_with_remote(
+        &mut self,
+        path: PathBuf,
+        remote: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         if self.live.is_some() || self.live_starting {
             self.status = Some(
                 self.t(
@@ -1315,11 +1326,26 @@ impl Workspace {
         options.soft_memory_limit = memory;
         let config = LaunchConfiguration {
             arguments: self.launch_arguments.read(cx).value().to_string(),
-            working_directory: self.launch_working_directory.clone(),
+            working_directory: if remote.is_some() {
+                let value = self.remote_working_directory.read(cx).value().to_string();
+                if value.is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(value))
+                }
+            } else {
+                self.launch_working_directory.clone()
+            },
             options,
             environment: self.launch_environment.clone(),
         };
-        if config.validate().is_err() {
+        if (if remote.is_some() {
+            config.validate_remote()
+        } else {
+            config.validate()
+        })
+        .is_err()
+        {
             self.status = Some(
                 self.t(
                     "Invalid working directory or launch arguments.",
@@ -1347,8 +1373,13 @@ impl Workspace {
         );
         cx.notify();
         let task = cx.background_executor().spawn(async move {
-            let directory = capture_directory()?;
-            LiveSession::launch(&settings, &path, &directory, &config)
+            if let Some(url) = remote {
+                let app = path.to_str().ok_or("Invalid remote application path")?;
+                LiveSession::launch_remote(&settings, &url, app, &config)
+            } else {
+                let directory = capture_directory()?;
+                LiveSession::launch(&settings, &path, &directory, &config)
+            }
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -10298,7 +10329,7 @@ impl Render for Workspace {
                 )
             })
             .child(div().flex().flex_wrap().gap_2()
-                .child(Input::new(&self.remote_target_url).id("remote-target-url").aria_label(self.t("Remote target URL", "远程目标地址", "リモートターゲット URL", "원격 대상 URL")).w(px(260.)))
+                .child(div().flex().flex_col().gap_1().child(self.t("Remote server / target address", "远程服务器 / 目标地址", "リモートサーバー / ターゲットアドレス", "원격 서버 / 대상 주소")).child(Input::new(&self.remote_target_url).id("remote-target-url").aria_label(self.t("Remote target URL", "远程目标地址", "リモートターゲット URL", "원격 대상 URL")).w(px(260.))))
                 .child(button("discover-remote-targets", self.t("Discover remote targets", "查找远程目标", "リモートターゲットを検索", "원격 대상 검색"), false, |this, cx| {
                     let url = this.remote_target_url.read(cx).value().to_string();
                     this.discover_target(Some(url), cx);
@@ -10313,6 +10344,17 @@ impl Render for Workspace {
                     if let Some(path) = rfd::FileDialog::new().add_filter("RenderDoc", &["rdc"]).pick_file() {
                         this.open_with_remote(path, Some(url), cx);
                     }
+                }, cx)))
+            .child(div().flex().flex_wrap().gap_2()
+                .child(div().flex().flex_col().gap_1().child(self.t("Remote application path", "远程应用路径", "リモートアプリのパス", "원격 앱 경로")).child(Input::new(&self.remote_app_path).id("remote-app-path").aria_label(self.t("Remote application path", "远程应用路径", "リモートアプリのパス", "원격 앱 경로")).w(px(300.))))
+                .child(div().flex().flex_col().gap_1().child(self.t("Remote working directory (optional)", "远程工作目录（可选）", "リモート作業ディレクトリ（任意）", "원격 작업 디렉터리 (선택)")).child(Input::new(&self.remote_working_directory).id("remote-working-directory").aria_label(self.t("Remote working directory (optional)", "远程工作目录（可选）", "リモート作業ディレクトリ（任意）", "원격 작업 디렉터리 (선택)")).w(px(260.))))
+                .child(button("launch-remote", self.t("Launch remote capture", "启动远程捕获", "リモートキャプチャを起動", "원격 캡처 시작"), false, |this, cx| {
+                    let url = this.remote_target_url.read(cx).value().to_string();
+                    let app = this.remote_app_path.read(cx).value().to_string();
+                    if url.trim().is_empty() || app.trim().is_empty() {
+                        this.status = Some(this.t("Enter a remote server URL and application path.", "请输入远程服务器地址和应用路径。", "リモートサーバーの URL とアプリのパスを入力してください。", "원격 서버 URL과 앱 경로를 입력하세요.").to_owned());
+                        cx.notify();
+                    } else { this.launch_live_with_remote(PathBuf::from(app), Some(url), cx); }
                 }, cx)))
             .when(!live_targets.is_empty(), |view| {
                 view.child(
@@ -10550,6 +10592,8 @@ fn main() {
                 cx,
                 |window, cx| {
                     let remote_target_url = cx.new(|cx| InputState::new(window, cx));
+                    let remote_app_path = cx.new(|cx| InputState::new(window, cx));
+                    let remote_working_directory = cx.new(|cx| InputState::new(window, cx));
                     let launch_arguments = cx.new(|cx| InputState::new(window, cx));
                     let launch_delay = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let launch_memory = cx.new(|cx| InputState::new(window, cx).default_value("0"));
@@ -10673,6 +10717,8 @@ fn main() {
                         live_targets: Vec::new(),
                         live_target_url: None,
                         remote_target_url,
+                        remote_app_path,
+                        remote_working_directory,
                         show_launch_config: false,
                         launch_arguments,
                         launch_delay,
@@ -10731,6 +10777,8 @@ mod ui_tests {
                 cx,
                 |window, cx| {
                     let remote_target_url = cx.new(|cx| InputState::new(window, cx));
+                    let remote_app_path = cx.new(|cx| InputState::new(window, cx));
+                    let remote_working_directory = cx.new(|cx| InputState::new(window, cx));
                     let launch_arguments = cx.new(|cx| InputState::new(window, cx));
                     let launch_delay = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let launch_memory = cx.new(|cx| InputState::new(window, cx).default_value("0"));
@@ -10871,6 +10919,8 @@ mod ui_tests {
                         live_targets: Vec::new(),
                         live_target_url: None,
                         remote_target_url,
+                        remote_app_path,
+                        remote_working_directory,
                         show_launch_config: false,
                         launch_arguments,
                         launch_delay,
@@ -11062,6 +11112,8 @@ mod ui_tests {
                 cx,
                 |window, cx| {
                     let remote_target_url = cx.new(|cx| InputState::new(window, cx));
+                    let remote_app_path = cx.new(|cx| InputState::new(window, cx));
+                    let remote_working_directory = cx.new(|cx| InputState::new(window, cx));
                     let launch_arguments = cx.new(|cx| InputState::new(window, cx));
                     let launch_delay = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let launch_memory = cx.new(|cx| InputState::new(window, cx).default_value("0"));
@@ -11307,6 +11359,8 @@ mod ui_tests {
                         live_targets: Vec::new(),
                         live_target_url: None,
                         remote_target_url,
+                        remote_app_path,
+                        remote_working_directory,
                         show_launch_config: false,
                         launch_arguments,
                         launch_delay,

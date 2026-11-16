@@ -104,8 +104,9 @@ int run(const std::vector<std::string> &args)
     { failure(detail(result.result)); RENDERDOC_ShutdownReplay(); return 1; }
     ident = result.ident;
   }
-  else if(args[1] == "--launch2" && args.size() == 18)
+  else if((args[1] == "--launch2" || args[1] == "--launch-remote2") && args.size() == 18)
   {
+    const bool remote_launch = args[1] == "--launch-remote2";
     uint32_t values[12] = {};
     for(size_t i = 0; i < 12; ++i)
     {
@@ -140,8 +141,19 @@ int run(const std::vector<std::string> &args)
     options.verifyBufferAccess = values[6] != 0; options.hookIntoChildren = values[7] != 0;
     options.refAllResources = values[8] != 0; options.captureAllCmdLists = values[9] != 0;
     options.debugOutputMute = values[10] != 0; options.softMemoryLimit = values[11];
-    ExecuteResult result = RENDERDOC_ExecuteAndInject(args[2].c_str(), args[5].c_str(), args[4].c_str(), modifications, args[3].c_str(), options, false);
-    if(!result.result.OK() || !result.ident) { failure(detail(result.result)); RENDERDOC_ShutdownReplay(); return 1; }
+    ExecuteResult result;
+    if(remote_launch)
+    {
+      if(args[3].empty()) { failure("Remote server URL is empty"); RENDERDOC_ShutdownReplay(); return 2; }
+      IRemoteServer *server = nullptr;
+      ResultDetails connected = RENDERDOC_CreateRemoteServerConnection(args[3].c_str(), &server);
+      if(!connected.OK() || !server) { failure(connected.OK() ? "Remote server returned no connection" : detail(connected)); RENDERDOC_ShutdownReplay(); return 1; }
+      result = server->ExecuteAndInject(args[2].c_str(), args[5].c_str(), args[4].c_str(), modifications, options);
+      server->ShutdownConnection();
+      target_url = args[3].c_str();
+    }
+    else result = RENDERDOC_ExecuteAndInject(args[2].c_str(), args[5].c_str(), args[4].c_str(), modifications, args[3].c_str(), options, false);
+    if(!result.result.OK() || !result.ident) { failure(result.result.OK() ? "Target launch returned no target identifier" : detail(result.result)); RENDERDOC_ShutdownReplay(); return 1; }
     ident = result.ident;
   }
   else if(args[1] == "--connect-pid" && args.size() == 3)
