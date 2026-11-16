@@ -20,6 +20,7 @@ use renderdocx::{
         MeshInfo, MeshSelection, Pipeline, SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session,
         ShaderReport, Snapshot, StructurePage, StructuredNode, TextureSelection,
     },
+    vertex_input::{INPUT_PAGE_LIMIT, InputPage},
 };
 use std::path::PathBuf;
 
@@ -168,6 +169,7 @@ enum CaptureTab {
     Buffers,
     Shaders,
     Mesh,
+    VertexInput,
 }
 #[derive(Clone, Copy)]
 enum TextureField {
@@ -200,6 +202,7 @@ struct Workspace {
     shader_data: Option<ShaderReport>,
     structure: StructureView,
     mesh: MeshView,
+    input_page: Option<InputPage>,
     open_revision: u64,
     selection_revision: u64,
     replay_pending: bool,
@@ -688,6 +691,7 @@ impl Workspace {
                         this.shader_data = None;
                         this.structure = StructureView::default();
                         this.mesh = MeshView::default();
+                        this.input_page = None;
                         this.replay_pending = false;
                         this.export_pending = false;
                         this.preview = None;
@@ -750,6 +754,7 @@ impl Workspace {
         self.shader_data = None;
         self.structure = StructureView::default();
         self.mesh = MeshView::default();
+        self.input_page = None;
         let open_revision = self.open_revision;
         self.status = Some(
             self.t(
@@ -970,6 +975,94 @@ impl Workspace {
                                 "着色器查看失败",
                                 "シェーダーを表示できません",
                                 "셰이더 확인 실패"
+                            )
+                        ));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn read_vertex_input(&mut self, offset: u32, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            self.status = Some(
+                self.t(
+                    "Wait for the current operation.",
+                    "请等待当前操作完成。",
+                    "現在の処理が完了するまでお待ちください。",
+                    "현재 작업이 끝날 때까지 기다려 주세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let Some(action) = self
+            .selected
+            .and_then(|index| snapshot.actions.get(index))
+            .cloned()
+        else {
+            self.status = Some(
+                self.t(
+                    "Select a draw action first.",
+                    "请先选择绘制操作。",
+                    "先に描画アクションを選択してください。",
+                    "먼저 그리기 작업을 선택하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let Some(pipeline) = self.pipeline.clone() else {
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let buffers = snapshot.buffers.clone();
+        let revision = self.open_revision;
+        let selection_revision = self.selection_revision;
+        self.resource_pending = true;
+        self.status = Some(
+            self.t(
+                "Loading vertex inputs…",
+                "正在加载顶点输入…",
+                "頂点入力を読み込み中…",
+                "정점 입력을 불러오는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            session.vertex_input_page(&action, &pipeline, &buffers, 0, offset, INPUT_PAGE_LIMIT)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision || this.selection_revision != selection_revision {
+                    return;
+                }
+                this.resource_pending = false;
+                match result {
+                    Ok(page) => {
+                        this.input_page = Some(page);
+                        this.status = None;
+                    }
+                    Err(error) => {
+                        this.input_page = None;
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Could not inspect vertex inputs",
+                                "无法查看顶点输入",
+                                "頂点入力を表示できません",
+                                "정점 입력을 확인할 수 없습니다"
                             )
                         ));
                     }
@@ -1529,6 +1622,7 @@ impl Workspace {
             _ => Vec::new(),
         };
         let count = match self.tab {
+            CaptureTab::VertexInput => self.input_page.as_ref().map_or(0, |page| page.rows.len()),
             CaptureTab::Mesh => mesh_lines.len(),
             CaptureTab::Textures => snapshot.textures.len(),
             CaptureTab::Buffers => snapshot.buffers.len(),
@@ -1794,7 +1888,55 @@ impl Workspace {
         let status = self.status.clone();
         let preview_path = self.preview.as_ref().map(|preview| preview.path.clone());
 
-        let list = if self.tab == CaptureTab::Mesh {
+        let list = if self.tab == CaptureTab::VertexInput {
+            uniform_list(
+                "capture-vertex-input",
+                count,
+                cx.processor(|this, range: std::ops::Range<usize>, _, _| {
+                    range
+                        .filter_map(|index| {
+                            let row = this.input_page.as_ref()?.rows.get(index)?;
+                            let values = row
+                                .attributes
+                                .iter()
+                                .map(|attribute| {
+                                    let value = attribute
+                                        .values
+                                        .as_ref()
+                                        .map(|v| v.join(", "))
+                                        .or_else(|| attribute.hex.clone())
+                                        .unwrap_or_else(|| "—".into());
+                                    format!("{}: {value}", attribute.name)
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" · ");
+                            let display = if row.restart {
+                                format!("{}: ↻", row.row)
+                            } else {
+                                format!(
+                                    "{}  [{}]  {values}",
+                                    row.row,
+                                    row.vertex_index
+                                        .map(|v| v.to_string())
+                                        .unwrap_or_else(|| "—".into())
+                                )
+                            };
+                            Some(
+                                div()
+                                    .id(("vertex-input-row", index))
+                                    .test_support()
+                                    .h(px(32.))
+                                    .px_3()
+                                    .overflow_hidden()
+                                    .child(display),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .flex_1()
+            .into_any_element()
+        } else if self.tab == CaptureTab::Mesh {
             let lines = std::sync::Arc::new(mesh_lines);
             uniform_list(
                 "capture-mesh",
@@ -2190,7 +2332,25 @@ impl Workspace {
             .into_any_element()
         };
 
-        let detail_view = if self.tab == CaptureTab::Mesh {
+        let detail_view = if self.tab == CaptureTab::VertexInput {
+            let heading = self.t("VERTEX INPUT", "顶点输入", "頂点入力", "정점 입력");
+            let note = self.t("Rows follow draw order. Unsupported formats are shown as raw bytes; unavailable attributes use —.", "行按绘制顺序排列；尚未解码的格式显示原始字节，不可用的属性显示 —。", "行は描画順です。未対応形式はバイトで、利用できない属性は — で表示します。", "행은 그리기 순서입니다. 지원하지 않는 형식은 바이트로, 사용할 수 없는 속성은 —로 표시합니다.");
+            let mut view = div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(div().text_sm().text_color(rgb(0x82aaff)).child(heading))
+                .child(note);
+            if let Some(page) = &self.input_page {
+                view = view
+                    .child(format!(
+                        "{event_label}: {} · {instances_label}: {}",
+                        page.event_id, page.instance
+                    ))
+                    .child(format!("{offset_label}: {} / {}", page.offset, page.total));
+            }
+            view
+        } else if self.tab == CaptureTab::Mesh {
             let heading = self.t("MESH OUTPUT", "网格输出", "メッシュ出力", "메시 출력");
             let empty = self.t(
                 "Select a draw or mesh event.",
@@ -2877,6 +3037,7 @@ impl Workspace {
                             this.shader_data = None;
                             this.structure = StructureView::default();
                             this.mesh = MeshView::default();
+                            this.input_page = None;
                             this.preview = None;
                             this.status = None;
                             cx.notify();
@@ -3019,6 +3180,19 @@ impl Workspace {
                                         },
                                         cx,
                                     ))
+                                    .child(button(
+                                        "vertex-input-tab",
+                                        self.t("Vertex input", "顶点输入", "頂点入力", "정점 입력"),
+                                        self.tab == CaptureTab::VertexInput,
+                                        |this, cx| {
+                                            this.tab = CaptureTab::VertexInput;
+                                            if this.input_page.is_none() {
+                                                this.read_vertex_input(0, cx);
+                                            }
+                                            cx.notify();
+                                        },
+                                        cx,
+                                    ))
                                     .child(
                                         div()
                                             .self_center()
@@ -3027,6 +3201,50 @@ impl Workspace {
                                             .child(count.to_string()),
                                     ),
                             )
+                            .when(self.tab == CaptureTab::VertexInput, |view| {
+                                view.child(
+                                    div()
+                                        .flex()
+                                        .gap_2()
+                                        .px_3()
+                                        .pb_2()
+                                        .child(button(
+                                            "vertex-input-previous",
+                                            previous_label,
+                                            false,
+                                            |this, cx| {
+                                                if let Some(page) = &this.input_page {
+                                                    if page.offset > 0 {
+                                                        this.read_vertex_input(
+                                                            page.offset
+                                                                .saturating_sub(INPUT_PAGE_LIMIT),
+                                                            cx,
+                                                        );
+                                                    }
+                                                }
+                                            },
+                                            cx,
+                                        ))
+                                        .child(button(
+                                            "vertex-input-next",
+                                            next_label,
+                                            false,
+                                            |this, cx| {
+                                                if let Some(page) = &this.input_page {
+                                                    if let Some(next) = page
+                                                        .offset
+                                                        .checked_add(page.rows.len() as u32)
+                                                    {
+                                                        if next < page.total {
+                                                            this.read_vertex_input(next, cx);
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            cx,
+                                        )),
+                                )
+                            })
                             .when(self.tab == CaptureTab::Mesh, |view| {
                                 view.child(
                                     div()
@@ -4053,6 +4271,7 @@ fn main() {
                         shader_data: None,
                         structure: StructureView::default(),
                         mesh: MeshView::default(),
+                        input_page: None,
                         open_revision: 0,
                         selection_revision: 0,
                         replay_pending: false,
@@ -4162,6 +4381,7 @@ mod ui_tests {
                         shader_data: None,
                         structure: StructureView::default(),
                         mesh: MeshView::default(),
+                        input_page: None,
                         open_revision: 0,
                         selection_revision: 0,
                         replay_pending: false,
@@ -4336,6 +4556,10 @@ mod ui_tests {
                                     flags: 2,
                                     indices: 3,
                                     instances: 1,
+                                    base_vertex: Some(0),
+                                    index_offset: Some(0),
+                                    vertex_offset: Some(0),
+                                    instance_offset: Some(0),
                                     name: "Draw".into(),
                                     api_events: vec![
                                         renderdocx::replay::ApiEvent {
@@ -4360,6 +4584,10 @@ mod ui_tests {
                                     flags: 2,
                                     indices: 3,
                                     instances: 1,
+                                    base_vertex: Some(0),
+                                    index_offset: Some(0),
+                                    vertex_offset: Some(0),
+                                    instance_offset: Some(0),
                                     name: "Child".into(),
                                     api_events: Vec::new(),
                                 },
@@ -4371,6 +4599,10 @@ mod ui_tests {
                                     flags: 2,
                                     indices: 3,
                                     instances: 1,
+                                    base_vertex: Some(0),
+                                    index_offset: Some(0),
+                                    vertex_offset: Some(0),
+                                    instance_offset: Some(0),
                                     name: "Next".into(),
                                     api_events: Vec::new(),
                                 },
@@ -4420,6 +4652,7 @@ mod ui_tests {
                         shader_data: None,
                         structure: StructureView::default(),
                         mesh: MeshView::default(),
+                        input_page: None,
                         open_revision: 0,
                         selection_revision: 0,
                         replay_pending: false,
@@ -5089,8 +5322,43 @@ mod ui_tests {
                     );
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
-                cx.update_window(handle.into(), |_, window, cx| window.click("mesh-tab", cx))
-                    .unwrap();
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.click("vertex-input-tab", cx)
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx)
+                            .input_page
+                            .as_ref()
+                            .is_some_and(|page| page.event_id == draw_event)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real vertex input did not load: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update(|cx| {
+                    let page = view.read(cx).input_page.as_ref().unwrap();
+                    let position = page.rows[0]
+                        .attributes
+                        .iter()
+                        .find(|a| a.name == "POSITION")
+                        .unwrap();
+                    assert_eq!(position.values.as_ref().unwrap(), &["3", "3"]);
+                });
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    assert!(window.find(("vertex-input-row", 0usize)).visible());
+                    window.click("mesh-tab", cx);
+                })
+                .unwrap();
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
                 loop {
                     cx.run_until_parked();

@@ -20,6 +20,14 @@ pub struct Action {
     pub flags: u32,
     pub indices: u32,
     pub instances: u32,
+    #[serde(default)]
+    pub base_vertex: Option<i32>,
+    #[serde(default)]
+    pub index_offset: Option<u32>,
+    #[serde(default)]
+    pub vertex_offset: Option<u32>,
+    #[serde(default)]
+    pub instance_offset: Option<u32>,
     pub name: String,
     #[serde(default)]
     pub api_events: Vec<ApiEvent>,
@@ -262,6 +270,16 @@ pub struct VertexInput {
     pub per_instance: bool,
     pub instance_rate: i32,
     pub format: String,
+    #[serde(default)]
+    pub format_type: Option<u32>,
+    #[serde(default)]
+    pub component_type: Option<u32>,
+    #[serde(default)]
+    pub component_count: Option<u32>,
+    #[serde(default)]
+    pub component_byte_width: Option<u32>,
+    #[serde(default)]
+    pub element_size: Option<u32>,
     pub generic_enabled: bool,
     pub used: bool,
 }
@@ -282,6 +300,10 @@ pub struct Pipeline {
     pub event_id: u32,
     pub available: bool,
     pub topology: u32,
+    #[serde(default)]
+    pub restart_enabled: Option<bool>,
+    #[serde(default)]
+    pub restart_index: Option<u32>,
     pub shaders: Vec<PipelineShader>,
     pub outputs: Vec<PipelineResource>,
     #[serde(default)]
@@ -893,6 +915,35 @@ impl Session {
             .lock()
             .map_err(|e| e.to_string())?
             .read_buffer(index, offset, length)
+    }
+
+    pub fn vertex_input_page(
+        &self,
+        action: &Action,
+        pipeline: &Pipeline,
+        buffers: &[Buffer],
+        instance: u32,
+        offset: u32,
+        limit: u32,
+    ) -> Result<crate::vertex_input::InputPage, String> {
+        let revision = self.revision.load(Ordering::SeqCst);
+        let mut process = self.process.lock().map_err(|e| e.to_string())?;
+        if self.revision.load(Ordering::SeqCst) != revision {
+            return Err("Replay selection changed".into());
+        }
+        let page = crate::vertex_input::inspect(
+            action,
+            pipeline,
+            buffers,
+            instance,
+            offset,
+            limit,
+            |index, offset, length| process.read_buffer(index, offset, length),
+        )?;
+        if self.revision.load(Ordering::SeqCst) != revision {
+            return Err("Replay selection changed".into());
+        }
+        Ok(page)
     }
 
     pub fn shader(&self, stage: u32, target: Option<u32>) -> Result<ShaderReport, String> {

@@ -79,6 +79,14 @@ fn capabilities_advertises_versioned_machine_readable_contract() {
     assert_eq!(value["capture_options_default"]["debug_output_mute"], true);
     assert_eq!(value["capture_options_default"]["soft_memory_limit"], 0);
     assert_eq!(value["structure_page_limit"], 128);
+    assert_eq!(value["vertex_input_page_limit"], 64);
+    assert!(
+        value["serve_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|name| name == "vertex_input")
+    );
     assert!(
         value["serve_commands"]
             .as_array()
@@ -698,6 +706,21 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let draw =
         agent.send(&serde_json::json!({"command":"select","event_id":draw_event}).to_string());
     assert_eq!(draw["ok"], true, "{draw}");
+    let inputs = agent.send(r#"{"command":"vertex_input","offset":0,"limit":3}"#);
+    assert_eq!(inputs["ok"], true, "{inputs}");
+    assert_eq!(inputs["data"]["page"]["event_id"], draw_event);
+    let rows = inputs["data"]["page"]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0]["raw_index"], 0);
+    assert_eq!(rows[1]["vertex_index"], 1);
+    let position = rows[0]["attributes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|value| value["name"] == "POSITION")
+        .unwrap();
+    assert_eq!(position["hex"], "0000404000004040");
+    assert_eq!(position["values"], serde_json::json!(["3", "3"]));
     let invalid_instance = agent.send(r#"{"command":"mesh","stage":"vs_out","instance":1}"#);
     assert_eq!(
         invalid_instance["error"]["code"], "replay_mesh_failed",

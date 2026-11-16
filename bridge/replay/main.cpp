@@ -134,7 +134,10 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
     std::cout << "{\"event_id\":" << action.eventId << ",\"action_id\":" << action.actionId
               << ",\"depth\":" << node.depth << ",\"parent\":" << node.parent
               << ",\"flags\":" << uint32_t(action.flags) << ",\"indices\":" << action.numIndices
-              << ",\"instances\":" << action.numInstances << ",\"name\":";
+              << ",\"instances\":" << action.numInstances
+              << ",\"base_vertex\":" << action.baseVertex << ",\"index_offset\":" << action.indexOffset
+              << ",\"vertex_offset\":" << action.vertexOffset << ",\"instance_offset\":" << action.instanceOffset
+              << ",\"name\":";
     json_string(action.GetName(structured));
     std::cout << ",\"api_events\":[";
     for(size_t i = 0; i < action.events.size(); ++i)
@@ -358,6 +361,8 @@ void write_pipeline(IReplayController *controller, uint32_t event)
   }
   std::cout << "],\"index_buffer\":";
   buffer(state.GetIBuffer());
+  std::cout << ",\"restart_enabled\":" << (state.IsRestartEnabled() ? "true" : "false")
+            << ",\"restart_index\":" << state.GetRestartIndex();
   std::cout << ",\"vertex_buffers\":[";
   const auto vertex_buffers = state.GetVBuffers();
   for(size_t i = 0; i < vertex_buffers.size(); ++i)
@@ -381,6 +386,11 @@ void write_pipeline(IReplayController *controller, uint32_t event)
                 << ",\"per_instance\":" << (input.perInstance ? "true" : "false")
                 << ",\"instance_rate\":" << input.instanceRate << ",\"format\":";
       json_string(input.format.Name());
+      std::cout << ",\"format_type\":" << uint32_t(input.format.type)
+                << ",\"component_type\":" << uint32_t(input.format.compType)
+                << ",\"component_count\":" << uint32_t(input.format.compCount)
+                << ",\"component_byte_width\":" << uint32_t(input.format.compByteWidth)
+                << ",\"element_size\":" << input.format.ElementSize();
       std::cout << ",\"generic_enabled\":" << (input.genericEnabled ? "true" : "false")
                 << ",\"used\":" << (input.used ? "true" : "false") << '}';
     }

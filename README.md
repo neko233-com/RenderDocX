@@ -10,6 +10,8 @@ Select an action and open **API calls** to inspect its associated API events, or
 
 **Mesh** queries post-shader output for a selected draw and displays paged positions when RenderDoc reports a supported float position format; otherwise it displays raw bytes. Positions follow buffer order, not draw-index order. The current desktop view uses instance 0 and view 0 and is not yet the complete RenderDoc mesh viewer. The agent CLI also exposes the index buffer and instance selection.
 
+**Vertex input** displays used attributes in draw order, applying the selected draw's indices, base vertex, instance rate and buffer offsets. Common float32 and integer components are decoded; other formats show their raw bytes. Generic values and OpenGL vertex input are not yet available. The desktop view shows instance 0; the agent CLI can select another instance.
+
 The interface detects the system language on startup and supports English, Simplified Chinese, Japanese, and Korean, with a manual language override. Its settings are stored in the operating system's user configuration directory.
 
 ## Build and run

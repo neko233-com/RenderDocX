@@ -134,6 +134,10 @@ mod tests {
             flags: 0,
             indices: 0,
             instances: 0,
+            base_vertex: Some(0),
+            index_offset: Some(0),
+            vertex_offset: Some(0),
+            instance_offset: Some(0),
             name: String::new(),
             api_events: Vec::new(),
         }
