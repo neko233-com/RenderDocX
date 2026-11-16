@@ -2,7 +2,7 @@ use gpui_kit as gpui;
 use gpui_kit::TestSupportExt;
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
-    input::{Input, InputState},
+    input::{Input, InputEvent, InputState},
     theme::{Theme, ThemeMode},
 };
 use gpui_kit::{
@@ -51,6 +51,8 @@ struct Workspace {
     session: Option<Session>,
     snapshot: Option<Snapshot>,
     event_tree: EventTree,
+    event_search: Entity<InputState>,
+    _event_search_subscription: gpui::Subscription,
     selected: Option<usize>,
     pipeline: Option<Pipeline>,
     tab: CaptureTab,
@@ -87,6 +89,18 @@ struct Workspace {
 }
 
 impl Workspace {
+    fn watch_event_search(
+        input: &Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Subscription {
+        cx.subscribe(input, |this, input, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.event_tree.set_filter(input.read(cx).value().as_ref());
+                cx.notify();
+            }
+        })
+    }
+
     fn discover_live(&mut self, cx: &mut Context<Self>) {
         if self.live.is_some() || self.live_starting {
             self.status = Some(
@@ -1175,6 +1189,12 @@ impl Workspace {
             "RenderDoc에서 열기",
         );
         let events = self.t("EVENTS", "事件", "イベント", "이벤트");
+        let event_filter_label = self.t(
+            "Filter action names",
+            "筛选操作名称",
+            "アクション名で絞り込み",
+            "작업 이름 필터",
+        );
         let textures_label = self.t("Textures", "纹理", "テクスチャ", "텍스처");
         let next_mip = self.t("Next mip", "切换 mip", "mip 切替", "mip 전환");
         let next_slice = self.t("Next slice", "切换层", "スライス切替", "슬라이스 전환");
@@ -2073,7 +2093,7 @@ impl Workspace {
                             this.open_revision += 1;
                             this.session = None;
                             this.snapshot = None;
-                            this.event_tree = EventTree::default();
+                            this.event_tree.reset(&[]);
                             this.capture = None;
                             this.selected = None;
                             this.replay_pending = false;
@@ -2194,6 +2214,25 @@ impl Workspace {
                                             .child(count.to_string()),
                                     ),
                             )
+                            .when(self.tab == CaptureTab::Events, |view| {
+                                view.child(
+                                    div()
+                                        .px_3()
+                                        .pb_2()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(0x9eacc0))
+                                                .child(event_filter_label),
+                                        )
+                                        .child(
+                                            Input::new(&self.event_search)
+                                                .id("event-filter")
+                                                .aria_label(event_filter_label)
+                                                .w_full(),
+                                        ),
+                                )
+                            })
                             .child(list),
                     )
                     .child(
@@ -2955,13 +2994,19 @@ fn main() {
                     let launch_memory = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let launch_env_name = cx.new(|cx| InputState::new(window, cx));
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
-                    let entity = cx.new(|_| Workspace {
+                    let event_search = cx.new(|cx| InputState::new(window, cx));
+                    let entity = cx.new(|cx| Workspace {
                         settings,
                         status: None,
                         capture: None,
                         session: None,
                         snapshot: None,
                         event_tree: EventTree::default(),
+                        _event_search_subscription: Workspace::watch_event_search(
+                            &event_search,
+                            cx,
+                        ),
+                        event_search,
                         selected: None,
                         pipeline: None,
                         tab: CaptureTab::Events,
@@ -3045,7 +3090,8 @@ mod ui_tests {
                     let launch_memory = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let launch_env_name = cx.new(|cx| InputState::new(window, cx));
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
-                    cx.new(|_| Workspace {
+                    let event_search = cx.new(|cx| InputState::new(window, cx));
+                    cx.new(|cx| Workspace {
                         settings: Settings::default(),
                         status: None,
                         capture: Some("capture.rdc".into()),
@@ -3063,6 +3109,11 @@ mod ui_tests {
                             buffers: Vec::new(),
                         }),
                         event_tree: EventTree::default(),
+                        _event_search_subscription: Workspace::watch_event_search(
+                            &event_search,
+                            cx,
+                        ),
+                        event_search,
                         selected: None,
                         pipeline: None,
                         tab: CaptureTab::Events,
@@ -3228,7 +3279,8 @@ mod ui_tests {
                     let launch_memory = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let launch_env_name = cx.new(|cx| InputState::new(window, cx));
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
-                    cx.new(|_| Workspace {
+                    let event_search = cx.new(|cx| InputState::new(window, cx));
+                    cx.new(|cx| Workspace {
                         settings: Settings::default(),
                         status: None,
                         capture: Some("capture.rdc".into()),
@@ -3297,6 +3349,11 @@ mod ui_tests {
                             }],
                         }),
                         event_tree: EventTree::default(),
+                        _event_search_subscription: Workspace::watch_event_search(
+                            &event_search,
+                            cx,
+                        ),
+                        event_search,
                         selected: None,
                         pipeline: None,
                         tab: CaptureTab::Events,
@@ -3526,6 +3583,43 @@ mod ui_tests {
             assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 43);
             assert_eq!(view.read(cx).event_tree.visible, [0, 2]);
         });
+        assert_eq!(*events.lock().unwrap(), vec![42, 77, 43]);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("event-filter", cx);
+            window.input("cHiLd", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).event_tree.visible, [0]));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("event-toggle-0", cx);
+            window.render_frame(cx);
+            assert!(window.find(1usize).visible());
+            window.click("event-filter", cx);
+            window.press("ctrl-a", cx);
+            window.press("backspace", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(view.read(cx).event_tree.visible, [0, 1, 2]);
+            assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 43);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.input("no matching name", cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert!(view.read(cx).event_tree.visible.is_empty()));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.press("ctrl-a", cx);
+            window.press("backspace", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).event_tree.visible, [0, 1, 2]));
         assert_eq!(*events.lock().unwrap(), vec![42, 77, 43]);
     }
 }

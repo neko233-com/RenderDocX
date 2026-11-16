@@ -4,6 +4,8 @@ RenderDocX is an in-progress Rust + GPUI desktop frontend for [RenderDoc](https:
 
 **Status: early prototype, not a replacement for RenderDoc.** The Rust workspace can launch an application, connect to a local RenderDoc target, trigger a capture and open reported local captures. It can open an `.rdc` with its version-matched replay helper, expand or collapse the action hierarchy, browse resource metadata, request event replay, inspect common pipeline state, bound shader disassembly and buffer bytes, select a texture mip, slice, sample and channel for preview, and export it to PNG without overwriting existing files. Preview and export use RenderDoc's 8-bit PNG mapping. Some detailed inspection and `.cap` files still use `qrenderdoc`. A submitted capture request is not proof that a capture was produced.
 
+The event browser can filter action names using case-insensitive literal text, retaining matching actions' ancestors and existing expansion state. RenderDoc's full event-filter expression language is not implemented yet.
+
 The interface detects the system language on startup and supports English, Simplified Chinese, Japanese, and Korean, with a manual language override. Its settings are stored in the operating system's user configuration directory.
 
 ## Build and run
