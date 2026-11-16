@@ -32,6 +32,7 @@ use renderdocx::{
 };
 use std::path::PathBuf;
 
+mod event_filter;
 mod event_tree;
 mod shader_debug;
 use event_tree::{EventRow, EventTree};
@@ -12541,7 +12542,23 @@ impl Workspace {
                                                 .id("event-filter")
                                                 .aria_label(event_filter_label)
                                                 .w_full(),
-                                        ),
+                                        )
+                                        .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
+                                            "Examples: +$action() +$event(EID >= 100), \"draw indexed\"",
+                                            "示例：+$action() +$event(EID >= 100)、\"draw indexed\"",
+                                            "例：+$action() +$event(EID >= 100)、\"draw indexed\"",
+                                            "예: +$action() +$event(EID >= 100), \"draw indexed\"",
+                                        )))
+                                        .when(self.event_tree.filter_error(), |view| {
+                                            view.child(
+                                                div().text_sm().text_color(rgb(0xef7777)).child(self.t(
+                                                    "Invalid or unsupported filter; showing the last valid result.",
+                                                    "筛选表达式无效或尚不支持；显示上一次有效结果。",
+                                                    "フィルターが無効か未対応です。前回の有効な結果を表示します。",
+                                                    "필터가 잘못되었거나 지원되지 않습니다. 마지막 유효 결과를 표시합니다.",
+                                                )),
+                                            )
+                                        }),
                                 )
                                 .child(button(
                                     "toggle-api-events",
@@ -15660,6 +15677,26 @@ mod ui_tests {
         .unwrap();
         cx.run_until_parked();
         cx.update(|cx| assert!(view.read(cx).event_tree.visible.is_empty()));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.press("ctrl-a", cx);
+            window.input("$event(EID=43)", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(!view.read(cx).event_tree.filter_error());
+            assert_eq!(view.read(cx).event_tree.visible, [0, 1]);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.press("ctrl-a", cx);
+            window.input("$unknown()", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(view.read(cx).event_tree.filter_error());
+            assert_eq!(view.read(cx).event_tree.visible, [0, 1]);
+        });
         cx.update_window(handle.into(), |_, window, cx| {
             window.press("ctrl-a", cx);
             window.press("backspace", cx);

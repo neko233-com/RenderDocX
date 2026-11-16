@@ -1,3 +1,4 @@
+use crate::event_filter::Filter;
 use renderdocx::replay::Action;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -15,7 +16,10 @@ pub struct EventTree {
     show_api: bool,
     parents: Vec<Option<usize>>,
     names: Vec<String>,
-    filter: String,
+    filter: Filter,
+    filter_error: bool,
+    actions: Vec<Action>,
+    event_ids: Vec<u32>,
     matching_children: Vec<bool>,
     collapsed: Vec<bool>,
     pub visible: Vec<usize>,
@@ -24,6 +28,8 @@ pub struct EventTree {
 impl EventTree {
     pub fn reset(&mut self, actions: &[Action]) {
         self.action_count = actions.len();
+        self.actions = actions.to_vec();
+        self.event_ids = actions.iter().map(|action| action.event_id).collect();
         self.rows = (0..actions.len()).map(EventRow::Action).collect();
         self.order.clear();
         self.parents.clear();
@@ -48,6 +54,7 @@ impl EventTree {
                 });
                 self.parents.push(self.parents[action_index]);
                 self.names.push(event.name.to_lowercase());
+                self.event_ids.push(event.event_id);
             }
             self.order.push(action_index);
         }
@@ -88,8 +95,18 @@ impl EventTree {
     }
 
     pub fn set_filter(&mut self, text: &str) {
-        self.filter = text.to_lowercase();
-        self.rebuild();
+        match Filter::parse(text) {
+            Ok(filter) => {
+                self.filter = filter;
+                self.filter_error = false;
+                self.rebuild();
+            }
+            Err(()) => self.filter_error = true,
+        }
+    }
+
+    pub fn filter_error(&self) -> bool {
+        self.filter_error
     }
 
     pub fn reveal(&mut self, action: usize, api: Option<usize>) -> Option<usize> {
@@ -105,7 +122,8 @@ impl EventTree {
         if row >= self.parents.len() {
             return None;
         }
-        self.filter.clear();
+        self.filter = Filter::default();
+        self.filter_error = false;
         let mut parent = self.parents[row];
         while let Some(index) = parent {
             self.collapsed[index] = false;
@@ -122,7 +140,12 @@ impl EventTree {
             .iter()
             .enumerate()
             .map(|(index, name)| {
-                (self.show_api || index < self.action_count) && name.contains(&self.filter)
+                let action = match self.rows[index] {
+                    EventRow::Action(action) => self.actions.get(action),
+                    EventRow::Api { .. } => None,
+                };
+                (self.show_api || index < self.action_count)
+                    && self.filter.matches(name, self.event_ids[index], action)
             })
             .collect();
         self.matching_children = vec![false; self.parents.len()];
@@ -277,5 +300,45 @@ mod tests {
         assert!(tree.visible.is_empty());
         tree.set_filter("");
         assert_eq!(tree.visible, [0, 1]);
+    }
+
+    #[test]
+    fn upstream_expression_subset_filters_actions_and_api_events() {
+        use renderdocx::replay::ApiEvent;
+        let mut parent = action(-1);
+        parent.event_id = 1;
+        parent.name = "Frame".into();
+        let mut draw = action(0);
+        draw.event_id = 4;
+        draw.action_id = 2;
+        draw.indices = 12;
+        draw.name = "Draw indexed".into();
+        draw.api_events.push(ApiEvent {
+            event_id: 3,
+            chunk_index: Some(3),
+            file_offset: "0".into(),
+            name: "Bind texture".into(),
+        });
+        let mut clear = action(0);
+        clear.event_id = 5;
+        clear.name = "Clear".into();
+        let mut tree = EventTree::default();
+        tree.reset(&[parent, draw, clear]);
+        tree.set_show_api(true);
+        tree.set_filter("+(\"draw indexed\" bind) +$event(EID >= 0x3) -$event(EID=5)");
+        assert!(!tree.filter_error());
+        assert_eq!(tree.visible, [0, 3, 1]);
+        tree.set_filter("$action(numVertices >= 12)");
+        assert_eq!(tree.visible, [0, 1]);
+        tree.set_filter("$event(EID = 3)");
+        assert_eq!(tree.visible, [0, 3]);
+        tree.set_filter("$action(unknown = 1)");
+        assert!(tree.filter_error());
+        assert_eq!(tree.visible, [0, 3]);
+        tree.set_filter("$event(EID = 4294967296)");
+        assert!(tree.filter_error());
+        tree.set_filter("$action()");
+        assert!(!tree.filter_error());
+        assert_eq!(tree.visible, [0, 1, 2]);
     }
 }
