@@ -340,6 +340,67 @@ pub struct Pixel {
     pub int_values: [i32; 4],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HistogramRequest {
+    pub min: f32,
+    pub max: f32,
+    pub channels: [bool; 4],
+}
+
+impl HistogramRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.min.is_finite()
+            || !self.max.is_finite()
+            || self.min >= self.max
+            || !(self.max - self.min).is_finite()
+            || !(self.max + self.max * 1e-6).is_finite()
+        {
+            return Err("Invalid histogram range".into());
+        }
+        Ok(())
+    }
+    fn mask(self) -> u32 {
+        self.channels
+            .into_iter()
+            .enumerate()
+            .fold(0, |mask, (index, enabled)| {
+                mask | (u32::from(enabled) << index)
+            })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PixelComponents {
+    pub bits: [u32; 4],
+    pub float_values: [String; 4],
+    pub uint_values: [u32; 4],
+    pub int_values: [i32; 4],
+}
+
+impl From<[u32; 4]> for PixelComponents {
+    fn from(bits: [u32; 4]) -> Self {
+        Self {
+            bits,
+            float_values: bits.map(|v| f32::from_bits(v).to_string()),
+            uint_values: bits,
+            int_values: bits.map(|v| v as i32),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TextureStatistics {
+    pub event_id: u32,
+    pub index: u32,
+    pub mip: u32,
+    pub slice: u32,
+    pub sample: u32,
+    pub request: HistogramRequest,
+    pub min: PixelComponents,
+    pub max: PixelComponents,
+    pub histogram: Vec<u32>,
+}
+
 impl TextureSelection {
     pub fn validate(&self, texture: &Texture) -> Result<(), String> {
         let slices = if texture.dimension == 3 {
@@ -491,6 +552,19 @@ enum Reply {
         x: u32,
         y: u32,
         bits: [u32; 4],
+    },
+    TextureStats {
+        event_id: u32,
+        index: u32,
+        mip: u32,
+        slice: u32,
+        sample: u32,
+        range_min_bits: u32,
+        range_max_bits: u32,
+        channel_mask: u32,
+        min_bits: [u32; 4],
+        max_bits: [u32; 4],
+        histogram: Vec<u32>,
     },
     StructuredBuffer {
         event_id: u32,
@@ -713,6 +787,16 @@ trait Transport: Send {
     ) -> Result<Pixel, String> {
         Err("Pixel picking is not supported by this transport".into())
     }
+    fn texture_statistics(
+        &mut self,
+        _event: u32,
+        _index: u32,
+        _selection: TextureSelection,
+        _sample: u32,
+        _request: HistogramRequest,
+    ) -> Result<TextureStatistics, String> {
+        Err("Texture statistics are not supported by this transport".into())
+    }
     fn shader(&mut self, _stage: u32, _target: Option<u32>) -> Result<ShaderReport, String> {
         Err("Shader inspection is not supported by this transport".into())
     }
@@ -753,6 +837,68 @@ trait Transport: Send {
 }
 
 impl Transport for Process {
+    fn texture_statistics(
+        &mut self,
+        event: u32,
+        index: u32,
+        selection: TextureSelection,
+        sample: u32,
+        request: HistogramRequest,
+    ) -> Result<TextureStatistics, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        let requested = selection
+            .sample
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "resolve".into());
+        writeln!(
+            input,
+            "stats {index} {} {} {requested} {} {} {}",
+            selection.mip,
+            selection.slice,
+            request.min.to_bits(),
+            request.max.to_bits(),
+            request.mask()
+        )
+        .and_then(|_| input.flush())
+        .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::TextureStats {
+                event_id,
+                index: actual,
+                mip,
+                slice,
+                sample: actual_sample,
+                range_min_bits,
+                range_max_bits,
+                channel_mask,
+                min_bits,
+                max_bits,
+                histogram,
+            } if event_id == event
+                && actual == index
+                && mip == selection.mip
+                && slice == selection.slice
+                && actual_sample == sample
+                && range_min_bits == request.min.to_bits()
+                && range_max_bits == request.max.to_bits()
+                && channel_mask == request.mask() =>
+            {
+                Ok(TextureStatistics {
+                    event_id,
+                    index,
+                    mip,
+                    slice,
+                    sample,
+                    request,
+                    min: min_bits.into(),
+                    max: max_bits.into(),
+                    histogram,
+                })
+            }
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected texture statistics response".into()),
+        }
+    }
     fn resource_usage(
         &mut self,
         index: u32,
@@ -1233,6 +1379,31 @@ impl Session {
         Ok(pixel)
     }
 
+    pub fn texture_statistics(
+        &self,
+        event: u32,
+        index: u32,
+        texture: &Texture,
+        selection: TextureSelection,
+        request: HistogramRequest,
+    ) -> Result<TextureStatistics, String> {
+        selection.validate_pixel(texture, 0, 0)?;
+        request.validate()?;
+        let sample = selection
+            .sample
+            .unwrap_or(if texture.samples > 1 { u32::MAX } else { 0 });
+        let revision = self.revision.load(Ordering::SeqCst);
+        let mut process = self.process.lock().map_err(|e| e.to_string())?;
+        if self.revision.load(Ordering::SeqCst) != revision {
+            return Err("Replay selection changed".into());
+        }
+        let result = process.texture_statistics(event, index, selection, sample, request)?;
+        if self.revision.load(Ordering::SeqCst) != revision {
+            return Err("Replay selection changed".into());
+        }
+        Ok(result)
+    }
+
     pub fn vertex_input_page(
         &self,
         action: &Action,
@@ -1399,6 +1570,34 @@ pub mod test_support {
     use super::*;
     struct RecordingTransport(Arc<Mutex<Vec<u32>>>, Arc<Mutex<Vec<TextureSelection>>>);
     impl Transport for RecordingTransport {
+        fn texture_statistics(
+            &mut self,
+            event: u32,
+            index: u32,
+            selection: TextureSelection,
+            sample: u32,
+            request: HistogramRequest,
+        ) -> Result<TextureStatistics, String> {
+            let mut histogram = vec![0; 256];
+            histogram[64] = 16;
+            let min = [
+                0.25_f32.to_bits(),
+                0.5_f32.to_bits(),
+                0.75_f32.to_bits(),
+                1.0_f32.to_bits(),
+            ];
+            Ok(TextureStatistics {
+                event_id: event,
+                index,
+                mip: selection.mip,
+                slice: selection.slice,
+                sample,
+                request,
+                min: min.into(),
+                max: min.into(),
+                histogram,
+            })
+        }
         fn resource_usage(
             &mut self,
             index: u32,
@@ -1777,6 +1976,24 @@ mod tests {
         selection.sample = None;
         selection.mip = u32::MAX;
         assert!(selection.validate(&texture).is_err());
+    }
+
+    #[test]
+    fn histogram_rejects_nonfinite_or_degenerate_ranges() {
+        let mut request = HistogramRequest {
+            min: 0.0,
+            max: 1.0,
+            channels: [true, false, true, false],
+        };
+        assert!(request.validate().is_ok());
+        assert_eq!(request.mask(), 5);
+        request.max = 0.0;
+        assert!(request.validate().is_err());
+        request.max = f32::INFINITY;
+        assert!(request.validate().is_err());
+        request.min = -f32::MAX;
+        request.max = f32::MAX;
+        assert!(request.validate().is_err());
     }
 
     #[test]

@@ -17,9 +17,10 @@ use renderdocx::{
         LiveSession, capture_directory, capture_notice, enumerate, parse_target_pid,
     },
     replay::{
-        MeshInfo, MeshSelection, Pipeline, Pixel, RESOURCE_USAGE_PAGE_LIMIT, ResourceUsagePage,
-        SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session, ShaderReport, Snapshot, StructurePage,
-        StructuredNode, TextureSelection, resource_type_name, resource_usage_name,
+        HistogramRequest, MeshInfo, MeshSelection, Pipeline, Pixel, RESOURCE_USAGE_PAGE_LIMIT,
+        ResourceUsagePage, SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session, ShaderReport, Snapshot,
+        StructurePage, StructuredNode, TextureSelection, TextureStatistics, resource_type_name,
+        resource_usage_name,
     },
     vertex_input::{INPUT_PAGE_LIMIT, InputPage},
 };
@@ -204,6 +205,9 @@ struct Workspace {
     pixel_x: Entity<InputState>,
     pixel_y: Entity<InputState>,
     pixel: Option<Pixel>,
+    stats_min: Entity<InputState>,
+    stats_max: Entity<InputState>,
+    statistics: Option<TextureStatistics>,
     selected_buffer: Option<usize>,
     buffer_offset: u64,
     buffer_data: Option<Vec<u8>>,
@@ -752,6 +756,7 @@ impl Workspace {
                         this.export_pending = false;
                         this.preview = None;
                         this.pixel = None;
+                        this.statistics = None;
                         this.status = None;
                     }
                     Err(error) => {
@@ -808,6 +813,7 @@ impl Workspace {
         self.replay_pending = true;
         self.preview = None;
         self.pixel = None;
+        self.statistics = None;
         self.buffer_data = None;
         self.shader_data = None;
         self.structure = StructureView::default();
@@ -1581,6 +1587,7 @@ impl Workspace {
         }
         self.preview = None;
         self.pixel = None;
+        self.statistics = None;
         self.status = None;
         cx.notify();
     }
@@ -1679,6 +1686,137 @@ impl Workspace {
                         )
                     ),
                 });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn compute_texture_statistics(&mut self, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            self.status = Some(
+                self.t(
+                    "Wait for the current operation.",
+                    "请等待当前操作完成。",
+                    "現在の処理が完了するまでお待ちください。",
+                    "현재 작업이 끝날 때까지 기다려 주세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let Some(event) = self.pipeline.as_ref().map(|pipeline| pipeline.event_id) else {
+            self.status = Some(
+                self.t(
+                    "Select an event before analyzing a texture.",
+                    "请先选择事件再分析纹理。",
+                    "テクスチャを解析する前にイベントを選択してください。",
+                    "텍스처를 분석하기 전에 이벤트를 선택하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let (Ok(min), Ok(max)) = (
+            self.stats_min.read(cx).value().parse::<f32>(),
+            self.stats_max.read(cx).value().parse::<f32>(),
+        ) else {
+            self.status = Some(
+                self.t(
+                    "Enter a finite histogram range.",
+                    "请输入有限的直方图范围。",
+                    "有限のヒストグラム範囲を入力してください。",
+                    "유한한 히스토그램 범위를 입력하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let (Some(session), Some(index)) = (self.session.clone(), self.selected_texture) else {
+            return;
+        };
+        let Some(texture) = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.textures.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        let Ok(texture_index) = u32::try_from(index) else {
+            return;
+        };
+        let selection = self.texture_selection;
+        let channels = std::array::from_fn(|channel| {
+            selection
+                .channel
+                .map_or(channel < texture.component_count as usize, |selected| {
+                    selected as usize == channel
+                })
+        });
+        let request = HistogramRequest { min, max, channels };
+        if request.validate().is_err() || selection.channel.is_some_and(|channel| channel >= 4) {
+            self.status = Some(
+                self.t(
+                    "Invalid histogram range or channel.",
+                    "直方图范围或通道无效。",
+                    "ヒストグラムの範囲またはチャンネルが無効です。",
+                    "히스토그램 범위 또는 채널이 올바르지 않습니다.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let revision = self.open_revision;
+        let selection_revision = self.selection_revision;
+        self.statistics = None;
+        self.resource_pending = true;
+        self.status = Some(
+            self.t(
+                "Analyzing texture…",
+                "正在分析纹理…",
+                "テクスチャを解析中…",
+                "텍스처 분석 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            session.texture_statistics(event, texture_index, &texture, selection, request)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision || this.selection_revision != selection_revision {
+                    return;
+                }
+                this.resource_pending = false;
+                if this.selected_texture != Some(index) || this.texture_selection != selection {
+                    this.status = None;
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok(stats) => {
+                        this.statistics = Some(stats);
+                        this.status = None;
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Could not analyze texture",
+                                "无法分析纹理",
+                                "テクスチャを解析できません",
+                                "텍스처를 분석할 수 없습니다"
+                            )
+                        ));
+                    }
+                }
                 cx.notify();
             });
         })
@@ -2573,6 +2711,7 @@ impl Workspace {
                                         this.texture_selection = TextureSelection::default();
                                         this.preview = None;
                                         this.pixel = None;
+                                        this.statistics = None;
                                         cx.notify();
                                     })),
                             )
@@ -3284,6 +3423,34 @@ impl Workspace {
                 "符号付き整数として解釈",
                 "부호 있는 정수 해석",
             );
+            let statistics = self.statistics.clone();
+            let histogram_label = self.t(
+                "Histogram range",
+                "直方图范围",
+                "ヒストグラム範囲",
+                "히스토그램 범위",
+            );
+            let analyze_label = self.t("Analyze", "分析", "解析", "분석");
+            let minimum_label = self.t("Minimum", "最小值", "最小値", "최솟값");
+            let maximum_label = self.t("Maximum", "最大值", "最大値", "최댓값");
+            let no_histogram = self.t(
+                "Histogram unavailable or empty.",
+                "直方图不可用或为空。",
+                "ヒストグラムが利用できないか空です。",
+                "히스토그램을 사용할 수 없거나 비어 있습니다.",
+            );
+            let stats_note = self.t(
+                "RenderDoc does not report a separate success status for minimum/maximum.",
+                "RenderDoc 不提供最小值／最大值的单独成功状态。",
+                "RenderDoc は最小値・最大値の個別の成功状態を返しません。",
+                "RenderDoc은 최솟값과 최댓값의 별도 성공 상태를 반환하지 않습니다.",
+            );
+            let channels_note = self.t(
+                "The histogram uses the selected channel; minimum and maximum cover RGBA.",
+                "直方图使用选中通道，最小值和最大值覆盖 RGBA。",
+                "ヒストグラムは選択チャンネルを使用し、最小値と最大値は RGBA を対象にします。",
+                "히스토그램은 선택한 채널을 사용하며 최솟값과 최댓값은 RGBA를 포함합니다.",
+            );
             div()
                 .flex()
                 .flex_col()
@@ -3398,6 +3565,108 @@ impl Workspace {
                         .child(format!("{float_label}: {}", pixel.float_values.join(", ")))
                         .child(format!("{uint_label}: {:?}", pixel.uint_values))
                         .child(format!("{int_label}: {:?}", pixel.int_values))
+                    })
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0x91a7c0))
+                            .child(histogram_label),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0x91a7c0))
+                            .child(channels_note),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .child(div().text_sm().child(minimum_label))
+                            .child(
+                                Input::new(&self.stats_min)
+                                    .id("histogram-min")
+                                    .aria_label(minimum_label)
+                                    .w(px(80.)),
+                            )
+                            .child(div().text_sm().child(maximum_label))
+                            .child(
+                                Input::new(&self.stats_max)
+                                    .id("histogram-max")
+                                    .aria_label(maximum_label)
+                                    .w(px(80.)),
+                            )
+                            .child(button(
+                                "histogram-analyze",
+                                analyze_label,
+                                false,
+                                |this, cx| this.compute_texture_statistics(cx),
+                                cx,
+                            )),
+                    )
+                    .when_some(statistics, |view, stats| {
+                        let highest = stats.histogram.iter().copied().max().unwrap_or(0);
+                        let channels = ["R", "G", "B", "A"]
+                            .into_iter()
+                            .zip(stats.request.channels)
+                            .filter_map(|(name, enabled)| enabled.then_some(name))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let mut view = view
+                            .child(div().id("texture-statistics").test_support().child(format!(
+                                "{event_label} {} · {} — {} · {channel_label}: {channels}",
+                                stats.event_id, stats.request.min, stats.request.max
+                            )))
+                            .child(format!(
+                                "{minimum_label} · {float_label}: {}",
+                                stats.min.float_values.join(", ")
+                            ))
+                            .child(format!(
+                                "{maximum_label} · {float_label}: {}",
+                                stats.max.float_values.join(", ")
+                            ))
+                            .child(format!(
+                                "{minimum_label} · {uint_label}: {:?}",
+                                stats.min.uint_values
+                            ))
+                            .child(format!(
+                                "{maximum_label} · {uint_label}: {:?}",
+                                stats.max.uint_values
+                            ))
+                            .child(format!(
+                                "{minimum_label} · {int_label}: {:?}",
+                                stats.min.int_values
+                            ))
+                            .child(format!(
+                                "{maximum_label} · {int_label}: {:?}",
+                                stats.max.int_values
+                            ))
+                            .child(div().text_sm().text_color(rgb(0x91a7c0)).child(stats_note));
+                        if stats.histogram.is_empty() {
+                            view = view.child(no_histogram);
+                        } else {
+                            view = view.child(
+                                div()
+                                    .id("texture-histogram")
+                                    .test_support()
+                                    .h(px(80.))
+                                    .w_full()
+                                    .overflow_hidden()
+                                    .flex()
+                                    .items_end()
+                                    .children(stats.histogram.iter().map(|count| {
+                                        let height = if highest == 0 {
+                                            0.0
+                                        } else {
+                                            80.0 * (*count as f32 / highest as f32)
+                                        };
+                                        div().flex_1().min_w_0().h(px(height)).bg(rgb(0x82aaff))
+                                    })),
+                            );
+                        }
+                        view
                     })
                     .child(div().text_sm().text_color(rgb(0x91a7c0)).child(export_note))
                     .when_some(preview_path, |view, path| {
@@ -3663,6 +3932,7 @@ impl Workspace {
                             this.usage_page = None;
                             this.preview = None;
                             this.pixel = None;
+                            this.statistics = None;
                             this.status = None;
                             cx.notify();
                         },
@@ -4904,6 +5174,8 @@ fn main() {
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
+                    let stats_min = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_x = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let pixel_y = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let entity = cx.new(|cx| Workspace {
@@ -4934,6 +5206,9 @@ fn main() {
                         pixel_x,
                         pixel_y,
                         pixel: None,
+                        stats_min,
+                        stats_max,
+                        statistics: None,
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_data: None,
@@ -5019,6 +5294,8 @@ mod ui_tests {
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
+                    let stats_min = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_x = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let pixel_y = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     cx.new(|cx| Workspace {
@@ -5061,6 +5338,9 @@ mod ui_tests {
                         pixel_x,
                         pixel_y,
                         pixel: None,
+                        stats_min,
+                        stats_max,
+                        statistics: None,
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_data: None,
@@ -5228,6 +5508,8 @@ mod ui_tests {
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
+                    let stats_min = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_x = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let pixel_y = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     cx.new(|cx| Workspace {
@@ -5366,6 +5648,9 @@ mod ui_tests {
                         pixel_x,
                         pixel_y,
                         pixel: None,
+                        stats_min,
+                        stats_max,
+                        statistics: None,
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_data: None,
@@ -5491,6 +5776,32 @@ mod ui_tests {
             assert_eq!((pixel.event_id, pixel.x, pixel.y), (42, 3, 4));
             assert_eq!(pixel.float_values, ["0.25", "0.5", "0.75", "1"]);
         });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(-700.))),
+                cx,
+            );
+            window.click("histogram-analyze", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let stats = view.read(cx).statistics.as_ref().unwrap();
+            assert_eq!(stats.event_id, 42);
+            assert_eq!(stats.histogram[64], 16);
+            assert_eq!(stats.request.channels, [true, true, true, true]);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(-1200.))),
+                cx,
+            );
+            assert!(window.find("texture-histogram").visible());
+        })
+        .unwrap();
         assert_eq!(*events.lock().unwrap(), vec![42]);
         cx.update_window(handle.into(), |_, window, cx| {
             window.scroll(
@@ -5506,7 +5817,10 @@ mod ui_tests {
         })
         .unwrap();
         cx.run_until_parked();
-        cx.update(|cx| assert!(view.read(cx).pixel.is_none()));
+        cx.update(|cx| {
+            assert!(view.read(cx).pixel.is_none());
+            assert!(view.read(cx).statistics.is_none());
+        });
         assert_eq!(
             *selections.lock().unwrap(),
             vec![TextureSelection {
@@ -5527,6 +5841,11 @@ mod ui_tests {
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(-800.))),
+                cx,
+            );
             assert!(window.find("texture-preview-image").visible());
             assert!(window.find("texture-preview-image").bounds().size.height > px(0.));
             window.scroll(
@@ -6234,6 +6553,38 @@ mod ui_tests {
                     for (actual, expected) in values.iter().zip([0.25, 0.5, 0.75, 1.0]) {
                         assert!((actual - expected).abs() <= 1.0 / 255.0);
                     }
+                });
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.scroll(
+                        "capture-details-scroll",
+                        ScrollDelta::Pixels(point(px(0.), px(-700.))),
+                        cx,
+                    );
+                    window.click("histogram-analyze", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx)
+                            .statistics
+                            .as_ref()
+                            .is_some_and(|stats| stats.event_id == draw_event)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real texture statistics did not load: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update(|cx| {
+                    let statistics = view.read(cx).statistics.as_ref().unwrap();
+                    assert_eq!(statistics.histogram.len(), 256);
+                    assert!(statistics.histogram.iter().any(|count| *count > 0));
                 });
                 cx.update_window(handle.into(), |_, window, cx| {
                     window.click("vertex-input-tab", cx)

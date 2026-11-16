@@ -798,6 +798,46 @@ int run(const std::string &capture, bool structure_worker)
       std::cout << "\"}" << std::endl;
       continue;
     }
+    if(command.compare(0, 6, "stats ") == 0)
+    {
+      if(!selected) { error("Select an event before computing texture statistics"); continue; }
+      std::istringstream arguments(command.substr(6));
+      std::string index_text, mip_text, slice_text, sample_text, min_text, max_text, mask_text, extra;
+      uint64_t index = 0, mip = 0, slice = 0, sample = 0, min_bits = 0, max_bits = 0, mask = 0;
+      if(!(arguments >> index_text >> mip_text >> slice_text >> sample_text >> min_text >> max_text >> mask_text) || (arguments >> extra) ||
+         !decimal(index_text, index) || !decimal(mip_text, mip) || !decimal(slice_text, slice) ||
+         (sample_text != "resolve" && !decimal(sample_text, sample)) || !decimal(min_text, min_bits) || !decimal(max_text, max_bits) || !decimal(mask_text, mask) ||
+         index >= texture_ids.size() || min_bits > UINT32_MAX || max_bits > UINT32_MAX || mask > 15)
+      { error("Invalid texture statistics request"); continue; }
+      const TextureRef &texture = texture_ids[size_t(index)];
+      if(mip >= texture.mips || mip >= 32 || !texture.width || !texture.height || !texture.samples)
+      { error("Invalid texture dimensions, mip or sample count"); continue; }
+      const uint32_t depth = texture.dimension == 3 ? (std::max)(1U, texture.depth >> uint32_t(mip)) : texture.arraysize;
+      if(slice >= depth || (sample_text != "resolve" && sample >= texture.samples))
+      { error("Texture selection is out of range"); continue; }
+      const uint32_t lo_bits = uint32_t(min_bits), hi_bits = uint32_t(max_bits);
+      float lo = 0, hi = 0;
+      std::memcpy(&lo, &lo_bits, sizeof(lo)); std::memcpy(&hi, &hi_bits, sizeof(hi));
+      if(!std::isfinite(lo) || !std::isfinite(hi) || !(lo < hi) || !std::isfinite(hi - lo) || !std::isfinite(hi + hi * 1e-6f))
+      { error("Invalid histogram range"); continue; }
+      const uint32_t actual_sample = sample_text == "resolve" ? (texture.samples > 1 ? UINT32_MAX : 0U) : uint32_t(sample);
+      const Subresource sub(uint32_t(mip), uint32_t(slice), actual_sample);
+      const auto extrema = replay.controller->GetMinMax(texture.id, sub, CompType::Typeless);
+      result = replay.controller->GetFatalErrorStatus();
+      if(!result.OK()) { error(result_message(result)); break; }
+      const rdcfixedarray<bool, 4> channels = {(mask & 1) != 0, (mask & 2) != 0, (mask & 4) != 0, (mask & 8) != 0};
+      const rdcarray<uint32_t> histogram = replay.controller->GetHistogram(texture.id, sub, CompType::Typeless, lo, hi, channels);
+      result = replay.controller->GetFatalErrorStatus();
+      if(!result.OK()) { error(result_message(result)); break; }
+      uint32_t low[4], high[4]; std::memcpy(low, &extrema.first, sizeof(low)); std::memcpy(high, &extrema.second, sizeof(high));
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"texture_stats\",\"event_id\":" << selected_event << ",\"index\":" << index
+                << ",\"mip\":" << mip << ",\"slice\":" << slice << ",\"sample\":" << actual_sample
+                << ",\"range_min_bits\":" << lo_bits << ",\"range_max_bits\":" << hi_bits << ",\"channel_mask\":" << mask
+                << ",\"min_bits\":[" << low[0] << ',' << low[1] << ',' << low[2] << ',' << low[3] << "],\"max_bits\":[" << high[0] << ',' << high[1] << ',' << high[2] << ',' << high[3] << "],\"histogram\":[";
+      for(size_t i = 0; i < histogram.size(); ++i) { if(i) std::cout << ','; std::cout << histogram[i]; }
+      std::cout << "]}" << std::endl;
+      continue;
+    }
     if(command.compare(0, 6, "pixel ") == 0)
     {
       if(!selected) { error("Select an event before picking a pixel"); continue; }

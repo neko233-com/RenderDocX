@@ -10,6 +10,8 @@ Select an action and open **API calls** to inspect its associated API events, or
 
 The texture details view can pick a pixel at explicit top-left coordinates for the selected mip, slice and sample. It shows RenderDoc's returned component bits and their float, signed and unsigned interpretations; these are not necessarily the texture's original storage bytes.
 
+The same view can calculate RenderDoc's per-channel minimum and maximum and display a histogram for a chosen numeric range and channel. RenderDoc's public minimum/maximum call does not report a separate success status, so its returned values cannot by themselves prove the operation succeeded.
+
 **Resources** lists captured resources and their initialization chunk indices, parent and derived relationships, and paged static usage. Filter by name, type or session-scoped `#index`, and select a recorded usage to replay its event. Some resource types do not have usage tracking in RenderDoc; that state is shown separately from an empty tracked list.
 
 **Mesh** queries post-shader output for a selected draw and displays paged positions when RenderDoc reports a supported float position format; otherwise it displays raw bytes. Positions follow buffer order, not draw-index order. The current desktop view uses instance 0 and view 0 and is not yet the complete RenderDoc mesh viewer. The agent CLI also exposes the index buffer and instance selection.

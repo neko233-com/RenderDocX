@@ -83,6 +83,21 @@ int wmain(int argc, wchar_t **argv)
     hr = device->CreateRenderTargetView(volume, &vd, &volume_views[slice]);
   }
   if(FAILED(hr)) { std::cerr << "Could not create 3D texture"; return 19; }
+  UINT msaa_samples = 0, quality = 0;
+  for(UINT count : {4U, 2U})
+  {
+    if(SUCCEEDED(device->CheckMultisampleQualityLevels(desc.Format, count, &quality)) && quality > 0) { msaa_samples = count; break; }
+  }
+  ID3D11Texture2D *msaa_texture = nullptr;
+  ID3D11RenderTargetView *msaa_view = nullptr;
+  if(msaa_samples)
+  {
+    D3D11_TEXTURE2D_DESC msaa_desc = desc;
+    msaa_desc.Width = 4; msaa_desc.Height = 4; msaa_desc.SampleDesc.Count = msaa_samples;
+    hr = device->CreateTexture2D(&msaa_desc, nullptr, &msaa_texture);
+    if(SUCCEEDED(hr)) hr = device->CreateRenderTargetView(msaa_texture, nullptr, &msaa_view);
+    if(FAILED(hr)) { std::cerr << "Could not create multisampled texture"; return 20; }
+  }
 
   HMODULE compiler = LoadLibraryW(L"d3dcompiler_47.dll");
   auto compile = compiler ? reinterpret_cast<decltype(&D3DCompile)>(GetProcAddress(compiler, "D3DCompile")) : nullptr;
@@ -118,6 +133,7 @@ int wmain(int argc, wchar_t **argv)
   context->ClearRenderTargetView(view, color);
   const float integer_color[4] = {1, 2, 3, 4};
   context->ClearRenderTargetView(integer_view, integer_color);
+  if(msaa_view) context->ClearRenderTargetView(msaa_view, color);
   const float volume_colors[2][4] = {{1,0,0,1}, {0,0,1,1}};
   for(unsigned i = 0; i < 2; ++i) context->ClearRenderTargetView(volume_views[i], volume_colors[i]);
   const float layer_colors[4][4] = {{1,0,0,1}, {0,1,0,1}, {0,0,1,1}, {1,1,0,1}};
@@ -143,8 +159,10 @@ int wmain(int argc, wchar_t **argv)
   std::vector<char> output(length, 0);
   if(!api->GetCapture(0, output.data(), &length, nullptr)) { std::cerr << "Could not read capture path"; return 13; }
   std::cout << "RENDERDOCX_CAPTURE=" << output.data() << std::endl;
+  std::cout << "RENDERDOCX_MSAA_SAMPLES=" << msaa_samples << std::endl;
   for(auto *layer_view : layered_views) layer_view->Release();
   for(auto *volume_view : volume_views) volume_view->Release();
+  if(msaa_view) msaa_view->Release(); if(msaa_texture) msaa_texture->Release();
   volume->Release(); integer_view->Release(); integer_texture->Release(); layered->Release(); index_buffer->Release(); vertex_buffer->Release(); layout->Release(); vertex->Release(); pixel->Release(); view->Release(); texture->Release(); context->Release(); device->Release();
   return 0;
 }

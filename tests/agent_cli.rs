@@ -185,6 +185,12 @@ fn real_opengl_vertex_inputs_include_generic_and_normalized_values() {
         serde_json::json!(["1", "0", "0", "1"]),
         "{bottom}"
     );
+    let stats = agent.send(&serde_json::json!({"command":"texture_statistics","index":texture,"min":0,"max":1,"channels":[true,false,false,false]}).to_string());
+    assert_eq!(stats["ok"], true, "{stats}");
+    let histogram = stats["data"]["statistics"]["histogram"].as_array().unwrap();
+    assert_eq!(histogram.len(), 256);
+    assert_eq!(histogram[0], 2);
+    assert_eq!(histogram[255], 2);
     agent.quit();
 }
 
@@ -199,6 +205,13 @@ fn capabilities_advertises_versioned_machine_readable_contract() {
     assert_eq!(value["capture_options_default"]["soft_memory_limit"], 0);
     assert_eq!(value["structure_page_limit"], 128);
     assert_eq!(value["vertex_input_page_limit"], 64);
+    assert!(
+        value["serve_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|name| name == "texture_statistics")
+    );
     assert_eq!(value["resource_usage_page_limit"], 128);
     assert!(
         value["serve_commands"]
@@ -260,6 +273,10 @@ fn agent_jsonl_session_has_correlated_errors_and_clean_shutdown() {
     assert_eq!(reply["schema"], "renderdocx.agent.v1");
     assert_eq!(reply["id"], 17);
     assert_eq!(reply["error"]["code"], "no_capture");
+    assert_eq!(
+        agent.send(r#"{"command":"texture_statistics","index":0}"#)["error"]["code"],
+        "no_capture"
+    );
     assert_eq!(
         agent.send(r#"{"command":"resource_usage","index":0}"#)["error"]["code"],
         "no_capture"
@@ -558,6 +575,12 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).expect("fixture output must be UTF-8");
+    let msaa_samples: u32 = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("RENDERDOCX_MSAA_SAMPLES="))
+        .expect("MSAA support report")
+        .parse()
+        .unwrap();
     let capture = stdout
         .lines()
         .find_map(|line| line.strip_prefix("RENDERDOCX_CAPTURE="))
@@ -999,6 +1022,39 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         picked["data"]["pixel"]["float_values"],
         serde_json::json!(["1", "1", "0", "1"])
     );
+    let statistics = agent.send(&serde_json::json!({"command":"texture_statistics","index":layered_index,"mip":1,"slice":1,"sample":0,"min":0,"max":1,"channels":[true,false,false,false]}).to_string());
+    assert_eq!(statistics["ok"], true, "{statistics}");
+    assert_eq!(
+        statistics["data"]["statistics"]["min"]["float_values"],
+        serde_json::json!(["1", "1", "0", "1"])
+    );
+    assert_eq!(
+        statistics["data"]["statistics"]["max"]["float_values"],
+        serde_json::json!(["1", "1", "0", "1"])
+    );
+    let histogram = statistics["data"]["statistics"]["histogram"]
+        .as_array()
+        .unwrap();
+    assert_eq!(histogram.len(), 256);
+    assert_eq!(histogram[255], 16);
+    assert_eq!(
+        histogram.iter().map(|v| v.as_u64().unwrap()).sum::<u64>(),
+        16
+    );
+    let bad_range = agent.send(
+        &serde_json::json!({"command":"texture_statistics","index":layered_index,"min":1,"max":1})
+            .to_string(),
+    );
+    assert_eq!(bad_range["error"]["code"], "invalid_arguments");
+    let blue_stats = agent.send(&serde_json::json!({"command":"texture_statistics","index":layered_index,"mip":1,"slice":1,"channel":2}).to_string());
+    assert_eq!(blue_stats["ok"], true, "{blue_stats}");
+    assert_eq!(
+        blue_stats["data"]["statistics"]["request"]["channels"],
+        serde_json::json!([false, false, true, false])
+    );
+    assert_eq!(blue_stats["data"]["statistics"]["histogram"][0], 16);
+    let bad_channels = agent.send(&serde_json::json!({"command":"texture_statistics","index":layered_index,"channels":[true,false]}).to_string());
+    assert_eq!(bad_channels["error"]["code"], "invalid_arguments");
     let out_of_range = agent.send(&serde_json::json!({"command":"pick_pixel","index":layered_index,"mip":1,"slice":1,"x":4,"y":0}).to_string());
     assert_eq!(
         out_of_range["error"]["code"], "invalid_arguments",
@@ -1018,6 +1074,16 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         integer["data"]["pixel"]["uint_values"],
         serde_json::json!([1, 2, 3, 4])
     );
+    let integer_stats = agent.send(&serde_json::json!({"command":"texture_statistics","index":integer_index,"min":0,"max":5,"channels":[true,false,false,false]}).to_string());
+    assert_eq!(integer_stats["ok"], true, "{integer_stats}");
+    assert_eq!(
+        integer_stats["data"]["statistics"]["min"]["uint_values"],
+        serde_json::json!([1, 2, 3, 4])
+    );
+    assert_eq!(
+        integer_stats["data"]["statistics"]["max"]["uint_values"],
+        serde_json::json!([1, 2, 3, 4])
+    );
     let volume_index = opened["data"]["capture"]["textures"]
         .as_array()
         .unwrap()
@@ -1035,6 +1101,73 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         volume["data"]["pixel"]["float_values"],
         serde_json::json!(["0", "0", "1", "1"])
     );
+    let volume_stats = agent.send(&serde_json::json!({"command":"texture_statistics","index":volume_index,"slice":1,"channels":[false,false,true,false]}).to_string());
+    assert_eq!(volume_stats["ok"], true, "{volume_stats}");
+    assert_eq!(
+        volume_stats["data"]["statistics"]["min"]["float_values"],
+        serde_json::json!(["0", "0", "1", "1"])
+    );
+    assert_eq!(volume_stats["data"]["statistics"]["histogram"][255], 16);
+    if msaa_samples > 1 {
+        println!("D3D11 MSAA statistics sample count: {msaa_samples}");
+        let msaa = opened["data"]["capture"]["textures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|texture| {
+                texture["width"] == 4
+                    && texture["height"] == 4
+                    && texture["samples"] == msaa_samples
+            })
+            .expect("multisampled texture");
+        let single = agent.send(&serde_json::json!({"command":"texture_statistics","index":msaa,"sample":0,"channels":[true,false,false,false]}).to_string());
+        let resolved = agent.send(&serde_json::json!({"command":"texture_statistics","index":msaa,"channels":[true,false,false,false]}).to_string());
+        assert_eq!(single["ok"], true, "{single}");
+        assert_eq!(resolved["ok"], true, "{resolved}");
+        assert_eq!(resolved["data"]["statistics"]["sample"], u32::MAX);
+        assert_eq!(
+            single["data"]["statistics"]["min"]["bits"],
+            resolved["data"]["statistics"]["min"]["bits"]
+        );
+        assert_eq!(
+            single["data"]["statistics"]["max"]["bits"],
+            resolved["data"]["statistics"]["max"]["bits"]
+        );
+        let red = resolved["data"]["statistics"]["min"]["float_values"][0]
+            .as_str()
+            .unwrap()
+            .parse::<f32>()
+            .unwrap();
+        assert!((red - 0.25).abs() <= 1.0 / 255.0);
+        let pixel_sample = agent.send(
+            &serde_json::json!({"command":"pick_pixel","index":msaa,"sample":0,"x":0,"y":0})
+                .to_string(),
+        );
+        let pixel_resolved = agent.send(
+            &serde_json::json!({"command":"pick_pixel","index":msaa,"x":0,"y":0}).to_string(),
+        );
+        assert_eq!(pixel_sample["ok"], true, "{pixel_sample}");
+        assert_eq!(pixel_resolved["ok"], true, "{pixel_resolved}");
+        assert_eq!(
+            pixel_sample["data"]["pixel"]["bits"],
+            pixel_resolved["data"]["pixel"]["bits"]
+        );
+        assert_eq!(pixel_resolved["data"]["pixel"]["sample"], u32::MAX);
+        let histogram = resolved["data"]["statistics"]["histogram"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            histogram.iter().map(|v| v.as_u64().unwrap()).sum::<u64>(),
+            16
+        );
+        let invalid = agent.send(
+            &serde_json::json!({"command":"texture_statistics","index":msaa,"sample":msaa_samples})
+                .to_string(),
+        );
+        assert_eq!(invalid["error"]["code"], "invalid_arguments");
+    } else {
+        eprintln!("D3D11 device has no supported 2x/4x sample mode; MSAA statistics not exercised");
+    }
     let layered_path = dir.path().join("layered.png");
     let save_layer = serde_json::json!({"command":"export_texture","index":layered_index,"path":layered_path.to_str().unwrap(),"mip":1,"slice":1,"sample":0}).to_string();
     let saved_layer = agent.send(&save_layer);
