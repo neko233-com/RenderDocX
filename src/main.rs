@@ -9821,16 +9821,19 @@ impl Workspace {
                                 .page_offset_for_position(self.buffer_layout_origin, hit.offset)
                                 == Some(self.buffer_offset)
                     }) {
-                        result.push(format!(
-                            "{}: {}",
-                            self.t(
-                                "Match at byte",
-                                "匹配字节偏移",
-                                "一致したバイト位置",
-                                "일치 바이트 위치"
+                        result.push(vec![(
+                            format!(
+                                "{}: {}",
+                                self.t(
+                                    "Match at byte",
+                                    "匹配字节偏移",
+                                    "一致したバイト位置",
+                                    "일치 바이트 위치"
+                                ),
+                                hit.offset
                             ),
-                            hit.offset
-                        ));
+                            None,
+                        )]);
                     }
                     match layout.decode_at(self.buffer_layout_origin, self.buffer_offset, data) {
                         Ok(page) => {
@@ -9843,54 +9846,101 @@ impl Workspace {
                                     fields,
                                 });
                             for row in fixed.chain(page.rows) {
-                                let fields = row
-                                    .fields
-                                    .into_iter()
-                                    .map(|field| {
-                                        let values =
-                                            field.display_values.as_ref().unwrap_or(&field.values);
-                                        let value = if let Some(names) = &field.enum_names {
-                                            values
-                                                .iter()
-                                                .zip(names)
-                                                .map(|(value, names)| {
-                                                    let numeric = value.join(", ");
-                                                    if names.is_empty() {
-                                                        numeric
-                                                    } else {
-                                                        format!("{numeric} ({})", names.join(" | "))
-                                                    }
-                                                })
-                                                .collect::<Vec<_>>()
-                                                .join(", ")
-                                        } else if let Some(columns) = field.matrix_columns {
-                                            values
-                                                .iter()
-                                                .map(|matrix| {
-                                                    let rows = matrix
-                                                        .chunks(columns)
-                                                        .map(|row| format!("[{}]", row.join(", ")))
-                                                        .collect::<Vec<_>>()
-                                                        .join(", ");
-                                                    format!("[{rows}]")
-                                                })
-                                                .collect::<Vec<_>>()
-                                                .join(", ")
-                                        } else {
-                                            values
-                                                .iter()
-                                                .map(|value| format!("[{}]", value.join(", ")))
-                                                .collect::<Vec<_>>()
-                                                .join(", ")
-                                        };
-                                        format!("{}={value}", field.name)
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join("  ");
-                                result.push(format!("{}  {fields}", row.offset));
+                                let mut line = vec![(format!("{}  ", row.offset), None)];
+                                for field in row.fields {
+                                    let values =
+                                        field.display_values.as_ref().unwrap_or(&field.values);
+                                    let value = if let Some(names) = &field.enum_names {
+                                        values
+                                            .iter()
+                                            .zip(names)
+                                            .map(|(value, names)| {
+                                                let numeric = value.join(", ");
+                                                if names.is_empty() {
+                                                    numeric
+                                                } else {
+                                                    format!("{numeric} ({})", names.join(" | "))
+                                                }
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
+                                    } else if let Some(columns) = field.matrix_columns {
+                                        values
+                                            .iter()
+                                            .map(|matrix| {
+                                                let rows = matrix
+                                                    .chunks(columns)
+                                                    .map(|row| format!("[{}]", row.join(", ")))
+                                                    .collect::<Vec<_>>()
+                                                    .join(", ");
+                                                format!("[{rows}]")
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
+                                    } else {
+                                        values
+                                            .iter()
+                                            .map(|value| format!("[{}]", value.join(", ")))
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
+                                    };
+                                    let colors = field.rgb_srgb8.unwrap_or_default();
+                                    line.push((
+                                        format!("{}={value}  ", field.name),
+                                        colors.first().copied().flatten(),
+                                    ));
+                                    for (index, color) in colors.into_iter().enumerate().skip(1) {
+                                        if color.is_some() {
+                                            line.push((
+                                                format!("{}[{index}]  ", field.name),
+                                                color,
+                                            ));
+                                        }
+                                    }
+                                }
+                                result.push(line);
                             }
                             if !page.trailing_hex.is_empty() {
-                                result.push(format!(
+                                result.push(vec![(
+                                    format!(
+                                        "{}: {}",
+                                        self.t(
+                                            "Trailing bytes",
+                                            "剩余字节",
+                                            "残りのバイト",
+                                            "남은 바이트"
+                                        ),
+                                        page.trailing_hex
+                                    ),
+                                    None,
+                                )]);
+                            }
+                        }
+                        Err(error) => result.push(vec![(
+                            format!(
+                                "{}: {error}",
+                                self.t(
+                                    "Cannot decode layout at this offset",
+                                    "无法在此偏移解码布局",
+                                    "このオフセットではレイアウトをデコードできません",
+                                    "이 오프셋에서 레이아웃을 디코딩할 수 없습니다"
+                                )
+                            ),
+                            None,
+                        )]),
+                    }
+                    result
+                } else if let Some(format) = self.buffer_format {
+                    let mut result = Vec::new();
+                    if let Ok(page) =
+                        renderdocx::buffer_format::decode(format, self.buffer_offset, data)
+                    {
+                        result.extend(page.values.into_iter().map(|value| {
+                            vec![(format!("{}  {}", value.offset, value.value), None)]
+                        }));
+                        if !page.trailing_hex.is_empty() {
+                            result.push(vec![(
+                                format!(
                                     "{}: {}",
                                     self.t(
                                         "Trailing bytes",
@@ -9899,36 +9949,9 @@ impl Workspace {
                                         "남은 바이트"
                                     ),
                                     page.trailing_hex
-                                ));
-                            }
-                        }
-                        Err(error) => result.push(format!(
-                            "{}: {error}",
-                            self.t(
-                                "Cannot decode layout at this offset",
-                                "无法在此偏移解码布局",
-                                "このオフセットではレイアウトをデコードできません",
-                                "이 오프셋에서 레이아웃을 디코딩할 수 없습니다"
-                            )
-                        )),
-                    }
-                    result
-                } else if let Some(format) = self.buffer_format {
-                    let mut result = Vec::new();
-                    if let Ok(page) =
-                        renderdocx::buffer_format::decode(format, self.buffer_offset, data)
-                    {
-                        result.extend(
-                            page.values
-                                .into_iter()
-                                .map(|value| format!("{}  {}", value.offset, value.value)),
-                        );
-                        if !page.trailing_hex.is_empty() {
-                            result.push(format!(
-                                "{}: {}",
-                                self.t("Trailing bytes", "剩余字节", "残りのバイト", "남은 바이트"),
-                                page.trailing_hex
-                            ));
+                                ),
+                                None,
+                            )]);
                         }
                     }
                     result
@@ -9938,7 +9961,10 @@ impl Workspace {
                         .map(|(line, bytes)| {
                             let hex: String =
                                 bytes.iter().map(|byte| format!("{byte:02x} ")).collect();
-                            format!("{:016x}  {hex}", self.buffer_offset + (line as u64 * 8))
+                            vec![(
+                                format!("{:016x}  {hex}", self.buffer_offset + (line as u64 * 8)),
+                                None,
+                            )]
                         })
                         .collect::<Vec<_>>()
                 }
@@ -10235,7 +10261,17 @@ impl Workspace {
                                     .id(("buffer-line", index))
                                     .test_support()
                                     .text_sm()
-                                    .child(line)
+                                    .flex().flex_wrap()
+                                    .children(line.into_iter().enumerate().map(|(column, (text, color))| {
+                                        let prefix = if color.is_some() { "buffer-rgb" } else { "buffer-text" };
+                                        let mut element = div().id(SharedString::from(format!("{prefix}-{index}-{column}"))).test_support().child(text);
+                                        if let Some([r, g, b]) = color {
+                                            let color = (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
+                                            let light = u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114 >= 128_000;
+                                            element = element.bg(rgb(color)).text_color(rgb(if light { 0x000000 } else { 0xffffff }));
+                                        }
+                                        element
+                                    }))
                             }),
                     )
                 })
@@ -14265,7 +14301,7 @@ mod ui_tests {
             window.click("buffer-layout-input", cx);
             window.press("ctrl-a", cx);
             window.input(
-                "#pack(cbuffer) enum State : uint { Ready = 1 }; [[size(32)]] struct V { float2 p; State id:3; uint :29; }; V v[2]; ushort q[2]; [[hex]] uint end;",
+                "#pack(cbuffer) enum State : uint { Ready = 1 }; [[size(32)]] struct V { [[rgb]] float2 p; State id:3; uint :29; }; V v[2]; ushort q[2]; [[hex]] uint end;",
                 cx,
             );
             window.click("buffer-layout-apply", cx);
@@ -14287,6 +14323,7 @@ mod ui_tests {
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
+            assert!(window.try_find("buffer-rgb-0-1").is_some());
             for _ in 0..40 {
                 let target = window.find("buffer-next");
                 let viewport = window.find("capture-details-scroll").bounds();

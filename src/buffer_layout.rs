@@ -11,6 +11,7 @@ struct Field {
     name: String,
     format: ScalarFormat,
     display: Option<DisplayFormat>,
+    rgb: bool,
     components: usize,
     matrix_rows: usize,
     row_major: bool,
@@ -152,6 +153,10 @@ pub struct FieldValue {
     pub display: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_values: Option<Vec<Vec<String>>>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rgb: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rgb_srgb8: Option<Vec<Option<[u8; 3]>>>,
 }
 #[derive(Serialize)]
 pub struct Row {
@@ -168,6 +173,50 @@ pub struct Page {
     pub repeat_offset: Option<String>,
     pub rows: Vec<Row>,
     pub trailing_hex: String,
+}
+
+// RenderDoc interprets float and normalized values as linear RGB; integer values
+// are already sRGB byte values. Unsupported types have no colour swatch.
+fn rgb_value(field: &Field, values: &[String]) -> Option<[u8; 3]> {
+    let float = match field.packed {
+        Some(PackedFormat::R10UNorm | PackedFormat::R10SNorm | PackedFormat::R11Float) => true,
+        Some(PackedFormat::R10Uint) => false,
+        None => match field.format {
+            ScalarFormat::F16
+            | ScalarFormat::F32
+            | ScalarFormat::F64
+            | ScalarFormat::UNorm8
+            | ScalarFormat::SNorm8
+            | ScalarFormat::UNorm16
+            | ScalarFormat::SNorm16 => true,
+            ScalarFormat::U8
+            | ScalarFormat::I8
+            | ScalarFormat::U16
+            | ScalarFormat::I16
+            | ScalarFormat::U32
+            | ScalarFormat::I32 => false,
+            _ => return None,
+        },
+    };
+    let mut rgb = [0u8; 3];
+    for (out, value) in rgb.iter_mut().zip(values.iter().take(3)) {
+        let value: f32 = value.parse().ok()?;
+        if value.is_nan() {
+            return None;
+        }
+        *out = if float {
+            let linear = value.clamp(0.0, 1.0);
+            let srgb = if linear <= 0.0031308 {
+                12.92 * linear
+            } else {
+                1.055 * linear.powf(1.0 / 2.4) - 0.055
+            };
+            (srgb * 255.0).round().clamp(0.0, 255.0) as u8
+        } else {
+            value.clamp(0.0, 255.0) as u8
+        };
+    }
+    Some(rgb)
 }
 
 fn tokens(source: &str) -> Result<Vec<&str>, String> {
@@ -571,6 +620,7 @@ impl Layout {
             let mut packed_name = None;
             let mut major = None;
             let mut display = None;
+            let mut rgb = false;
             while t.get(i) == Some(&"[") && t.get(i + 1) == Some(&"[") {
                 let annotation = *t.get(i + 2).ok_or("Invalid annotation")?;
                 i += 3;
@@ -598,6 +648,7 @@ impl Layout {
                         i += 3;
                     }
                     "pad" | "padding" if !padding => padding = true,
+                    "rgb" if !rgb => rgb = true,
                     "hex" | "hexadecimal" if display.is_none() => {
                         display = Some(DisplayFormat::Hex)
                     }
@@ -641,6 +692,7 @@ impl Layout {
                     || packed_name.is_some()
                     || major.is_some()
                     || display.is_some()
+                    || rgb
                 {
                     return Err("Unsupported annotation or qualifier on struct field".into());
                 }
@@ -700,6 +752,7 @@ impl Layout {
                         name: name.to_owned(),
                         format: ScalarFormat::Bool,
                         display: None,
+                        rgb: false,
                         components: 1,
                         matrix_rows: 1,
                         row_major: false,
@@ -723,7 +776,8 @@ impl Layout {
                     || normalization.is_some()
                     || packed_name.is_some()
                     || major.is_some()
-                    || display.is_some())
+                    || display.is_some()
+                    || rgb)
             {
                 return Err("Unsupported qualifier on enum field".into());
             }
@@ -951,6 +1005,7 @@ impl Layout {
                         name: name.to_owned(),
                         format,
                         display,
+                        rgb,
                         components: 1,
                         matrix_rows: 1,
                         row_major: false,
@@ -1077,6 +1132,7 @@ impl Layout {
                     name: name.to_owned(),
                     format,
                     display,
+                    rgb,
                     components,
                     matrix_rows,
                     row_major,
@@ -1182,6 +1238,9 @@ impl Layout {
                 } else {
                     value.to_string()
                 };
+                let rgb_color = field
+                    .rgb
+                    .then(|| rgb_value(field, std::slice::from_ref(&numeric)));
                 let enum_bits = if signed {
                     (signed_value as u64)
                         & if width == 8 {
@@ -1212,6 +1271,8 @@ impl Layout {
                     bit_size: Some(bits),
                     values: vec![vec![numeric]],
                     display: field.display.map(DisplayFormat::name),
+                    rgb: field.rgb,
+                    rgb_srgb8: rgb_color.map(|color| vec![color]),
                     display_values: field
                         .display
                         .map(|display| vec![vec![display.format(value, width)]]),
@@ -1291,6 +1352,10 @@ impl Layout {
                 enum_names,
                 bit_offset: None,
                 bit_size: None,
+                rgb_srgb8: field
+                    .rgb
+                    .then(|| values.iter().map(|value| rgb_value(field, value)).collect()),
+                rgb: field.rgb,
                 values,
                 display: field.display.map(DisplayFormat::name),
                 display_values,
@@ -1412,6 +1477,54 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rgb_uses_linear_float_and_srgb_integer_components() {
+        let float = Layout::parse("[[rgb]] float3 color;").unwrap();
+        let bytes = [
+            0.5f32.to_le_bytes(),
+            1f32.to_le_bytes(),
+            (-1f32).to_le_bytes(),
+        ]
+        .concat();
+        let page = float.decode(0, &bytes).unwrap();
+        assert!(page.rows[0].fields[0].rgb);
+        assert_eq!(
+            page.rows[0].fields[0].rgb_srgb8,
+            Some(vec![Some([188, 255, 0])])
+        );
+        let ints = Layout::parse("[[rgb]] int3 color;").unwrap();
+        let bytes = [
+            128i32.to_le_bytes(),
+            300i32.to_le_bytes(),
+            (-2i32).to_le_bytes(),
+        ]
+        .concat();
+        assert_eq!(
+            ints.decode(0, &bytes).unwrap().rows[0].fields[0].rgb_srgb8,
+            Some(vec![Some([128, 255, 0])])
+        );
+        let norm = Layout::parse("[[rgb]] [[unorm]] ubyte4 color;").unwrap();
+        assert_eq!(
+            norm.decode(0, &[128, 255, 0, 42]).unwrap().rows[0].fields[0].rgb_srgb8,
+            Some(vec![Some([188, 255, 0])])
+        );
+        let packed = Layout::parse("[[rgb]] [[packed(r10g10b10a2_unorm)]] uint4 color;").unwrap();
+        assert_eq!(
+            packed.decode(0, &1023u32.to_le_bytes()).unwrap().rows[0].fields[0].rgb_srgb8,
+            Some(vec![Some([255, 0, 0])])
+        );
+        let nan = [
+            f32::NAN.to_le_bytes(),
+            0f32.to_le_bytes(),
+            0f32.to_le_bytes(),
+        ]
+        .concat();
+        assert_eq!(
+            float.decode(0, &nan).unwrap().rows[0].fields[0].rgb_srgb8,
+            Some(vec![None])
+        );
+        assert!(Layout::parse("struct S { uint x; }; [[rgb]] S value;").is_err());
+    }
     #[test]
     fn hexadecimal_and_binary_display_preserve_unsigned_bit_patterns() {
         let layout = Layout::parse("[[hex]] int signed_value; [[binary]] ubyte bits; xshort alias; [[hexadecimal]] short2 vector;").unwrap();
