@@ -121,6 +121,16 @@ impl Timeline {
     }
 }
 
+/// Maps a pointer position onto the inclusive event-ID range.
+pub fn event_at(start: u32, end: u32, x: f32, width: f32) -> Option<u32> {
+    if start > end || !x.is_finite() || !width.is_finite() || width <= 0.0 {
+        return None;
+    }
+    let fraction = (f64::from(x) / f64::from(width)).clamp(0.0, 1.0);
+    let span = u64::from(end) - u64::from(start);
+    Some((u64::from(start) + (fraction * span as f64).floor() as u64) as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,6 +156,17 @@ mod tests {
             api_events: vec![],
         }
     }
+    #[test]
+    fn pointer_mapping_clamps_and_handles_large_event_ranges() {
+        assert_eq!(event_at(0, u32::MAX, 0.0, 100.0), Some(0));
+        assert_eq!(event_at(0, u32::MAX, 100.0, 100.0), Some(u32::MAX));
+        assert_eq!(event_at(10, 20, -1.0, 100.0), Some(10));
+        assert_eq!(event_at(10, 20, 50.0, 100.0), Some(15));
+        assert_eq!(event_at(10, 20, 101.0, 100.0), Some(20));
+        assert_eq!(event_at(10, 20, f32::NAN, 100.0), None);
+        assert_eq!(event_at(20, 10, 1.0, 100.0), None);
+    }
+
     #[test]
     fn markers_and_leaf_actions_follow_upstream_rules() {
         let mut marker = action(8, -1, 0, 0x40);

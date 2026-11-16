@@ -402,6 +402,26 @@ pub struct ResourceUsagePage {
     pub entries: Vec<ResourceUse>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct TimelineUsage {
+    pub index: u32,
+    pub tracked: bool,
+    pub entries: Vec<ResourceUse>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct TimelineHistory {
+    pub event_id: u32,
+    pub index: u32,
+    pub mip: u32,
+    pub slice: u32,
+    pub sample: u32,
+    pub x: u32,
+    pub y: u32,
+    pub modifications: String,
+    pub events: Vec<u32>,
+}
+
 pub const RESOURCE_USAGE_PAGE_LIMIT: u32 = 128;
 
 pub fn resource_usage_name(usage: u32) -> &'static str {
@@ -1173,6 +1193,8 @@ enum Reply {
     CounterFetch(CounterFetch),
     CounterPage(CounterPage),
     ResourceUsage(ResourceUsagePage),
+    TimelineUsage(TimelineUsage),
+    TimelineHistory(TimelineHistory),
     Selected {
         event_id: u32,
         pipeline: Pipeline,
@@ -1547,6 +1569,12 @@ trait Transport: Send {
         _limit: u32,
     ) -> Result<CounterPage, String> {
         Err("GPU counters are not supported by this transport".into())
+    }
+    fn timeline_usage(&mut self, _index: u32) -> Result<TimelineUsage, String> {
+        Err("Timeline usage is not supported by this transport".into())
+    }
+    fn timeline_history(&mut self) -> Result<TimelineHistory, String> {
+        Err("Timeline history is not supported by this transport".into())
     }
     fn resource_usage(
         &mut self,
@@ -2080,6 +2108,41 @@ impl Transport for Process {
             _ => Err("Unexpected texture statistics response".into()),
         }
     }
+    fn timeline_usage(&mut self, index: u32) -> Result<TimelineUsage, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(input, "timeline_usage {index}")
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::TimelineUsage(data)
+                if data.index == index && (data.tracked || data.entries.is_empty()) =>
+            {
+                Ok(data)
+            }
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected timeline usage response".into()),
+        }
+    }
+    fn timeline_history(&mut self) -> Result<TimelineHistory, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(input, "timeline_history")
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::TimelineHistory(data)
+                if data
+                    .modifications
+                    .parse::<u64>()
+                    .is_ok_and(|n| n >= data.events.len() as u64)
+                    && data.events.windows(2).all(|pair| pair[0] < pair[1]) =>
+            {
+                Ok(data)
+            }
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected timeline history response".into()),
+        }
+    }
+
     fn resource_usage(
         &mut self,
         index: u32,
@@ -3024,6 +3087,25 @@ impl Session {
             .read_buffer(index, offset, length)
     }
 
+    pub fn timeline_usage(&self, index: u32) -> Result<TimelineUsage, String> {
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .timeline_usage(index)
+    }
+    pub fn timeline_history(&self) -> Result<TimelineHistory, String> {
+        let revision = self.revision.load(Ordering::SeqCst);
+        let mut process = self.process.lock().map_err(|e| e.to_string())?;
+        if self.revision.load(Ordering::SeqCst) != revision {
+            return Err("Replay selection changed".into());
+        }
+        let result = process.timeline_history()?;
+        if self.revision.load(Ordering::SeqCst) != revision {
+            return Err("Replay selection changed".into());
+        }
+        Ok(result)
+    }
+
     pub fn resource_usage(
         &self,
         index: u32,
@@ -3402,7 +3484,11 @@ impl Session {
 #[cfg(feature = "ui-tests")]
 pub mod test_support {
     use super::*;
-    struct RecordingTransport(Arc<Mutex<Vec<u32>>>, Arc<Mutex<Vec<TextureSelection>>>);
+    struct RecordingTransport(
+        Arc<Mutex<Vec<u32>>>,
+        Arc<Mutex<Vec<TextureSelection>>>,
+        Option<TimelineHistory>,
+    );
     impl Transport for RecordingTransport {
         fn pixel_history(
             &mut self,
@@ -3460,6 +3546,17 @@ pub mod test_support {
                     },
                 },
             ];
+            self.2 = Some(TimelineHistory {
+                event_id: event,
+                index,
+                mip: selection.mip,
+                slice: selection.slice,
+                sample,
+                x,
+                y,
+                modifications: "2".into(),
+                events: vec![41, 42],
+            });
             Ok(PixelHistoryPage {
                 event_id: event,
                 index,
@@ -3477,6 +3574,12 @@ pub mod test_support {
                     .collect(),
             })
         }
+        fn timeline_history(&mut self) -> Result<TimelineHistory, String> {
+            self.2
+                .clone()
+                .ok_or_else(|| "No pixel history is currently cached".into())
+        }
+
         fn texture_statistics(
             &mut self,
             event: u32,
@@ -3505,6 +3608,19 @@ pub mod test_support {
                 histogram,
             })
         }
+        fn timeline_usage(&mut self, index: u32) -> Result<TimelineUsage, String> {
+            if index > 1 {
+                return Err("Invalid resource".into());
+            }
+            Ok(TimelineUsage {
+                index,
+                tracked: true,
+                entries: (0..140)
+                    .map(|event_id| ResourceUse { event_id, usage: 2 })
+                    .collect(),
+            })
+        }
+
         fn resource_usage(
             &mut self,
             index: u32,
@@ -3937,6 +4053,7 @@ pub mod test_support {
             process: Arc::new(Mutex::new(Box::new(RecordingTransport(
                 events.clone(),
                 selections.clone(),
+                None,
             )))),
             revision: Arc::new(AtomicU64::new(0)),
             remote_url: None,

@@ -1,5 +1,6 @@
 use gpui_kit as gpui;
 use gpui_kit::TestSupportExt;
+use gpui_kit::base::ElementExt;
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
@@ -212,6 +213,9 @@ struct TimelineView {
     start: u32,
     end: u32,
     collapsed: std::collections::HashSet<usize>,
+    pending_scrub: Option<usize>,
+    usage: Option<renderdocx::replay::TimelineUsage>,
+    history: Option<renderdocx::replay::TimelineHistory>,
 }
 impl TimelineView {
     fn reset(&mut self, actions: &[renderdocx::replay::Action]) {
@@ -219,6 +223,9 @@ impl TimelineView {
         self.start = 0;
         self.end = self.model.max_event;
         self.collapsed.clear();
+        self.pending_scrub = None;
+        self.usage = None;
+        self.history = None;
     }
     fn zoom(&mut self, inward: bool, focus: Option<u32>) {
         let total = u64::from(self.model.max_event) + 1;
@@ -2564,6 +2571,7 @@ impl Workspace {
     }
 
     fn select_event(&mut self, index: usize, api_index: Option<usize>, cx: &mut Context<Self>) {
+        self.timeline.pending_scrub = None;
         if self.protect_shader_draft(cx) {
             return;
         }
@@ -2644,7 +2652,7 @@ impl Workspace {
                         this.pipeline = Some(pipeline);
                         this.status = None;
                     }
-                    Ok(None) => return,
+                    Ok(None) => {}
                     Err(error) => {
                         this.status = Some(format!(
                             "{}: {error}",
@@ -2655,6 +2663,12 @@ impl Workspace {
                                 "리플레이 실패"
                             )
                         ))
+                    }
+                }
+                if let Some(next) = this.timeline.pending_scrub.take() {
+                    if this.selected != Some(next) {
+                        this.select_event(next, None, cx);
+                        return;
                     }
                 }
                 cx.notify();
@@ -3746,6 +3760,7 @@ impl Workspace {
         };
         if self.selected_resource != Some(index) {
             self.usage_page = None;
+            self.timeline.usage = None;
         }
         self.selected_resource = Some(index);
         self.resource_pending = true;
@@ -5020,6 +5035,7 @@ impl Workspace {
         if !reuse {
             self.pixel_history = None;
             self.history_selected = None;
+            self.timeline.history = None;
         }
         self.resource_pending = true;
         self.status = Some(
@@ -5033,7 +5049,7 @@ impl Workspace {
         );
         cx.notify();
         let task = cx.background_executor().spawn(async move {
-            session.pixel_history(
+            let page = session.pixel_history(
                 event,
                 texture_index,
                 &texture,
@@ -5042,7 +5058,18 @@ impl Workspace {
                 y,
                 offset,
                 PIXEL_HISTORY_PAGE_LIMIT,
-            )
+            )?;
+            let history = session.timeline_history().ok().filter(|history| {
+                history.event_id == page.event_id
+                    && history.index == page.index
+                    && history.mip == page.mip
+                    && history.slice == page.slice
+                    && history.sample == page.sample
+                    && history.x == page.x
+                    && history.y == page.y
+                    && history.modifications == page.total
+            });
+            Ok::<_, String>((page, history))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -5057,7 +5084,10 @@ impl Workspace {
                     return;
                 }
                 match result {
-                    Ok(page) => {
+                    Ok((page, history)) => {
+                        if let Some(history) = history {
+                            this.timeline.history = Some(history);
+                        }
                         this.history_selected = (!page.entries.is_empty()).then_some(0);
                         this.pixel_history = Some(page);
                         this.status = None;
@@ -5973,6 +6003,110 @@ impl Workspace {
         Some(view.into_any_element())
     }
 
+    fn load_timeline_usage(&mut self, cx: &mut Context<Self>) {
+        if self.replay_pending || self.resource_pending || self.export_pending {
+            return;
+        }
+        let (Some(session), Some(index)) = (self.session.clone(), self.selected_resource) else {
+            self.status = Some(
+                self.t(
+                    "Select a resource first.",
+                    "请先选择资源。",
+                    "最初にリソースを選択してください。",
+                    "먼저 리소스를 선택하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let Ok(wire_index) = u32::try_from(index) else {
+            return;
+        };
+        let revision = self.open_revision;
+        self.resource_pending = true;
+        self.status = Some(
+            self.t(
+                "Loading complete resource usage…",
+                "正在加载完整资源使用记录…",
+                "すべてのリソース使用履歴を読み込み中…",
+                "전체 리소스 사용 기록을 불러오는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx
+            .background_executor()
+            .spawn(async move { session.timeline_usage(wire_index) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision {
+                    return;
+                }
+                this.resource_pending = false;
+                if this.selected_resource != Some(index) {
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok(usage) => {
+                        this.timeline.usage = Some(usage);
+                        this.status = None;
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Could not load full resource usage",
+                                "无法加载完整资源使用记录",
+                                "すべてのリソース使用履歴を読み込めません",
+                                "전체 리소스 사용 기록을 불러올 수 없습니다"
+                            )
+                        ))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn scrub_timeline(
+        &mut self,
+        position: gpui::Point<gpui::Pixels>,
+        bounds: Bounds<gpui::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.resource_pending || self.export_pending {
+            return;
+        }
+        let x = f32::from(position.x - bounds.origin.x);
+        let width = f32::from(bounds.size.width);
+        let Some(event) =
+            renderdocx::timeline::event_at(self.timeline.start, self.timeline.end, x, width)
+        else {
+            return;
+        };
+        let Some((_, index)) = self.timeline.model.next_action(event) else {
+            return;
+        };
+        self.event_search
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        if let Some(row) = self.event_tree.reveal(index, None) {
+            self.event_scroll
+                .scroll_to_item(row, gpui::ScrollStrategy::Nearest);
+        }
+        self.tab = CaptureTab::Events;
+        if self.replay_pending {
+            self.timeline.pending_scrub = Some(index);
+        } else if self.selected != Some(index) {
+            self.select_event(index, None, cx);
+        }
+        cx.notify();
+    }
+
     fn timeline_view(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         const WIDTH: f64 = 768.0;
         let start = self.timeline.start;
@@ -6014,15 +6148,30 @@ impl Workspace {
                 bins.entry(position(event) as u32).or_insert((event, index));
             }
         }
-        let usage = self
-            .usage_page
+        let full_usage = self
+            .timeline
+            .usage
             .as_ref()
-            .map(|page| page.entries.iter().map(|e| e.event_id).collect::<Vec<_>>())
+            .filter(|usage| self.selected_resource == usize::try_from(usage.index).ok());
+        let usage = full_usage
+            .map(|usage| usage.entries.iter().map(|e| e.event_id).collect::<Vec<_>>())
+            .or_else(|| {
+                self.usage_page
+                    .as_ref()
+                    .filter(|page| self.selected_resource == usize::try_from(page.index).ok())
+                    .map(|page| page.entries.iter().map(|e| e.event_id).collect::<Vec<_>>())
+            })
             .unwrap_or_default();
         let history = self
-            .pixel_history
+            .timeline
+            .history
             .as_ref()
-            .map(|page| page.entries.iter().map(|e| e.event_id).collect::<Vec<_>>())
+            .map(|history| history.events.clone())
+            .or_else(|| {
+                self.pixel_history
+                    .as_ref()
+                    .map(|page| page.entries.iter().map(|e| e.event_id).collect::<Vec<_>>())
+            })
             .unwrap_or_default();
         let bookmarks = self
             .annotations
@@ -6097,19 +6246,20 @@ impl Workspace {
             );
         }
         for (kind, values, color) in [(0u8, usage, 0xffb454), (1u8, history, 0xf07178)] {
-            for (index, event) in values
+            let mut bins = std::collections::BTreeMap::new();
+            for event in values
                 .into_iter()
-                .enumerate()
-                .filter(|(_, e)| *e >= start && *e <= end)
+                .filter(|event| *event >= start && *event <= end)
             {
+                bins.entry(position(event) as u32).or_insert(event);
+            }
+            for (x, event) in bins {
                 graph = graph.child(
                     div()
-                        .id(SharedString::from(format!(
-                            "timeline-highlight-{kind}-{index}"
-                        )))
+                        .id(SharedString::from(format!("timeline-highlight-{kind}-{x}")))
                         .test_support()
                         .absolute()
-                        .left(px(position(event)))
+                        .left(px(x as f32))
                         .top(px(height - 22.0))
                         .w(px(4.))
                         .h(px(6.))
@@ -6153,15 +6303,44 @@ impl Workspace {
                     .bg(rgb(0xffffff)),
             );
         }
+        let axis_bounds = std::rc::Rc::new(std::cell::Cell::new(Bounds::<gpui::Pixels>::default()));
+        let paint_bounds = axis_bounds.clone();
+        let down_bounds = axis_bounds.clone();
+        let move_bounds = axis_bounds.clone();
+        let axis = div()
+            .id("timeline-axis")
+            .test_support()
+            .relative()
+            .w(px(WIDTH as f32))
+            .h(px(20.))
+            .bg(rgb(0x30445b))
+            .cursor_pointer()
+            .on_prepaint(move |bounds, _, _| paint_bounds.set(bounds))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                    this.scrub_timeline(event.position, down_bounds.get(), window, cx)
+                }),
+            )
+            .on_mouse_move(
+                cx.listener(move |this, event: &gpui::MouseMoveEvent, window, cx| {
+                    if event.dragging() {
+                        this.scrub_timeline(event.position, move_bounds.get(), window, cx);
+                    }
+                }),
+            );
         div().flex().flex_col().gap_2()
             .child(div().flex().flex_wrap().gap_2()
                 .child(button("timeline-previous", self.t("Previous range", "上一范围", "前の範囲", "이전 범위"), false, |this, cx| { this.timeline.pan(false); cx.notify(); }, cx))
                 .child(button("timeline-next", self.t("Next range", "下一范围", "次の範囲", "다음 범위"), false, |this, cx| { this.timeline.pan(true); cx.notify(); }, cx))
                 .child(button("timeline-zoom-in", self.t("Zoom in", "放大", "拡大", "확대"), false, |this, cx| { this.timeline.zoom(true, this.pipeline.as_ref().map(|p| p.event_id)); cx.notify(); }, cx))
-                .child(button("timeline-zoom-out", self.t("Zoom out", "缩小", "縮小", "축소"), false, |this, cx| { this.timeline.zoom(false, this.pipeline.as_ref().map(|p| p.event_id)); cx.notify(); }, cx)))
+                .child(button("timeline-zoom-out", self.t("Zoom out", "缩小", "縮小", "축소"), false, |this, cx| { this.timeline.zoom(false, this.pipeline.as_ref().map(|p| p.event_id)); cx.notify(); }, cx))
+                .child(button("timeline-load-usage", self.t("Highlight all resource usage", "高亮全部资源使用", "すべてのリソース使用を強調", "전체 리소스 사용 강조"), false, |this, cx| this.load_timeline_usage(cx), cx)))
             .child(format!("{}: {start}–{end} / {}", self.t("Event IDs", "事件 ID", "イベント ID", "이벤트 ID"), self.timeline.model.max_event))
-            .child(self.t("Blue: actions · orange: loaded resource usage · red: loaded pixel history · green: loaded bookmarks", "蓝：操作 · 橙：已加载资源使用 · 红：已加载像素历史 · 绿：已加载书签", "青：アクション・橙：読込済みリソース使用・赤：読込済みピクセル履歴・緑：読込済みブックマーク", "파랑: 작업 · 주황: 불러온 리소스 사용 · 빨강: 불러온 픽셀 기록 · 초록: 불러온 북마크"))
+            .child(self.t("Drag the axis to select actions. Orange: resource usage · red: pixel history · green: loaded bookmarks.", "拖动坐标轴选择操作。橙：资源使用 · 红：像素历史 · 绿：已加载书签。", "軸をドラッグしてアクションを選択。橙：リソース使用・赤：ピクセル履歴・緑：読込済みブックマーク。", "축을 드래그하여 작업 선택. 주황: 리소스 사용 · 빨강: 픽셀 기록 · 초록: 불러온 북마크."))
+            .child(format!("{}: {} · {}: {}", self.t("Resource usage", "资源使用", "リソース使用", "리소스 사용"), if full_usage.is_some() { self.t("complete", "完整", "全件", "전체") } else { self.t("loaded page", "已加载页", "読込済みページ", "불러온 페이지") }, self.t("Pixel history", "像素历史", "ピクセル履歴", "픽셀 기록"), if self.timeline.history.is_some() { self.t("complete", "完整", "全件", "전체") } else { self.t("loaded page", "已加载页", "読込済みページ", "불러온 페이지") }))
             .child(div().id("timeline-scroll").test_support().max_h(px(180.)).overflow_scroll().child(graph))
+            .child(div().id("timeline-axis-scroll").test_support().overflow_x_scroll().child(axis))
             .into_any_element()
     }
 
@@ -12479,6 +12658,24 @@ mod ui_tests {
         })
         .unwrap();
         cx.update(|cx| assert!(view.read(cx).timeline.start > 0));
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.selected_resource = Some(0);
+                cx.notify();
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("timeline-load-usage", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                view.read(cx).timeline.usage.as_ref().unwrap().entries.len(),
+                140
+            )
+        });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             window.click("timeline-zoom-out", cx);
@@ -12488,6 +12685,16 @@ mod ui_tests {
         .unwrap();
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 43));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let bounds = window.find("timeline-axis").bounds();
+            let from = bounds.origin + gpui::point(px(5.), px(10.));
+            let to = bounds.origin + gpui::point(bounds.size.width - px(5.), px(10.));
+            window.drag(from, to, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 77));
         events.lock().unwrap().clear();
         cx.update(|cx| {
             view.update(cx, |view, cx| {
@@ -12630,6 +12837,10 @@ mod ui_tests {
             let history = view.read(cx).pixel_history.as_ref().unwrap();
             assert_eq!((history.event_id, history.x, history.y), (42, 3, 4));
             assert_eq!(history.entries.len(), 2);
+            assert_eq!(
+                view.read(cx).timeline.history.as_ref().unwrap().events,
+                [41, 42]
+            );
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
@@ -13003,6 +13214,12 @@ mod ui_tests {
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 43));
         assert_eq!(*events.lock().unwrap(), vec![42, 77, 43]);
+        cx.update(|cx| {
+            assert_eq!(
+                view.read(cx).timeline.history.as_ref().unwrap().events,
+                [41, 42]
+            )
+        });
         cx.update_window(handle.into(), |_, window, cx| {
             window.click("event-toggle-0", cx);
             window.render_frame(cx);

@@ -1568,6 +1568,39 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       std::cout << "]}" << std::endl;
       continue;
     }
+    if(command.compare(0, 15, "timeline_usage ") == 0)
+    {
+      const std::string text = command.substr(15);
+      uint64_t index = 0;
+      if(!decimal(text, index) || index >= resources.size()) { error("Invalid resource index"); continue; }
+      const auto usage = replay.controller->GetUsage(resources[size_t(index)].resourceId);
+      result = replay.controller->GetFatalErrorStatus();
+      if(!result.OK()) { error(result_message(result)); break; }
+      const bool tracked = !(usage.size() == 1 && usage[0].eventId == 0 && usage[0].usage == ResourceUsage::Unused);
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"timeline_usage\",\"index\":" << index
+                << ",\"tracked\":" << (tracked ? "true" : "false") << ",\"entries\":[";
+      if(tracked) for(size_t i = 0; i < usage.size(); ++i)
+      {
+        if(i) std::cout << ',';
+        std::cout << "{\"event_id\":" << usage[i].eventId << ",\"usage\":" << uint32_t(usage[i].usage) << '}';
+      }
+      std::cout << "]}" << std::endl;
+      continue;
+    }
+    if(command == "timeline_history")
+    {
+      if(!history_ready || !selected || history_event != selected_event) { error("No pixel history is currently cached"); continue; }
+      std::set<uint32_t> events;
+      for(const PixelModification &mod : cached_history) events.insert(mod.eventId);
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"timeline_history\",\"event_id\":" << history_event
+                << ",\"index\":" << history_index << ",\"mip\":" << history_mip << ",\"slice\":" << history_slice
+                << ",\"sample\":" << history_sample << ",\"x\":" << history_x << ",\"y\":" << history_y
+                << ",\"modifications\":\"" << cached_history.size() << "\",\"events\":[";
+      bool first = true;
+      for(uint32_t event : events) { if(!first) std::cout << ','; first = false; std::cout << event; }
+      std::cout << "]}" << std::endl;
+      continue;
+    }
     if(command.compare(0, 6, "usage ") == 0)
     {
       std::istringstream arguments(command.substr(6));

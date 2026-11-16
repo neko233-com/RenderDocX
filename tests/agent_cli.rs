@@ -1211,6 +1211,27 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         .send(&serde_json::json!({"command":"resource_usage","index":vertex_resource}).to_string());
     assert_eq!(usage["ok"], true, "{usage}");
     assert_eq!(usage["data"]["tracked"], true);
+    let full_usage = agent.send(
+        &serde_json::json!({"command":"timeline_usage", "index":vertex_resource}).to_string(),
+    );
+    assert_eq!(full_usage["ok"], true, "{full_usage}");
+    assert_eq!(full_usage["data"]["usage"]["tracked"], true);
+    for (full, page) in full_usage["data"]["usage"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(usage["data"]["entries"].as_array().unwrap())
+    {
+        assert_eq!(full["event_id"], page["event_id"]);
+        assert_eq!(full["usage"], page["usage"]);
+    }
+    assert!(
+        full_usage["data"]["usage"]["entries"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= usage["data"]["entries"].as_array().unwrap().len()
+    );
     assert!(
         usage["data"]["entries"]
             .as_array()
@@ -1369,7 +1390,7 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         "{api_select}"
     );
     assert_eq!(
-        agent.send(r#"{"id":12,"command":"select","event_id":4294967295u32}"#)["error"]["code"],
+        agent.send(r#"{"id":12,"command":"select","event_id":4294967295}"#)["error"]["code"],
         "replay_select_failed"
     );
     let request =
@@ -2046,6 +2067,20 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let request = serde_json::json!({"command":"pixel_history","index":texture_index,"x":8,"y":8});
     let history = agent.send(&request.to_string());
     assert_eq!(history["ok"], true, "{history}");
+    let history_events = agent.send(r#"{"command":"timeline_history"}"#);
+    assert_eq!(history_events["ok"], true, "{history_events}");
+    assert_eq!(
+        history_events["data"]["history"]["modifications"],
+        history["data"]["history"]["total"]
+    );
+    for entry in history["data"]["history"]["entries"].as_array().unwrap() {
+        assert!(
+            history_events["data"]["history"]["events"]
+                .as_array()
+                .unwrap()
+                .contains(&entry["event_id"])
+        );
+    }
     assert_eq!(
         agent.send(r#"{"command":"mesh_read","kind":"vertex","offset":"0","length":16}"#)["error"]
             ["code"],
@@ -2509,6 +2544,48 @@ fn real_remote_replay_loopback() {
     let selected =
         agent.send(&serde_json::json!({"command":"select", "event_id":event}).to_string());
     assert_eq!(selected["ok"], true, "{selected}");
+    let vertex_resource = opened["data"]["capture"]["buffers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|buffer| buffer["length"] == "28")
+        .unwrap()["resource_index"]
+        .as_u64()
+        .unwrap();
+    let usage = agent.send(
+        &serde_json::json!({"command":"timeline_usage", "index":vertex_resource}).to_string(),
+    );
+    assert_eq!(usage["ok"], true, "{usage}");
+    assert!(
+        usage["data"]["usage"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["event_id"] == event)
+    );
+    let texture = opened["data"]["capture"]["textures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|texture| texture["width"] == 16 && texture["height"] == 16)
+        .unwrap();
+    let history = agent.send(
+        &serde_json::json!({"command":"pixel_history", "index":texture, "x":8, "y":8}).to_string(),
+    );
+    assert_eq!(history["ok"], true, "{history}");
+    let history_events = agent.send(r#"{"command":"timeline_history"}"#);
+    assert_eq!(history_events["ok"], true, "{history_events}");
+    assert_eq!(
+        history_events["data"]["history"]["modifications"],
+        history["data"]["history"]["total"]
+    );
+    let highlighted = history_events["data"]["history"]["events"]
+        .as_array()
+        .unwrap();
+    assert!(!highlighted.is_empty(), "{history_events}");
+    for entry in history["data"]["history"]["entries"].as_array().unwrap() {
+        assert!(highlighted.contains(&entry["event_id"]));
+    }
     let stack =
         agent.send(&serde_json::json!({"command":"callstack", "event_id":event}).to_string());
     assert_eq!(stack["ok"], true, "{stack}");
