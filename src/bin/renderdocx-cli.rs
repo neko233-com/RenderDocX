@@ -26,6 +26,21 @@ enum Invocation {
     Serve(Settings),
 }
 
+fn apply_event_filter(
+    tree: &mut EventTree,
+    session: &renderdocx::replay::Session,
+    actions: &[renderdocx::replay::Action],
+    expression: &str,
+) -> Result<(), String> {
+    let matches = renderdocx::event_parameters::resolve(session, actions, expression, || false)?;
+    tree.set_filter_with_parameters(expression, matches);
+    if tree.filter_error() {
+        Err("Invalid or unsupported event filter".into())
+    } else {
+        Ok(())
+    }
+}
+
 fn mesh_filter(request: &serde_json::Map<String, Value>) -> Result<mesh_draw::MeshFilter, String> {
     let parse = |name: &str| -> Result<Option<u32>, String> {
         match request.get(name) {
@@ -689,19 +704,17 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                 };
                 match (&opened, path, filter, show_api) {
                     (None, _, _, _) => Err(("no_capture", "No capture is open".into())),
-                    (Some((_, snapshot)), Some(path), Some(filter), Some(show_api)) => {
+                    (Some((session, snapshot)), Some(path), Some(filter), Some(show_api)) => {
                         let mut tree = EventTree::default();
                         tree.reset(&snapshot.actions);
                         tree.set_show_api(show_api);
                         if let Some(times) = &event_times {
                             tree.set_durations(times.clone());
                         }
-                        tree.set_filter(filter);
-                        if tree.filter_error() {
-                            Err((
-                                "invalid_filter",
-                                "Invalid or unsupported event filter".into(),
-                            ))
+                        if let Err(error) =
+                            apply_event_filter(&mut tree, session, &snapshot.actions, filter)
+                        {
+                            Err(("invalid_filter", error))
                         } else {
                             renderdocx::event_export::write_new(
                                 std::path::Path::new(path),
@@ -737,15 +750,14 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                 };
                 match (&opened, event, filter, forward) {
                     (None, _, _, _) => Err(("no_capture", "No capture is open".into())),
-                    (Some((_, snapshot)), Some(event), Some(filter), Some(forward)) => {
+                    (Some((session, snapshot)), Some(event), Some(filter), Some(forward)) => {
                         let known = snapshot.actions.iter().any(|action| action.event_id == event || action.api_events.iter().any(|e| e.event_id == event));
                         if !known { Err(("invalid_arguments", "Unknown event".into())) }
                         else {
                             let mut tree = EventTree::default();
                             tree.reset(&snapshot.actions);
                             if let Some(times) = &event_times { tree.set_durations(times.clone()); }
-                            tree.set_filter(filter);
-                            if tree.filter_error() { Err(("invalid_filter", "Invalid or unsupported event filter".into())) }
+                            if let Err(error) = apply_event_filter(&mut tree, session, &snapshot.actions, filter) { Err(("invalid_filter", error)) }
                             else {
                                 let action = tree.step_action(event, forward).map(|index|
                                     json!({"action_index":index,"event_id":snapshot.actions[index].event_id}));
@@ -781,13 +793,12 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                 };
                 match (&opened, query, filter, show_api, current, forward) {
                     (None, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
-                    (Some((_, snapshot)), Some(query), Some(filter), Some(show_api), Some(current), Some(forward)) => {
+                    (Some((session, snapshot)), Some(query), Some(filter), Some(show_api), Some(current), Some(forward)) => {
                         let mut tree = EventTree::default();
                         tree.reset(&snapshot.actions);
                         tree.set_show_api(show_api);
                         if let Some(times) = &event_times { tree.set_durations(times.clone()); }
-                        tree.set_filter(filter);
-                        if tree.filter_error() { Err(("invalid_filter", "Invalid or unsupported event filter".into())) }
+                        if let Err(error) = apply_event_filter(&mut tree, session, &snapshot.actions, filter) { Err(("invalid_filter", error)) }
                         else {
                             let found = tree.find(query, current, forward).and_then(|row| {
                                 let (action_index, api_index) = match tree.row(row)? {
@@ -821,14 +832,13 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                 };
                 match (&opened, expression, show_api, offset, limit) {
                     (None, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
-                    (Some((_, snapshot)), Some(expression), Some(show_api), Some(offset), Some(limit)) => {
+                    (Some((session, snapshot)), Some(expression), Some(show_api), Some(offset), Some(limit)) => {
                         let mut tree = EventTree::default();
                         tree.reset(&snapshot.actions);
                         tree.set_show_api(show_api);
                         if let Some(times) = &event_times { tree.set_durations(times.clone()); }
-                        tree.set_filter(expression);
-                        if tree.filter_error() {
-                            Err(("invalid_filter", "Invalid or unsupported event filter".into()))
+                        if let Err(error) = apply_event_filter(&mut tree, session, &snapshot.actions, expression) {
+                            Err(("invalid_filter", error))
                         } else if offset > tree.visible.len() {
                             Err(("invalid_arguments", "Event offset exceeds the filtered item count".into()))
                         } else {

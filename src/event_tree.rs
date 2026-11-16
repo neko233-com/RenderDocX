@@ -1,4 +1,4 @@
-use crate::event_filter::{EventContext, Filter};
+use crate::event_filter::{EventContext, Filter, ParameterMatches};
 use crate::replay::Action;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +30,7 @@ pub struct EventTree {
     lower_names: Vec<String>,
     marker_names: Vec<String>,
     filter: Filter,
+    parameter_matches: ParameterMatches,
     filter_error: bool,
     actions: Vec<Action>,
     ranges: Vec<Option<crate::event_ranges::ActionRange>>,
@@ -45,6 +46,12 @@ pub struct EventTree {
 
 impl EventTree {
     pub fn reset(&mut self, actions: &[Action]) {
+        // Match results are specific to a capture; never reuse them for another.
+        self.parameter_matches.clear();
+        if !self.filter.parameter_queries().is_empty() {
+            self.filter = Filter::default();
+            self.filter_error = false;
+        }
         self.durations = None;
         self.action_count = actions.len();
         self.actions = actions.to_vec();
@@ -144,13 +151,24 @@ impl EventTree {
     }
 
     pub fn set_filter(&mut self, text: &str) {
+        self.set_filter_with_parameters(text, ParameterMatches::new());
+    }
+
+    /// Apply only complete parameter results, preserving the last valid filter otherwise.
+    pub fn set_filter_with_parameters(&mut self, text: &str, matches: ParameterMatches) {
         match Filter::parse(text) {
-            Ok(filter) => {
+            Ok(filter)
+                if filter
+                    .parameter_queries()
+                    .iter()
+                    .all(|query| matches.contains_key(query)) =>
+            {
                 self.filter = filter;
+                self.parameter_matches = matches;
                 self.filter_error = false;
                 self.rebuild();
             }
-            Err(()) => self.filter_error = true,
+            _ => self.filter_error = true,
         }
     }
 
@@ -352,6 +370,7 @@ impl EventTree {
                         parents: &self.parents,
                         marker_names: &self.marker_names,
                         duration: self.duration(self.event_ids[index]),
+                        parameter_matches: &self.parameter_matches,
                     })
             })
             .collect();
@@ -379,6 +398,67 @@ impl EventTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parameter_filters_require_complete_capture_scoped_results() {
+        use crate::event_filter::{Filter, ParamQuery, ParameterMatches};
+        let mut first = action(-1);
+        first.event_id = 1;
+        first.name = "first".into();
+        let mut second = action(-1);
+        second.event_id = 2;
+        second.name = "second".into();
+        let mut tree = EventTree::default();
+        tree.reset(&[first.clone(), second]);
+        tree.set_filter("first");
+        let expression = "+$param(Name: HELLO) -$param(other = bad)";
+        let queries = Filter::parse(expression).unwrap().parameter_queries();
+        assert!(queries.contains(&ParamQuery {
+            name: "Name".into(),
+            value: "hello".into()
+        }));
+        let mut matches = ParameterMatches::new();
+        matches.insert(
+            ParamQuery {
+                name: "Name".into(),
+                value: "hello".into(),
+            },
+            [2].into(),
+        );
+        tree.set_filter_with_parameters(expression, matches.clone());
+        assert!(tree.filter_error());
+        assert_eq!(tree.visible, vec![0]); // Last valid filter remains in force.
+        matches.insert(
+            ParamQuery {
+                name: "other".into(),
+                value: "bad".into(),
+            },
+            [].into(),
+        );
+        tree.set_filter_with_parameters(expression, matches);
+        assert!(!tree.filter_error());
+        assert_eq!(tree.visible, vec![1]);
+        tree.reset(&[first]);
+        assert_eq!(tree.visible, vec![0]); // A capture cannot inherit old match IDs.
+    }
+
+    #[test]
+    fn parameter_query_parsing_matches_upstream_delimiter_rules() {
+        use crate::event_filter::{Filter, ParamQuery};
+        let query = Filter::parse("($param(a=b: VaL) +$param(: x))")
+            .unwrap()
+            .parameter_queries();
+        assert!(query.contains(&ParamQuery {
+            name: "a=b".into(),
+            value: "val".into()
+        }));
+        assert!(query.contains(&ParamQuery {
+            name: "".into(),
+            value: "x".into()
+        }));
+        assert!(Filter::parse("$param(name: )").is_err());
+        assert!(Filter::parse("$param(name)").is_err());
+    }
 
     fn action(parent: i64) -> Action {
         Action {

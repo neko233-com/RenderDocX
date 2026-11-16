@@ -575,6 +575,7 @@ struct Workspace {
     event_tree: EventTree,
     event_scroll: UniformListScrollHandle,
     event_search: Entity<InputState>,
+    event_filter_revision: std::sync::Arc<std::sync::atomic::AtomicU64>,
     event_filter_name: Entity<InputState>,
     saved_event_filters: Vec<renderdocx::event_filters::SavedFilter>,
     event_find: Entity<InputState>,
@@ -1412,10 +1413,67 @@ impl Workspace {
     ) -> gpui::Subscription {
         cx.subscribe(input, |this, input, event, cx| {
             if matches!(event, InputEvent::Change) {
-                this.event_tree.set_filter(input.read(cx).value().as_ref());
-                cx.notify();
+                let expression = input.read(cx).value().to_string();
+                this.apply_event_filter(expression, cx);
             }
         })
+    }
+
+    fn apply_event_filter(&mut self, expression: String, cx: &mut Context<Self>) {
+        use std::sync::atomic::Ordering;
+        let revision = self.event_filter_revision.fetch_add(1, Ordering::Relaxed) + 1;
+        self.event_tree.set_filter(&expression);
+        let needs_parameters = renderdocx::event_filter::Filter::parse(&expression)
+            .is_ok_and(|filter| !filter.parameter_queries().is_empty());
+        let Some((session, actions)) = self
+            .session
+            .clone()
+            .zip(self.snapshot.as_ref().map(|s| s.actions.clone()))
+        else {
+            cx.notify();
+            return;
+        };
+        if !needs_parameters {
+            cx.notify();
+            return;
+        }
+        let capture_revision = self.open_revision;
+        let generation = self.event_filter_revision.clone();
+        let task_expression = expression.clone();
+        let task = cx.background_executor().spawn(async move {
+            renderdocx::event_parameters::resolve(&session, &actions, &task_expression, || {
+                generation.load(Ordering::Relaxed) != revision
+            })
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != capture_revision
+                    || this.event_filter_revision.load(Ordering::Relaxed) != revision
+                {
+                    return;
+                }
+                match result {
+                    Ok(matches) => this
+                        .event_tree
+                        .set_filter_with_parameters(&expression, matches),
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Could not evaluate parameter filter",
+                                "无法计算参数筛选",
+                                "パラメーターフィルターを評価できません",
+                                "매개변수 필터를 평가할 수 없습니다"
+                            )
+                        ))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     fn discover_live(&mut self, cx: &mut Context<Self>) {
@@ -2579,6 +2637,8 @@ impl Workspace {
                         this.timeline.reset(&snapshot.actions);
                         this.snapshot = Some(snapshot);
                         this.session = Some(session.clone());
+                        let expression = this.event_search.read(cx).value().to_string();
+                        this.apply_event_filter(expression, cx);
                         this.message_generation += 1;
                         this.message_poll_pending = false;
                         this.refresh_messages();
@@ -2896,7 +2956,7 @@ impl Workspace {
                 self.event_search.update(cx, |input, cx| {
                     input.set_value(filter.expression.clone(), window, cx)
                 });
-                self.event_tree.set_filter(&filter.expression);
+                self.apply_event_filter(filter.expression, cx);
             }
             Err(error) => {
                 self.status = Some(format!(
@@ -14252,6 +14312,7 @@ fn main() {
                             &event_search,
                             cx,
                         ),
+                        event_filter_revision: Default::default(),
                         event_search,
                         event_filter_name,
                         saved_event_filters: Vec::new(),
@@ -14580,6 +14641,7 @@ mod ui_tests {
                             &event_search,
                             cx,
                         ),
+                        event_filter_revision: Default::default(),
                         event_search,
                         event_find,
                         event_filter_name,
@@ -15103,6 +15165,7 @@ mod ui_tests {
                             &event_search,
                             cx,
                         ),
+                        event_filter_revision: Default::default(),
                         event_search,
                         event_find,
                         selected: None,

@@ -11,6 +11,7 @@ pub mod debug_navigation;
 pub mod event_export;
 pub mod event_filter;
 pub mod event_filters;
+pub mod event_parameters;
 pub mod event_ranges;
 pub mod event_step;
 pub mod event_timing;

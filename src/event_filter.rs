@@ -1,4 +1,15 @@
 use crate::replay::Action;
+use std::collections::{HashMap, HashSet};
+
+/// One upstream `$param(name: value)` predicate. Names remain case-sensitive.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ParamQuery {
+    pub name: String,
+    pub value: String,
+}
+
+/// A complete set of matching event IDs for each parameter predicate.
+pub type ParameterMatches = HashMap<ParamQuery, HashSet<u32>>;
 
 #[derive(Clone, Copy)]
 enum Mode {
@@ -36,6 +47,7 @@ enum Expr {
     Dispatch(Option<(String, Op, i64)>),
     Regex(pcre2::bytes::Regex),
     Parent(String),
+    Param(ParamQuery),
     Duration {
         dispatch_only: bool,
         op: Op,
@@ -62,6 +74,22 @@ impl Filter {
     pub fn matches(&self, context: &EventContext<'_>) -> bool {
         evaluate(&self.0, context)
     }
+    pub fn parameter_queries(&self) -> HashSet<ParamQuery> {
+        fn collect(terms: &[Term], queries: &mut HashSet<ParamQuery>) {
+            for term in terms {
+                match &term.expr {
+                    Expr::Param(query) => {
+                        queries.insert(query.clone());
+                    }
+                    Expr::Group(group) => collect(group, queries),
+                    _ => {}
+                }
+            }
+        }
+        let mut queries = HashSet::new();
+        collect(&self.0, &mut queries);
+        queries
+    }
 }
 pub struct EventContext<'a> {
     pub name: &'a str,
@@ -72,6 +100,7 @@ pub struct EventContext<'a> {
     pub parents: &'a [Option<usize>],
     pub marker_names: &'a [String],
     pub duration: Option<f64>,
+    pub parameter_matches: &'a ParameterMatches,
 }
 fn evaluate(terms: &[Term], context: &EventContext<'_>) -> bool {
     if terms.is_empty() {
@@ -120,6 +149,10 @@ fn evaluate(terms: &[Term], context: &EventContext<'_>) -> bool {
                 }
                 found
             }
+            Expr::Param(query) => context
+                .parameter_matches
+                .get(query)
+                .is_some_and(|events| events.contains(&context.eid)),
             Expr::Duration {
                 dispatch_only,
                 op,
@@ -342,6 +375,18 @@ impl Parser<'_> {
                             Expr::Dispatch(Some((prop, op, n)))
                         }
                         "regex" => Expr::Regex(parse_regex(&params)?),
+                        "param" => {
+                            // Upstream prefers ':' even if '=' appears earlier.
+                            let pos = params.find(':').or_else(|| params.find('=')).ok_or(())?;
+                            let value = params[pos + 1..].trim();
+                            if value.is_empty() {
+                                return Err(());
+                            }
+                            Expr::Param(ParamQuery {
+                                name: params[..pos].trim().to_owned(),
+                                value: value.to_lowercase(),
+                            })
+                        }
                         "parent" | "childOf" => Expr::Parent(params.trim().to_lowercase()),
                         _ => return Err(()),
                     }
