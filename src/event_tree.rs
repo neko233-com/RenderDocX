@@ -7,6 +7,16 @@ pub enum EventRow {
     Api { action: usize, event: usize },
 }
 
+#[derive(Clone, Debug)]
+pub struct ExportRow {
+    pub event_id: u32,
+    pub action_id: Option<u32>,
+    pub name: String,
+    pub depth: usize,
+    pub first_child: bool,
+    pub duration: Option<f64>,
+}
+
 /// Rows retain their snapshot identity even when filtering or expansion changes.
 #[derive(Default)]
 pub struct EventTree {
@@ -226,6 +236,37 @@ impl EventTree {
 
     pub fn event_id(&self, row: usize) -> Option<u32> {
         self.event_ids.get(row).copied()
+    }
+
+    /// Export the filter-admitted tree, independent of interactive collapse state.
+    pub fn export_rows(&self) -> Vec<ExportRow> {
+        let mut seen_parents = std::collections::HashSet::new();
+        let parents: std::collections::HashSet<usize> =
+            self.parents.iter().flatten().copied().collect();
+        self.order
+            .iter()
+            .copied()
+            .filter(|&row| self.eligible[row])
+            .map(|row| {
+                let (action, is_action) = match self.rows[row] {
+                    EventRow::Action(index) => (&self.actions[index], true),
+                    EventRow::Api { action, .. } => (&self.actions[action], false),
+                };
+                let first_child =
+                    self.parents[row].is_some_and(|parent| seen_parents.insert(parent));
+                ExportRow {
+                    event_id: self.event_ids[row],
+                    action_id: (is_action
+                        && action.flags & (0x20 | 0x40 | 0x80) == 0
+                        && !parents.contains(&row))
+                    .then_some(action.action_id),
+                    name: self.names[row].clone(),
+                    depth: action.depth,
+                    first_child,
+                    duration: self.duration(self.event_ids[row]),
+                }
+            })
+            .collect()
     }
 
     pub fn reveal(&mut self, action: usize, api: Option<usize>) -> Option<usize> {
@@ -612,5 +653,47 @@ mod tests {
         );
         assert_eq!(tree.event_id(tree.find("@3", None, true).unwrap()), Some(5));
         assert!(tree.find("absent", None, true).is_none());
+    }
+
+    #[test]
+    fn export_includes_filtered_collapsed_descendants_and_api_siblings() {
+        use crate::replay::ApiEvent;
+        let mut parent = action(-1);
+        parent.event_id = 1;
+        parent.flags = 0x40;
+        parent.name = "Pass".into();
+        let mut draw = action(0);
+        draw.event_id = 3;
+        draw.action_id = 1;
+        draw.depth = 1;
+        draw.name = "Draw".into();
+        draw.api_events.push(ApiEvent {
+            event_id: 2,
+            chunk_index: None,
+            file_offset: "0".into(),
+            name: "Bind".into(),
+        });
+        let mut tree = EventTree::default();
+        tree.reset(&[parent, draw]);
+        tree.set_show_api(true);
+        tree.toggle(0);
+        assert_eq!(tree.visible, [0]);
+        let rows = tree.export_rows();
+        assert_eq!(
+            rows.iter().map(|r| r.event_id).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert_eq!(rows[0].action_id, None);
+        assert!(rows[1].first_child);
+        assert!(!rows[2].first_child);
+        assert_eq!(rows[2].action_id, Some(1));
+        tree.set_filter("draw");
+        assert_eq!(
+            tree.export_rows()
+                .iter()
+                .map(|r| r.event_id)
+                .collect::<Vec<_>>(),
+            [1, 3]
+        );
     }
 }

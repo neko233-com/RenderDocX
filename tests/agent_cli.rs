@@ -197,6 +197,15 @@ fn real_d3d11_mesh_draw_order() {
     assert_eq!(found["data"]["match"]["event_id"], draw, "{found}");
     let missing = agent.send(r#"{"command":"find_event","query":"surely no matching event name"}"#);
     assert!(missing["data"]["match"].is_null(), "{missing}");
+    let event_path = dir.path().join("事件.txt");
+    let request = serde_json::json!({"command":"export_events","path":event_path,"filter":format!("$event(EID={draw})")}).to_string();
+    let exported = agent.send(&request);
+    assert_eq!(exported["ok"], true, "{exported}");
+    let text = std::fs::read_to_string(&event_path).unwrap();
+    assert!(text.contains("DrawIndexed"), "{text}");
+    let existing = agent.send(&request);
+    assert_eq!(existing["error"]["code"], "event_export_failed");
+    assert_eq!(std::fs::read_to_string(&event_path).unwrap(), text);
     let invalid_page =
         agent.send(r#"{"command":"filter_events","expression":"","offset":"99999999"}"#);
     assert_eq!(invalid_page["error"]["code"], "invalid_arguments");

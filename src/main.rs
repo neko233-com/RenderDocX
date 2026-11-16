@@ -4184,6 +4184,74 @@ impl Workspace {
         .detach();
     }
 
+    fn export_events(&mut self, cx: &mut Context<Self>) {
+        if self.export_pending || self.resource_pending || self.replay_pending {
+            return;
+        }
+        let (Some(snapshot), Some(capture)) = (self.snapshot.as_ref(), self.capture.as_ref())
+        else {
+            return;
+        };
+        let Some(destination) = rfd::FileDialog::new()
+            .set_file_name("events.txt")
+            .add_filter("Text", &["txt"])
+            .save_file()
+        else {
+            return;
+        };
+        let frame = snapshot.frame;
+        let capture = capture.display().to_string();
+        let rows = self.event_tree.export_rows();
+        let has_times = self.event_tree.has_durations();
+        let label = destination.display().to_string();
+        let revision = self.open_revision;
+        self.export_pending = true;
+        self.status = Some(
+            self.t(
+                "Exporting events…",
+                "正在导出事件…",
+                "イベントを書き出し中…",
+                "이벤트 내보내는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            renderdocx::event_export::write_new(&destination, &capture, frame, &rows, has_times)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision {
+                    return;
+                }
+                this.export_pending = false;
+                this.status = Some(match result {
+                    Ok(count) => format!(
+                        "{}: {label} ({count})",
+                        this.t(
+                            "Events exported",
+                            "事件已导出",
+                            "イベントを書き出しました",
+                            "이벤트를 내보냈습니다"
+                        )
+                    ),
+                    Err(error) => format!(
+                        "{}: {error}",
+                        this.t(
+                            "Event export failed",
+                            "事件导出失败",
+                            "イベントを書き出せません",
+                            "이벤트 내보내기 실패"
+                        )
+                    ),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn collect_event_times(&mut self, cx: &mut Context<Self>) {
         if self.replay_pending || self.export_pending || self.resource_pending {
             return;
@@ -12708,6 +12776,11 @@ impl Workspace {
                                     false,
                                     |this, cx| this.collect_event_times(cx),
                                     cx,
+                                ))
+                                .child(button(
+                                    "event-export",
+                                    self.t("Export events", "导出事件", "イベントを書き出す", "이벤트 내보내기"),
+                                    false, |this, cx| this.export_events(cx), cx,
                                 ))
                                 .child(button(
                                     "toggle-api-events",

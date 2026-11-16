@@ -60,6 +60,10 @@ fn usage() -> Value {
         .as_array_mut()
         .expect("capabilities commands")
         .push(json!("find_event"));
+    capabilities["serve_commands"]
+        .as_array_mut()
+        .expect("capabilities commands")
+        .push(json!("export_events"));
     capabilities
 }
 
@@ -143,6 +147,7 @@ fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
 
 fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io::Result<()> {
     let mut opened: Option<(Session, Snapshot)> = None;
+    let mut capture_name = String::new();
     let mut event_times: Option<std::collections::HashMap<u32, f64>> = None;
     let mut selected_event: Option<u32> = None;
     let mut pipeline: Option<Pipeline> = None;
@@ -526,6 +531,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         &options,
                     ) {
                         Ok((session, snapshot)) => {
+                            capture_name = path.to_owned();
                             event_times = None;
                             let value = json!({"capture": &snapshot});
                             opened = Some((session, snapshot));
@@ -567,6 +573,53 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         .map_err(|error| ("replay_counter_failed", error))
                 }
             },
+            "export_events" => {
+                let path = request
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty() && !s.contains('\0'));
+                let filter = match request.get("filter") {
+                    None => Some(""),
+                    Some(v) => v.as_str(),
+                };
+                let show_api = match request.get("show_api") {
+                    None => Some(false),
+                    Some(v) => v.as_bool(),
+                };
+                match (&opened, path, filter, show_api) {
+                    (None, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some((_, snapshot)), Some(path), Some(filter), Some(show_api)) => {
+                        let mut tree = EventTree::default();
+                        tree.reset(&snapshot.actions);
+                        tree.set_show_api(show_api);
+                        if let Some(times) = &event_times {
+                            tree.set_durations(times.clone());
+                        }
+                        tree.set_filter(filter);
+                        if tree.filter_error() {
+                            Err((
+                                "invalid_filter",
+                                "Invalid or unsupported event filter".into(),
+                            ))
+                        } else {
+                            renderdocx::event_export::write_new(
+                                std::path::Path::new(path),
+                                &capture_name,
+                                snapshot.frame,
+                                &tree.export_rows(),
+                                tree.has_durations(),
+                            )
+                            .map(|count| json!({"path":path,"rows":count.to_string()}))
+                            .map_err(|error| ("event_export_failed", error))
+                        }
+                    }
+                    _ => Err((
+                        "invalid_arguments",
+                        "export_events requires a path and valid optional filter and show_api"
+                            .into(),
+                    )),
+                }
+            }
             "find_event" => {
                 let query = request
                     .get("query")
@@ -2351,6 +2404,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
             }
             "close" | "quit" => {
                 event_times = None;
+                capture_name.clear();
                 selected_event = None;
                 pipeline = None;
                 mesh_selection = None;
