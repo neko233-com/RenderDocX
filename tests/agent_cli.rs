@@ -518,12 +518,44 @@ fn real_d3d11_mesh_draw_order() {
             .any(|item| item["event_id"] == topology_event && item["direct_match"] == true),
         "{combined}"
     );
-    let unsupported = agent.send(
-        r#"{"command":"filter_events","expression":"$param(pShader: missing)","show_api":true}"#,
+    let shader_event = opened["data"]["capture"]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|action| action["api_events"].as_array().into_iter().flatten())
+        .find(|event| {
+            event["name"]
+                .as_str()
+                .is_some_and(|name| name.contains("VSSetShader"))
+        })
+        .expect("vertex shader event")["event_id"]
+        .as_u64()
+        .unwrap();
+    let shader_page =
+        agent.send(&serde_json::json!({"command":"structure","event_id":shader_event}).to_string());
+    let shader = shader_page["data"]["structure"]["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["name"] == "pShader")
+        .unwrap();
+    let shader_index = shader["resource_index"]
+        .as_u64()
+        .expect("vertex shader resource");
+    assert_eq!(shader["resource_edited"], false);
+    let rename = agent.send(&serde_json::json!({"command":"resource_rename","index":shader_index,"name":"筛选测试Shader"}).to_string());
+    assert_eq!(rename["ok"], true, "{rename}");
+    let shader_filter = agent.send(
+        r#"{"command":"filter_events","expression":"$param(pShader: 测试shader)","show_api":true}"#,
     );
-    assert_eq!(
-        unsupported["error"]["code"], "invalid_filter",
-        "{unsupported}"
+    assert_eq!(shader_filter["ok"], true, "{shader_filter}");
+    assert!(
+        shader_filter["data"]["events"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["event_id"] == shader_event && item["direct_match"] == true),
+        "{shader_filter}"
     );
     let draw = opened["data"]["capture"]["actions"]
         .as_array()

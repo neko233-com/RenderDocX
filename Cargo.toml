@@ -31,6 +31,7 @@ rfd = { version = "0.15", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sys-locale = "0.3"
+unicode-segmentation = "1.13"
 which = "8"
 tempfile = "3"
 

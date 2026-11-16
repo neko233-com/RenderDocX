@@ -133,6 +133,10 @@ pub struct StructuredNode {
     pub custom_string: Option<String>,
     pub resource_non_null: Option<bool>,
     pub resource_index: Option<usize>,
+    #[serde(default)]
+    pub resource_id: Option<String>,
+    #[serde(default)]
+    pub resource_edited: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -4370,6 +4374,8 @@ pub mod test_support {
                     custom_string: None,
                     resource_non_null: None,
                     resource_index: None,
+                    resource_id: None,
+                    resource_edited: None,
                 };
             let (node, all) = match path {
                 [] => (

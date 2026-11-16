@@ -29,10 +29,18 @@ enum Invocation {
 fn apply_event_filter(
     tree: &mut EventTree,
     session: &renderdocx::replay::Session,
-    actions: &[renderdocx::replay::Action],
+    snapshot: &Snapshot,
+    language: renderdocx::i18n::Language,
     expression: &str,
 ) -> Result<(), String> {
-    let matches = renderdocx::event_parameters::resolve(session, actions, expression, || false)?;
+    let matches = renderdocx::event_parameters::resolve(
+        session,
+        &snapshot.actions,
+        &snapshot.resources,
+        language,
+        expression,
+        || false,
+    )?;
     tree.set_filter_with_parameters(expression, matches);
     if tree.filter_error() {
         Err("Invalid or unsupported event filter".into())
@@ -711,9 +719,13 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         if let Some(times) = &event_times {
                             tree.set_durations(times.clone());
                         }
-                        if let Err(error) =
-                            apply_event_filter(&mut tree, session, &snapshot.actions, filter)
-                        {
+                        if let Err(error) = apply_event_filter(
+                            &mut tree,
+                            session,
+                            snapshot,
+                            settings.language,
+                            filter,
+                        ) {
                             Err(("invalid_filter", error))
                         } else {
                             renderdocx::event_export::write_new(
@@ -757,7 +769,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                             let mut tree = EventTree::default();
                             tree.reset(&snapshot.actions);
                             if let Some(times) = &event_times { tree.set_durations(times.clone()); }
-                            if let Err(error) = apply_event_filter(&mut tree, session, &snapshot.actions, filter) { Err(("invalid_filter", error)) }
+                            if let Err(error) = apply_event_filter(&mut tree, session, snapshot, settings.language, filter) { Err(("invalid_filter", error)) }
                             else {
                                 let action = tree.step_action(event, forward).map(|index|
                                     json!({"action_index":index,"event_id":snapshot.actions[index].event_id}));
@@ -798,7 +810,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         tree.reset(&snapshot.actions);
                         tree.set_show_api(show_api);
                         if let Some(times) = &event_times { tree.set_durations(times.clone()); }
-                        if let Err(error) = apply_event_filter(&mut tree, session, &snapshot.actions, filter) { Err(("invalid_filter", error)) }
+                        if let Err(error) = apply_event_filter(&mut tree, session, snapshot, settings.language, filter) { Err(("invalid_filter", error)) }
                         else {
                             let found = tree.find(query, current, forward).and_then(|row| {
                                 let (action_index, api_index) = match tree.row(row)? {
@@ -837,7 +849,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         tree.reset(&snapshot.actions);
                         tree.set_show_api(show_api);
                         if let Some(times) = &event_times { tree.set_durations(times.clone()); }
-                        if let Err(error) = apply_event_filter(&mut tree, session, &snapshot.actions, expression) {
+                        if let Err(error) = apply_event_filter(&mut tree, session, snapshot, settings.language, expression) {
                             Err(("invalid_filter", error))
                         } else if offset > tree.visible.len() {
                             Err(("invalid_arguments", "Event offset exceeds the filtered item count".into()))

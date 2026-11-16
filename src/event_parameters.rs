@@ -1,12 +1,24 @@
 //! Structured capture lookups for the event browser's `$param` predicates.
 use crate::event_filter::{Filter, ParamQuery, ParameterMatches};
-use crate::replay::{Action, STRUCTURE_PAGE_LIMIT, Session, StructurePage, StructuredNode};
+use crate::i18n::Language;
+use crate::replay::{
+    Action, ResourceInfo, STRUCTURE_PAGE_LIMIT, Session, StructurePage, StructuredNode,
+};
 use std::collections::{HashMap, HashSet};
+use unicode_segmentation::UnicodeSegmentation;
+
+struct ResourceContext<'a> {
+    resources: &'a [ResourceInfo],
+    renames: Result<serde_json::Value, String>,
+    language: Language,
+}
 
 /// Resolve every predicate completely or return an error; partial results are never applied.
 pub fn resolve(
     session: &Session,
     actions: &[Action],
+    resources: &[ResourceInfo],
+    language: Language,
     expression: &str,
     cancelled: impl Fn() -> bool,
 ) -> Result<ParameterMatches, String> {
@@ -20,6 +32,13 @@ pub fn resolve(
     if queries.is_empty() {
         return Ok(matches);
     }
+    let context = ResourceContext {
+        resources,
+        language,
+        renames: session
+            .annotation_read("renames")
+            .and_then(|section| section.document()),
+    };
     let events: HashSet<u32> = actions
         .iter()
         .flat_map(|a| a.api_events.iter())
@@ -63,13 +82,13 @@ pub fn resolve(
                     let formatted = if item.node.basic_type == 2 {
                         None
                     } else {
-                        Some(format_value(&item.node, item.parent_flags)?.to_lowercase())
+                        Some(format_value(&item.node, item.parent_flags, &context)?.to_lowercase())
                     };
                     for query in &by_name[name] {
                         let matched = if let Some(formatted) = &formatted {
                             formatted.contains(&query.value)
                         } else {
-                            array_matches(&mut read, &path, &query.value, &cancelled)?
+                            array_matches(&mut read, &path, &query.value, &cancelled, &context)?
                         };
                         if matched {
                             found.insert(query.clone());
@@ -79,7 +98,7 @@ pub fn resolve(
             }
         }
         if !fast_available {
-            found = matches_parameters(&mut read, &queries, &cancelled)?;
+            found = matches_parameters(&mut read, &queries, &cancelled, &context)?;
         }
         for query in found {
             matches
@@ -95,6 +114,7 @@ fn matches_parameters(
     read: &mut impl FnMut(&[u64], u64) -> Result<StructurePage, String>,
     queries: &HashSet<ParamQuery>,
     cancelled: &impl Fn() -> bool,
+    context: &ResourceContext<'_>,
 ) -> Result<HashSet<ParamQuery>, String> {
     // FindChildRecursively checks all direct children before descending into each child.
     let mut stack = vec![Vec::<u64>::new()];
@@ -129,13 +149,13 @@ fn matches_parameters(
                     let formatted = if child.basic_type == 2 {
                         None
                     } else {
-                        Some(format_value(&child, page.node.flags)?.to_lowercase())
+                        Some(format_value(&child, page.node.flags, context)?.to_lowercase())
                     };
                     for query in matching_queries {
                         let is_match = if let Some(formatted) = &formatted {
                             formatted.contains(&query.value)
                         } else {
-                            array_matches(read, &child_path, &query.value, cancelled)?
+                            array_matches(read, &child_path, &query.value, cancelled, context)?
                         };
                         remaining.remove(&query);
                         if is_match {
@@ -164,6 +184,7 @@ fn array_matches(
     path: &[u64],
     value: &str,
     cancelled: &impl Fn() -> bool,
+    context: &ResourceContext<'_>,
 ) -> Result<bool, String> {
     let mut offset = 0;
     loop {
@@ -181,7 +202,7 @@ fn array_matches(
         }
         for child in page.children {
             offset += 1;
-            if format_value(&child, page.node.flags)?
+            if format_value(&child, page.node.flags, context)?
                 .to_lowercase()
                 .contains(value)
             {
@@ -194,10 +215,16 @@ fn array_matches(
     }
 }
 
-fn format_value(node: &StructuredNode, parent_flags: u32) -> Result<String, String> {
-    // Resource names and floats depend on UI state and preferences. Refuse to guess.
-    if node.basic_type == 12 || node.basic_type == 13 {
-        return Err("Resource and GPU address parameter formatting is not supported yet".into());
+fn format_value(
+    node: &StructuredNode,
+    parent_flags: u32,
+    context: &ResourceContext<'_>,
+) -> Result<String, String> {
+    if node.basic_type == 12 {
+        return resource_name(node, context);
+    }
+    if node.basic_type == 13 {
+        return Err("GPU address parameter formatting is not supported yet".into());
     }
     if node.flags & 8 != 0 {
         return Ok("NULL".into());
@@ -264,6 +291,58 @@ fn format_value(node: &StructuredNode, parent_flags: u32) -> Result<String, Stri
     }
 }
 
+fn resource_name(node: &StructuredNode, context: &ResourceContext<'_>) -> Result<String, String> {
+    let id = node
+        .resource_id
+        .as_deref()
+        .ok_or("Resource identity is unavailable in this bridge")?
+        .parse::<u64>()
+        .map_err(|_| "Invalid resource identity")?;
+    if node.resource_non_null != Some(id != 0) {
+        return Err("Inconsistent resource identity".into());
+    }
+    if id == 0 {
+        return Ok(context.language.no_resource().into());
+    }
+    let edited = node
+        .resource_edited
+        .ok_or("Resource replacement state is unavailable in this bridge")?;
+    let mut name = if let Some(index) = node.resource_index {
+        let resource = context
+            .resources
+            .get(index)
+            .ok_or("Invalid resource index")?;
+        let key = format!("ResourceId::{id}");
+        if resource.rename_key.as_deref() != Some(&key) {
+            return Err("Resource identity changed during lookup".into());
+        }
+        let document = context.renames.as_ref().map_err(Clone::clone)?;
+        crate::annotations::resource_name(document, &key)?
+            .unwrap_or(&resource.name)
+            .to_owned()
+    } else {
+        format!("{} {id}", context.language.unknown_resource())
+    };
+    if edited {
+        name.push_str(context.language.edited_resource_suffix());
+    }
+    if name.encode_utf16().count() > 64 {
+        let mut length = 0;
+        let mut end = 0;
+        for (index, grapheme) in name.grapheme_indices(true) {
+            let next = length + grapheme.encode_utf16().count();
+            if next > 64 {
+                break;
+            }
+            length = next;
+            end = index + grapheme.len();
+        }
+        name.truncate(end);
+        name.push_str("...");
+    }
+    Ok(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,6 +360,8 @@ mod tests {
             custom_string: None,
             resource_non_null: None,
             resource_index: None,
+            resource_id: None,
+            resource_edited: None,
         }
     }
 
@@ -317,7 +398,12 @@ mod tests {
                 value: value.into(),
             })
             .collect();
-        let matched = matches_parameters(&mut read, &queries, &|| false).unwrap();
+        let context = ResourceContext {
+            resources: &[],
+            renames: Ok(serde_json::json!({})),
+            language: Language::English,
+        };
+        let matched = matches_parameters(&mut read, &queries, &|| false, &context).unwrap();
         assert_eq!(reads, 2); // One shared scan, including the second root page.
         assert!(matched.iter().any(|q| q.value == "direct"));
         assert!(matched.iter().any(|q| q.value == "rect"));
@@ -343,8 +429,58 @@ mod tests {
                 chunk_metadata: None,
             })
         };
-        assert!(matches_parameters(&mut read, &queries, &|| true).is_err());
-        assert!(matches_parameters(&mut read, &queries, &|| false).is_err());
+        let context = ResourceContext {
+            resources: &[],
+            renames: Ok(serde_json::json!({})),
+            language: Language::English,
+        };
+        assert!(matches_parameters(&mut read, &queries, &|| true, &context).is_err());
+        assert!(matches_parameters(&mut read, &queries, &|| false, &context).is_err());
         assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn resource_format_uses_renames_replacement_state_and_utf16_grapheme_boundaries() {
+        let resource = ResourceInfo {
+            name: "original".into(),
+            rename_key: Some("ResourceId::7".into()),
+            resource_type: 0,
+            autogenerated_name: false,
+            initialisation_chunks: vec![],
+            parents: vec![],
+            derived: vec![],
+        };
+        let resources = vec![resource];
+        let context = ResourceContext {
+            resources: &resources,
+            renames: Ok(serde_json::json!({"CustomResourceNames":{"ResourceId::7":"renamed"}})),
+            language: Language::English,
+        };
+        let mut value = node("r", 12, None, 0);
+        value.resource_id = Some("7".into());
+        value.resource_index = Some(0);
+        value.resource_non_null = Some(true);
+        value.resource_edited = Some(true);
+        assert_eq!(resource_name(&value, &context).unwrap(), "renamed (Edited)");
+        value.resource_edited = None;
+        assert!(resource_name(&value, &context).is_err());
+        value.resource_id = Some("0".into());
+        value.resource_non_null = Some(false);
+        value.resource_index = None;
+        assert_eq!(resource_name(&value, &context).unwrap(), "No Resource");
+        let long_name = format!("{}👩‍💻tail", "a".repeat(63));
+        let context = ResourceContext {
+            resources: &resources,
+            renames: Ok(serde_json::json!({"CustomResourceNames":{"ResourceId::7":long_name}})),
+            language: Language::English,
+        };
+        value.resource_id = Some("7".into());
+        value.resource_non_null = Some(true);
+        value.resource_index = Some(0);
+        value.resource_edited = Some(false);
+        assert_eq!(
+            resource_name(&value, &context).unwrap(),
+            format!("{}...", "a".repeat(63))
+        );
     }
 }

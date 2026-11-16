@@ -684,7 +684,8 @@ void write_pixel_modification(const PixelModification &mod)
 }
 
 // Preserve upstream type metadata and scalar values; child arrays are paged separately.
-void write_structured_node(const SDObject *object, const std::map<ResourceId, size_t> &resources)
+void write_structured_node(const SDObject *object, const std::map<ResourceId, size_t> &resources,
+                           const ShaderReplacementScope *replacements = nullptr)
 {
   std::cout << "{\"name\":"; json_string(object->name.c_str(), object->name.size());
   std::cout << ",\"type_name\":"; json_string(object->type.name.c_str(), object->type.name.size());
@@ -729,6 +730,18 @@ void write_structured_node(const SDObject *object, const std::map<ResourceId, si
     if(found != resources.end() && object->AsResourceId() != ResourceId()) std::cout << found->second;
     else std::cout << "null";
   }
+  else std::cout << "null";
+  std::cout << ",\"resource_id\":";
+  if(object->type.basetype == SDBasic::Resource)
+  {
+    uint64_t id = 0; const ResourceId resource = object->AsResourceId();
+    std::memcpy(&id, &resource, sizeof(id));
+    std::cout << '"' << id << '"';
+  }
+  else std::cout << "null";
+  std::cout << ",\"resource_edited\":";
+  if(object->type.basetype == SDBasic::Resource && replacements)
+    std::cout << (replacements->replacements.count(object->AsResourceId()) ? "true" : "false");
   else std::cout << "null";
   std::cout << '}';
 }
@@ -1820,7 +1833,7 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
         std::cout << "{\"path\":[";
         for(size_t i = 0; i < path.size(); ++i) { if(i) std::cout << ','; std::cout << '"' << path[i] << '"'; }
         std::cout << "],\"parent_flags\":" << uint32_t(object->GetParent()->type.flags) << ",\"node\":";
-        write_structured_node(object, resource_indices);
+        write_structured_node(object, resource_indices, &replacements);
         std::cout << '}';
       }
       std::cout << "]}" << std::endl;
@@ -1864,9 +1877,9 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       const SDChunk *source_chunk = replay.controller->GetStructuredFile().chunks[found->second];
       std::cout << "],\"chunk_metadata\":{\"chunk_id\":" << source_chunk->metadata.chunkID
                 << ",\"length\":\"" << source_chunk->metadata.length << "\",\"thread_id\":\""
-                << source_chunk->metadata.threadID << "\"},\"node\":"; write_structured_node(object, resource_indices);
+                << source_chunk->metadata.threadID << "\"},\"node\":"; write_structured_node(object, resource_indices, &replacements);
       std::cout << ",\"children\":[";
-      for(size_t i = 0; i < children.size(); ++i) { if(i) std::cout << ','; write_structured_node(children[i], resource_indices); }
+      for(size_t i = 0; i < children.size(); ++i) { if(i) std::cout << ','; write_structured_node(children[i], resource_indices, &replacements); }
       std::cout << "]}" << std::endl;
       continue;
     }

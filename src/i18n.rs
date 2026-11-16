@@ -11,6 +11,22 @@ pub enum Language {
 }
 
 impl Language {
+    pub fn no_resource(self) -> &'static str {
+        self.text("No Resource", "无资源", "リソースなし", "리소스 없음")
+    }
+
+    pub fn unknown_resource(self) -> &'static str {
+        self.text(
+            "Unknown Resource",
+            "未知资源",
+            "不明なリソース",
+            "알 수 없는 리소스",
+        )
+    }
+
+    pub fn edited_resource_suffix(self) -> &'static str {
+        self.text(" (Edited)", "（已编辑）", "（編集済み）", " (편집됨)")
+    }
     pub const ALL: [Self; 5] = [
         Self::Auto,
         Self::English,

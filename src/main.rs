@@ -576,6 +576,7 @@ struct Workspace {
     event_scroll: UniformListScrollHandle,
     event_search: Entity<InputState>,
     event_filter_revision: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    event_filter_names_pending: bool,
     event_filter_name: Entity<InputState>,
     saved_event_filters: Vec<renderdocx::event_filters::SavedFilter>,
     event_find: Entity<InputState>,
@@ -1059,6 +1060,11 @@ impl Workspace {
         let Some((section, _)) = section else { return };
         let section = section.clone();
         self.resource_pending = true;
+        if name == "renames" {
+            self.event_filter_names_pending = true;
+            self.event_filter_revision
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let revision = self.open_revision;
         self.status = Some(
             self.t(
@@ -1104,6 +1110,11 @@ impl Workspace {
                             )
                         ))
                     }
+                }
+                if name == "renames" {
+                    this.event_filter_names_pending = false;
+                    let expression = this.event_search.read(cx).value().to_string();
+                    this.apply_event_filter(expression, cx);
                 }
                 cx.notify();
             });
@@ -1425,11 +1436,11 @@ impl Workspace {
         self.event_tree.set_filter(&expression);
         let needs_parameters = renderdocx::event_filter::Filter::parse(&expression)
             .is_ok_and(|filter| !filter.parameter_queries().is_empty());
-        let Some((session, actions)) = self
-            .session
-            .clone()
-            .zip(self.snapshot.as_ref().map(|s| s.actions.clone()))
-        else {
+        let Some((session, (actions, resources))) = self.session.clone().zip(
+            self.snapshot
+                .as_ref()
+                .map(|s| (s.actions.clone(), s.resources.clone())),
+        ) else {
             cx.notify();
             return;
         };
@@ -1437,13 +1448,23 @@ impl Workspace {
             cx.notify();
             return;
         }
+        if self.event_filter_names_pending {
+            cx.notify();
+            return;
+        }
         let capture_revision = self.open_revision;
         let generation = self.event_filter_revision.clone();
+        let language = self.settings.language;
         let task_expression = expression.clone();
         let task = cx.background_executor().spawn(async move {
-            renderdocx::event_parameters::resolve(&session, &actions, &task_expression, || {
-                generation.load(Ordering::Relaxed) != revision
-            })
+            renderdocx::event_parameters::resolve(
+                &session,
+                &actions,
+                &resources,
+                language,
+                &task_expression,
+                || generation.load(Ordering::Relaxed) != revision,
+            )
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -2637,6 +2658,7 @@ impl Workspace {
                         this.timeline.reset(&snapshot.actions);
                         this.snapshot = Some(snapshot);
                         this.session = Some(session.clone());
+                        this.event_filter_names_pending = false;
                         let expression = this.event_search.read(cx).value().to_string();
                         this.apply_event_filter(expression, cx);
                         this.message_generation += 1;
@@ -4065,6 +4087,9 @@ impl Workspace {
             ))
         };
         self.resource_pending = true;
+        self.event_filter_names_pending = true;
+        self.event_filter_revision
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let revision = self.open_revision;
         self.status = Some(
             self.t(
@@ -4211,6 +4236,9 @@ impl Workspace {
                         ))
                     }
                 }
+                let expression = this.event_search.read(cx).value().to_string();
+                this.event_filter_names_pending = false;
+                this.apply_event_filter(expression, cx);
                 cx.notify();
             });
         })
@@ -14203,6 +14231,8 @@ impl Render for Workspace {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.settings.language = lang;
                             this.save();
+                            let expression = this.event_search.read(cx).value().to_string();
+                            this.apply_event_filter(expression, cx);
                             cx.notify();
                         }))
                 }),
@@ -14313,6 +14343,7 @@ fn main() {
                             cx,
                         ),
                         event_filter_revision: Default::default(),
+                        event_filter_names_pending: false,
                         event_search,
                         event_filter_name,
                         saved_event_filters: Vec::new(),
@@ -14642,6 +14673,7 @@ mod ui_tests {
                             cx,
                         ),
                         event_filter_revision: Default::default(),
+                        event_filter_names_pending: false,
                         event_search,
                         event_find,
                         event_filter_name,
@@ -15166,6 +15198,7 @@ mod ui_tests {
                             cx,
                         ),
                         event_filter_revision: Default::default(),
+                        event_filter_names_pending: false,
                         event_search,
                         event_find,
                         selected: None,
