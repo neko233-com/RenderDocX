@@ -420,6 +420,25 @@ pub struct TimelineHistory {
     pub y: u32,
     pub modifications: String,
     pub events: Vec<u32>,
+    pub passed_events: Vec<u32>,
+    pub failed_events: Vec<u32>,
+}
+
+impl TimelineHistory {
+    fn valid(&self) -> bool {
+        let sorted = |events: &[u32]| events.windows(2).all(|pair| pair[0] < pair[1]);
+        let mut union = self.passed_events.clone();
+        union.extend_from_slice(&self.failed_events);
+        union.sort_unstable();
+        union.dedup();
+        self.modifications
+            .parse::<u64>()
+            .is_ok_and(|n| n >= self.passed_events.len() as u64 + self.failed_events.len() as u64)
+            && sorted(&self.events)
+            && sorted(&self.passed_events)
+            && sorted(&self.failed_events)
+            && union == self.events
+    }
 }
 
 pub const RESOURCE_USAGE_PAGE_LIMIT: u32 = 128;
@@ -2129,15 +2148,7 @@ impl Transport for Process {
             .and_then(|_| input.flush())
             .map_err(|e| e.to_string())?;
         match self.read()? {
-            Reply::TimelineHistory(data)
-                if data
-                    .modifications
-                    .parse::<u64>()
-                    .is_ok_and(|n| n >= data.events.len() as u64)
-                    && data.events.windows(2).all(|pair| pair[0] < pair[1]) =>
-            {
-                Ok(data)
-            }
+            Reply::TimelineHistory(data) if data.valid() => Ok(data),
             Reply::Error { message } => Err(message),
             _ => Err("Unexpected timeline history response".into()),
         }
@@ -3556,6 +3567,8 @@ pub mod test_support {
                 y,
                 modifications: "2".into(),
                 events: vec![41, 42],
+                passed_events: vec![41],
+                failed_events: vec![42],
             });
             Ok(PixelHistoryPage {
                 event_id: event,
@@ -4469,5 +4482,34 @@ mod tests {
         };
         let revision = session.next_revision();
         assert_eq!(session.select(4, revision).unwrap_err(), "replay failed");
+    }
+}
+
+#[cfg(test)]
+mod timeline_history_validation_tests {
+    use super::TimelineHistory;
+    #[test]
+    fn rejects_inconsistent_history_categories() {
+        let mut history = TimelineHistory {
+            event_id: 1,
+            index: 0,
+            mip: 0,
+            slice: 0,
+            sample: 0,
+            x: 0,
+            y: 0,
+            modifications: "3".into(),
+            events: vec![1, 2],
+            passed_events: vec![1, 2],
+            failed_events: vec![2],
+        };
+        assert!(history.valid());
+        history.modifications = "2".into();
+        assert!(!history.valid());
+        history.modifications = "3".into();
+        history.failed_events = vec![1, 1];
+        assert!(!history.valid());
+        history.failed_events = vec![3];
+        assert!(!history.valid());
     }
 }

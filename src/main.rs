@@ -6179,7 +6179,7 @@ impl Workspace {
             .cloned()
             .collect();
         let max_depth = markers.iter().map(|item| item.depth).max().unwrap_or(0);
-        let height = ((max_depth.saturating_add(1)) as f32 * 20.0 + 44.0).max(64.0);
+        let height = ((max_depth.saturating_add(1)) as f32 * 20.0 + 48.0).max(68.0);
         let mut bins = std::collections::BTreeMap::<u32, (u32, usize)>::new();
         for &(event, index) in &self.timeline.model.actions {
             if event >= start && event <= end && !hidden.get(index).copied().unwrap_or(true) {
@@ -6225,11 +6225,21 @@ impl Workspace {
             .timeline
             .history
             .as_ref()
-            .map(|history| history.events.clone())
+            .map(|history| {
+                history
+                    .passed_events
+                    .iter()
+                    .map(|event| (*event, true))
+                    .chain(history.failed_events.iter().map(|event| (*event, false)))
+                    .collect::<Vec<_>>()
+            })
             .or_else(|| {
-                self.pixel_history
-                    .as_ref()
-                    .map(|page| page.entries.iter().map(|e| e.event_id).collect::<Vec<_>>())
+                self.pixel_history.as_ref().map(|page| {
+                    page.entries
+                        .iter()
+                        .map(|e| (e.event_id, e.passed))
+                        .collect::<Vec<_>>()
+                })
             })
             .unwrap_or_default();
         let bookmarks = self
@@ -6340,24 +6350,29 @@ impl Workspace {
             );
         }
         let mut history_bins = std::collections::BTreeMap::new();
-        for event in history
+        for (event, passed) in history
             .into_iter()
-            .filter(|event| *event >= start && *event <= end)
+            .filter(|(event, _)| *event >= start && *event <= end)
         {
-            history_bins.entry(position(event) as u32).or_insert(event);
+            history_bins
+                .entry((passed, position(event) as u32))
+                .or_insert(event);
         }
-        for (x, event) in history_bins {
+        for ((passed, x), event) in history_bins {
             graph = graph.child(
                 div()
-                    .id(SharedString::from(format!("timeline-history-{x}")))
+                    .id(SharedString::from(format!(
+                        "timeline-history-{}-{x}",
+                        if passed { "passed" } else { "failed" }
+                    )))
                     .test_support()
                     .absolute()
                     .left(px(x as f32))
-                    .top(px(height - 44.0))
+                    .top(px(height - if passed { 44.0 } else { 48.0 }))
                     .w(px(4.))
                     .h(px(4.))
                     .cursor_pointer()
-                    .bg(rgb(0xf07178))
+                    .bg(rgb(if passed { 0x009e73 } else { 0xd55e00 }))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.jump_to_usage(event, window, cx)
                     })),
@@ -6374,7 +6389,7 @@ impl Workspace {
                     .test_support()
                     .absolute()
                     .left(px(position(event)))
-                    .top(px(height - 50.0))
+                    .top(px(height - 54.0))
                     .w(px(4.))
                     .h(px(6.))
                     .cursor_pointer()
@@ -6462,7 +6477,7 @@ impl Workspace {
                 .child(button("timeline-zoom-out", self.t("Zoom out", "缩小", "縮小", "축소"), false, |this, cx| { this.timeline.zoom(false, this.pipeline.as_ref().map(|p| p.event_id)); cx.notify(); }, cx))
                 .child(button("timeline-load-usage", self.t("Highlight all resource usage", "高亮全部资源使用", "すべてのリソース使用を強調", "전체 리소스 사용 강조"), false, |this, cx| this.load_timeline_usage(cx), cx)))
             .child(format!("{}: {start}–{end} / {}", self.t("Event IDs", "事件 ID", "イベント ID", "이벤트 ID"), self.timeline.model.max_event))
-            .child(self.t("Drag the axis to select actions; Alt-drag pans, scroll zooms. Red: pixel history · green: loaded bookmarks.", "拖动坐标轴选择操作；Alt 拖动平移，滚轮缩放。红：像素历史 · 绿：已加载书签。", "軸ドラッグで選択、Alt ドラッグで移動、スクロールで拡大縮小。赤：ピクセル履歴・緑：読込済みブックマーク。", "축 드래그로 선택, Alt 드래그로 이동, 스크롤로 확대/축소. 빨강: 픽셀 기록 · 초록: 불러온 북마크."))
+            .child(self.t("Drag the axis to select actions; Alt-drag pans, scroll zooms. Green: passed · orange-red: failed pixel history · light green: loaded bookmarks.", "拖动坐标轴选择操作；Alt 拖动平移，滚轮缩放。绿：像素通过 · 橙红：像素失败 · 浅绿：已加载书签。", "軸ドラッグで選択、Alt ドラッグで移動、スクロールで拡大縮小。緑：ピクセル成功・橙赤：失敗・薄緑：読込済みブックマーク。", "축 드래그로 선택, Alt 드래그로 이동, 스크롤로 확대/축소. 초록: 픽셀 통과 · 주황 빨강: 실패 · 연두: 불러온 북마크."))
             .child(div().flex().flex_wrap().gap_2()
                 .child(format!("{}:", self.t("Resource usage", "资源使用", "リソース使用", "리소스 사용")))
                 .child(div().text_color(rgb(0xe69f00)).child(self.t("Read", "读取", "読み取り", "읽기")))
@@ -13005,6 +13020,24 @@ mod ui_tests {
             assert_eq!(
                 view.read(cx).timeline.history.as_ref().unwrap().events,
                 [41, 42]
+            );
+            assert_eq!(
+                view.read(cx)
+                    .timeline
+                    .history
+                    .as_ref()
+                    .unwrap()
+                    .passed_events,
+                [41]
+            );
+            assert_eq!(
+                view.read(cx)
+                    .timeline
+                    .history
+                    .as_ref()
+                    .unwrap()
+                    .failed_events,
+                [42]
             );
         });
         cx.update_window(handle.into(), |_, window, cx| {

@@ -1590,14 +1590,24 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
     if(command == "timeline_history")
     {
       if(!history_ready || !selected || history_event != selected_event) { error("No pixel history is currently cached"); continue; }
-      std::set<uint32_t> events;
-      for(const PixelModification &mod : cached_history) events.insert(mod.eventId);
+      std::set<uint32_t> events, passed_events, failed_events;
+      for(const PixelModification &mod : cached_history)
+      {
+        events.insert(mod.eventId);
+        (mod.Passed() ? passed_events : failed_events).insert(mod.eventId);
+      }
       std::cout << "\nRENDERDOCX/1 {\"type\":\"timeline_history\",\"event_id\":" << history_event
                 << ",\"index\":" << history_index << ",\"mip\":" << history_mip << ",\"slice\":" << history_slice
                 << ",\"sample\":" << history_sample << ",\"x\":" << history_x << ",\"y\":" << history_y
                 << ",\"modifications\":\"" << cached_history.size() << "\",\"events\":[";
       bool first = true;
       for(uint32_t event : events) { if(!first) std::cout << ','; first = false; std::cout << event; }
+      std::cout << "],\"passed_events\":[";
+      first = true;
+      for(uint32_t event : passed_events) { if(!first) std::cout << ','; first = false; std::cout << event; }
+      std::cout << "],\"failed_events\":[";
+      first = true;
+      for(uint32_t event : failed_events) { if(!first) std::cout << ','; first = false; std::cout << event; }
       std::cout << "]}" << std::endl;
       continue;
     }

@@ -2074,6 +2074,17 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         history["data"]["history"]["total"]
     );
     for entry in history["data"]["history"]["entries"].as_array().unwrap() {
+        let category = if entry["passed"] == true {
+            "passed_events"
+        } else {
+            "failed_events"
+        };
+        assert!(
+            history_events["data"]["history"][category]
+                .as_array()
+                .unwrap()
+                .contains(&entry["event_id"])
+        );
         assert!(
             history_events["data"]["history"]["events"]
                 .as_array()
@@ -2585,6 +2596,17 @@ fn real_remote_replay_loopback() {
     assert!(!highlighted.is_empty(), "{history_events}");
     for entry in history["data"]["history"]["entries"].as_array().unwrap() {
         assert!(highlighted.contains(&entry["event_id"]));
+        let category = if entry["passed"] == true {
+            "passed_events"
+        } else {
+            "failed_events"
+        };
+        assert!(
+            history_events["data"]["history"][category]
+                .as_array()
+                .unwrap()
+                .contains(&entry["event_id"])
+        );
     }
     let stack =
         agent.send(&serde_json::json!({"command":"callstack", "event_id":event}).to_string());
