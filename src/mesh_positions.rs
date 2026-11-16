@@ -11,10 +11,10 @@ pub struct MeshPosition {
 pub fn supported(info: &MeshInfo) -> bool {
     info.format_type == 0
         && info.component_type == 1
-        && info.component_byte_width == 4
+        && matches!(info.component_byte_width, 2 | 4)
         && (1..=4).contains(&info.component_count)
         && info.vertex_stride > 0
-        && info.component_count * 4 <= info.vertex_stride
+        && info.component_count * info.component_byte_width <= info.vertex_stride
 }
 
 /// Returns complete elements starting in this byte range; incomplete trailing elements are omitted.
@@ -24,14 +24,20 @@ pub fn decode(info: &MeshInfo, bytes: &[u8], offset: u64) -> Option<Vec<MeshPosi
     }
     let stride = u64::from(info.vertex_stride);
     let mut relative = (stride - offset % stride) % stride;
-    let width = u64::from(info.component_count) * 4;
+    let width = u64::from(info.component_count) * u64::from(info.component_byte_width);
+    let component_width = info.component_byte_width as usize;
     let mut positions = Vec::new();
     while relative.checked_add(width)? <= bytes.len() as u64 {
         let start = usize::try_from(relative).ok()?;
         let values = (0..info.component_count as usize)
             .map(|index| {
-                let i = start + index * 4;
-                f32::from_le_bytes(bytes[i..i + 4].try_into().unwrap())
+                let i = start + index * component_width;
+                if component_width == 2 {
+                    half::f16::from_bits(u16::from_le_bytes(bytes[i..i + 2].try_into().unwrap()))
+                        .to_f32()
+                } else {
+                    f32::from_le_bytes(bytes[i..i + 4].try_into().unwrap())
+                }
             })
             .collect();
         positions.push(MeshPosition {
@@ -72,7 +78,24 @@ mod tests {
         );
         info.unproject = true;
         assert_eq!(decode(&info, &bytes[4..], 4).unwrap(), result);
-        info.component_byte_width = 2;
+        info.component_byte_width = 8;
         assert!(decode(&info, &bytes, 0).is_none());
+    }
+
+    #[test]
+    fn decodes_half_float_components_with_padding() {
+        let info = MeshInfo {
+            vertex_stride: 8,
+            component_type: 1,
+            component_byte_width: 2,
+            component_count: 3,
+            ..Default::default()
+        };
+        let bytes = [0x00, 0x3c, 0x00, 0xc0, 0x00, 0x38, 0, 0];
+        assert_eq!(
+            decode(&info, &bytes, 0).unwrap()[0].values,
+            [1.0, -2.0, 0.5]
+        );
+        assert!(decode(&info, &bytes[..5], 0).unwrap().is_empty());
     }
 }

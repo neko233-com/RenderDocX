@@ -6733,10 +6733,10 @@ impl Workspace {
                 self.t("Positions are shown in buffer order, not draw index order. Other formats are shown as bytes.", "位置按缓冲区顺序显示，非绘制索引顺序；其他格式显示为字节。", "位置は描画インデックス順ではなくバッファ順です。他の形式はバイトで表示します。", "위치는 그리기 인덱스 순서가 아닌 버퍼 순서입니다. 다른 형식은 바이트로 표시합니다.")
             } else {
                 self.t(
-                    "Index values are raw; base vertex is shown separately.",
-                    "索引显示原始值，基础顶点单独显示。",
-                    "インデックスは生の値で、ベース頂点は別に表示します。",
-                    "인덱스는 원시 값이며 기본 정점은 별도로 표시됩니다.",
+                    "Indices show raw and base-adjusted values; restart indices are marked.",
+                    "索引显示原始值和基础顶点调整后的值，并标记重启索引。",
+                    "インデックスの生値とベース頂点調整後の値、リスタートを表示します。",
+                    "원시 인덱스와 기본 정점 적용 값 및 재시작 인덱스를 표시합니다.",
                 )
             };
             let mut view = div()
