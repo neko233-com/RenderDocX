@@ -716,6 +716,27 @@ impl LiveSession {
         )
     }
     pub fn is_alive(&self) -> bool {
+        if !self.inner.alive.load(Ordering::SeqCst) {
+            return false;
+        }
+        // An injected target may inherit the helper's stdout handle. In that case
+        // EOF is not delivered when the helper crashes, so inspect the process too.
+        let status = self.inner.child.lock().ok().and_then(|mut child| {
+            child
+                .as_mut()
+                .and_then(|child| child.try_wait().ok().flatten())
+        });
+        if let Some(status) = status {
+            if self.inner.alive.swap(false, Ordering::SeqCst) {
+                if let Ok(mut events) = self.inner.events.lock() {
+                    if !status.success() {
+                        events.push_back(json!({"type":"error","message":format!("Target helper exited: {status}")}));
+                    }
+                    events.push_back(json!({"type":"disconnected"}));
+                }
+            }
+            return false;
+        }
         self.inner.alive.load(Ordering::SeqCst)
     }
     fn send(&self, command: &str) -> Result<(), String> {
@@ -778,6 +799,7 @@ impl LiveSession {
         Ok(path)
     }
     pub fn drain(&self) -> Result<Vec<Value>, String> {
+        self.is_alive();
         let events: Vec<Value> = self
             .inner
             .events
@@ -825,6 +847,78 @@ pub fn capture_directory() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "subprocess fixture for helper liveness"]
+    fn helper_exits_for_liveness_test() {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "live::tests::hold_stdout_for_liveness_test",
+                "--ignored",
+            ])
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000);
+        }
+        command.spawn().unwrap();
+        std::process::exit(7);
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture that temporarily holds stdout open"]
+    fn hold_stdout_for_liveness_test() {
+        std::thread::sleep(Duration::from_secs(2));
+    }
+
+    #[test]
+    fn exited_helper_is_disconnected_without_waiting_for_stdout_eof() {
+        use std::time::Instant;
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "live::tests::helper_exits_for_liveness_test",
+                "--ignored",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let input = child.stdin.take().unwrap();
+        // The fixture's descendant inherits stdout after the helper exits.
+        let _held_stdout = child.stdout.take().unwrap();
+        let session = LiveSession {
+            inner: Arc::new(Inner {
+                input: Mutex::new(Some(input)),
+                child: Mutex::new(Some(child)),
+                events: Arc::new(Mutex::new(VecDeque::new())),
+                alive: Arc::new(AtomicBool::new(true)),
+                pending_copies: Mutex::new(HashMap::new()),
+            }),
+            connected: json!({}),
+            capture_template: None,
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while session.is_alive() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!session.is_alive());
+        assert!(session.trigger(1).is_err());
+        let events = session.drain().unwrap();
+        assert_eq!(events.iter().filter(|e| e["type"] == "error").count(), 1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e["type"] == "disconnected")
+                .count(),
+            1
+        );
+        assert!(session.drain().unwrap().is_empty());
+    }
+
     #[test]
     fn remote_urls_require_nonempty_clean_text() {
         assert!(valid_remote_url("127.0.0.1"));
