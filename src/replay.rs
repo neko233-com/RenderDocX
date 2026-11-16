@@ -443,6 +443,67 @@ pub struct ShaderSignature {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ReflectedType {
+    pub name: String,
+    pub flags: u32,
+    pub pointer_type_id: u32,
+    pub elements: u32,
+    pub array_stride: u32,
+    pub base_type: u32,
+    pub rows: u32,
+    pub columns: u32,
+    pub matrix_stride: u32,
+    pub members: Vec<ReflectedConstant>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ReflectedConstant {
+    pub name: String,
+    pub byte_offset: u32,
+    pub bit_offset: u32,
+    pub bit_size: u32,
+    pub default_value: String,
+    #[serde(rename = "type")]
+    pub variable_type: ReflectedType,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ReflectedConstantBlock {
+    pub name: String,
+    pub bind: u32,
+    pub space: u32,
+    pub array_size: u32,
+    pub byte_size: u32,
+    pub buffer_backed: bool,
+    pub inline_data: bool,
+    pub compile_constants: bool,
+    pub variables: Vec<ReflectedConstant>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ReflectedSampler {
+    pub name: String,
+    pub bind: u32,
+    pub space: u32,
+    pub array_size: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ReflectedResource {
+    pub name: String,
+    pub bind: u32,
+    pub space: u32,
+    pub array_size: u32,
+    pub texture_type: u32,
+    pub descriptor_type: u32,
+    pub is_texture: bool,
+    pub has_sampler: bool,
+    pub input_attachment: bool,
+    pub read_only: bool,
+    pub variable_type: ReflectedType,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ShaderReport {
     pub event_id: u32,
     pub stage: u32,
@@ -457,6 +518,14 @@ pub struct ShaderReport {
     pub read_only_resources: usize,
     pub read_write_resources: usize,
     pub samplers: usize,
+    #[serde(default)]
+    pub constant_block_details: Vec<ReflectedConstantBlock>,
+    #[serde(default)]
+    pub sampler_details: Vec<ReflectedSampler>,
+    #[serde(default)]
+    pub read_only_details: Vec<ReflectedResource>,
+    #[serde(default)]
+    pub read_write_details: Vec<ReflectedResource>,
     #[serde(default)]
     pub dispatch_threads: Option<[u32; 3]>,
     #[serde(default)]
@@ -3121,6 +3190,10 @@ pub mod test_support {
                 read_only_resources: 0,
                 read_write_resources: 0,
                 samplers: 0,
+                constant_block_details: Vec::new(),
+                sampler_details: Vec::new(),
+                read_only_details: Vec::new(),
+                read_write_details: Vec::new(),
                 dispatch_threads: None,
                 debuggable: None,
                 source_debug_info: None,
@@ -3164,6 +3237,17 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reflected_constants_preserve_nested_layout_and_u64_defaults() {
+        let scalar = serde_json::json!({"name":"float","flags":0,"pointer_type_id":u32::MAX,"elements":1,"array_stride":0,"base_type":1,"rows":1,"columns":1,"matrix_stride":0,"members":[]});
+        let member = serde_json::json!({"name":"value","byte_offset":4,"bit_offset":0,"bit_size":0,"default_value":"18446744073709551615","type":scalar});
+        let outer = serde_json::json!({"name":"struct","flags":0,"pointer_type_id":u32::MAX,"elements":1,"array_stride":0,"base_type":0,"rows":1,"columns":1,"matrix_stride":0,"members":[member]});
+        let value: ReflectedType = serde_json::from_value(outer.clone()).unwrap();
+        assert_eq!(value.members[0].byte_offset, 4);
+        assert_eq!(value.members[0].default_value, "18446744073709551615");
+        assert_eq!(serde_json::to_value(value).unwrap(), outer);
+    }
     use std::{io::Cursor, sync::Mutex};
 
     const SNAPSHOT: &str = r#"{"type":"snapshot","protocol":1,"api":3,"frame":7,"degraded":false,"actions":[{"event_id":10,"action_id":1,"depth":0,"parent":-1,"flags":0,"indices":0,"instances":0,"name":"pass"},{"event_id":11,"action_id":2,"depth":1,"parent":0,"flags":2,"indices":3,"instances":1,"name":"draw"}],"resource_count":4,"texture_count":2,"buffer_count":1}"#;

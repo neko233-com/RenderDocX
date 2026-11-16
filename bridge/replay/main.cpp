@@ -59,6 +59,25 @@ void json_string(const char *value, size_t length)
 }
 
 void json_string(const rdcstr &value) { json_string(value.c_str(), value.size()); }
+void write_reflected_constant(const ShaderConstant &value);
+void write_reflected_type(const ShaderConstantType &value)
+{
+  std::cout << "{\"name\":"; json_string(value.name);
+  std::cout << ",\"flags\":" << uint32_t(value.flags) << ",\"pointer_type_id\":" << value.pointerTypeID
+            << ",\"elements\":" << value.elements << ",\"array_stride\":" << value.arrayByteStride
+            << ",\"base_type\":" << uint32_t(value.baseType) << ",\"rows\":" << uint32_t(value.rows)
+            << ",\"columns\":" << uint32_t(value.columns) << ",\"matrix_stride\":" << uint32_t(value.matrixByteStride)
+            << ",\"members\":[";
+  for(size_t i = 0; i < value.members.size(); ++i) { if(i) std::cout << ','; write_reflected_constant(value.members[i]); }
+  std::cout << "]}";
+}
+void write_reflected_constant(const ShaderConstant &value)
+{
+  std::cout << "{\"name\":"; json_string(value.name);
+  std::cout << ",\"byte_offset\":" << value.byteOffset << ",\"bit_offset\":" << value.bitFieldOffset
+            << ",\"bit_size\":" << value.bitFieldSize << ",\"default_value\":\"" << value.defaultValue << "\",\"type\":";
+  write_reflected_type(value.type); std::cout << '}';
+}
 void error(const std::string &message)
 {
   std::cout << "\nRENDERDOCX/1 {\"type\":\"error\",\"message\":";
@@ -1647,7 +1666,48 @@ int run(const std::string &capture, bool structure_worker)
       std::cout << ",\"constant_blocks\":" << reflection->constantBlocks.size()
                 << ",\"read_only_resources\":" << reflection->readOnlyResources.size()
                 << ",\"read_write_resources\":" << reflection->readWriteResources.size()
-                << ",\"samplers\":" << reflection->samplers.size() << "}" << std::endl;
+                << ",\"samplers\":" << reflection->samplers.size() << ",\"constant_block_details\":[";
+      for(size_t i = 0; i < reflection->constantBlocks.size(); ++i)
+      {
+        if(i) std::cout << ',';
+        const ConstantBlock &block = reflection->constantBlocks[i];
+        std::cout << "{\"name\":"; json_string(block.name);
+        std::cout << ",\"bind\":" << block.fixedBindNumber << ",\"space\":" << block.fixedBindSetOrSpace
+                  << ",\"array_size\":" << block.bindArraySize << ",\"byte_size\":" << block.byteSize
+                  << ",\"buffer_backed\":" << (block.bufferBacked ? "true" : "false")
+                  << ",\"inline_data\":" << (block.inlineDataBytes ? "true" : "false")
+                  << ",\"compile_constants\":" << (block.compileConstants ? "true" : "false") << ",\"variables\":[";
+        for(size_t j = 0; j < block.variables.size(); ++j) { if(j) std::cout << ','; write_reflected_constant(block.variables[j]); }
+        std::cout << "]}";
+      }
+      std::cout << "],\"sampler_details\":[";
+      for(size_t i = 0; i < reflection->samplers.size(); ++i)
+      {
+        if(i) std::cout << ',';
+        const ShaderSampler &sampler = reflection->samplers[i];
+        std::cout << "{\"name\":"; json_string(sampler.name);
+        std::cout << ",\"bind\":" << sampler.fixedBindNumber << ",\"space\":" << sampler.fixedBindSetOrSpace
+                  << ",\"array_size\":" << sampler.bindArraySize << '}';
+      }
+      auto resource_details = [](const rdcarray<ShaderResource> &resources) {
+        std::cout << '[';
+        for(size_t i = 0; i < resources.size(); ++i)
+        {
+          if(i) std::cout << ',';
+          const ShaderResource &r = resources[i];
+          std::cout << "{\"name\":"; json_string(r.name);
+          std::cout << ",\"bind\":" << r.fixedBindNumber << ",\"space\":" << r.fixedBindSetOrSpace
+                    << ",\"array_size\":" << r.bindArraySize << ",\"texture_type\":" << uint32_t(r.textureType)
+                    << ",\"descriptor_type\":" << uint32_t(r.descriptorType) << ",\"is_texture\":" << (r.isTexture ? "true" : "false")
+                    << ",\"has_sampler\":" << (r.hasSampler ? "true" : "false") << ",\"input_attachment\":" << (r.isInputAttachment ? "true" : "false")
+                    << ",\"read_only\":" << (r.isReadOnly ? "true" : "false") << ",\"variable_type\":";
+          write_reflected_type(r.variableType); std::cout << '}';
+        }
+        std::cout << ']';
+      };
+      std::cout << "],\"read_only_details\":"; resource_details(reflection->readOnlyResources);
+      std::cout << ",\"read_write_details\":"; resource_details(reflection->readWriteResources);
+      std::cout << "}" << std::endl;
       continue;
     }
     if(command.compare(0, 7, "buffer ") == 0)

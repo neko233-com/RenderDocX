@@ -7254,6 +7254,35 @@ impl Workspace {
                             )
                         })
                         .collect::<Vec<_>>();
+                    let mut reflection_lines = Vec::new();
+                    for block in &shader.constant_block_details {
+                        reflection_lines.push(format!("{} · {} {} · {} {} · {} {}", block.name,
+                            self.t("bind", "绑定", "バインド", "바인딩"), block.bind,
+                            self.t("space", "空间", "空間", "공간"), block.space,
+                            self.t("bytes", "字节", "バイト", "바이트"), block.byte_size));
+                        let mut pending: Vec<_> = block.variables.iter().rev().map(|v| (v, 1usize)).collect();
+                        while let Some((variable, depth)) = pending.pop() {
+                            reflection_lines.push(format!("{}{}: {} · +{} · {}×{} · [{}]", "  ".repeat(depth), variable.name,
+                                variable.variable_type.name, variable.byte_offset, variable.variable_type.rows,
+                                variable.variable_type.columns, variable.variable_type.elements));
+                            pending.extend(variable.variable_type.members.iter().rev().map(|member| (member, depth + 1)));
+                        }
+                    }
+                    for (label, resources) in [
+                        (self.t("Read-only", "只读资源", "読み取り専用", "읽기 전용"), &shader.read_only_details),
+                        (self.t("Read/write", "读写资源", "読み書き", "읽기/쓰기"), &shader.read_write_details),
+                    ] {
+                        for resource in resources {
+                            reflection_lines.push(format!("{label}: {} · {} {} · {} {} · [{}] · {}", resource.name,
+                                self.t("bind", "绑定", "バインド", "바인딩"), resource.bind,
+                                self.t("space", "空间", "空間", "공간"), resource.space, resource.array_size, resource.variable_type.name));
+                        }
+                    }
+                    for sampler in &shader.sampler_details {
+                        reflection_lines.push(format!("{}: {} · {} {} · {} {} · [{}]", self.t("Sampler", "采样器", "サンプラー", "샘플러"),
+                            sampler.name, self.t("bind", "绑定", "バインド", "바인딩"), sampler.bind,
+                            self.t("space", "空间", "空間", "공간"), sampler.space, sampler.array_size));
+                    }
                     let mut view = view
                         .child(format!("{entry_label}: {}", shader.entry_point))
                         .child(format!(
@@ -7266,6 +7295,7 @@ impl Workspace {
                         ))
                         .child(target_button)
                         .child(format!("{constants_label}: {}", shader.constant_blocks))
+                        .children(reflection_lines.into_iter().map(|line| div().text_sm().child(line)))
                         .child(format!("{shader_inputs_label}: {}", inputs.len()))
                         .children(inputs.into_iter().map(|line| div().text_sm().child(line)))
                         .child(format!("{shader_outputs_label}: {}", outputs.len()))

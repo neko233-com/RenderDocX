@@ -195,6 +195,32 @@ fn real_d3d11_mesh_draw_order() {
         assert_eq!(result["ok"], true, "{command}: {result}");
         assert_eq!(result["data"]["selection"]["analysis_type_cast"], 2);
     }
+    let dispatch = opened["data"]["capture"]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|action| {
+            action["name"]
+                .as_str()
+                .is_some_and(|name| name.contains("Dispatch"))
+        })
+        .expect("compute dispatch")["event_id"]
+        .as_u64()
+        .unwrap();
+    let selected =
+        agent.send(&serde_json::json!({"command":"select","event_id":dispatch}).to_string());
+    assert_eq!(selected["ok"], true, "{selected}");
+    let shader = agent.send(r#"{"command":"shader","stage":"compute"}"#);
+    assert_eq!(shader["ok"], true, "{shader}");
+    let resources = shader["data"]["shader"]["read_write_details"]
+        .as_array()
+        .unwrap();
+    assert!(
+        resources
+            .iter()
+            .any(|resource| resource["name"] == "output" && resource["bind"] == 0),
+        "{shader}"
+    );
     agent.quit();
 }
 

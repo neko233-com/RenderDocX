@@ -15,6 +15,8 @@ Pipeline state includes a nullable `scissors` array with each rectangle's signed
 
 The nullable `fixed_state` contains the upstream common raster, depth, stencil and color-blend state. Enum fields are numeric values from the matching RenderDoc headers; non-finite bounds or blend factors become null. D3D11 capture checks cover raster values and the presence of depth, stencil and blend data. Other graphics APIs, detailed state combinations and GUI interaction remain unverified.
 
+Shader reports include `constant_block_details`, `sampler_details`, `read_only_details`, and `read_write_details`, including nested reflected type and variable layouts. `default_value` is a decimal string. Binding numbers and spaces are upstream reflection metadata, not necessarily actual dynamic bindings (notably on OpenGL); use descriptor inspection for runtime binding information. This is reflection metadata, not decoded constant values.
+
 Pipeline `color_attachments`, `depth_attachment`, and `depth_resolve_attachment` expose resource and view references, format, texture type, mip/slice range, minimum LOD clamp, and swizzle from RenderDoc descriptors. Existing `outputs` remains available. Non-finite LOD clamps are null. D3D11 color and unbound depth were checked with a capture; bound depth, resolves and other APIs remain unverified.
 
 `export_texture` accepts `preview_type_cast`, a numeric RenderDoc `CompType` (0 through 9, default 0), passed to `TextureSave.typeCast` for PNG export. Pixel picking, statistics and history accept the separate `analysis_type_cast` field with the same range and default. Neither field applies a descriptor swizzle. A D3D11 capture exercises these operations with a type cast; additional formats, results and APIs require further validation.
