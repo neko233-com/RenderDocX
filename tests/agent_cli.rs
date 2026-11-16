@@ -159,7 +159,7 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/renderdocx-fixtures");
     std::fs::create_dir_all(&root).unwrap();
     let dir = tempfile::Builder::new()
-        .prefix("capture-")
+        .prefix("capture-图像 空格-")
         .tempdir_in(&root)
         .unwrap();
     assert!(
@@ -220,6 +220,21 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let request = serde_json::json!({"id":1,"command":"open","path":capture}).to_string();
     let opened = agent.send(&request);
     assert_eq!(opened["ok"], true, "{opened}");
+    let texture_index = opened["data"]["capture"]["textures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|texture| texture["width"] == 16 && texture["height"] == 16)
+        .unwrap();
+    assert!(
+        !opened["data"]["capture"]["textures"][texture_index]["format_name"]
+            .as_str()
+            .unwrap()
+            .is_empty()
+    );
+    let png_path = dir.path().join("图像 空格.png");
+    let export = serde_json::json!({"id":20,"command":"export_texture","index":texture_index,"path":png_path.to_str().unwrap()}).to_string();
+    assert_eq!(agent.send(&export)["error"]["code"], "no_event");
     let failed_open =
         agent.send(r#"{"id":10,"command":"open","path":"missing-renderdocx-capture.rdc"}"#);
     assert_eq!(failed_open["error"]["code"], "replay_open_failed");
@@ -236,6 +251,27 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         selected["data"]["event_id"].as_u64().unwrap().to_string(),
         event
     );
+    let exported = agent.send(&export);
+    assert_eq!(exported["ok"], true, "{exported}");
+    let bytes = std::fs::read(&png_path).unwrap();
+    let decoder = png::Decoder::new(std::io::BufReader::new(
+        std::fs::File::open(&png_path).unwrap(),
+    ));
+    let mut reader = decoder.read_info().unwrap();
+    assert_eq!((reader.info().width, reader.info().height), (16, 16));
+    let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+    let info = reader.next_frame(&mut pixels).unwrap();
+    assert!(matches!(
+        info.color_type,
+        png::ColorType::Rgb | png::ColorType::Rgba
+    ));
+    assert!(
+        pixels[0] > 0 && pixels[1] > pixels[0] && pixels[2] > pixels[1],
+        "unexpected clear color: {:?}",
+        &pixels[..3]
+    );
+    assert_eq!(agent.send(&export)["error"]["code"], "replay_export_failed");
+    assert_eq!(std::fs::read(&png_path).unwrap(), bytes);
     assert_eq!(agent.send(r#"{"id":3,"command":"close"}"#)["ok"], true);
     assert_eq!(
         agent.send(r#"{"id":4,"command":"snapshot"}"#)["error"]["code"],

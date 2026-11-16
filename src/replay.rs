@@ -48,6 +48,8 @@ pub struct Texture {
     pub samples: u32,
     /// Decimal text preserves the full 64-bit value in JavaScript agents.
     pub bytes: String,
+    #[serde(default)]
+    pub format_name: String,
     pub format_type: u32,
     pub component_type: u32,
     pub component_count: u32,
@@ -59,6 +61,7 @@ pub struct Texture {
 enum Reply {
     Snapshot(Snapshot),
     Selected { event_id: u32 },
+    TextureSaved { index: u32 },
     Error { message: String },
 }
 
@@ -110,6 +113,9 @@ fn validate_snapshot(snapshot: &Snapshot) -> Result<(), String> {
 
 trait Transport: Send {
     fn select(&mut self, event: u32) -> Result<(), String>;
+    fn save_texture(&mut self, _index: u32, _path: &Path) -> Result<(), String> {
+        Err("Texture export is not supported by this transport".into())
+    }
     fn close(&mut self) -> Result<(), String> {
         Ok(())
     }
@@ -125,6 +131,27 @@ impl Transport for Process {
             Reply::Selected { event_id } if event_id == event => Ok(()),
             Reply::Error { message } => Err(message),
             _ => Err("Unexpected replay selection response".into()),
+        }
+    }
+
+    fn save_texture(&mut self, index: u32, path: &Path) -> Result<(), String> {
+        let path = path
+            .to_str()
+            .ok_or("Texture output path is not valid UTF-8")?;
+        let mut encoded = String::with_capacity(path.len() * 2);
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for &byte in path.as_bytes() {
+            encoded.push(HEX[(byte >> 4) as usize] as char);
+            encoded.push(HEX[(byte & 15) as usize] as char);
+        }
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(input, "save {index} {encoded}")
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::TextureSaved { index: saved } if saved == index => Ok(()),
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected texture export response".into()),
         }
     }
 
@@ -217,6 +244,28 @@ impl Session {
 
     pub fn close(&self) -> Result<(), String> {
         self.process.lock().map_err(|e| e.to_string())?.close()
+    }
+
+    /// Export a PNG without replacing an existing destination, including symlinks.
+    pub fn export_texture(&self, index: u32, destination: &Path) -> Result<(), String> {
+        let parent = destination
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let temporary = tempfile::Builder::new()
+            .prefix(".renderdocx-")
+            .suffix(".png")
+            .tempfile_in(parent)
+            .map_err(|e| format!("Cannot create temporary export: {e}"))?
+            .into_temp_path();
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .save_texture(index, temporary.as_ref())?;
+        temporary
+            .persist_noclobber(destination)
+            .map_err(|e| format!("Cannot publish texture export: {}", e.error))?;
+        Ok(())
     }
 
     pub fn select(&self, event: u32, revision: u64) -> Result<bool, String> {

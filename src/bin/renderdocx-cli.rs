@@ -104,6 +104,7 @@ fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
 
 fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io::Result<()> {
     let mut opened: Option<(Session, Snapshot)> = None;
+    let mut selected_event: Option<u32> = None;
     for line in input.lines() {
         let line = line?;
         let parsed: Result<Value, _> = serde_json::from_str(&line);
@@ -132,6 +133,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     Ok((session, snapshot)) => {
                         let value = json!({"capture": &snapshot});
                         opened = Some((session, snapshot));
+                        selected_event = None;
                         Ok(value)
                     }
                     Err(message) => Err(("replay_open_failed", message)),
@@ -157,7 +159,10 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                 (Some((session, _)), Some(event)) => {
                     let revision = session.next_revision();
                     match session.select(event, revision) {
-                        Ok(true) => Ok(json!({"event_id":event})),
+                        Ok(true) => {
+                            selected_event = Some(event);
+                            Ok(json!({"event_id":event}))
+                        }
                         Ok(false) => Err((
                             "replay_select_superseded",
                             "Selection was superseded".into(),
@@ -166,13 +171,46 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     }
                 }
             },
-            "close" | "quit" => match opened.take() {
-                Some((session, _)) => session
-                    .close()
-                    .map(|_| json!({}))
-                    .map_err(|error| ("replay_close_failed", error)),
-                None => Ok(json!({})),
-            },
+            "export_texture" => {
+                let index = request
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok());
+                let path = request
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .filter(|path| !path.is_empty());
+                match (&opened, selected_event, index, path) {
+                    (None, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some(_), None, _, _) => {
+                        Err(("no_event", "Select an event before exporting".into()))
+                    }
+                    (Some(_), Some(_), None, _) | (Some(_), Some(_), Some(_), None) => Err((
+                        "invalid_arguments",
+                        "export_texture requires a texture index and output path".into(),
+                    )),
+                    (Some((session, snapshot)), Some(event), Some(index), Some(path)) => {
+                        if index as usize >= snapshot.textures.len() {
+                            Err(("invalid_arguments", "Texture index is out of range".into()))
+                        } else {
+                            session
+                                .export_texture(index, PathBuf::from(path).as_path())
+                                .map(|_| json!({"index":index,"event_id":event,"path":path}))
+                                .map_err(|error| ("replay_export_failed", error))
+                        }
+                    }
+                }
+            }
+            "close" | "quit" => {
+                selected_event = None;
+                match opened.take() {
+                    Some((session, _)) => session
+                        .close()
+                        .map(|_| json!({}))
+                        .map_err(|error| ("replay_close_failed", error)),
+                    None => Ok(json!({})),
+                }
+            }
             _ => Err(("invalid_command", "Unknown or missing command".into())),
         };
         let response = match result {

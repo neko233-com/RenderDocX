@@ -80,7 +80,8 @@ struct PendingAction
   int64_t parent;
 };
 
-void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids)
+void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids,
+                    std::vector<ResourceId> &texture_ids)
 {
   const APIProperties api = controller->GetAPIProperties();
   const FrameDescription frame = controller->GetFrameInfo();
@@ -120,6 +121,7 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
   for(size_t i = 0; i < textures.size(); ++i)
   {
     const TextureDescription &texture = textures[i];
+    texture_ids.push_back(texture.resourceId);
     const auto found_name = resource_names.find(texture.resourceId);
     const rdcstr *name = found_name == resource_names.end() ? nullptr : found_name->second;
     if(i) std::cout << ',';
@@ -129,7 +131,9 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
               << ",\"depth\":" << texture.depth << ",\"dimension\":" << texture.dimension
               << ",\"mips\":" << texture.mips << ",\"array_size\":" << texture.arraysize
               << ",\"samples\":" << texture.msSamp << ",\"bytes\":\"" << texture.byteSize
-              << "\",\"format_type\":" << uint32_t(texture.format.type)
+              << "\",\"format_name\":";
+    json_string(texture.format.Name());
+    std::cout << ",\"format_type\":" << uint32_t(texture.format.type)
               << ",\"component_type\":" << uint32_t(texture.format.compType)
               << ",\"component_count\":" << uint32_t(texture.format.compCount)
               << ",\"component_byte_width\":" << uint32_t(texture.format.compByteWidth)
@@ -164,12 +168,45 @@ int run(const std::string &capture)
   replay.file->Shutdown();
   replay.file = nullptr;
   std::set<uint32_t> event_ids;
-  write_snapshot(replay.controller, event_ids);
+  std::vector<ResourceId> texture_ids;
+  write_snapshot(replay.controller, event_ids, texture_ids);
 
   std::string command;
   while(std::getline(std::cin, command))
   {
     if(command == "quit") break;
+    if(command.compare(0, 5, "save ") == 0)
+    {
+      const size_t separator = command.find(' ', 5);
+      if(separator == std::string::npos) { error("Invalid texture save command"); continue; }
+      const std::string number = command.substr(5, separator - 5);
+      const std::string encoded = command.substr(separator + 1);
+      uint64_t index = 0;
+      bool valid = !number.empty() && !encoded.empty() && encoded.size() % 2 == 0;
+      for(char c : number)
+      {
+        if(c < '0' || c > '9' || index > (std::numeric_limits<uint32_t>::max)() / 10)
+        { valid = false; break; }
+        index = index * 10 + uint64_t(c - '0');
+        if(index > (std::numeric_limits<uint32_t>::max)()) { valid = false; break; }
+      }
+      std::string path;
+      for(size_t i = 0; valid && i < encoded.size(); i += 2)
+      {
+        auto digit = [](char c) -> int { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1; };
+        int high = digit(encoded[i]), low = digit(encoded[i + 1]);
+        if(high < 0 || low < 0 || (high == 0 && low == 0)) { valid = false; break; }
+        path.push_back(char(high * 16 + low));
+      }
+      if(!valid || index >= texture_ids.size()) { error("Invalid texture or output path"); continue; }
+      TextureSave save;
+      save.resourceId = texture_ids[size_t(index)];
+      save.destType = FileType::PNG;
+      ResultDetails saved = replay.controller->SaveTexture(save, path.c_str());
+      if(!saved.OK()) { error(result_message(saved)); continue; }
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"texture_saved\",\"index\":" << index << "}" << std::endl;
+      continue;
+    }
     if(command.compare(0, 7, "select ") != 0) { error("Unknown command"); continue; }
     const std::string number = command.substr(7);
     uint64_t event = 0;

@@ -26,6 +26,8 @@ struct Workspace {
     selected_texture: Option<usize>,
     open_revision: u64,
     selection_revision: u64,
+    replay_pending: bool,
+    export_pending: bool,
 }
 
 impl Workspace {
@@ -62,6 +64,19 @@ impl Workspace {
     }
 
     fn open(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending {
+            self.status = Some(
+                self.t(
+                    "Wait for the current replay operation to finish.",
+                    "请等待当前回放操作完成。",
+                    "現在のリプレイ処理が完了するまでお待ちください。",
+                    "현재 리플레이 작업이 끝날 때까지 기다려 주세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
         if path
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("cap"))
@@ -101,6 +116,8 @@ impl Workspace {
                         this.selected = None;
                         this.selected_texture = None;
                         this.show_textures = false;
+                        this.replay_pending = false;
+                        this.export_pending = false;
                         this.status = None;
                     }
                     Err(error) => {
@@ -122,6 +139,19 @@ impl Workspace {
     }
 
     fn select(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.export_pending {
+            self.status = Some(
+                self.t(
+                    "Wait for the texture export to finish.",
+                    "请等待纹理导出完成。",
+                    "テクスチャの書き出しが完了するまでお待ちください。",
+                    "텍스처 내보내기가 완료될 때까지 기다려 주세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
         let Some(session) = self.session.clone() else {
             return;
         };
@@ -135,6 +165,7 @@ impl Workspace {
         let event = action.event_id;
         let revision = session.next_revision();
         self.selection_revision = revision;
+        self.replay_pending = true;
         let open_revision = self.open_revision;
         self.status = Some(
             self.t(
@@ -155,6 +186,7 @@ impl Workspace {
                 if this.open_revision != open_revision || this.selection_revision != revision {
                     return;
                 }
+                this.replay_pending = false;
                 match result {
                     Ok(true) => {
                         this.selected = Some(index);
@@ -173,6 +205,81 @@ impl Workspace {
                         ))
                     }
                 }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn export_texture(&mut self, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending || self.selected.is_none() {
+            self.status = Some(
+                self.t(
+                    "Select an event and wait for replay to finish before exporting.",
+                    "请先选择事件并等待回放完成，再导出纹理。",
+                    "イベントを選択し、リプレイ完了後に書き出してください。",
+                    "이벤트를 선택하고 리플레이가 끝난 뒤 내보내세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let (Some(session), Some(index)) = (self.session.clone(), self.selected_texture) else {
+            return;
+        };
+        let Ok(index) = u32::try_from(index) else {
+            return;
+        };
+        let Some(destination) = rfd::FileDialog::new()
+            .add_filter("PNG", &["png"])
+            .save_file()
+        else {
+            return;
+        };
+        let destination_label = destination.display().to_string();
+        self.export_pending = true;
+        let revision = self.open_revision;
+        self.status = Some(
+            self.t(
+                "Exporting texture…",
+                "正在导出纹理…",
+                "テクスチャを書き出し中…",
+                "텍스처를 내보내는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx
+            .background_executor()
+            .spawn(async move { session.export_texture(index, &destination) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision {
+                    return;
+                }
+                this.export_pending = false;
+                this.status = Some(match result {
+                    Ok(()) => format!(
+                        "{}: {destination_label}",
+                        this.t(
+                            "Texture exported",
+                            "纹理已导出",
+                            "テクスチャを書き出しました",
+                            "텍스처를 내보냈습니다",
+                        )
+                    ),
+                    Err(error) => format!(
+                        "{}: {error}",
+                        this.t(
+                            "Texture export failed",
+                            "纹理导出失败",
+                            "テクスチャを書き出せません",
+                            "텍스처 내보내기 실패"
+                        )
+                    ),
+                });
                 cx.notify();
             });
         })
@@ -257,6 +364,13 @@ impl Workspace {
             "纹理详情",
             "テクスチャの詳細",
             "텍스처 상세",
+        );
+        let export_label = self.t("Export PNG", "导出 PNG", "PNG を書き出す", "PNG 내보내기");
+        let export_note = self.t(
+            "Existing files are never replaced.",
+            "不会覆盖已有文件。",
+            "既存のファイルは上書きしません。",
+            "기존 파일을 덮어쓰지 않습니다.",
         );
         let texture_empty = self.t(
             "Select a texture to inspect its metadata.",
@@ -376,6 +490,13 @@ impl Workspace {
         };
 
         let detail_view = if self.show_textures {
+            let export = button(
+                "texture-export",
+                export_label,
+                true,
+                |this, cx| this.export_texture(cx),
+                cx,
+            );
             div()
                 .flex()
                 .flex_col()
@@ -403,11 +524,17 @@ impl Workspace {
                     .child(format!("{bytes_label}: {}", texture.bytes))
                     .child(format!(
                         "{format_label}: {}  ·  {component_label}: {} / {} × {}",
-                        texture.format_type,
+                        if texture.format_name.is_empty() {
+                            texture.format_type.to_string()
+                        } else {
+                            texture.format_name
+                        },
                         texture.component_type,
                         texture.component_count,
                         texture.component_byte_width
                     ))
+                    .child(export)
+                    .child(div().text_sm().text_color(rgb(0x91a7c0)).child(export_note))
                 })
                 .when(self.selected_texture.is_none(), |view| {
                     view.child(div().text_color(rgb(0x9eacc0)).child(texture_empty))
@@ -454,6 +581,8 @@ impl Workspace {
                             this.snapshot = None;
                             this.capture = None;
                             this.selected = None;
+                            this.replay_pending = false;
+                            this.export_pending = false;
                             this.status = None;
                             cx.notify();
                         },
@@ -835,6 +964,8 @@ fn main() {
                         selected_texture: None,
                         open_revision: 0,
                         selection_revision: 0,
+                        replay_pending: false,
+                        export_pending: false,
                     });
                     if let Some(path) = initial_capture {
                         entity.update(cx, |view, cx| view.open(path, cx));
@@ -885,6 +1016,8 @@ mod ui_tests {
                         selected_texture: None,
                         open_revision: 0,
                         selection_revision: 0,
+                        replay_pending: false,
+                        export_pending: false,
                     })
                 },
             )
@@ -948,6 +1081,7 @@ mod ui_tests {
                                 array_size: 1,
                                 samples: 1,
                                 bytes: "1024".into(),
+                                format_name: "R8G8B8A8_UNORM".into(),
                                 format_type: 0,
                                 component_type: 0,
                                 component_count: 4,
@@ -959,6 +1093,8 @@ mod ui_tests {
                         selected_texture: None,
                         open_revision: 0,
                         selection_revision: 0,
+                        replay_pending: false,
+                        export_pending: false,
                     })
                 },
             )
@@ -967,6 +1103,18 @@ mod ui_tests {
         let handle = handle.downcast::<Root>().unwrap();
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
+            window.click("textures-tab", cx);
+            window.click("texture-0", cx);
+            window.click("texture-export", cx);
+        })
+        .unwrap();
+        cx.update(|cx| {
+            assert!(view.read(cx).status.is_some());
+            assert!(!view.read(cx).export_pending);
+        });
+        assert!(events.lock().unwrap().is_empty());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("events-tab", cx);
             window.click(0usize, cx);
         })
         .unwrap();
