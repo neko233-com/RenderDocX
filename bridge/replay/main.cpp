@@ -96,6 +96,7 @@ struct ReplayScope
   ICaptureFile *file = nullptr;
   IReplayController *controller = nullptr;
   IRemoteServer *remote = nullptr;
+  rdcstr remote_path;
   bool initialised = false;
   ~ReplayScope()
   {
@@ -1009,9 +1010,9 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
   {
     result = RENDERDOC_CreateRemoteServerConnection(remote_url.c_str(), &replay.remote);
     if(!result.OK() || !replay.remote) { error(result.OK() ? "Remote server returned no connection" : result_message(result)); return 1; }
-    const rdcstr remote_path = replay.remote->CopyCaptureToRemote(capture.c_str(), nullptr);
-    if(remote_path.empty()) { error("Could not copy capture to remote replay server"); return 1; }
-    auto opened = replay.remote->OpenCapture(IRemoteServer::NoPreference, remote_path, options, nullptr);
+    replay.remote_path = replay.remote->CopyCaptureToRemote(capture.c_str(), nullptr);
+    if(replay.remote_path.empty()) { error("Could not copy capture to remote replay server"); return 1; }
+    auto opened = replay.remote->OpenCapture(IRemoteServer::NoPreference, replay.remote_path, options, nullptr);
     if(!opened.first.OK()) { error(result_message(opened.first)); return 1; }
     replay.controller = opened.second;
   }
@@ -1070,6 +1071,60 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       std::cout << "\nRENDERDOCX/1 {\"type\":\"debug_messages\",\"messages\":[";
       for(size_t i = 0; i < messages.size(); ++i) { if(i) std::cout << ','; write_debug_message(messages[i]); }
       std::cout << "]}" << std::endl;
+      continue;
+    }
+    if(command == "dependencies" || command.compare(0, 18, "dependencies_save ") == 0)
+    {
+      const bool saving = command != "dependencies";
+      std::string operation, encoded, extra, output;
+      bytebuf bytes;
+      if(saving)
+      {
+        std::istringstream args(command.substr(18));
+        if(!(args >> operation >> encoded) || (args >> extra) || (operation != "embed" && operation != "remove") ||
+           !decode_section_hex(encoded, bytes) || bytes.empty() || std::find(bytes.begin(), bytes.end(), byte(0)) != bytes.end())
+        { error("Invalid dependency export request"); continue; }
+        output.assign(bytes.begin(), bytes.end());
+      }
+      ICaptureFile *file = nullptr;
+      ICaptureAccess *access = replay.remote;
+      if(!access)
+      {
+        file = RENDERDOC_OpenCaptureFile();
+        if(!file) { error("Could not open capture dependencies"); continue; }
+        ResultDetails opened = file->OpenFile(saving ? output.c_str() : capture.c_str(), "rdc", nullptr);
+        if(!opened.OK()) { std::string message = result_message(opened); file->Shutdown(); error(message); continue; }
+        access = file;
+      }
+      const bool embedded = access->HasEmbeddedDependencies();
+      const bool pending = access->HasPendingDependencies();
+      if(saving && ((operation == "embed" && !pending) || (operation == "remove" && !embedded)))
+      { if(file) file->Shutdown(); error(operation == "embed" ? "No pending dependencies to embed" : "No embedded dependencies to remove"); continue; }
+      if(saving)
+      {
+        ResultDetails changed = operation == "embed" ? access->EmbedDependenciesIntoCapture() : access->RemoveDependenciesFromCapture();
+        if(!changed.OK()) { std::string message = result_message(changed); if(file) file->Shutdown(); error(message); continue; }
+        if(replay.remote) replay.remote->CopyCaptureFromRemote(replay.remote_path, output.c_str(), nullptr);
+        if(file) { file->Shutdown(); file = nullptr; }
+        ICaptureFile *check = RENDERDOC_OpenCaptureFile();
+        if(!check) { error("Could not verify exported capture"); continue; }
+        ResultDetails verified = check->OpenFile(output.c_str(), "rdc", nullptr);
+        const std::string verification_error = verified.OK() ? std::string() : result_message(verified);
+        const bool exported_embedded = verified.OK() && check->HasEmbeddedDependencies();
+        check->Shutdown();
+        if(!verification_error.empty()) { error("Could not verify exported capture: " + verification_error); continue; }
+        if(exported_embedded != (operation == "embed")) { error("Exported capture has an unexpected dependency state"); continue; }
+        std::cout << "\nRENDERDOCX/1 {\"type\":\"dependencies_saved\"}" << std::endl;
+      }
+      else
+      {
+        const auto names = access->GetPendingDependenciesNicknames();
+        std::cout << "\nRENDERDOCX/1 {\"type\":\"dependencies\",\"embedded\":" << (embedded ? "true" : "false")
+                  << ",\"pending\":" << (pending ? "true" : "false") << ",\"nicknames\":[";
+        for(size_t i = 0; i < names.size(); ++i) { if(i) std::cout << ','; json_string(names[i]); }
+        std::cout << "]}" << std::endl;
+        if(file) file->Shutdown();
+      }
       continue;
     }
     if(command == "remote_gpus")

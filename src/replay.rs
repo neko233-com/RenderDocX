@@ -78,6 +78,13 @@ pub struct ApiEvent {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CaptureDependencies {
+    pub embedded: bool,
+    pub pending: bool,
+    pub nicknames: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EventCallstack {
     pub event_id: u32,
     pub available: bool,
@@ -1181,6 +1188,8 @@ enum Reply {
     DebugStarted(DebugTrace),
     DebugStates(DebugStates),
     DebugStopped,
+    Dependencies(CaptureDependencies),
+    DependenciesSaved,
     Gpus {
         gpus: Vec<crate::live::ReplayGpu>,
     },
@@ -1240,6 +1249,7 @@ struct Process {
     executable: PathBuf,
     capture: PathBuf,
     capture_stamp: Option<CaptureStamp>,
+    remote_source_stamp: Option<CaptureStamp>,
     events: HashMap<u32, ApiEvent>,
     structure_worker: Option<Box<Process>>,
 }
@@ -1314,6 +1324,7 @@ impl Process {
             executable: executable.to_path_buf(),
             capture: capture.clone(),
             capture_stamp: None,
+            remote_source_stamp: None,
             events: HashMap::new(),
             structure_worker: None,
         };
@@ -1327,6 +1338,9 @@ impl Process {
         };
         let after = capture_stamp(&capture);
         if before.is_some() && before == after {
+            if remote.is_some() {
+                process.remote_source_stamp = before.clone();
+            }
             process.capture_stamp = before;
         }
         for event in snapshot
@@ -1374,6 +1388,7 @@ impl Process {
             executable: executable.to_path_buf(),
             capture: capture.to_path_buf(),
             capture_stamp: None,
+            remote_source_stamp: None,
             events: HashMap::new(),
             structure_worker: None,
         };
@@ -1490,6 +1505,12 @@ fn validate_snapshot(snapshot: &Snapshot) -> Result<(), String> {
 
 trait Transport: Send {
     fn select(&mut self, event: u32) -> Result<Pipeline, String>;
+    fn dependencies(&mut self) -> Result<CaptureDependencies, String> {
+        Err("Capture dependency inspection is not supported by this transport".into())
+    }
+    fn dependencies_save(&mut self, _action: &str, _root: &Path) -> Result<PathBuf, String> {
+        Err("Capture dependency export is not supported by this transport".into())
+    }
     fn annotation_read(&mut self, _name: &str) -> Result<AnnotationSection, String> {
         Err("Annotation sections are not supported by this transport".into())
     }
@@ -1677,6 +1698,80 @@ trait Transport: Send {
 }
 
 impl Transport for Process {
+    fn dependencies(&mut self) -> Result<CaptureDependencies, String> {
+        let stamp = self
+            .capture_stamp
+            .clone()
+            .ok_or("Capture identity is unavailable")?;
+        if capture_stamp(&self.capture).as_ref() != Some(&stamp) {
+            return Err("Capture changed since it was opened".into());
+        }
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(input, "dependencies")
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        let reply = self.read()?;
+        if capture_stamp(&self.capture).as_ref() != Some(&stamp) {
+            return Err("Capture changed while inspecting dependencies".into());
+        }
+        match reply {
+            Reply::Dependencies(value) => Ok(value),
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected dependency response".into()),
+        }
+    }
+
+    fn dependencies_save(&mut self, action: &str, root: &Path) -> Result<PathBuf, String> {
+        if !matches!(action, "embed" | "remove") || !root.is_absolute() || !root.is_dir() {
+            return Err("Invalid dependency export request".into());
+        }
+        let stamp = self
+            .capture_stamp
+            .clone()
+            .ok_or("Capture identity is unavailable")?;
+        if capture_stamp(&self.capture).as_ref() != Some(&stamp) {
+            return Err("Capture changed since it was opened".into());
+        }
+        if self
+            .remote_source_stamp
+            .as_ref()
+            .is_some_and(|original| original != &stamp)
+        {
+            return Err("The local capture changed since upload; reopen it before exporting remote dependencies".into());
+        }
+        let folder = tempfile::Builder::new()
+            .prefix("dependencies-")
+            .tempdir_in(root)
+            .map_err(|e| e.to_string())?;
+        let path = folder.path().join("capture.rdc");
+        if self.remote_source_stamp.is_none() {
+            std::fs::copy(&self.capture, &path).map_err(|e| e.to_string())?;
+        }
+        if capture_stamp(&self.capture).as_ref() != Some(&stamp) {
+            return Err("Capture changed while copying".into());
+        }
+        let text = path.to_str().ok_or("Invalid capture export path")?;
+        let encoded: String = text.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(input, "dependencies_save {action} {encoded}")
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        let reply = self.read()?;
+        if capture_stamp(&self.capture).as_ref() != Some(&stamp) {
+            return Err("Original capture changed while exporting".into());
+        }
+        match reply {
+            Reply::DependenciesSaved => (),
+            Reply::Error { message } => return Err(message),
+            _ => return Err("Unexpected dependency export response".into()),
+        }
+        if !path.metadata().is_ok_and(|m| m.is_file() && m.len() > 0) {
+            return Err("Exported capture is missing or empty".into());
+        }
+        let _ = folder.keep();
+        Ok(path)
+    }
+
     fn annotation_read(&mut self, name: &str) -> Result<AnnotationSection, String> {
         if capture_stamp(&self.capture).as_ref() != self.capture_stamp.as_ref()
             || self.capture_stamp.is_none()
@@ -2769,6 +2864,18 @@ impl Session {
         let _ = folder.keep();
         Ok(path)
     }
+    pub fn dependencies(&self) -> Result<CaptureDependencies, String> {
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .dependencies()
+    }
+    pub fn dependencies_save(&self, action: &str, root: &Path) -> Result<PathBuf, String> {
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .dependencies_save(action, root)
+    }
     pub fn annotation_read(&self, name: &str) -> Result<AnnotationSection, String> {
         if name != "notes" && name != "bookmarks" && name != "renames" && name != "edits" {
             return Err("Unknown annotation section".into());
@@ -3499,6 +3606,14 @@ pub mod test_support {
                 .skip(usize::try_from(offset).unwrap_or(usize::MAX))
                 .take(length as usize)
                 .collect())
+        }
+
+        fn dependencies(&mut self) -> Result<CaptureDependencies, String> {
+            Ok(CaptureDependencies {
+                embedded: true,
+                pending: true,
+                nicknames: vec!["fixture".into()],
+            })
         }
 
         fn remote_list(

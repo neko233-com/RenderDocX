@@ -47,6 +47,8 @@ struct AnnotationView {
     renames: Option<(AnnotationSection, serde_json::Value)>,
     edits: Option<serde_json::Value>,
     editor: Option<Entity<TextareaState>>,
+    dependencies: Option<renderdocx::replay::CaptureDependencies>,
+    dependencies_copy: Option<PathBuf>,
 }
 
 fn resource_name<'a>(
@@ -751,6 +753,132 @@ impl Workspace {
                                 "无法加载注释与书签",
                                 "注釈を読み込めません",
                                 "주석을 불러올 수 없습니다"
+                            )
+                        ))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn inspect_dependencies(&mut self, cx: &mut Context<Self>) {
+        if self.resource_pending || self.replay_pending || self.export_pending {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        self.resource_pending = true;
+        let revision = self.open_revision;
+        self.status = Some(
+            self.t(
+                "Inspecting capture dependencies…",
+                "正在检查捕获依赖…",
+                "キャプチャの依存関係を確認中…",
+                "캡처 종속성을 확인하는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx
+            .background_executor()
+            .spawn(async move { session.dependencies() });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision {
+                    return;
+                }
+                this.resource_pending = false;
+                match result {
+                    Ok(info) => {
+                        this.annotations.dependencies = Some(info);
+                        this.status = None;
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Could not inspect dependencies",
+                                "无法检查依赖",
+                                "依存関係を確認できません",
+                                "종속성을 확인할 수 없습니다"
+                            )
+                        ))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn export_dependencies(&mut self, action: &'static str, root: PathBuf, cx: &mut Context<Self>) {
+        if self.resource_pending || self.replay_pending || self.export_pending {
+            return;
+        }
+        if self.annotation_dirty(cx) || self.protect_shader_draft(cx) {
+            self.status = Some(
+                self.t(
+                    "Save or discard drafts before exporting a capture copy.",
+                    "导出捕获副本前请先保存或放弃草稿。",
+                    "コピーの出力前に下書きを保存または破棄してください。",
+                    "복사본을 내보내기 전에 초안을 저장하거나 취소하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        self.export_pending = true;
+        let revision = self.open_revision;
+        self.status = Some(
+            self.t(
+                "Exporting capture copy…",
+                "正在导出捕获副本…",
+                "キャプチャのコピーを出力中…",
+                "캡처 복사본을 내보내는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx
+            .background_executor()
+            .spawn(async move { session.dependencies_save(action, &root) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision {
+                    return;
+                }
+                this.export_pending = false;
+                match result {
+                    Ok(path) => {
+                        this.status = Some(format!(
+                            "{}: {}",
+                            this.t(
+                                "Capture copy saved",
+                                "捕获副本已保存",
+                                "キャプチャのコピーを保存しました",
+                                "캡처 복사본을 저장했습니다"
+                            ),
+                            path.display()
+                        ));
+                        this.annotations.dependencies_copy = Some(path);
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Could not export capture copy",
+                                "无法导出捕获副本",
+                                "キャプチャのコピーを出力できません",
+                                "캡처 복사본을 내보낼 수 없습니다"
                             )
                         ))
                     }
@@ -6952,6 +7080,21 @@ impl Workspace {
                 "コメントとブックマーク",
                 "댓글과 북마크",
             ));
+            detail = detail.child(self.t("Capture dependencies", "捕获依赖", "キャプチャの依存関係", "캡처 종속성"))
+                .child(self.t("Exports create a new copy. Embedding replaces existing embedded files; missing external files are skipped.", "导出会创建新副本。嵌入会替换已有嵌入文件，找不到的外部文件会被跳过。", "出力時に新しいコピーを作成します。埋め込みは既存ファイルを置き換え、見つからない外部ファイルを省略します。", "내보내기는 새 복사본을 만듭니다. 포함 시 기존 파일이 교체되며 없는 외부 파일은 건너뜁니다."))
+                .when(self.session.as_ref().and_then(Session::remote_server_url).is_some(), |view| view.child(self.t("Remote export changes this session's temporary capture; reopen the original to restore it.", "远程导出会更改本会话的临时捕获；重新打开原文件可恢复。", "リモート出力はこのセッションの一時キャプチャを変更します。元のファイルを開き直すと復元できます。", "원격 내보내기는 현재 세션의 임시 캡처를 변경합니다. 원본을 다시 열면 복원됩니다.")))
+                .child(button("dependencies-inspect", self.t("Inspect dependencies", "检查依赖", "依存関係を確認", "종속성 확인"), false, |this, cx| this.inspect_dependencies(cx), cx))
+                .child(button("dependencies-embed", self.t("Save copy with dependencies", "保存含依赖的副本", "依存関係を含むコピーを保存", "종속성이 포함된 복사본 저장"), false, |this, cx| {
+                    if let Some(root) = rfd::FileDialog::new().pick_folder() { this.export_dependencies("embed", root, cx); }
+                }, cx))
+                .child(button("dependencies-remove", self.t("Save copy without embedded dependencies", "保存移除嵌入依赖的副本", "埋め込み依存関係のないコピーを保存", "포함된 종속성을 제거한 복사본 저장"), false, |this, cx| {
+                    if let Some(root) = rfd::FileDialog::new().pick_folder() { this.export_dependencies("remove", root, cx); }
+                }, cx))
+                .when_some(self.annotations.dependencies.as_ref(), |view, info| {
+                    view.child(format!("{}: {} · {}: {}", self.t("Embedded", "已嵌入", "埋め込み済み", "포함됨"), info.embedded, self.t("Pending", "待嵌入", "保留中", "대기 중"), info.pending))
+                        .children(info.nicknames.iter().cloned().map(|name| div().text_sm().child(name)))
+                })
+                .when_some(self.annotations.dependencies_copy.as_ref(), |view, path| view.child(path.display().to_string()));
             if let Some(editor) = &self.annotations.editor {
                 let label = self.t(
                     "Capture comments",
@@ -12023,6 +12166,29 @@ mod ui_tests {
         })
         .unwrap();
         cx.run_until_parked();
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.tab = CaptureTab::Annotations;
+                cx.notify();
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("dependencies-inspect", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let info = view.read(cx).annotations.dependencies.as_ref().unwrap();
+            assert!(info.embedded && info.pending);
+            assert_eq!(info.nicknames, ["fixture"]);
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.tab = CaptureTab::Events;
+                cx.notify();
+            })
+        });
 
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);

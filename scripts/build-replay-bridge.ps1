@@ -45,7 +45,7 @@ try {
     }
     Write-Host "Replay bridge: $(Join-Path $destination 'renderdocx-replay.exe')"
     Write-Host "Matching core commit: $commit"
-    if ($WithFixtures) { Copy-Item -LiteralPath 'target/replay-bridge/Release/renderdocx-remote-server-fixture.exe' -Destination $destination -Force }
+    if ($WithFixtures) { Copy-Item -LiteralPath 'target/replay-bridge/Release/renderdocx-remote-server-fixture.exe', 'target/replay-bridge/Release/renderdocx-dependency-fixture.exe' -Destination $destination -Force }
     if ($WithFixtures) { Write-Host "D3D11 fixture: $(Join-Path $root 'target/replay-bridge/Release/renderdocx-d3d11-fixture.exe')" }
 }
 finally { Pop-Location }

@@ -2691,3 +2691,106 @@ fn replay_options_reject_invalid_values_before_open() {
     }
     agent.quit();
 }
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires matching RenderDoc, dependency and D3D11 fixtures"]
+fn real_dependency_exports_preserve_original_locally_and_remotely() {
+    use std::{net::TcpListener, os::windows::process::CommandExt, path::PathBuf, time::Duration};
+    struct Server(Child);
+    impl Drop for Server {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let bridge = PathBuf::from(std::env::var_os("RENDERDOCX_TEST_BRIDGE").unwrap());
+    let fixture = std::env::var_os("RENDERDOCX_TEST_FIXTURE").unwrap();
+    let dependency_fixture = std::env::var_os("RENDERDOCX_TEST_DEPENDENCY_FIXTURE").unwrap();
+    let server_exe = std::env::var_os("RENDERDOCX_TEST_REMOTE_SERVER").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(fixture)
+        .arg(bridge.parent().unwrap().join("renderdoc.dll"))
+        .arg(dir.path().join("frame"))
+        .creation_flags(0x08000000)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let capture = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("RENDERDOCX_CAPTURE="))
+        .unwrap();
+    assert!(
+        Command::new(dependency_fixture)
+            .arg(capture)
+            .creation_flags(0x08000000)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let original = std::fs::read(capture).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let _server = Server(
+        Command::new(server_exe)
+            .arg(port.to_string())
+            .creation_flags(0x08000000)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    let url = format!("127.0.0.1:{port}");
+    for remote in [false, true] {
+        let mut agent = Agent::new(bridge.to_str());
+        let mut request = serde_json::json!({"command":"open", "path":capture});
+        if remote {
+            request["remote_url"] = serde_json::json!(url);
+        }
+        let opened = agent.send(&request.to_string());
+        assert_eq!(opened["ok"], true, "{opened}");
+        let info = agent.send(r#"{"command":"dependencies"}"#);
+        assert_eq!(info["ok"], true, "{info}");
+        assert_eq!(info["data"]["dependencies"]["embedded"], true, "{info}");
+        assert_eq!(info["data"]["dependencies"]["pending"], true, "{info}");
+        assert!(
+            info["data"]["dependencies"]["nicknames"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|n| n == "renderdocx-fixture")
+        );
+        let removed = agent.send(&serde_json::json!({"command":"dependencies_save", "action":"remove", "capture_directory":dir.path()}).to_string());
+        assert_eq!(removed["ok"], true, "{removed}");
+        let embedded = agent.send(&serde_json::json!({"command":"dependencies_save", "action":"embed", "capture_directory":dir.path()}).to_string());
+        assert_eq!(embedded["ok"], true, "{embedded}");
+        assert_eq!(std::fs::read(capture).unwrap(), original);
+        if remote {
+            let section = agent.send(r#"{"command":"annotation_read","name":"notes"}"#);
+            let saved = agent.send(&serde_json::json!({"command":"annotation_write", "section":section["data"]["section"], "document":{"comments":"changed"}}).to_string());
+            assert_eq!(saved["ok"], true, "{saved}");
+            let refused = agent.send(&serde_json::json!({"command":"dependencies_save", "action":"embed", "capture_directory":dir.path()}).to_string());
+            assert_eq!(
+                refused["error"]["code"], "dependencies_save_failed",
+                "{refused}"
+            );
+        }
+        agent.quit();
+        for (result, expected) in [(&removed, false), (&embedded, true)] {
+            let mut check = Agent::new(bridge.to_str());
+            let opened = check.send(
+                &serde_json::json!({"command":"open", "path":result["data"]["path"]}).to_string(),
+            );
+            assert_eq!(opened["ok"], true, "{opened}");
+            let status = check.send(r#"{"command":"dependencies"}"#);
+            assert_eq!(
+                status["data"]["dependencies"]["embedded"], expected,
+                "{status}"
+            );
+            check.quit();
+        }
+    }
+}
