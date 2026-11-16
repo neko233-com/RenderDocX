@@ -108,6 +108,37 @@ pub struct Texture {
     pub component_byte_width: u32,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct TextureSelection {
+    pub mip: u32,
+    pub slice: u32,
+    pub sample: Option<u32>,
+    pub channel: Option<u32>,
+}
+
+impl TextureSelection {
+    pub fn validate(&self, texture: &Texture) -> Result<(), String> {
+        let slices = if texture.dimension == 3 {
+            texture.depth.checked_shr(self.mip).unwrap_or(0).max(1)
+        } else {
+            texture.array_size
+        };
+        if self.mip >= texture.mips
+            || self.mip > i32::MAX as u32
+            || self.slice >= slices
+            || self.slice > i32::MAX as u32
+            || self.sample.is_some_and(|value| value >= texture.samples)
+            || self
+                .channel
+                .is_some_and(|value| value >= texture.component_count || value > i32::MAX as u32)
+        {
+            return Err("Texture selection is out of range".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct PipelineResource {
     pub bound: bool,
@@ -241,7 +272,12 @@ fn validate_snapshot(snapshot: &Snapshot) -> Result<(), String> {
 
 trait Transport: Send {
     fn select(&mut self, event: u32) -> Result<Pipeline, String>;
-    fn save_texture(&mut self, _index: u32, _path: &Path) -> Result<(), String> {
+    fn save_texture(
+        &mut self,
+        _index: u32,
+        _selection: TextureSelection,
+        _path: &Path,
+    ) -> Result<(), String> {
         Err("Texture export is not supported by this transport".into())
     }
     fn read_buffer(&mut self, _index: u32, _offset: u64, _length: u32) -> Result<Vec<u8>, String> {
@@ -272,7 +308,12 @@ impl Transport for Process {
         }
     }
 
-    fn save_texture(&mut self, index: u32, path: &Path) -> Result<(), String> {
+    fn save_texture(
+        &mut self,
+        index: u32,
+        selection: TextureSelection,
+        path: &Path,
+    ) -> Result<(), String> {
         let path = path
             .to_str()
             .ok_or("Texture output path is not valid UTF-8")?;
@@ -283,7 +324,23 @@ impl Transport for Process {
             encoded.push(HEX[(byte & 15) as usize] as char);
         }
         let input = self.input.as_mut().ok_or("Replay session has closed")?;
-        writeln!(input, "save {index} {encoded}")
+        let command = if selection == TextureSelection::default() {
+            format!("save {index} {encoded}")
+        } else {
+            let sample = selection
+                .sample
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "resolve".into());
+            let channel = selection
+                .channel
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "all".into());
+            format!(
+                "save2 {index} {} {} {sample} {channel} {encoded}",
+                selection.mip, selection.slice
+            )
+        };
+        writeln!(input, "{command}")
             .and_then(|_| input.flush())
             .map_err(|e| e.to_string())?;
         match self.read()? {
@@ -459,6 +516,21 @@ impl Session {
 
     /// Export a PNG without replacing an existing destination, including symlinks.
     pub fn export_texture(&self, index: u32, destination: &Path) -> Result<(), String> {
+        self.export_texture_selected(index, TextureSelection::default(), destination)
+    }
+
+    pub fn export_texture_selected(
+        &self,
+        index: u32,
+        selection: TextureSelection,
+        destination: &Path,
+    ) -> Result<(), String> {
+        if selection.mip > i32::MAX as u32
+            || selection.slice > i32::MAX as u32
+            || selection.channel.is_some_and(|v| v > i32::MAX as u32)
+        {
+            return Err("Texture selection is out of range".into());
+        }
         let parent = destination
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
@@ -472,7 +544,7 @@ impl Session {
         self.process
             .lock()
             .map_err(|e| e.to_string())?
-            .save_texture(index, temporary.as_ref())?;
+            .save_texture(index, selection, temporary.as_ref())?;
         temporary
             .persist_noclobber(destination)
             .map_err(|e| format!("Cannot publish texture export: {}", e.error))?;
@@ -500,7 +572,7 @@ impl Session {
 #[cfg(feature = "ui-tests")]
 pub mod test_support {
     use super::*;
-    struct RecordingTransport(Arc<Mutex<Vec<u32>>>);
+    struct RecordingTransport(Arc<Mutex<Vec<u32>>>, Arc<Mutex<Vec<TextureSelection>>>);
     impl Transport for RecordingTransport {
         fn select(&mut self, event: u32) -> Result<Pipeline, String> {
             self.0.lock().map_err(|e| e.to_string())?.push(event);
@@ -548,7 +620,13 @@ pub mod test_support {
             })
         }
 
-        fn save_texture(&mut self, _index: u32, path: &Path) -> Result<(), String> {
+        fn save_texture(
+            &mut self,
+            _index: u32,
+            selection: TextureSelection,
+            path: &Path,
+        ) -> Result<(), String> {
+            self.1.lock().map_err(|e| e.to_string())?.push(selection);
             const PIXEL: &[u8] = &[
                 137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0,
                 1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 112,
@@ -602,13 +680,21 @@ pub mod test_support {
         }
     }
 
-    pub fn recording_session() -> (Session, Arc<Mutex<Vec<u32>>>) {
+    pub fn recording_session() -> (
+        Session,
+        Arc<Mutex<Vec<u32>>>,
+        Arc<Mutex<Vec<TextureSelection>>>,
+    ) {
         let events = Arc::new(Mutex::new(Vec::new()));
+        let selections = Arc::new(Mutex::new(Vec::new()));
         let session = Session {
-            process: Arc::new(Mutex::new(Box::new(RecordingTransport(events.clone())))),
+            process: Arc::new(Mutex::new(Box::new(RecordingTransport(
+                events.clone(),
+                selections.clone(),
+            )))),
             revision: Arc::new(AtomicU64::new(0)),
         };
-        (session, events)
+        (session, events, selections)
     }
 }
 
@@ -638,6 +724,44 @@ mod tests {
         assert!(decode_buffer_hex("00", 2).is_err());
         assert!(decode_buffer_hex("FF", 1).is_err());
         assert!(decode_buffer_hex("", 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn texture_selection_validates_mip_dependent_depth_and_components() {
+        let texture = Texture {
+            name: String::new(),
+            width: 8,
+            height: 8,
+            depth: 8,
+            dimension: 3,
+            mips: 4,
+            array_size: 1,
+            samples: 1,
+            bytes: "0".into(),
+            format_name: String::new(),
+            format_type: 0,
+            component_type: 0,
+            component_count: 4,
+            component_byte_width: 1,
+        };
+        let mut selection = TextureSelection {
+            mip: 2,
+            slice: 1,
+            sample: Some(0),
+            channel: Some(3),
+        };
+        assert!(selection.validate(&texture).is_ok());
+        selection.slice = 2;
+        assert!(selection.validate(&texture).is_err());
+        selection.slice = 0;
+        selection.channel = Some(4);
+        assert!(selection.validate(&texture).is_err());
+        selection.channel = None;
+        selection.sample = Some(1);
+        assert!(selection.validate(&texture).is_err());
+        selection.sample = None;
+        selection.mip = u32::MAX;
+        assert!(selection.validate(&texture).is_err());
     }
 
     #[test]

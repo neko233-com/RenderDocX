@@ -1,6 +1,6 @@
 use renderdocx::{
     backend::Settings,
-    replay::{BUFFER_PAGE_LIMIT, Pipeline, SHADER_STAGES, Session, Snapshot},
+    replay::{BUFFER_PAGE_LIMIT, Pipeline, SHADER_STAGES, Session, Snapshot, TextureSelection},
 };
 use serde_json::{Value, json};
 use std::{
@@ -283,13 +283,17 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         "export_texture requires a texture index and output path".into(),
                     )),
                     (Some((session, snapshot)), Some(event), Some(index), Some(path)) => {
-                        if index as usize >= snapshot.textures.len() {
-                            Err(("invalid_arguments", "Texture index is out of range".into()))
-                        } else {
-                            session
-                                .export_texture(index, PathBuf::from(path).as_path())
-                                .map(|_| json!({"index":index,"event_id":event,"path":path}))
-                                .map_err(|error| ("replay_export_failed", error))
+                        let selection = serde_json::from_value::<TextureSelection>(Value::Object(
+                            request.clone(),
+                        ));
+                        match (snapshot.textures.get(index as usize), selection) {
+                            (Some(texture), Ok(selection)) => match selection.validate(texture) {
+                                Ok(()) => session.export_texture_selected(index, selection, PathBuf::from(path).as_path())
+                                    .map(|_| json!({"index":index,"event_id":event,"path":path,"selection":selection}))
+                                    .map_err(|error| ("replay_export_failed", error)),
+                                Err(error) => Err(("invalid_arguments", error)),
+                            },
+                            _ => Err(("invalid_arguments", "Invalid texture index or selection".into())),
                         }
                     }
                 }

@@ -2,6 +2,7 @@
 #include "api/replay/version.h"
 
 #include <cstdint>
+#include <algorithm>
 #include <cstring>
 #include <cmath>
 #include <iomanip>
@@ -91,6 +92,7 @@ struct PendingAction
 };
 
 struct BufferRef { ResourceId id; uint64_t length; };
+struct TextureRef { ResourceId id; uint32_t dimension, depth, mips, arraysize, samples, components; };
 
 bool decimal(const std::string &text, uint64_t &value)
 {
@@ -107,7 +109,7 @@ bool decimal(const std::string &text, uint64_t &value)
 }
 
 void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids,
-                    std::vector<ResourceId> &texture_ids, std::vector<BufferRef> &buffer_ids)
+                    std::vector<TextureRef> &texture_ids, std::vector<BufferRef> &buffer_ids)
 {
   const APIProperties api = controller->GetAPIProperties();
   const FrameDescription frame = controller->GetFrameInfo();
@@ -152,7 +154,7 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
   for(size_t i = 0; i < textures.size(); ++i)
   {
     const TextureDescription &texture = textures[i];
-    texture_ids.push_back(texture.resourceId);
+    texture_ids.push_back({texture.resourceId, texture.dimension, texture.depth, texture.mips, texture.arraysize, texture.msSamp, texture.format.compCount});
     const auto found_name = resource_names.find(texture.resourceId);
     const rdcstr *name = found_name == resource_names.end() ? nullptr : found_name->second;
     if(i) std::cout << ',';
@@ -312,7 +314,7 @@ int run(const std::string &capture)
   replay.file->Shutdown();
   replay.file = nullptr;
   std::set<uint32_t> event_ids;
-  std::vector<ResourceId> texture_ids;
+  std::vector<TextureRef> texture_ids;
   std::vector<BufferRef> buffer_ids;
   write_snapshot(replay.controller, event_ids, texture_ids, buffer_ids);
   bool selected = false;
@@ -393,8 +395,48 @@ int run(const std::string &capture)
       std::cout << "\"}" << std::endl;
       continue;
     }
+    if(command.compare(0, 6, "save2 ") == 0)
+    {
+      if(!selected) { error("Select an event before saving textures"); continue; }
+      std::istringstream arguments(command.substr(6));
+      std::string index_text, mip_text, slice_text, sample_text, channel_text, encoded, extra;
+      uint64_t index = 0, mip = 0, slice = 0, sample = 0, channel = 0;
+      if(!(arguments >> index_text >> mip_text >> slice_text >> sample_text >> channel_text >> encoded) || (arguments >> extra) ||
+         !decimal(index_text, index) || !decimal(mip_text, mip) || !decimal(slice_text, slice) ||
+         (sample_text != "resolve" && !decimal(sample_text, sample)) ||
+         (channel_text != "all" && !decimal(channel_text, channel)) || index >= texture_ids.size())
+      { error("Invalid texture selection"); continue; }
+      const TextureRef &texture = texture_ids[size_t(index)];
+      const uint64_t depth = texture.dimension == 3 ? (mip < 32 ? (std::max)(1U, texture.depth >> uint32_t(mip)) : 1U) : texture.arraysize;
+      if(mip >= texture.mips || mip > INT32_MAX || slice >= depth || slice > INT32_MAX ||
+         (sample_text != "resolve" && sample >= texture.samples) ||
+         (channel_text != "all" && (channel >= texture.components || channel > INT32_MAX)))
+      { error("Texture selection is out of range"); continue; }
+      std::string path;
+      bool valid = !encoded.empty() && encoded.size() % 2 == 0;
+      for(size_t i = 0; valid && i < encoded.size(); i += 2)
+      {
+        auto digit = [](char c) -> int { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1; };
+        int high = digit(encoded[i]), low = digit(encoded[i + 1]);
+        if(high < 0 || low < 0 || (high == 0 && low == 0)) { valid = false; break; }
+        path.push_back(char(high * 16 + low));
+      }
+      if(!valid) { error("Invalid output path"); continue; }
+      TextureSave save;
+      save.resourceId = texture.id;
+      save.destType = FileType::PNG;
+      save.mip = int32_t(mip);
+      save.slice.sliceIndex = int32_t(slice);
+      save.sample.sampleIndex = sample_text == "resolve" ? TextureSampleMapping::ResolveSamples : uint32_t(sample);
+      save.channelExtract = channel_text == "all" ? -1 : int(channel);
+      ResultDetails saved = replay.controller->SaveTexture(save, path.c_str());
+      if(!saved.OK()) { error(result_message(saved)); continue; }
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"texture_saved\",\"index\":" << index << "}" << std::endl;
+      continue;
+    }
     if(command.compare(0, 5, "save ") == 0)
     {
+      if(!selected) { error("Select an event before saving textures"); continue; }
       const size_t separator = command.find(' ', 5);
       if(separator == std::string::npos) { error("Invalid texture save command"); continue; }
       const std::string number = command.substr(5, separator - 5);
@@ -418,7 +460,7 @@ int run(const std::string &capture)
       }
       if(!valid || index >= texture_ids.size()) { error("Invalid texture or output path"); continue; }
       TextureSave save;
-      save.resourceId = texture_ids[size_t(index)];
+      save.resourceId = texture_ids[size_t(index)].id;
       save.destType = FileType::PNG;
       ResultDetails saved = replay.controller->SaveTexture(save, path.c_str());
       if(!saved.OK()) { error(result_message(saved)); continue; }

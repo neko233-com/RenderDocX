@@ -11,7 +11,7 @@ use gpui_kit::{
 use renderdocx::{
     backend::{self, Settings},
     i18n::Language,
-    replay::{Pipeline, SHADER_STAGES, Session, ShaderReport, Snapshot},
+    replay::{Pipeline, SHADER_STAGES, Session, ShaderReport, Snapshot, TextureSelection},
 };
 use std::path::PathBuf;
 
@@ -27,6 +27,13 @@ enum CaptureTab {
     Buffers,
     Shaders,
 }
+#[derive(Clone, Copy)]
+enum TextureField {
+    Mip,
+    Slice,
+    Sample,
+    Channel,
+}
 const BUFFER_VIEW_PAGE: u64 = 256;
 
 struct Workspace {
@@ -39,6 +46,7 @@ struct Workspace {
     pipeline: Option<Pipeline>,
     tab: CaptureTab,
     selected_texture: Option<usize>,
+    texture_selection: TextureSelection,
     selected_buffer: Option<usize>,
     buffer_offset: u64,
     buffer_data: Option<Vec<u8>>,
@@ -140,6 +148,7 @@ impl Workspace {
                         this.selected = None;
                         this.pipeline = None;
                         this.selected_texture = None;
+                        this.texture_selection = TextureSelection::default();
                         this.tab = CaptureTab::Events;
                         this.selected_buffer = None;
                         this.buffer_data = None;
@@ -434,6 +443,73 @@ impl Workspace {
         .detach();
     }
 
+    fn advance_texture(&mut self, field: TextureField, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            self.status = Some(
+                self.t(
+                    "Wait for the current operation.",
+                    "请等待当前操作完成。",
+                    "現在の処理が完了するまでお待ちください。",
+                    "현재 작업이 끝날 때까지 기다려 주세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let Some(texture) = self
+            .selected_texture
+            .and_then(|index| self.snapshot.as_ref()?.textures.get(index))
+        else {
+            return;
+        };
+        let next = |value: u32, count: u32| {
+            value
+                .checked_add(1)
+                .filter(|next| *next < count && *next <= i32::MAX as u32)
+                .unwrap_or(0)
+        };
+        match field {
+            TextureField::Mip => {
+                self.texture_selection.mip = next(self.texture_selection.mip, texture.mips);
+                self.texture_selection.slice = 0;
+            }
+            TextureField::Slice => {
+                let count = if texture.dimension == 3 {
+                    texture
+                        .depth
+                        .checked_shr(self.texture_selection.mip)
+                        .unwrap_or(0)
+                        .max(1)
+                } else {
+                    texture.array_size
+                };
+                self.texture_selection.slice = next(self.texture_selection.slice, count);
+            }
+            TextureField::Sample => {
+                self.texture_selection.sample = match self.texture_selection.sample {
+                    None if texture.samples > 0 => Some(0),
+                    Some(sample) => sample
+                        .checked_add(1)
+                        .filter(|value| *value < texture.samples),
+                    _ => None,
+                };
+            }
+            TextureField::Channel => {
+                self.texture_selection.channel = match self.texture_selection.channel {
+                    None if texture.component_count > 0 => Some(0),
+                    Some(channel) => channel.checked_add(1).filter(|value| {
+                        *value < texture.component_count && *value <= i32::MAX as u32
+                    }),
+                    _ => None,
+                };
+            }
+        }
+        self.preview = None;
+        self.status = None;
+        cx.notify();
+    }
+
     fn export_texture(&mut self, cx: &mut Context<Self>) {
         if self.replay_pending
             || self.export_pending
@@ -458,6 +534,27 @@ impl Workspace {
         let Ok(index) = u32::try_from(index) else {
             return;
         };
+        let selection = self.texture_selection;
+        let Some(texture) = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.textures.get(index as usize))
+        else {
+            return;
+        };
+        if selection.validate(texture).is_err() {
+            self.status = Some(
+                self.t(
+                    "Texture selection is out of range.",
+                    "纹理子资源选择超出范围。",
+                    "テクスチャの選択範囲が無効です。",
+                    "텍스처 선택 범위가 올바르지 않습니다.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
         let Some(destination) = rfd::FileDialog::new()
             .add_filter("PNG", &["png"])
             .save_file()
@@ -479,7 +576,7 @@ impl Workspace {
         cx.notify();
         let task = cx
             .background_executor()
-            .spawn(async move { session.export_texture(index, &destination) });
+            .spawn(async move { session.export_texture_selected(index, selection, &destination) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -537,6 +634,27 @@ impl Workspace {
         let Ok(texture_index) = u32::try_from(index) else {
             return;
         };
+        let selection = self.texture_selection;
+        let Some(texture) = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.textures.get(index))
+        else {
+            return;
+        };
+        if selection.validate(texture).is_err() {
+            self.status = Some(
+                self.t(
+                    "Texture selection is out of range.",
+                    "纹理子资源选择超出范围。",
+                    "テクスチャの選択範囲が無効です。",
+                    "텍스처 선택 범위가 올바르지 않습니다.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
         let revision = self.open_revision;
         self.preview = None;
         self.export_pending = true;
@@ -553,7 +671,7 @@ impl Workspace {
         let task = cx.background_executor().spawn(async move {
             let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
             let path = directory.path().join("preview.png");
-            session.export_texture(texture_index, &path)?;
+            session.export_texture_selected(texture_index, selection, &path)?;
             Ok::<_, String>(TexturePreview {
                 path,
                 _directory: directory,
@@ -566,7 +684,7 @@ impl Workspace {
                     return;
                 }
                 this.export_pending = false;
-                if this.selected_texture != Some(index) {
+                if this.selected_texture != Some(index) || this.texture_selection != selection {
                     this.status = None;
                     cx.notify();
                     return;
@@ -672,6 +790,14 @@ impl Workspace {
         );
         let events = self.t("EVENTS", "事件", "イベント", "이벤트");
         let textures_label = self.t("Textures", "纹理", "テクスチャ", "텍스처");
+        let next_mip = self.t("Next mip", "切换 mip", "mip 切替", "mip 전환");
+        let next_slice = self.t("Next slice", "切换层", "スライス切替", "슬라이스 전환");
+        let next_sample = self.t("Next sample", "切换采样", "サンプル切替", "샘플 전환");
+        let next_channel = self.t("Next channel", "切换通道", "チャンネル切替", "채널 전환");
+        let slice_label = self.t("Slice", "层", "スライス", "슬라이스");
+        let channel_label = self.t("Channel", "通道", "チャンネル", "채널");
+        let resolve_label = self.t("Resolve", "解析", "解決", "리졸브");
+        let all_label = self.t("All", "全部", "すべて", "전체");
         let buffers_label = self.t("Buffers", "缓冲区", "バッファ", "버퍼");
         let shaders_tab_label = self.t("Shaders", "着色器", "シェーダー", "셰이더");
         let shader_details = self.t(
@@ -929,6 +1055,7 @@ impl Workspace {
                                     .child(div().text_color(rgb(0x91a7c0)).child(dimensions))
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.selected_texture = Some(index);
+                                        this.texture_selection = TextureSelection::default();
                                         this.preview = None;
                                         cx.notify();
                                     })),
@@ -1175,6 +1302,35 @@ impl Workspace {
                     view.child(div().text_color(rgb(0x9eacc0)).child(buffer_empty))
                 })
         } else if self.tab == CaptureTab::Textures {
+            let selection = self.texture_selection;
+            let mip_button = button(
+                "texture-next-mip",
+                next_mip,
+                false,
+                |this, cx| this.advance_texture(TextureField::Mip, cx),
+                cx,
+            );
+            let slice_button = button(
+                "texture-next-slice",
+                next_slice,
+                false,
+                |this, cx| this.advance_texture(TextureField::Slice, cx),
+                cx,
+            );
+            let sample_button = button(
+                "texture-next-sample",
+                next_sample,
+                false,
+                |this, cx| this.advance_texture(TextureField::Sample, cx),
+                cx,
+            );
+            let channel_button = button(
+                "texture-next-channel",
+                next_channel,
+                false,
+                |this, cx| this.advance_texture(TextureField::Channel, cx),
+                cx,
+            );
             let export = button(
                 "texture-export",
                 export_label,
@@ -1214,6 +1370,31 @@ impl Workspace {
                         texture.mips, texture.array_size, texture.samples
                     ))
                     .child(format!("{bytes_label}: {}", texture.bytes))
+                    .child(format!(
+                        "Mip: {} · {slice_label}: {}",
+                        selection.mip, selection.slice
+                    ))
+                    .child(format!(
+                        "{samples_label}: {} · {channel_label}: {}",
+                        selection
+                            .sample
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| resolve_label.to_owned()),
+                        selection
+                            .channel
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| all_label.to_owned())
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(mip_button)
+                            .child(slice_button)
+                            .child(sample_button)
+                            .child(channel_button),
+                    )
                     .child(format!(
                         "{format_label}: {}  ·  {component_label}: {} / {} × {}",
                         if texture.format_name.is_empty() {
@@ -1891,6 +2072,7 @@ fn main() {
                         pipeline: None,
                         tab: CaptureTab::Events,
                         selected_texture: None,
+                        texture_selection: TextureSelection::default(),
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_data: None,
@@ -1952,6 +2134,7 @@ mod ui_tests {
                         pipeline: None,
                         tab: CaptureTab::Events,
                         selected_texture: None,
+                        texture_selection: TextureSelection::default(),
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_data: None,
@@ -1983,7 +2166,7 @@ mod ui_tests {
     #[gpui_kit::test]
     fn clicking_an_action_replays_its_exact_event(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
-        let (session, events) = renderdocx::replay::test_support::recording_session();
+        let (session, events, selections) = renderdocx::replay::test_support::recording_session();
         let (handle, view) = cx.update(|cx| {
             let bounds = Bounds::centered(None, size(px(1040.), px(760.)), cx);
             gpui_kit::open_window(
@@ -2022,8 +2205,8 @@ mod ui_tests {
                                 height: 16,
                                 depth: 1,
                                 dimension: 2,
-                                mips: 1,
-                                array_size: 1,
+                                mips: 2,
+                                array_size: 2,
                                 samples: 1,
                                 bytes: "1024".into(),
                                 format_name: "R8G8B8A8_UNORM".into(),
@@ -2043,6 +2226,7 @@ mod ui_tests {
                         pipeline: None,
                         tab: CaptureTab::Events,
                         selected_texture: None,
+                        texture_selection: TextureSelection::default(),
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_data: None,
@@ -2119,10 +2303,28 @@ mod ui_tests {
         });
         assert_eq!(*events.lock().unwrap(), vec![42]);
         cx.update_window(handle.into(), |_, window, cx| {
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(2000.))),
+                cx,
+            );
+            window.click("texture-next-mip", cx);
+            window.click("texture-next-slice", cx);
+            window.click("texture-next-sample", cx);
+            window.click("texture-next-channel", cx);
             window.click("texture-preview", cx)
         })
         .unwrap();
         cx.run_until_parked();
+        assert_eq!(
+            *selections.lock().unwrap(),
+            vec![TextureSelection {
+                mip: 1,
+                slice: 1,
+                sample: Some(0),
+                channel: Some(0)
+            }]
+        );
         cx.update(|cx| {
             let view = view.read(cx);
             assert!(!view.export_pending);
@@ -2136,8 +2338,15 @@ mod ui_tests {
             window.render_frame(cx);
             assert!(window.find("texture-preview-image").visible());
             assert!(window.find("texture-preview-image").bounds().size.height > px(0.));
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(2000.))),
+                cx,
+            );
+            window.click("texture-next-channel", cx);
         })
         .unwrap();
+        cx.update(|cx| assert!(view.read(cx).preview.is_none()));
         cx.update_window(handle.into(), |_, window, cx| {
             window.click("buffers-tab", cx);
             window.click("buffer-0", cx);

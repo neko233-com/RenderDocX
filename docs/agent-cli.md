@@ -20,6 +20,7 @@ One-shot invocations write one JSON object on stdout with `schema: "renderdocx.c
 {"id":"shader","command":"shader","stage":"vertex"}
 {"id":"bytes","command":"read_buffer","index":0,"offset":"0","length":256}
 {"id":3,"command":"export_texture","index":0,"path":"C:/captures/texture.png"}
+{"id":"layer","command":"export_texture","index":0,"path":"C:/captures/layer.png","mip":1,"slice":0,"sample":null,"channel":0}
 {"id":4,"command":"close"}
 {"id":5,"command":"quit"}
 ```
@@ -29,5 +30,7 @@ An unsuccessful `open` leaves the previous session intact. `pipeline` requires a
 `shader` inspects the shader bound at the selected event. `stage` is one of the names in `capabilities.shader_stages`; `target_index` is optional and indexes the `targets` array returned for that stage and event. Omitting it or using null asks RenderDoc for its default. The result includes entry point, encoding, signature metadata, resource counts, supported targets and the disassembly text. RenderDoc may return an error message as the disassembly text; a successful request does not establish that disassembly or decompilation succeeded. Unbound stages and missing reflection return errors.
 
 The capture snapshot lists `buffers` with session-scoped indices, upstream `resource_index`, `creation_flags`, and a decimal-string `length`. `read_buffer` requires a selected event, the buffer array `index`, an unsigned decimal-string `offset`, and an integer `length`. It returns `event_id`, `index`, `offset`, and lowercase hexadecimal bytes in `hex`. The range must lie within the buffer; length zero returns an empty result even though the upstream API uses zero to mean the rest of the buffer. Each request is limited to 65,536 bytes to bound IPC response size; page through larger buffers with successive offsets. A short or failed upstream read is an error. Generic texture raw pixels remain unavailable.
+
+`export_texture` optionally accepts unsigned `mip` and `slice` indices (both default to 0), plus `sample` and `channel` (unsigned indices or null). Null `sample` requests RenderDoc's resolve; null `channel` requests all components. `slice` selects the array layer or, for a 3D texture, the depth slice at the chosen mip. Indices are validated against the capture metadata instead of silently clamped. The response echoes the selection. PNG conversion and channel extraction follow RenderDoc's format-dependent behavior, with its default black/white mapping. The 2D array and channel paths have real D3D11 coverage; multisample and 3D paths have not been validated against real captures. An older bridge can handle the default selection but reports an error for non-default selections.
 
 The helper and its RenderDoc core must be built from matching source revisions. `select` returning success means the upstream replay call returned without a fatal error, not that the rendered output was visually validated.

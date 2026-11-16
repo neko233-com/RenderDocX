@@ -48,6 +48,20 @@ int wmain(int argc, wchar_t **argv)
   hr = device->CreateTexture2D(&desc, nullptr, &texture);
   if(SUCCEEDED(hr)) hr = device->CreateRenderTargetView(texture, nullptr, &view);
   if(FAILED(hr)) { std::cerr << "Could not create render target"; return 8; }
+  D3D11_TEXTURE2D_DESC layered_desc = desc;
+  layered_desc.Width = 8; layered_desc.Height = 8; layered_desc.MipLevels = 2; layered_desc.ArraySize = 2;
+  ID3D11Texture2D *layered = nullptr;
+  ID3D11RenderTargetView *layered_views[4] = {};
+  hr = device->CreateTexture2D(&layered_desc, nullptr, &layered);
+  for(UINT slice = 0; SUCCEEDED(hr) && slice < 2; ++slice)
+    for(UINT mip = 0; SUCCEEDED(hr) && mip < 2; ++mip)
+    {
+      D3D11_RENDER_TARGET_VIEW_DESC vd = {};
+      vd.Format = layered_desc.Format; vd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+      vd.Texture2DArray.MipSlice = mip; vd.Texture2DArray.FirstArraySlice = slice; vd.Texture2DArray.ArraySize = 1;
+      hr = device->CreateRenderTargetView(layered, &vd, &layered_views[slice * 2 + mip]);
+    }
+  if(FAILED(hr)) { std::cerr << "Could not create layered texture"; return 17; }
 
   HMODULE compiler = LoadLibraryW(L"d3dcompiler_47.dll");
   auto compile = compiler ? reinterpret_cast<decltype(&D3DCompile)>(GetProcAddress(compiler, "D3DCompile")) : nullptr;
@@ -81,6 +95,8 @@ int wmain(int argc, wchar_t **argv)
   if(!api->IsFrameCapturing()) { std::cerr << "Capture did not start"; return 9; }
   const float color[4] = {0.25f, 0.5f, 0.75f, 1.0f};
   context->ClearRenderTargetView(view, color);
+  const float layer_colors[4][4] = {{1,0,0,1}, {0,1,0,1}, {0,0,1,1}, {1,1,0,1}};
+  for(unsigned i = 0; i < 4; ++i) context->ClearRenderTargetView(layered_views[i], layer_colors[i]);
   const float updated_vertices[] = {0, 3, 3, 3, 3, 3, 3};
   context->UpdateSubresource(vertex_buffer, 0, nullptr, updated_vertices, 0, 0);
   context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -102,6 +118,7 @@ int wmain(int argc, wchar_t **argv)
   std::vector<char> output(length, 0);
   if(!api->GetCapture(0, output.data(), &length, nullptr)) { std::cerr << "Could not read capture path"; return 13; }
   std::cout << "RENDERDOCX_CAPTURE=" << output.data() << std::endl;
-  index_buffer->Release(); vertex_buffer->Release(); layout->Release(); vertex->Release(); pixel->Release(); view->Release(); texture->Release(); context->Release(); device->Release();
+  for(auto *layer_view : layered_views) layer_view->Release();
+  layered->Release(); index_buffer->Release(); vertex_buffer->Release(); layout->Release(); vertex->Release(); pixel->Release(); view->Release(); texture->Release(); context->Release(); device->Release();
   return 0;
 }

@@ -315,6 +315,61 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let draw =
         agent.send(&serde_json::json!({"command":"select","event_id":draw_event}).to_string());
     assert_eq!(draw["ok"], true, "{draw}");
+    let layered_index = opened["data"]["capture"]["textures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|texture| {
+            texture["width"] == 8
+                && texture["height"] == 8
+                && texture["mips"] == 2
+                && texture["array_size"] == 2
+        })
+        .expect("layered fixture texture");
+    let layered_path = dir.path().join("layered.png");
+    let save_layer = serde_json::json!({"command":"export_texture","index":layered_index,"path":layered_path.to_str().unwrap(),"mip":1,"slice":1,"sample":0}).to_string();
+    let saved_layer = agent.send(&save_layer);
+    assert_eq!(saved_layer["ok"], true, "{saved_layer}");
+    assert_eq!(saved_layer["data"]["selection"]["mip"], 1);
+    let png = png::Decoder::new(std::io::BufReader::new(
+        std::fs::File::open(&layered_path).unwrap(),
+    ));
+    let mut layer_reader = png.read_info().unwrap();
+    assert_eq!(
+        (layer_reader.info().width, layer_reader.info().height),
+        (4, 4)
+    );
+    let mut layer_pixels = vec![0; layer_reader.output_buffer_size().unwrap()];
+    layer_reader.next_frame(&mut layer_pixels).unwrap();
+    assert_eq!(&layer_pixels[..3], &[255, 255, 0]);
+    let saved_bytes = std::fs::read(&layered_path).unwrap();
+    assert_eq!(
+        agent.send(&save_layer)["error"]["code"],
+        "replay_export_failed"
+    );
+    assert_eq!(std::fs::read(&layered_path).unwrap(), saved_bytes);
+    let blue_path = dir.path().join("channel.png");
+    let channel_request = serde_json::json!({"command":"export_texture","index":layered_index,"path":blue_path.to_str().unwrap(),"mip":1,"slice":1,"channel":2}).to_string();
+    let channel = agent.send(&channel_request);
+    assert_eq!(channel["ok"], true, "{channel}");
+    let png = png::Decoder::new(std::io::BufReader::new(
+        std::fs::File::open(&blue_path).unwrap(),
+    ));
+    let mut reader = png.read_info().unwrap();
+    let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+    reader.next_frame(&mut pixels).unwrap();
+    assert_eq!(&pixels[..3], &[0, 0, 0]);
+    for (key, value) in [("mip", 2), ("slice", 2), ("sample", 1), ("channel", 4)] {
+        let invalid_path = dir.path().join(format!("invalid-{key}.png"));
+        let mut request = serde_json::json!({"command":"export_texture","index":layered_index,"path":invalid_path.to_str().unwrap()});
+        request[key] = value.into();
+        assert_eq!(
+            agent.send(&request.to_string())["error"]["code"],
+            "invalid_arguments",
+            "{request}"
+        );
+        assert!(!invalid_path.exists());
+    }
     let vertex_shader = agent.send(r#"{"command":"shader","stage":"vertex"}"#);
     assert_eq!(vertex_shader["ok"], true, "{vertex_shader}");
     assert_eq!(vertex_shader["data"]["shader"]["event_id"], draw_event);
