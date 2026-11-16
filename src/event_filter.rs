@@ -1,4 +1,4 @@
-use renderdocx::replay::Action;
+use crate::replay::Action;
 
 #[derive(Clone, Copy)]
 enum Mode {
@@ -35,6 +35,7 @@ enum Expr {
     ActionFlags(u32),
     Dispatch(Option<(String, Op, i64)>),
     Regex(pcre2::bytes::Regex),
+    Parent(String),
 }
 struct Term {
     mode: Mode,
@@ -53,17 +54,20 @@ impl Filter {
             .terms(false, 0)?,
         ))
     }
-    pub fn matches(&self, name: &str, lower_name: &str, eid: u32, action: Option<&Action>) -> bool {
-        evaluate(&self.0, name, lower_name, eid, action)
+    pub fn matches(&self, context: &EventContext<'_>) -> bool {
+        evaluate(&self.0, context)
     }
 }
-fn evaluate(
-    terms: &[Term],
-    name: &str,
-    lower_name: &str,
-    eid: u32,
-    action: Option<&Action>,
-) -> bool {
+pub struct EventContext<'a> {
+    pub name: &'a str,
+    pub lower_name: &'a str,
+    pub eid: u32,
+    pub action: Option<&'a Action>,
+    pub parent: Option<usize>,
+    pub parents: &'a [Option<usize>],
+    pub marker_names: &'a [String],
+}
+fn evaluate(terms: &[Term], context: &EventContext<'_>) -> bool {
     if terms.is_empty() {
         return true;
     }
@@ -74,23 +78,42 @@ fn evaluate(
             continue;
         }
         let matched = match &term.expr {
-            Expr::Text(text) => lower_name.contains(text),
-            Expr::Group(terms) => evaluate(terms, name, lower_name, eid, action),
-            Expr::Event(op, value) => op.test(i64::from(eid), *value),
-            Expr::Action(condition) => action.is_some_and(|a| {
+            Expr::Text(text) => context.lower_name.contains(text),
+            Expr::Group(terms) => evaluate(terms, context),
+            Expr::Event(op, value) => op.test(i64::from(context.eid), *value),
+            Expr::Action(condition) => context.action.is_some_and(|a| {
                 a.flags & 0x80 == 0
                     && condition.as_ref().is_none_or(|(property, op, value)| {
                         action_property(a, property).is_some_and(|actual| op.test(actual, *value))
                     })
             }),
-            Expr::ActionFlags(mask) => action.is_some_and(|a| a.flags & mask != 0),
-            Expr::Dispatch(condition) => action.is_some_and(|a| {
+            Expr::ActionFlags(mask) => context.action.is_some_and(|a| a.flags & mask != 0),
+            Expr::Dispatch(condition) => context.action.is_some_and(|a| {
                 a.flags & 0x4 != 0
                     && condition.as_ref().is_none_or(|(property, op, value)| {
                         action_property(a, property).is_some_and(|actual| op.test(actual, *value))
                     })
             }),
-            Expr::Regex(regex) => regex.is_match(name.as_bytes()).unwrap_or(false),
+            Expr::Regex(regex) => regex.is_match(context.name.as_bytes()).unwrap_or(false),
+            Expr::Parent(marker) => {
+                let mut parent = context.parent;
+                let mut found = false;
+                while let Some(index) = parent {
+                    let Some(name) = context.marker_names.get(index) else {
+                        break;
+                    };
+                    if name.contains(marker) {
+                        found = true;
+                        break;
+                    }
+                    let next = context.parents.get(index).copied().flatten();
+                    if next.is_some_and(|next| next >= index) {
+                        break;
+                    }
+                    parent = next;
+                }
+                found
+            }
         };
         match term.mode {
             Mode::Normal => accepted |= matched,
@@ -275,6 +298,7 @@ impl Parser<'_> {
                             Expr::Dispatch(Some((prop, op, n)))
                         }
                         "regex" => Expr::Regex(parse_regex(&params)?),
+                        "parent" | "childOf" => Expr::Parent(params.trim().to_lowercase()),
                         _ => return Err(()),
                     }
                 }

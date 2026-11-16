@@ -1,6 +1,7 @@
 use renderdocx::{
     backend::Settings,
     debug_navigation::{Breakpoint, DebugNavigator, SourceStep, StopReason},
+    event_tree::{EventRow, EventTree},
     live::{
         CaptureOptions, LaunchConfiguration, LiveSession, browse_remote, download_remote_capture,
         enumerate_gpus, enumerate_target,
@@ -41,12 +42,17 @@ impl AgentDebugTimeline {
 }
 
 fn usage() -> Value {
-    json!({"schema":"renderdocx.cli.v1","ok":true,"commands":[
+    let mut capabilities = json!({"schema":"renderdocx.cli.v1","ok":true,"commands":[
         {"name":"inspect","arguments":["capture.rdc"],"description":"Open a capture and return its action tree and resource counts."},
         {"name":"select","arguments":["capture.rdc","event_id"],"description":"Replay a capture to an event."},
         {"name":"serve","arguments":[],"description":"Serve sequential JSONL requests using a persistent replay session."},
         {"name":"capabilities","arguments":[],"description":"Describe the commands currently implemented."}
-    ],"serve_commands":["capabilities","open","snapshot","timeline","timeline_usage","timeline_history","select","pipeline","shader","shader_bindings","shader_binding_read","shader_constants","shader_export","shader_apply","shader_revert","debug_vertex","debug_pixel","debug_compute","debug_collect","debug_state","debug_breakpoint","debug_navigate","debug_next","debug_stop","vertex_input","mesh","mesh_read","mesh_draw","mesh_draw_export","structure","structure_buffer","callstack","read_buffer","decode_buffer","decode_buffer_layout","buffer_formats_list","buffer_format_get","buffer_format_save","buffer_format_delete","export_buffer","export_buffer_csv","find_buffer","resource_usage","resource_rename","annotation_read","annotation_write","dependencies","dependencies_save","descriptors","debug_messages","clear_debug_messages","counter_fetch","counter_page","pick_pixel","pixel_history","texture_statistics","export_texture","export_texture_raw","read_texture_raw","find_texture_raw","close","gpu_list","remote_list","remote_download","target_list","target_launch","target_connect","target_connect_pid","target_copy","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"texture_export_formats":["png","dds","jpg","bmp","tga","hdr","exr"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"mesh_draw_page_limit":renderdocx::mesh_draw::PAGE_LIMIT,"shader_binding_page_limit":renderdocx::replay::SHADER_BINDING_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"counter_page_limit":renderdocx::replay::COUNTER_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
+    ],"serve_commands":["capabilities","open","snapshot","timeline","timeline_usage","timeline_history","select","pipeline","shader","shader_bindings","shader_binding_read","shader_constants","shader_export","shader_apply","shader_revert","debug_vertex","debug_pixel","debug_compute","debug_collect","debug_state","debug_breakpoint","debug_navigate","debug_next","debug_stop","vertex_input","mesh","mesh_read","mesh_draw","mesh_draw_export","structure","structure_buffer","callstack","read_buffer","decode_buffer","decode_buffer_layout","buffer_formats_list","buffer_format_get","buffer_format_save","buffer_format_delete","export_buffer","export_buffer_csv","find_buffer","resource_usage","resource_rename","annotation_read","annotation_write","dependencies","dependencies_save","descriptors","debug_messages","clear_debug_messages","counter_fetch","counter_page","pick_pixel","pixel_history","texture_statistics","export_texture","export_texture_raw","read_texture_raw","find_texture_raw","close","gpu_list","remote_list","remote_download","target_list","target_launch","target_connect","target_connect_pid","target_copy","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"texture_export_formats":["png","dds","jpg","bmp","tga","hdr","exr"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"mesh_draw_page_limit":renderdocx::mesh_draw::PAGE_LIMIT,"shader_binding_page_limit":renderdocx::replay::SHADER_BINDING_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"counter_page_limit":renderdocx::replay::COUNTER_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]});
+    capabilities["serve_commands"]
+        .as_array_mut()
+        .expect("capabilities commands")
+        .push(json!("filter_events"));
+    capabilities
 }
 
 fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
@@ -527,6 +533,56 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                 Some((_, snapshot)) => Ok(json!({"capture": snapshot})),
                 None => Err(("no_capture", "No capture is open".into())),
             },
+            "filter_events" => {
+                let expression = request.get("expression").and_then(Value::as_str);
+                let show_api = match request.get("show_api") {
+                    None => Some(false),
+                    Some(v) => v.as_bool(),
+                };
+                let offset = match request.get("offset") {
+                    None => Some(0usize),
+                    Some(v) => v.as_str().and_then(|s| s.parse::<usize>().ok()),
+                };
+                let limit = match request.get("limit") {
+                    None => Some(128usize),
+                    Some(v) => v
+                        .as_u64()
+                        .and_then(|n| usize::try_from(n).ok())
+                        .filter(|n| (1..=128).contains(n)),
+                };
+                match (&opened, expression, show_api, offset, limit) {
+                    (None, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some((_, snapshot)), Some(expression), Some(show_api), Some(offset), Some(limit)) => {
+                        let mut tree = EventTree::default();
+                        tree.reset(&snapshot.actions);
+                        tree.set_show_api(show_api);
+                        tree.set_filter(expression);
+                        if tree.filter_error() {
+                            Err(("invalid_filter", "Invalid or unsupported event filter".into()))
+                        } else if offset > tree.visible.len() {
+                            Err(("invalid_arguments", "Event offset exceeds the filtered item count".into()))
+                        } else {
+                            let items: Vec<Value> = tree.visible.iter().skip(offset).take(limit).map(|&row| {
+                                let (action_index, api_index) = match tree.row(row).expect("visible row") {
+                                    EventRow::Action(action) => (action, None),
+                                    EventRow::Api { action, event } => (action, Some(event)),
+                                };
+                                let action = &snapshot.actions[action_index];
+                                let (event_id, name) = api_index.map(|index| {
+                                    let event = &action.api_events[index];
+                                    (event.event_id, &event.name)
+                                }).unwrap_or((action.event_id, &action.name));
+                                json!({"action_index":action_index,"api_index":api_index,"event_id":event_id,
+                                    "parent_action_index": if action.parent < 0 { None } else { Some(action.parent) },
+                                    "name":name,"direct_match":tree.directly_matches(row)})
+                            }).collect();
+                            Ok(json!({"events":{"expression":expression,"show_api":show_api,"offset":offset.to_string(),
+                                "total":tree.visible.len().to_string(),"items":items}}))
+                        }
+                    }
+                    _ => Err(("invalid_arguments", "filter_events requires an expression, optional show_api boolean, decimal-string offset, and limit 1–128".into())),
+                }
+            }
             "timeline_usage" => {
                 let index = request
                     .get("index")

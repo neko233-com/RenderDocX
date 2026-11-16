@@ -161,6 +161,38 @@ fn real_d3d11_mesh_draw_order() {
         .expect("indexed draw")["event_id"]
         .as_u64()
         .unwrap();
+    let filtered = agent.send(&serde_json::json!({"command":"filter_events","expression":format!("$event(EID={draw})"),"show_api":true,"offset":"0","limit":128}).to_string());
+    assert_eq!(filtered["ok"], true, "{filtered}");
+    assert!(
+        filtered["data"]["events"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["event_id"] == draw && row["direct_match"] == true),
+        "{filtered}"
+    );
+    let all = agent.send(
+        r#"{"command":"filter_events","expression":"","show_api":true,"offset":"0","limit":1}"#,
+    );
+    let total = all["data"]["events"]["total"]
+        .as_str()
+        .unwrap()
+        .parse::<usize>()
+        .unwrap();
+    assert!(total > 1, "{all}");
+    let next = agent.send(
+        r#"{"command":"filter_events","expression":"","show_api":true,"offset":"1","limit":1}"#,
+    );
+    assert_eq!(next["data"]["events"]["offset"], "1", "{next}");
+    assert_ne!(
+        all["data"]["events"]["items"][0]["event_id"],
+        next["data"]["events"]["items"][0]["event_id"]
+    );
+    let invalid_filter = agent.send(r#"{"command":"filter_events","expression":"$unknown()"}"#);
+    assert_eq!(invalid_filter["error"]["code"], "invalid_filter");
+    let invalid_page =
+        agent.send(r#"{"command":"filter_events","expression":"","offset":"99999999"}"#);
+    assert_eq!(invalid_page["error"]["code"], "invalid_arguments");
     let selected = agent.send(&serde_json::json!({"command":"select","event_id":draw}).to_string());
     assert_eq!(selected["ok"], true, "{selected}");
     let mesh = agent.send(r#"{"command":"mesh","stage":"vs_out"}"#);

@@ -1,5 +1,5 @@
-use crate::event_filter::Filter;
-use renderdocx::replay::Action;
+use crate::event_filter::{EventContext, Filter};
+use crate::replay::Action;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventRow {
@@ -17,11 +17,13 @@ pub struct EventTree {
     parents: Vec<Option<usize>>,
     names: Vec<String>,
     lower_names: Vec<String>,
+    marker_names: Vec<String>,
     filter: Filter,
     filter_error: bool,
     actions: Vec<Action>,
     event_ids: Vec<u32>,
     matching_children: Vec<bool>,
+    direct_matching: Vec<bool>,
     collapsed: Vec<bool>,
     pub visible: Vec<usize>,
 }
@@ -30,6 +32,10 @@ impl EventTree {
     pub fn reset(&mut self, actions: &[Action]) {
         self.action_count = actions.len();
         self.actions = actions.to_vec();
+        self.marker_names = actions
+            .iter()
+            .map(|a| a.marker_name.as_deref().unwrap_or("").to_lowercase())
+            .collect();
         self.event_ids = actions.iter().map(|action| action.event_id).collect();
         self.rows = (0..actions.len()).map(EventRow::Action).collect();
         self.order.clear();
@@ -71,6 +77,10 @@ impl EventTree {
 
     pub fn row(&self, index: usize) -> Option<EventRow> {
         self.rows.get(index).copied()
+    }
+
+    pub fn directly_matches(&self, index: usize) -> bool {
+        self.direct_matching.get(index).copied().unwrap_or(false)
     }
 
     pub fn show_api(&self) -> bool {
@@ -148,14 +158,18 @@ impl EventTree {
                     EventRow::Api { .. } => None,
                 };
                 (self.show_api || index < self.action_count)
-                    && self.filter.matches(
+                    && self.filter.matches(&EventContext {
                         name,
-                        &self.lower_names[index],
-                        self.event_ids[index],
+                        lower_name: &self.lower_names[index],
+                        eid: self.event_ids[index],
                         action,
-                    )
+                        parent: self.parents[index],
+                        parents: &self.parents,
+                        marker_names: &self.marker_names,
+                    })
             })
             .collect();
+        self.direct_matching = matching.clone();
         self.matching_children = vec![false; self.parents.len()];
         for index in (0..self.parents.len()).rev() {
             if matching[index] {
@@ -271,7 +285,7 @@ mod tests {
 
     #[test]
     fn api_calls_are_siblings_before_the_action_and_follow_its_parent_visibility() {
-        use renderdocx::replay::ApiEvent;
+        use crate::replay::ApiEvent;
         let mut parent = action(-1);
         parent.event_id = 1;
         parent.name = "Parent".into();
@@ -312,7 +326,7 @@ mod tests {
 
     #[test]
     fn upstream_expression_subset_filters_actions_and_api_events() {
-        use renderdocx::replay::ApiEvent;
+        use crate::replay::ApiEvent;
         let mut parent = action(-1);
         parent.event_id = 1;
         parent.name = "Frame".into();
@@ -385,5 +399,41 @@ mod tests {
         assert!(tree.visible.is_empty());
         tree.set_filter("$regex(/(/)");
         assert!(tree.filter_error());
+    }
+
+    #[test]
+    fn parent_filter_uses_custom_names_and_handles_api_siblings() {
+        use crate::replay::ApiEvent;
+        let mut outer = action(-1);
+        outer.event_id = 1;
+        outer.name = "Display name".into();
+        outer.marker_name = Some("Main Pass".into());
+        let mut inner = action(0);
+        inner.event_id = 2;
+        inner.marker_name = Some("Shadow".into());
+        let mut draw = action(1);
+        draw.event_id = 4;
+        draw.api_events.push(ApiEvent {
+            event_id: 3,
+            chunk_index: None,
+            file_offset: "0".into(),
+            name: "Bind".into(),
+        });
+        let mut root_draw = action(-1);
+        root_draw.event_id = 5;
+        let mut tree = EventTree::default();
+        tree.reset(&[outer, inner, draw, root_draw]);
+        tree.set_show_api(true);
+        tree.set_filter("$parent(mAiN)");
+        assert_eq!(tree.visible, [0, 1, 4, 2]);
+        assert!(!tree.directly_matches(0));
+        assert!(tree.directly_matches(1));
+        assert!(tree.directly_matches(4));
+        tree.set_filter("+$childOf(Shadow) +$event(EID=3)");
+        assert_eq!(tree.visible, [0, 1, 4]);
+        tree.set_filter("$parent(Display)");
+        assert!(tree.visible.is_empty());
+        tree.set_filter("$parent()");
+        assert_eq!(tree.visible, [0, 1, 4, 2]);
     }
 }

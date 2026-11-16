@@ -14,6 +14,7 @@ use renderdocx::{
     annotations,
     backend::{self, Settings},
     debug_navigation::{DebugNavigator, SourceStep},
+    event_tree::{EventRow, EventTree},
     i18n::Language,
     live::{
         CaptureOptions, EnvOperation, EnvSeparator, EnvironmentModification, LaunchConfiguration,
@@ -32,10 +33,7 @@ use renderdocx::{
 };
 use std::path::PathBuf;
 
-mod event_filter;
-mod event_tree;
 mod shader_debug;
-use event_tree::{EventRow, EventTree};
 
 struct TexturePreview {
     path: PathBuf,
