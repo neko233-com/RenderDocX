@@ -120,6 +120,20 @@ fn real_d3d11_mesh_draw_order() {
         serde_json::json!([3.0, 3.0, 0.0, 1.0])
     );
     assert_eq!(page["data"]["page"]["rows"][1]["vertex"], 1);
+    let export_path = dir.path().join("positions.csv");
+    let request = serde_json::json!({"command":"mesh_draw_export","path":export_path});
+    let exported = agent.send(&request.to_string());
+    assert_eq!(exported["ok"], true, "{exported}");
+    assert_eq!(exported["data"]["rows"], 3);
+    assert!(
+        std::fs::read_to_string(&export_path)
+            .unwrap()
+            .contains("0,0,0,false,3,3,0,1,")
+    );
+    assert_eq!(
+        agent.send(&request.to_string())["error"]["code"],
+        "mesh_export_failed"
+    );
     agent.quit();
 }
 

@@ -3727,6 +3727,77 @@ impl Workspace {
         .detach();
     }
 
+    fn export_mesh_draw_csv(&mut self, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let Some(info) = self.mesh.info.clone() else {
+            return;
+        };
+        let selection = self.mesh.selection;
+        let event = info.event_id;
+        let Some(destination) = rfd::FileDialog::new()
+            .set_file_name("mesh-positions.csv")
+            .add_filter("CSV", &["csv"])
+            .save_file()
+        else {
+            return;
+        };
+        let label = destination.display().to_string();
+        let revision = self.open_revision;
+        self.export_pending = true;
+        self.status = Some(
+            self.t(
+                "Exporting mesh positions…",
+                "正在导出网格位置…",
+                "メッシュ位置を書き出し中…",
+                "메시 위치를 내보내는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            let info = session.mesh(event, selection)?;
+            renderdocx::mesh_export::write_csv(&destination, &info, |kind, offset, length| {
+                session.mesh_read(event, selection, kind, offset, length)
+            })
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision {
+                    return;
+                }
+                this.export_pending = false;
+                this.status = Some(match result {
+                    Ok(rows) => format!(
+                        "{}: {label} ({rows})",
+                        this.t(
+                            "Mesh positions exported",
+                            "网格位置已导出",
+                            "メッシュ位置を書き出しました",
+                            "메시 위치를 내보냈습니다"
+                        )
+                    ),
+                    Err(error) => format!(
+                        "{}: {error}",
+                        this.t(
+                            "Mesh export failed",
+                            "网格导出失败",
+                            "メッシュを書き出せません",
+                            "메시 내보내기 실패"
+                        )
+                    ),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn export_shader_text(&mut self, cx: &mut Context<Self>) {
         if self.replay_pending || self.export_pending || self.resource_pending {
             return;
@@ -8560,6 +8631,7 @@ impl Workspace {
                                         .child(button("mesh-buffer-vertex", self.t("Vertices", "顶点", "頂点", "정점"), self.mesh.kind == MeshBufferKind::Vertex, |this, cx| this.read_mesh(this.mesh.selection, MeshBufferKind::Vertex, 0, cx), cx))
                                         .child(button("mesh-buffer-index", self.t("Indices", "索引", "インデックス", "인덱스"), self.mesh.kind == MeshBufferKind::Index, |this, cx| this.read_mesh(this.mesh.selection, MeshBufferKind::Index, 0, cx), cx))
                                         .child(button("mesh-buffer-draw", self.t("Draw order", "绘制顺序", "描画順", "그리기 순서"), self.mesh.kind == MeshBufferKind::Draw, |this, cx| this.read_mesh(this.mesh.selection, MeshBufferKind::Draw, 0, cx), cx))
+                                        .child(button("mesh-export-csv", self.t("Export positions CSV", "导出位置 CSV", "位置を CSV で書き出す", "위치 CSV 내보내기"), false, |this, cx| this.export_mesh_draw_csv(cx), cx))
                                         .child(button(
                                             "mesh-stage",
                                             self.t(
