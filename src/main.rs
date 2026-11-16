@@ -90,6 +90,19 @@ fn parse_debug_triplet(value: &str) -> Option<[u32; 3]> {
     }
 }
 
+fn parse_optional_debug_selector(value: &str) -> Result<Option<u32>, ()> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|value| *value != u32::MAX)
+        .map(Some)
+        .ok_or(())
+}
+
 fn collect_shader_debug(
     session: &Session,
     event: u32,
@@ -322,6 +335,23 @@ mod mesh_tests {
     }
 }
 
+#[cfg(test)]
+mod pixel_selector_tests {
+    use super::parse_optional_debug_selector;
+    #[test]
+    fn blank_means_default_and_reserved_or_invalid_values_are_rejected() {
+        assert_eq!(parse_optional_debug_selector(" "), Ok(None));
+        assert_eq!(parse_optional_debug_selector(" 42 "), Ok(Some(42)));
+        assert_eq!(
+            parse_optional_debug_selector("4294967294"),
+            Ok(Some(u32::MAX - 1))
+        );
+        assert!(parse_optional_debug_selector("4294967295").is_err());
+        assert!(parse_optional_debug_selector("-1").is_err());
+        assert!(parse_optional_debug_selector("4294967296").is_err());
+    }
+}
+
 fn structured_value(node: &StructuredNode) -> String {
     match (&node.custom_string, &node.value) {
         (Some(custom), Some(value)) if custom != value => format!("{custom} ({value})"),
@@ -400,6 +430,8 @@ struct Workspace {
     texture_selection: TextureSelection,
     pixel_x: Entity<InputState>,
     pixel_y: Entity<InputState>,
+    pixel_debug_primitive: Entity<InputState>,
+    pixel_debug_view: Entity<InputState>,
     pixel: Option<Pixel>,
     pixel_history: Option<PixelHistoryPage>,
     history_selected: Option<usize>,
@@ -2122,13 +2154,34 @@ impl Workspace {
             cx.notify();
             return;
         };
+        let primitive = parse_optional_debug_selector(&self.pixel_debug_primitive.read(cx).value());
+        let view = parse_optional_debug_selector(&self.pixel_debug_view.read(cx).value());
+        let (Ok(primitive), Ok(view)) = (primitive, view) else {
+            self.invalid_pixel_debug_selector(cx);
+            return;
+        };
         let selection = PixelDebugSelection {
             x,
             y,
             sample: self.texture_selection.sample,
-            primitive: None,
-            view: None,
+            primitive,
+            view,
         };
+        self.start_shader_debug(ShaderDebugContext::Pixel(selection), cx);
+    }
+
+    fn invalid_pixel_debug_selector(&mut self, cx: &mut Context<Self>) {
+        self.status = Some(self.t("Leave primitive and view blank for automatic selection, or enter integers below 4294967295.", "图元和视图留空表示自动选择，或输入小于 4294967295 的整数。", "プリミティブとビューは空欄で自動選択、または 4294967295 未満の整数を入力してください。", "프리미티브와 뷰를 비워 자동 선택하거나 4294967295 미만의 정수를 입력하세요.").to_owned());
+        cx.notify();
+    }
+
+    fn debug_history_pixel(&mut self, mut selection: PixelDebugSelection, cx: &mut Context<Self>) {
+        let Ok(view) = parse_optional_debug_selector(&self.pixel_debug_view.read(cx).value())
+        else {
+            self.invalid_pixel_debug_selector(cx);
+            return;
+        };
+        selection.view = view;
         self.start_shader_debug(ShaderDebugContext::Pixel(selection), cx);
     }
 
@@ -6401,7 +6454,12 @@ impl Workspace {
                             .child(button("pixel-history", history_label, false, |this, cx| this.read_pixel_history(0, false, cx), cx))
                             .child(button("pixel-debug-start", self.t("Debug pixel", "调试像素", "ピクセルをデバッグ", "픽셀 디버깅"), true, |this, cx| this.debug_selected_pixel(cx), cx)),
                     )
-                    .child(div().text_sm().text_color(rgb(0x91a7c0)).child(self.t("Pixel debugging uses the selected draw and sample; RenderDoc chooses the primitive and view. The selected texture need not be bound to that draw.", "像素调试使用当前绘制事件和采样；图元及视图由 RenderDoc 选择。所选纹理不一定绑定到该绘制。", "ピクセルデバッグは選択中の描画とサンプルを使用し、プリミティブとビューは RenderDoc が選択します。選択したテクスチャが描画にバインドされているとは限りません。", "픽셀 디버깅은 선택한 그리기와 샘플을 사용하며 프리미티브와 뷰는 RenderDoc이 선택합니다. 선택한 텍스처가 해당 그리기에 바인딩되어 있지 않을 수 있습니다.")))
+                    .child(div().flex().flex_wrap().items_center().gap_2()
+                        .child(self.t("Primitive", "图元", "プリミティブ", "프리미티브"))
+                        .child(Input::new(&self.pixel_debug_primitive).id("pixel-debug-primitive").aria_label(self.t("Primitive", "图元", "プリミティブ", "프리미티브")).w(px(100.)))
+                        .child(self.t("View", "视图", "ビュー", "뷰"))
+                        .child(Input::new(&self.pixel_debug_view).id("pixel-debug-view").aria_label(self.t("View", "视图", "ビュー", "뷰")).w(px(100.))))
+                    .child(div().text_sm().text_color(rgb(0x91a7c0)).child(self.t("Leave primitive and view blank for RenderDoc's default. Fragment history uses its own primitive and the selected view. The selected texture need not be bound to the draw.", "图元和视图留空时由 RenderDoc 选择。片元历史使用该记录的图元和所选视图。所选纹理不一定绑定到当前绘制。", "プリミティブとビューを空欄にすると RenderDoc が選択します。フラグメント履歴は記録されたプリミティブと選択ビューを使います。テクスチャは描画にバインドされているとは限りません。", "프리미티브와 뷰를 비우면 RenderDoc이 선택합니다. 프래그먼트 기록은 해당 프리미티브와 선택한 뷰를 사용합니다. 텍스처가 그리기에 바인딩되어 있지 않을 수 있습니다.")))
                     .when_some(pixel_debug_panel, |view, panel| view.child(panel))
                     .when_some(pixel, |view, pixel| {
                         let bits = pixel
@@ -6468,7 +6526,7 @@ impl Workspace {
                                 if entry.event_id == page.event_id {
                                     let selection = PixelDebugSelection { x: page.x, y: page.y, sample: (page.sample != u32::MAX).then_some(page.sample), primitive: (entry.primitive != u32::MAX).then_some(entry.primitive), view: None };
                                     view = view.child(button("pixel-history-debug", self.t("Debug this fragment", "调试此片元", "このフラグメントをデバッグ", "이 프래그먼트 디버깅"), true,
-                                        move |this, cx| this.start_shader_debug(ShaderDebugContext::Pixel(selection), cx), cx));
+                                        move |this, cx| this.debug_history_pixel(selection, cx), cx));
                                 }
                                 if entry.direct_shader_write { view = view.child(direct_write_label); }
                                 if entry.unbound_pixel_shader { view = view.child(unbound_shader_label); }
@@ -8278,6 +8336,8 @@ fn main() {
                     let bookmark_text = cx.new(|cx| InputState::new(window, cx));
                     let stats_min = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
+                    let pixel_debug_primitive = cx.new(|cx| InputState::new(window, cx));
+                    let pixel_debug_view = cx.new(|cx| InputState::new(window, cx));
                     let pixel_x = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let compute_group =
                         cx.new(|cx| InputState::new(window, cx).default_value("0,0,0"));
@@ -8326,6 +8386,8 @@ fn main() {
                         texture_selection: TextureSelection::default(),
                         pixel_x,
                         pixel_y,
+                        pixel_debug_primitive,
+                        pixel_debug_view,
                         pixel: None,
                         pixel_history: None,
                         history_selected: None,
@@ -8439,6 +8501,8 @@ mod ui_tests {
                     let bookmark_text = cx.new(|cx| InputState::new(window, cx));
                     let stats_min = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
+                    let pixel_debug_primitive = cx.new(|cx| InputState::new(window, cx));
+                    let pixel_debug_view = cx.new(|cx| InputState::new(window, cx));
                     let pixel_x = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let compute_group =
                         cx.new(|cx| InputState::new(window, cx).default_value("0,0,0"));
@@ -8504,6 +8568,8 @@ mod ui_tests {
                         texture_selection: TextureSelection::default(),
                         pixel_x,
                         pixel_y,
+                        pixel_debug_primitive,
+                        pixel_debug_view,
                         pixel: None,
                         pixel_history: None,
                         history_selected: None,
@@ -8745,6 +8811,8 @@ mod ui_tests {
                     let bookmark_text = cx.new(|cx| InputState::new(window, cx));
                     let stats_min = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
+                    let pixel_debug_primitive = cx.new(|cx| InputState::new(window, cx));
+                    let pixel_debug_view = cx.new(|cx| InputState::new(window, cx));
                     let pixel_x = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let compute_group =
                         cx.new(|cx| InputState::new(window, cx).default_value("0,0,0"));
@@ -8915,6 +8983,8 @@ mod ui_tests {
                         texture_selection: TextureSelection::default(),
                         pixel_x,
                         pixel_y,
+                        pixel_debug_primitive,
+                        pixel_debug_view,
                         pixel: None,
                         pixel_history: None,
                         history_selected: None,
@@ -10311,6 +10381,8 @@ mod ui_tests {
                             cx,
                         );
                     }
+                    let input = view.read(cx).pixel_debug_view.clone();
+                    input.update(cx, |input, cx| input.set_value("0", window, cx));
                     window.click("pixel-history-debug", cx);
                 })
                 .unwrap();
@@ -10337,6 +10409,7 @@ mod ui_tests {
                         selection.primitive,
                         (primitive != u32::MAX).then_some(primitive)
                     );
+                    assert_eq!(selection.view, Some(0));
                     assert_eq!(debug.trace.event_id, history_draw_event);
                     assert_eq!(debug.trace.stage, 4);
                     assert!(debug.states.len() > 1);
@@ -10360,6 +10433,8 @@ mod ui_tests {
                             cx,
                         );
                     }
+                    let input = view.read(cx).pixel_debug_view.clone();
+                    input.update(cx, |input, cx| input.set_value("", window, cx));
                     window.click("pixel-debug-start", cx);
                 })
                 .unwrap();
