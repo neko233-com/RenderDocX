@@ -252,6 +252,7 @@ fn real_d3d11_mesh_draw_order() {
     assert_eq!(entry["binding"], 0);
     assert_eq!(entry["descriptor"]["resource_present"], true);
     assert!(entry["descriptor"]["resource"].is_u64());
+    assert!(entry["descriptor"]["format_component_type"].is_u64());
     let constants =
         agent.send(r#"{"command":"shader_bindings","stage":"compute","kind":"constants"}"#);
     assert_eq!(constants["ok"], true, "{constants}");

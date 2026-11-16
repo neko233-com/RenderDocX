@@ -251,6 +251,7 @@ void write_descriptor(const Descriptor &d, const std::map<ResourceId, size_t> &i
   uint32_t lod; std::memcpy(&lod, &d.minLODClamp, sizeof(lod));
   std::cout << "{\"type\":" << uint32_t(d.type) << ",\"flags\":" << uint32_t(d.flags) << ",\"format\":";
   json_string(d.format.Name());
+  std::cout << ",\"format_component_type\":" << uint32_t(d.format.compType);
   std::cout << ",\"resource\":"; resource(d.resource);
   std::cout << ",\"resource_present\":" << (d.resource != ResourceId() ? "true" : "false");
   std::cout << ",\"secondary\":"; resource(d.secondary);

@@ -7497,6 +7497,43 @@ impl Workspace {
                                     .when_some(resource, |row, resource| row.cursor_pointer().text_color(rgb(0x91cfff)).on_click(cx.listener(move |this, _, _, cx| {
                                         this.tab = CaptureTab::Resources; this.refresh_resources(); this.read_resource_usage(resource, 0, cx);
                                     }))));
+                                if let Some(descriptor) = entry.get("descriptor").filter(|value| value.is_object()) {
+                                    let text = |key: &str| descriptor.get(key).map(|v| v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string())).unwrap_or_else(|| "—".into());
+                                    view = view.child(format!("{}: {} · {}: {} + {} · mip {} + {} · {} {} + {}",
+                                        self.t("Format", "格式", "形式", "형식"), text("format"),
+                                        self.t("Byte range", "字节范围", "バイト範囲", "바이트 범위"), text("byte_offset"), text("byte_size"),
+                                        text("first_mip"), text("num_mips"), self.t("slice", "切片", "スライス", "슬라이스"), text("first_slice"), text("num_slices")));
+                                    if let Some(resource) = resource {
+                                        if let Some((buffer_index, buffer)) = snapshot.buffers.iter().enumerate().find(|(_, buffer)| buffer.resource_index == Some(resource)) {
+                                            let offset = descriptor.get("byte_offset").and_then(|v| v.as_str()).and_then(|v| v.parse::<u64>().ok());
+                                            let size = buffer.length.parse::<u64>().ok();
+                                            if let Some(offset) = offset.filter(|offset| size.is_some_and(|size| *offset <= size)) {
+                                                view = view.child(div().id(("shader-binding-buffer", row_index)).test_support().cursor_pointer().text_color(rgb(0x91cfff))
+                                                    .child(self.t("Open buffer resource at offset", "在偏移处打开缓冲区资源", "オフセットでバッファーを開く", "오프셋에서 버퍼 리소스 열기"))
+                                                    .on_click(cx.listener(move |this, _, _, cx| { this.tab = CaptureTab::Buffers; this.read_buffer(buffer_index, offset, cx); })));
+                                            }
+                                        }
+                                        if let Some(texture_index) = snapshot.textures.iter().position(|texture| texture.resource_index == Some(resource)) {
+                                            let mip = descriptor.get("first_mip").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok());
+                                            let slice = descriptor.get("first_slice").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok());
+                                            let cast = descriptor.get("format_component_type").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok()).unwrap_or(0);
+                                            if let (Some(mip), Some(slice)) = (mip, slice) {
+                                                view = view.child(div().id(("shader-binding-texture", row_index)).test_support().cursor_pointer().text_color(rgb(0x91cfff))
+                                                    .child(self.t("Open texture view", "打开纹理视图", "テクスチャービューを開く", "텍스처 뷰 열기"))
+                                                    .on_click(cx.listener(move |this, _, _, cx| this.open_attachment_texture(texture_index, mip, slice, cast, cx))));
+                                            }
+                                        }
+                                    }
+                                }
+                                if let Some(sampler) = entry.get("sampler").filter(|value| value.get("type").and_then(|v| v.as_u64()).is_some_and(|kind| kind != 0)) {
+                                    let number = |key: &str| sampler.get(key).and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok()).map(|v| f32::from_bits(v).to_string()).unwrap_or_else(|| "—".into());
+                                    let array = |key: &str| sampler.get(key).map(|v| v.to_string()).unwrap_or_else(|| "—".into());
+                                    view = view.child(format!("{}: {} · {}: {} · LOD {}–{} · {} {} · {} {}",
+                                        self.t("Address", "寻址", "アドレス", "주소"), array("address"),
+                                        self.t("Filter", "过滤", "フィルター", "필터"), array("filter"), number("min_lod_bits"), number("max_lod_bits"),
+                                        self.t("bias", "偏移", "バイアス", "바이어스"), number("mip_bias_bits"),
+                                        self.t("anisotropy", "各向异性", "異方性", "비등방성"), number("max_anisotropy_bits")));
+                                }
                             }
                             view
                         })
@@ -11327,6 +11364,76 @@ mod ui_tests {
             assert_eq!(page.kind, "read_write");
             assert_eq!(page.entries[0]["descriptor"]["resource"], 0);
         });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(-350.))),
+                cx,
+            );
+            window.render_frame(cx);
+            window.click(("shader-binding-buffer", 0usize), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(view.read(cx).tab == CaptureTab::Buffers);
+            assert_eq!(view.read(cx).selected_buffer, Some(0));
+            assert_eq!(view.read(cx).buffer_offset, 4);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("shaders-tab", cx);
+            window.click("shader-0", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(2000.))),
+                cx,
+            );
+            window.render_frame(cx);
+            window.click("shader-bindings-readwrite", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(-350.))),
+                cx,
+            );
+            window.render_frame(cx);
+            window.click(("shader-binding-texture", 0usize), cx);
+        })
+        .unwrap();
+        cx.update(|cx| {
+            assert!(view.read(cx).tab == CaptureTab::Textures);
+            assert_eq!(view.read(cx).texture_selection.mip, 1);
+            assert_eq!(view.read(cx).texture_selection.slice, 1);
+            assert_eq!(view.read(cx).texture_selection.analysis_type_cast, 2);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("shaders-tab", cx);
+            window.click("shader-0", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(2000.))),
+                cx,
+            );
+            window.render_frame(cx);
+            window.click("shader-bindings-readwrite", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             window.scroll(

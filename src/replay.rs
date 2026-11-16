@@ -3412,7 +3412,7 @@ pub mod test_support {
                 offset: "0".into(),
                 total: "1".into(),
                 entries: vec![
-                    serde_json::json!({"binding":0,"array_element":0,"statically_unused":false,"descriptor":{"resource":0}}),
+                    serde_json::json!({"binding":0,"array_element":0,"statically_unused":false,"descriptor":{"resource":0,"format":"R32_UINT","byte_offset":"4","byte_size":"12","first_mip":1,"num_mips":1,"first_slice":1,"num_slices":1,"format_component_type":2}}),
                 ],
             })
         }
