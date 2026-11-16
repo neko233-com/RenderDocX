@@ -56,7 +56,27 @@ fn saved_event_filters_survive_restart_and_stay_separate_from_formats() {
 #[test]
 fn custom_shader_library_round_trips_and_requires_explicit_replacement() {
     let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("upstream");
+    std::fs::create_dir(&input).unwrap();
+    std::fs::write(input.join("from-renderdoc.frag"), "void main() {}").unwrap();
     let mut agent = Agent::with_config(None, false, Some(dir.path()));
+    let request =
+        serde_json::json!({"command":"custom_shader_library_import_directory","path":input})
+            .to_string();
+    assert_eq!(agent.send(&request)["data"]["results"][0]["imported"], true);
+    assert_eq!(
+        agent.send(&request)["data"]["results"][0]["imported"],
+        false
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"custom_shader_library_get","name":"from-renderdoc.frag"}"#)["data"]
+            ["shader"]["encoding"],
+        2
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"custom_shader_library_delete","name":"from-renderdoc.frag"}"#)["ok"],
+        true
+    );
     let mut shader = serde_json::json!({"name":"../着色器", "encoding":3, "entry":"main", "source_hex":"00ff12", "flags":[{"name":"opt","value":"1"}], "apply_prefix":false});
     let request = |shader: &Value, replace: bool| {
         serde_json::json!({"command":"custom_shader_library_save","shader":shader,"replace":replace}).to_string()
@@ -1046,6 +1066,23 @@ fn real_d3d11_mesh_draw_order() {
             .any(|value| value == 5)
     );
     let shader = "float4 main(float4 pos : SV_Position, float4 uv : TEXCOORD0) : SV_Target0 { return float4(1, 0, 1, 1); }";
+    let import_dir = dir.path().join("upstream-shaders");
+    std::fs::create_dir(&import_dir).unwrap();
+    std::fs::write(import_dir.join("imported.hlsl"), shader).unwrap();
+    let imported = agent.send(
+        &serde_json::json!({"command":"custom_shader_library_import_directory","path":import_dir})
+            .to_string(),
+    );
+    assert_eq!(
+        imported["data"]["results"][0]["imported"], true,
+        "{imported}"
+    );
+    let imported_build =
+        agent.send(r#"{"command":"custom_shader_library_build","name":"imported.hlsl"}"#);
+    assert_eq!(
+        imported_build["data"]["result"]["compiled"], true,
+        "{imported_build}"
+    );
     let saved = agent.send(&serde_json::json!({"command":"custom_shader_library_save","shader":{"name":"fixture shader","encoding":5,"entry":"main","source_hex":renderdocx::custom_shaders::encode_hex(shader.as_bytes()),"flags":[],"apply_prefix":true}}).to_string());
     assert_eq!(saved["ok"], true, "{saved}");
     let library_build =
@@ -1650,6 +1687,7 @@ fn capabilities_advertises_versioned_machine_readable_contract() {
         "event_filter_get",
         "event_filter_save",
         "event_filter_delete",
+        "custom_shader_library_import_directory",
         "custom_shader_library_list",
         "custom_shader_library_get",
         "custom_shader_library_save",

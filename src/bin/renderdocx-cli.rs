@@ -128,6 +128,7 @@ fn usage() -> Value {
         .as_array_mut()
         .expect("capabilities commands")
         .extend([
+            json!("custom_shader_library_import_directory"),
             json!("custom_shader_library_list"),
             json!("custom_shader_library_get"),
             json!("custom_shader_library_save"),
@@ -343,6 +344,20 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     .map_err(|error| ("event_filter_store_failed", error)),
                 None => Err(("invalid_arguments", "name must be a string".into())),
             },
+            "custom_shader_library_import_directory" => {
+                match request.get("path").and_then(Value::as_str) {
+                    Some(path) => renderdocx::custom_shaders::ShaderStore::new()
+                        .and_then(|store| {
+                            renderdocx::custom_shaders::import_renderdoc_directory(
+                                &store,
+                                std::path::Path::new(path),
+                            )
+                        })
+                        .map(|results| json!({"results":results}))
+                        .map_err(|error| ("custom_shader_store_failed", error)),
+                    None => Err(("invalid_arguments", "path must be a string".into())),
+                }
+            }
             "custom_shader_library_list" => renderdocx::custom_shaders::ShaderStore::new()
                 .and_then(|store| store.list())
                 .map(|shaders| json!({"shaders":shaders}))

@@ -1,7 +1,7 @@
 //! Named custom visualization shaders shared by the desktop and Agent CLI.
 use crate::{buffer_formats::FormatStore, replay::ShaderCompileFlag};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -56,6 +56,81 @@ impl SavedCustomShader {
         decode_hex(&self.source_hex)
     }
 }
+/// The extensions accepted by qrenderdoc's TextureViewer. Its extension map
+/// resolves the duplicate spvasm entry to OpenGLSPIRVAsm.
+pub fn renderdoc_source_encoding(path: &Path) -> Option<u32> {
+    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "hlsl" => Some(5),
+        "glsl" | "frag" => Some(2),
+        "spvasm" => Some(8),
+        "slang" => Some(9),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ImportResult {
+    pub path: PathBuf,
+    pub name: String,
+    pub imported: bool,
+    pub error: Option<String>,
+}
+
+/// Import a snapshot without modifying the source or replacing a record.
+pub fn import_renderdoc_file(
+    store: &ShaderStore,
+    path: &Path,
+) -> Result<SavedCustomShader, String> {
+    let encoding =
+        renderdoc_source_encoding(path).ok_or("Unsupported RenderDoc shader extension")?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("Shader filename is not UTF-8")?
+        .to_owned();
+    let text = std::fs::read_to_string(path).map_err(|e| format!("Cannot read shader: {e}"))?;
+    let source = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    let shader = SavedCustomShader {
+        name,
+        encoding,
+        entry: "main".into(),
+        source_hex: encode_hex(source.as_bytes()),
+        flags: Vec::new(),
+        apply_prefix: true,
+    };
+    store.save(&shader, false)
+}
+
+/// Report failures per file so a collision or malformed file does not hide others.
+pub fn import_renderdoc_directory(
+    store: &ShaderStore,
+    directory: &Path,
+) -> Result<Vec<ImportResult>, String> {
+    let mut paths = std::fs::read_dir(directory)
+        .map_err(|e| format!("Cannot read shader directory: {e}"))?
+        .map(|entry| entry.map(|entry| entry.path()).map_err(|e| e.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    paths.sort();
+    let mut results = Vec::new();
+    for path in paths {
+        if renderdoc_source_encoding(&path).is_none() || !path.is_file() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .map(|v| v.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let result = import_renderdoc_file(store, &path);
+        results.push(ImportResult {
+            path,
+            name,
+            imported: result.is_ok(),
+            error: result.err(),
+        });
+    }
+    Ok(results)
+}
+
 pub struct ShaderStore(FormatStore);
 impl ShaderStore {
     pub fn new() -> Result<Self, String> {
@@ -108,6 +183,40 @@ impl ShaderStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn imports_upstream_sources_without_overwriting_or_touching_files() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        let text = "\u{feff}float4 main() : SV_Target { return 1; }";
+        std::fs::write(source.join("sample.HLSL"), text).unwrap();
+        std::fs::write(source.join("bad.glsl"), [255]).unwrap();
+        std::fs::write(source.join("other.txt"), "ignored").unwrap();
+        let store = ShaderStore::at(root.path().join("library"));
+        let results = import_renderdoc_directory(&store, &source).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results.iter().filter(|r| r.imported).count(), 1);
+        let saved = store.get("sample.HLSL").unwrap();
+        assert_eq!(saved.encoding, 5);
+        assert_eq!(saved.entry, "main");
+        assert_eq!(
+            saved.source().unwrap(),
+            text.trim_start_matches('\u{feff}').as_bytes()
+        );
+        assert!(saved.apply_prefix);
+        assert!(
+            import_renderdoc_directory(&store, &source)
+                .unwrap()
+                .iter()
+                .all(|r| !r.imported)
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join("sample.HLSL")).unwrap(),
+            text
+        );
+        assert_eq!(renderdoc_source_encoding(Path::new("x.spvasm")), Some(8));
+    }
+
     #[test]
     fn preserves_binary_metadata_and_requires_explicit_replace() {
         let dir = tempfile::tempdir().unwrap();

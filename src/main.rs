@@ -5968,6 +5968,40 @@ impl Workspace {
         }
     }
 
+    fn import_custom_shader_directory(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        match self
+            .custom_shader_store()
+            .and_then(|store| renderdocx::custom_shaders::import_renderdoc_directory(&store, path))
+        {
+            Ok(results) => {
+                let count = results.iter().filter(|result| result.imported).count();
+                let errors = results
+                    .iter()
+                    .filter_map(|result| {
+                        result
+                            .error
+                            .as_ref()
+                            .map(|error| format!("{}: {error}", result.name))
+                    })
+                    .collect::<Vec<_>>();
+                self.refresh_custom_shaders();
+                self.texture_custom_diagnostics = format!(
+                    "{}: {count}; {}: {}{}",
+                    self.t("Imported", "已导入", "読み込み済み", "가져옴"),
+                    self.t("Failed", "失败", "失敗", "실패"),
+                    errors.len(),
+                    if errors.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\n{}", errors.join("\n"))
+                    }
+                );
+            }
+            Err(error) => self.texture_custom_diagnostics = error,
+        }
+        cx.notify();
+    }
+
     fn custom_shader_source(&self, encoding: u32, cx: &App) -> Result<Vec<u8>, String> {
         let source = self.texture_custom_source.read(cx).value().to_string();
         if matches!(encoding, 1 | 3 | 6 | 7) {
@@ -9509,6 +9543,7 @@ impl Workspace {
                 .child(div().text_sm().child(self.t("Binary encodings use hexadecimal bytes.", "二进制编码使用十六进制字节。", "バイナリ形式は16進数で入力します。", "바이너리 인코딩은 16진수로 입력합니다.")))
                 .child(div().flex().flex_wrap().gap_2()
                     .child(Input::new(&self.texture_custom_name).id("texture-custom-name").aria_label(self.t("Shader name", "着色器名称", "シェーダー名", "셰이더 이름")).w(px(160.)))
+                    .child(button("texture-custom-import", self.t("Import shader folder", "导入着色器目录", "シェーダーフォルダーを読み込む", "셰이더 폴더 가져오기"), false, |this, cx| { if let Some(path) = rfd::FileDialog::new().pick_folder() { this.import_custom_shader_directory(&path, cx); } }, cx))
                     .child(button("texture-custom-save", self.t("Save new", "新建保存", "新規保存", "새로 저장"), false, |this, cx| this.save_custom_shader(false, cx), cx))
                     .child(button("texture-custom-replace", self.t("Replace saved", "覆盖已保存", "保存内容を上書き", "저장 항목 덮어쓰기"), false, |this, cx| this.save_custom_shader(true, cx), cx))
                     .child(button("texture-custom-delete", if self.pending_custom_delete.as_deref() == Some(self.texture_custom_name.read(cx).value().trim()) { self.t("Confirm delete", "确认删除", "削除を確認", "삭제 확인") } else { self.t("Delete", "删除", "削除", "삭제") }, false, |this, cx| this.delete_custom_shader(cx), cx)))
@@ -17749,6 +17784,19 @@ mod ui_tests {
             })
         });
         exercise_custom_shader_editor(cx, &view, handle);
+        let import_dir = format_dir.path().join("upstream-shaders");
+        std::fs::create_dir(&import_dir).unwrap();
+        std::fs::write(
+            import_dir.join("visual.hlsl"),
+            "float4 main() : SV_Target { return 1; }",
+        )
+        .unwrap();
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.import_custom_shader_directory(&import_dir, cx)
+            })
+        });
+        cx.update(|cx| assert_eq!(view.read(cx).saved_custom_shaders[0].name, "visual.hlsl"));
         exercise_overlay_pixel(cx, &view, handle);
         cx.update(|cx| view.update(cx, |view, cx| view.read_texture_raw_page(0, cx)));
         cx.run_until_parked();
