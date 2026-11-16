@@ -2138,6 +2138,18 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         serde_json::json!([255, 255, 0]),
         "{rgb}"
     );
+    let legacy_rgb = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"4", "length":4, "layout":"unsigned rgb byte4 color;"}).to_string());
+    assert_eq!(
+        legacy_rgb["data"]["page"]["rows"][0]["fields"][0]["rgb_srgb8"][0],
+        serde_json::json!([0, 0, 64]),
+        "{legacy_rgb}"
+    );
+    let norm_display = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"6", "length":1, "layout":"[[hex]] [[unorm]] ubyte value;"}).to_string());
+    let field = &norm_display["data"]["page"]["rows"][0]["fields"][0];
+    assert_eq!(
+        field["values"][0][0], field["display_values"][0][0],
+        "{norm_display}"
+    );
     let display = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"4", "length":8, "layout":"xint h; [[binary]] int b;"}).to_string());
     assert_eq!(
         display["data"]["page"]["rows"][0]["fields"][0]["display_values"][0][0], "40400000",

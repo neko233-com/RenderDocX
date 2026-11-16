@@ -15987,10 +15987,15 @@ mod ui_tests {
                     window.render_frame(cx);
                     for _ in 0..30 {
                         let target = window.find(("pixel-history-row", row));
-                        if target.visible() {
+                        let viewport = window.find("capture-details-scroll").bounds();
+                        let bounds = target.bounds();
+                        if target.visible()
+                            && bounds.origin.y >= viewport.origin.y
+                            && bounds.origin.y + bounds.size.height
+                                <= viewport.origin.y + viewport.size.height
+                        {
                             break;
                         }
-                        let viewport = window.find("capture-details-scroll").bounds();
                         let delta = if target.bounds().origin.y < viewport.origin.y {
                             100.0
                         } else {
@@ -16004,13 +16009,23 @@ mod ui_tests {
                     }
                     assert!(window.find(("pixel-history-row", row)).visible());
                     window.click(("pixel-history-row", row), cx);
+                    assert_eq!(
+                        view.read(cx).history_selected,
+                        Some(row),
+                        "pixel history row click did not select the row"
+                    );
                     window.render_frame(cx);
                     for _ in 0..20 {
                         let target = window.find("pixel-history-debug");
-                        if target.visible() {
+                        let viewport = window.find("capture-details-scroll").bounds();
+                        let bounds = target.bounds();
+                        if target.visible()
+                            && bounds.origin.y >= viewport.origin.y
+                            && bounds.origin.y + bounds.size.height
+                                <= viewport.origin.y + viewport.size.height
+                        {
                             break;
                         }
-                        let viewport = window.find("capture-details-scroll").bounds();
                         let delta = if target.bounds().origin.y < viewport.origin.y {
                             100.0
                         } else {
@@ -16027,6 +16042,11 @@ mod ui_tests {
                     window.render_frame(cx);
                     assert!(window.find("pixel-history-debug").visible());
                     window.click("pixel-history-debug", cx);
+                    assert!(
+                        view.read(cx).resource_pending || view.read(cx).debug_view.is_some(),
+                        "pixel debug click did not start: {:?}",
+                        view.read(cx).status
+                    );
                 })
                 .unwrap();
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);

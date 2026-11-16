@@ -764,8 +764,14 @@ impl Layout {
                 i += 1;
             }
             let unsigned = typename == "unsigned";
-            if unsigned {
-                typename = *t.get(i).ok_or("Missing unsigned type")?;
+            let signed = typename == "signed";
+            if unsigned || signed {
+                typename = *t.get(i).ok_or("Missing qualified type")?;
+                i += 1;
+            }
+            if typename == "rgb" {
+                rgb = true;
+                typename = *t.get(i).ok_or("Missing RGB type")?;
                 i += 1;
             }
             if let Some(nested) = definitions.get(typename) {
@@ -775,6 +781,7 @@ impl Layout {
                         .ok_or("Layout size overflow")?;
                 }
                 if unsigned
+                    || signed
                     || normalization.is_some()
                     || packed_name.is_some()
                     || major.is_some()
@@ -861,6 +868,7 @@ impl Layout {
             let enum_def = enums.get(typename).cloned();
             if enum_def.is_some()
                 && (unsigned
+                    || signed
                     || normalization.is_some()
                     || packed_name.is_some()
                     || major.is_some()
@@ -950,11 +958,8 @@ impl Layout {
                 }
             }
             if display.is_some() {
-                if packed_name.is_some() || normalization.is_some() {
-                    return Err(
-                        "Hex and binary display are unsupported on packed or normalized fields"
-                            .into(),
-                    );
+                if packed_name.is_some() {
+                    return Err("Hex and binary display are unsupported on packed fields".into());
                 }
                 format = match format {
                     ScalarFormat::I8 => ScalarFormat::U8,
@@ -965,6 +970,10 @@ impl Layout {
                     | ScalarFormat::U16
                     | ScalarFormat::U32
                     | ScalarFormat::U64
+                    | ScalarFormat::UNorm8
+                    | ScalarFormat::SNorm8
+                    | ScalarFormat::UNorm16
+                    | ScalarFormat::SNorm16
                     | ScalarFormat::Bool => format,
                     _ => return Err("Hex and binary display require an integer or bool".into()),
                 };
@@ -1410,7 +1419,14 @@ impl Layout {
                         let data = bytes.get(start..start + width).ok_or("Incomplete field")?;
                         let value = field.format.value(data);
                         if let Some(display) = field.display {
-                            if field.format == ScalarFormat::Bool {
+                            if matches!(
+                                field.format,
+                                ScalarFormat::Bool
+                                    | ScalarFormat::UNorm8
+                                    | ScalarFormat::SNorm8
+                                    | ScalarFormat::UNorm16
+                                    | ScalarFormat::SNorm16
+                            ) {
                                 display_components.push(value.clone());
                             } else {
                                 let mut raw = [0u8; 8];
@@ -1675,10 +1691,27 @@ mod tests {
                 .len(),
             4
         );
+        for source in [
+            "[[hex]] [[unorm]] ubyte value;",
+            "[[hex]] unormb value;",
+            "[[binary]] [[unorm]] ubyte value;",
+        ] {
+            let page = Layout::parse(source).unwrap().decode(0, &[128]).unwrap();
+            assert_eq!(
+                page.rows[0].fields[0].display_values.as_ref().unwrap()[0][0],
+                page.rows[0].fields[0].values[0][0],
+                "{source}"
+            );
+        }
+        let legacy = Layout::parse("signed rgb int3 color;").unwrap();
+        let bytes = [128i32.to_le_bytes(), 2i32.to_le_bytes(), 3i32.to_le_bytes()].concat();
+        assert_eq!(
+            legacy.decode(0, &bytes).unwrap().rows[0].fields[0].rgb_srgb8,
+            Some(vec![Some([128, 2, 3])])
+        );
         for bad in [
             "[[hex]] float value;",
             "[[binary]] [[packed(r10g10b10a2_uint)]] uint4 value;",
-            "[[hex]] [[unorm]] ubyte value;",
             "enum E : uint { A = 1 }; [[hex]] E value;",
         ] {
             assert!(Layout::parse(bad).is_err(), "{bad}");
