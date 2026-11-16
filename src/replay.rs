@@ -1363,6 +1363,10 @@ enum Reply {
         event_id: u32,
         matches: Vec<Option<StructuredMatch>>,
     },
+    AnnotationFind {
+        event_id: u32,
+        matches: Vec<Option<StructuredNode>>,
+    },
     Callstack(EventCallstack),
     Mesh(MeshInfo),
     MeshData {
@@ -1871,6 +1875,13 @@ trait Transport: Send {
         _names: &[String],
     ) -> Result<Option<Vec<Option<StructuredMatch>>>, String> {
         Ok(None)
+    }
+    fn annotation_find(
+        &mut self,
+        _event: u32,
+        _keys: &[String],
+    ) -> Result<Vec<Option<StructuredNode>>, String> {
+        Err("Event annotations are not supported by this transport".into())
     }
     fn structure_buffer(
         &mut self,
@@ -2690,6 +2701,39 @@ impl Transport for Process {
             Reply::Error { message } if message == "Unknown command" => Ok(None),
             Reply::Error { message } => Err(message),
             _ => Err("Unexpected structured search response".into()),
+        }
+    }
+
+    fn annotation_find(
+        &mut self,
+        event: u32,
+        keys: &[String],
+    ) -> Result<Vec<Option<StructuredNode>>, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        write!(input, "annotation_find {event}").map_err(|e| e.to_string())?;
+        for key in keys {
+            let encoded: String = key.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+            write!(
+                input,
+                " {}",
+                if encoded.is_empty() { "_" } else { &encoded }
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        writeln!(input)
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::AnnotationFind { event_id, matches }
+                if event_id == event && matches.len() == keys.len() =>
+            {
+                Ok(matches)
+            }
+            Reply::Error { message } if message == "Unknown command" => {
+                Err("Event annotations require a newer replay bridge".into())
+            }
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected event annotation response".into()),
         }
     }
 
@@ -3916,6 +3960,20 @@ impl Session {
             .lock()
             .map_err(|e| e.to_string())?
             .structure_find(event, names)
+    }
+
+    pub fn annotation_find(
+        &self,
+        event: u32,
+        keys: &[String],
+    ) -> Result<Vec<Option<StructuredNode>>, String> {
+        if keys.is_empty() || keys.len() > 128 {
+            return Err("Invalid event annotation keys".into());
+        }
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .annotation_find(event, keys)
     }
 
     pub fn structure_buffer(

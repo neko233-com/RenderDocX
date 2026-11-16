@@ -200,6 +200,11 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint3 id : 
   context->OMSetRenderTargets(1, &view, nullptr);
   D3D11_VIEWPORT viewport = {0, 0, 16, 16, 0, 1};
   context->RSSetViewports(1, &viewport);
+  const RENDERDOC_AnnotationValue annotation_label = RDAnnotationHelper("First Pass").val;
+  const RENDERDOC_AnnotationValue annotation_count = RDAnnotationHelper(uint32_t(42)).val;
+  if(api->SetCommandAnnotation(device, context, "renderdocx.pass", eRENDERDOC_String, 0, &annotation_label) != 0 ||
+     api->SetCommandAnnotation(device, context, "renderdocx.count", eRENDERDOC_UInt32, 0, &annotation_count) != 0)
+  { std::cerr << "Could not set command annotations"; return 24; }
   context->DrawIndexed(3, 0, 0);
   const float history_vertices[] = {0, -1, -1, 3, -1, -1, 3};
   context->UpdateSubresource(vertex_buffer, 0, nullptr, history_vertices, 0, 0);

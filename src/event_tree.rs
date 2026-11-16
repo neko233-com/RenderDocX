@@ -1,4 +1,4 @@
-use crate::event_filter::{EventContext, Filter, ParameterMatches};
+use crate::event_filter::{AnnotationMatches, EventContext, Filter, ParameterMatches};
 use crate::replay::Action;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +31,7 @@ pub struct EventTree {
     marker_names: Vec<String>,
     filter: Filter,
     parameter_matches: ParameterMatches,
+    annotation_matches: AnnotationMatches,
     filter_error: bool,
     actions: Vec<Action>,
     ranges: Vec<Option<crate::event_ranges::ActionRange>>,
@@ -48,7 +49,10 @@ impl EventTree {
     pub fn reset(&mut self, actions: &[Action]) {
         // Match results are specific to a capture; never reuse them for another.
         self.parameter_matches.clear();
-        if !self.filter.parameter_queries().is_empty() {
+        self.annotation_matches.clear();
+        if !self.filter.parameter_queries().is_empty()
+            || !self.filter.annotation_queries().is_empty()
+        {
             self.filter = Filter::default();
             self.filter_error = false;
         }
@@ -151,20 +155,34 @@ impl EventTree {
     }
 
     pub fn set_filter(&mut self, text: &str) {
-        self.set_filter_with_parameters(text, ParameterMatches::new());
+        self.set_filter_with_data(text, ParameterMatches::new(), AnnotationMatches::new());
     }
 
     /// Apply only complete parameter results, preserving the last valid filter otherwise.
     pub fn set_filter_with_parameters(&mut self, text: &str, matches: ParameterMatches) {
+        self.set_filter_with_data(text, matches, AnnotationMatches::new());
+    }
+
+    pub fn set_filter_with_data(
+        &mut self,
+        text: &str,
+        matches: ParameterMatches,
+        annotations: AnnotationMatches,
+    ) {
         match Filter::parse(text) {
             Ok(filter)
                 if filter
                     .parameter_queries()
                     .iter()
-                    .all(|query| matches.contains_key(query)) =>
+                    .all(|query| matches.contains_key(query))
+                    && filter
+                        .annotation_queries()
+                        .iter()
+                        .all(|query| annotations.contains_key(query)) =>
             {
                 self.filter = filter;
                 self.parameter_matches = matches;
+                self.annotation_matches = annotations;
                 self.filter_error = false;
                 self.rebuild();
             }
@@ -371,6 +389,7 @@ impl EventTree {
                         marker_names: &self.marker_names,
                         duration: self.duration(self.event_ids[index]),
                         parameter_matches: &self.parameter_matches,
+                        annotation_matches: &self.annotation_matches,
                     })
             })
             .collect();
@@ -398,6 +417,39 @@ impl EventTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn annotation_filter_requires_complete_results_and_supports_groups() {
+        let mut a = action(-1);
+        a.event_id = 1;
+        a.name = "draw".into();
+        let mut tree = EventTree::default();
+        tree.reset(&[a]);
+        tree.set_filter("draw");
+        let expression =
+            "+$annot(renderdocx.count >= 42) -$annot(\"group name.key\" contains missing)";
+        let queries = Filter::parse(expression).unwrap().annotation_queries();
+        assert_eq!(queries.len(), 2);
+        tree.set_filter(expression);
+        assert!(tree.filter_error());
+        assert_eq!(tree.visible, vec![0]);
+        let annotations = queries
+            .into_iter()
+            .map(|query| {
+                let ids = if query.key == "renderdocx.count" {
+                    [1].into()
+                } else {
+                    [].into()
+                };
+                (query, ids)
+            })
+            .collect();
+        tree.set_filter_with_data(expression, ParameterMatches::new(), annotations);
+        assert!(!tree.filter_error());
+        assert_eq!(tree.visible, vec![0]);
+        assert!(Filter::parse("$annot(key >=)").is_err());
+        assert!(Filter::parse("$annot(key =~ /(/)").is_err());
+    }
 
     #[test]
     fn parameter_filters_require_complete_capture_scoped_results() {

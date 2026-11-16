@@ -41,7 +41,9 @@ fn apply_event_filter(
         expression,
         || false,
     )?;
-    tree.set_filter_with_parameters(expression, matches);
+    let annotations =
+        renderdocx::event_annotations::resolve(session, &snapshot.actions, expression, || false)?;
+    tree.set_filter_with_data(expression, matches, annotations);
     if tree.filter_error() {
         Err("Invalid or unsupported event filter".into())
     } else {
@@ -119,6 +121,10 @@ fn usage() -> Value {
         .as_array_mut()
         .expect("capabilities commands")
         .push(json!("filter_events"));
+    capabilities["serve_commands"]
+        .as_array_mut()
+        .expect("capabilities commands")
+        .push(json!("event_annotation_find"));
     capabilities["serve_commands"]
         .as_array_mut()
         .expect("capabilities commands")
@@ -961,6 +967,32 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     _ => Err((
                         "invalid_arguments",
                         "callstack requires an event_id and optional boolean resolve".into(),
+                    )),
+                }
+            }
+            "event_annotation_find" => {
+                let event = request
+                    .get("event_id")
+                    .and_then(Value::as_u64)
+                    .and_then(|v| u32::try_from(v).ok());
+                let keys = request
+                    .get("keys")
+                    .and_then(Value::as_array)
+                    .filter(|keys| !keys.is_empty() && keys.len() <= 128)
+                    .and_then(|keys| {
+                        keys.iter()
+                            .map(|key| key.as_str().map(str::to_owned))
+                            .collect::<Option<Vec<_>>>()
+                    });
+                match (&opened, event, keys) {
+                    (None, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some((session, _)), Some(event), Some(keys)) => session
+                        .annotation_find(event, &keys)
+                        .map(|items| json!({"event_id":event,"keys":keys,"values":items}))
+                        .map_err(|error| ("replay_event_annotation_failed", error)),
+                    _ => Err((
+                        "invalid_arguments",
+                        "event_annotation_find requires an event_id and 1–128 string keys".into(),
                     )),
                 }
             }

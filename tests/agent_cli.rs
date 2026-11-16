@@ -594,6 +594,60 @@ fn real_d3d11_mesh_draw_order() {
         .expect("indexed draw")["event_id"]
         .as_u64()
         .unwrap();
+    let annotated = agent.send(r#"{"command":"filter_events","expression":"+$annot(renderdocx.pass contains PASS) +$annot(renderdocx.count >= 42)","show_api":true}"#);
+    assert_eq!(annotated["ok"], true, "{annotated}");
+    let raw_annotations = agent.send(&serde_json::json!({"command":"event_annotation_find","event_id":draw,"keys":["renderdocx.pass","renderdocx.count","renderdocx.missing"]}).to_string());
+    assert_eq!(raw_annotations["ok"], true, "{raw_annotations}");
+    assert_eq!(raw_annotations["data"]["values"][0]["value"], "First Pass");
+    assert_eq!(raw_annotations["data"]["values"][1]["value"], "42");
+    assert!(raw_annotations["data"]["values"][2].is_null());
+    assert!(
+        annotated["data"]["events"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["event_id"] == draw && item["direct_match"] == true),
+        "{annotated}"
+    );
+    for expression in [
+        "$annot(renderdocx.pass == First Pass)",
+        "$annot(renderdocx.pass =~ /Pass/)",
+        "$annot(renderdocx.count)",
+    ] {
+        let result = agent.send(
+            &serde_json::json!({"command":"filter_events","expression":expression,"show_api":true})
+                .to_string(),
+        );
+        assert_eq!(result["ok"], true, "{result}");
+        assert!(
+            result["data"]["events"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["event_id"] == draw && item["direct_match"] == true),
+            "{result}"
+        );
+    }
+    let annotated_find = agent.send(&serde_json::json!({"command":"find_event","query":format!("@{draw}"),"filter":"$annot(renderdocx.count = 42)","show_api":true}).to_string());
+    assert_eq!(
+        annotated_find["data"]["match"]["event_id"], draw,
+        "{annotated_find}"
+    );
+    let absent = agent.send(
+        r#"{"command":"filter_events","expression":"$annot(renderdocx.missing)","show_api":true}"#,
+    );
+    assert_eq!(absent["ok"], true, "{absent}");
+    assert!(
+        !absent["data"]["events"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["direct_match"] == true)
+    );
+    let invalid_annotation = agent.send(
+        r#"{"command":"filter_events","expression":"$annot(renderdocx.count >=)","show_api":true}"#,
+    );
+    assert_eq!(invalid_annotation["error"]["code"], "invalid_filter");
     let filtered = agent.send(&serde_json::json!({"command":"filter_events","expression":format!("$event(EID={draw})"),"show_api":true,"offset":"0","limit":128}).to_string());
     assert_eq!(filtered["ok"], true, "{filtered}");
     assert!(

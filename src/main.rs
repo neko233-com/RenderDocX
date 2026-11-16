@@ -1434,8 +1434,10 @@ impl Workspace {
         use std::sync::atomic::Ordering;
         let revision = self.event_filter_revision.fetch_add(1, Ordering::Relaxed) + 1;
         self.event_tree.set_filter(&expression);
-        let needs_parameters = renderdocx::event_filter::Filter::parse(&expression)
-            .is_ok_and(|filter| !filter.parameter_queries().is_empty());
+        let needs_parameters =
+            renderdocx::event_filter::Filter::parse(&expression).is_ok_and(|filter| {
+                !filter.parameter_queries().is_empty() || !filter.annotation_queries().is_empty()
+            });
         let Some((session, (actions, resources))) = self.session.clone().zip(
             self.snapshot
                 .as_ref()
@@ -1457,14 +1459,21 @@ impl Workspace {
         let language = self.settings.language;
         let task_expression = expression.clone();
         let task = cx.background_executor().spawn(async move {
-            renderdocx::event_parameters::resolve(
+            let parameters = renderdocx::event_parameters::resolve(
                 &session,
                 &actions,
                 &resources,
                 language,
                 &task_expression,
                 || generation.load(Ordering::Relaxed) != revision,
-            )
+            )?;
+            let annotations = renderdocx::event_annotations::resolve(
+                &session,
+                &actions,
+                &task_expression,
+                || generation.load(Ordering::Relaxed) != revision,
+            )?;
+            Ok::<_, String>((parameters, annotations))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -1475,17 +1484,18 @@ impl Workspace {
                     return;
                 }
                 match result {
-                    Ok(matches) => this
-                        .event_tree
-                        .set_filter_with_parameters(&expression, matches),
+                    Ok((matches, annotations)) => {
+                        this.event_tree
+                            .set_filter_with_data(&expression, matches, annotations)
+                    }
                     Err(error) => {
                         this.status = Some(format!(
                             "{}: {error}",
                             this.t(
-                                "Could not evaluate parameter filter",
-                                "无法计算参数筛选",
-                                "パラメーターフィルターを評価できません",
-                                "매개변수 필터를 평가할 수 없습니다"
+                                "Could not evaluate structured event filter",
+                                "无法计算事件结构数据筛选",
+                                "イベント構造データのフィルターを評価できません",
+                                "이벤트 구조 데이터 필터를 평가할 수 없습니다"
                             )
                         ))
                     }

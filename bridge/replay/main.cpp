@@ -333,6 +333,7 @@ void write_section_hex(const bytebuf &bytes)
 void write_snapshot(IReplayController *controller, const ReplayOptions &options, std::set<uint32_t> &event_ids,
                     std::vector<TextureRef> &texture_ids, std::vector<BufferRef> &buffer_ids,
                     std::map<uint32_t, uint32_t> &event_chunks,
+                    std::map<uint32_t, const SDObject *> &event_annotations,
                     std::map<uint32_t, uint32_t> &draw_instances,
                     std::map<uint32_t, uint32_t> &draw_vertices,
                     std::set<uint32_t> &indexed_draws,
@@ -458,6 +459,7 @@ void write_snapshot(IReplayController *controller, const ReplayOptions &options,
       else json_string("", 0);
       std::cout << '}';
       event_ids.insert(event.eventId);
+      event_annotations.emplace(event.eventId, event.annotations);
       if(event.chunkIndex < structured.chunks.size() && structured.chunks[event.chunkIndex])
         event_chunks.emplace(event.eventId, event.chunkIndex);
     }
@@ -1088,11 +1090,12 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
   std::vector<TextureRef> texture_ids;
   std::vector<BufferRef> buffer_ids;
   std::map<uint32_t, uint32_t> event_chunks;
+  std::map<uint32_t, const SDObject *> event_annotations;
   std::map<uint32_t, uint32_t> draw_instances;
   std::map<uint32_t, uint32_t> draw_vertices;
   std::set<uint32_t> indexed_draws;
   std::map<uint32_t, const ActionDescription *> dispatch_actions;
-  write_snapshot(replay.controller, options, event_ids, texture_ids, buffer_ids, event_chunks, draw_instances, draw_vertices, indexed_draws, dispatch_actions);
+  write_snapshot(replay.controller, options, event_ids, texture_ids, buffer_ids, event_chunks, event_annotations, draw_instances, draw_vertices, indexed_draws, dispatch_actions);
   std::map<ResourceId, size_t> resource_indices;
   const auto &resources = replay.controller->GetResources();
   for(size_t i = 0; i < resources.size(); ++i) resource_indices.emplace(resources[i].resourceId, i);
@@ -1794,6 +1797,35 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       json_string(kind.data(), kind.size()); std::cout << ",\"offset\":\"" << offset << "\",\"hex\":\"";
       for(byte value : data) std::cout << hex[value >> 4] << hex[value & 15];
       std::cout << "\"}" << std::endl;
+      continue;
+    }
+    if(command.compare(0, 16, "annotation_find ") == 0)
+    {
+      std::istringstream arguments(command.substr(16));
+      std::string event_text, encoded;
+      uint64_t event = 0;
+      if(!(arguments >> event_text) || !decimal(event_text, event) || event > UINT32_MAX)
+      { error("Invalid event annotation request"); continue; }
+      auto found = event_annotations.find(uint32_t(event));
+      if(found == event_annotations.end()) { error("Unknown event annotation"); continue; }
+      std::vector<rdcstr> keys;
+      bool valid = true;
+      while(arguments >> encoded)
+      {
+        bytebuf bytes;
+        if(!decode_section_hex(encoded, bytes)) { valid = false; break; }
+        keys.push_back(bytes.empty() ? rdcstr() : rdcstr((const char *)bytes.data(), bytes.size()));
+      }
+      if(!valid || keys.empty() || keys.size() > 128) { error("Invalid event annotation keys"); continue; }
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"annotation_find\",\"event_id\":" << event << ",\"matches\":[";
+      for(size_t n = 0; n < keys.size(); ++n)
+      {
+        if(n) std::cout << ',';
+        const SDObject *object = found->second ? found->second->FindChildByKeyPath(keys[n]) : nullptr;
+        if(object) write_structured_node(object, resource_indices, &replacements);
+        else std::cout << "null";
+      }
+      std::cout << "]}" << std::endl;
       continue;
     }
     if(command.compare(0, 15, "structure_find ") == 0)

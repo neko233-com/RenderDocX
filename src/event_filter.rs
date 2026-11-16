@@ -11,6 +11,20 @@ pub struct ParamQuery {
 /// A complete set of matching event IDs for each parameter predicate.
 pub type ParameterMatches = HashMap<ParamQuery, HashSet<u32>>;
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct AnnotationQuery {
+    pub key: String,
+    pub condition: AnnotationCondition,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum AnnotationCondition {
+    Exists,
+    Compare(String, String),
+    Contains(String),
+    Regex(String),
+}
+pub type AnnotationMatches = HashMap<AnnotationQuery, HashSet<u32>>;
+
 #[derive(Clone, Copy)]
 enum Mode {
     Normal,
@@ -48,6 +62,7 @@ enum Expr {
     Regex(pcre2::bytes::Regex),
     Parent(String),
     Param(ParamQuery),
+    Annot(AnnotationQuery),
     Duration {
         dispatch_only: bool,
         op: Op,
@@ -90,6 +105,22 @@ impl Filter {
         collect(&self.0, &mut queries);
         queries
     }
+    pub fn annotation_queries(&self) -> HashSet<AnnotationQuery> {
+        fn collect(terms: &[Term], queries: &mut HashSet<AnnotationQuery>) {
+            for term in terms {
+                match &term.expr {
+                    Expr::Annot(query) => {
+                        queries.insert(query.clone());
+                    }
+                    Expr::Group(group) => collect(group, queries),
+                    _ => {}
+                }
+            }
+        }
+        let mut queries = HashSet::new();
+        collect(&self.0, &mut queries);
+        queries
+    }
 }
 pub struct EventContext<'a> {
     pub name: &'a str,
@@ -101,6 +132,7 @@ pub struct EventContext<'a> {
     pub marker_names: &'a [String],
     pub duration: Option<f64>,
     pub parameter_matches: &'a ParameterMatches,
+    pub annotation_matches: &'a AnnotationMatches,
 }
 fn evaluate(terms: &[Term], context: &EventContext<'_>) -> bool {
     if terms.is_empty() {
@@ -151,6 +183,10 @@ fn evaluate(terms: &[Term], context: &EventContext<'_>) -> bool {
             }
             Expr::Param(query) => context
                 .parameter_matches
+                .get(query)
+                .is_some_and(|events| events.contains(&context.eid)),
+            Expr::Annot(query) => context
+                .annotation_matches
                 .get(query)
                 .is_some_and(|events| events.contains(&context.eid)),
             Expr::Duration {
@@ -387,6 +423,7 @@ impl Parser<'_> {
                                 value: value.to_lowercase(),
                             })
                         }
+                        "annot" => Expr::Annot(parse_annotation(&params)?),
                         "parent" | "childOf" => Expr::Parent(params.trim().to_lowercase()),
                         _ => return Err(()),
                     }
@@ -420,6 +457,69 @@ impl Parser<'_> {
     fn peek(&self) -> Option<char> {
         self.chars.get(self.pos).copied()
     }
+}
+fn parse_annotation(input: &str) -> Result<AnnotationQuery, ()> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err(());
+    }
+    let (key, rest) = if let Some(quoted) = input.strip_prefix('"') {
+        let mut escaped = false;
+        let mut end = None;
+        for (index, c) in quoted.char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                end = Some(index);
+                break;
+            }
+        }
+        let end = end.ok_or(())?;
+        (
+            quoted[..end].replace("\\\"", "\"").replace("\\\\", "\\"),
+            quoted[end + 1..].trim(),
+        )
+    } else {
+        let end = input
+            .find(|c: char| c.is_whitespace() || "<>=~!".contains(c))
+            .unwrap_or(input.len());
+        (input[..end].to_owned(), input[end..].trim())
+    };
+    if key.is_empty() {
+        return Err(());
+    }
+    let condition = if rest.is_empty() {
+        AnnotationCondition::Exists
+    } else if let Some(value) = rest
+        .strip_prefix("contains")
+        .filter(|value| value.starts_with(char::is_whitespace))
+    {
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(());
+        }
+        AnnotationCondition::Contains(value.to_lowercase())
+    } else {
+        let op = ["==", "!=", "<=", ">=", "=~", "=", "<", ">"]
+            .into_iter()
+            .find(|op| rest.starts_with(op))
+            .ok_or(())?;
+        let value = rest[op.len()..].trim();
+        if value.is_empty() {
+            return Err(());
+        }
+        if op == "=~" {
+            parse_regex(value)?;
+            AnnotationCondition::Regex(value.to_owned())
+        } else {
+            AnnotationCondition::Compare(op.to_owned(), value.to_owned())
+        }
+    };
+    Ok(AnnotationQuery { key, condition })
 }
 fn parse_flags(input: &str) -> Result<u32, ()> {
     let pos = input.find(['&', '=']).ok_or(())?;
@@ -465,7 +565,7 @@ fn parse_flags(input: &str) -> Result<u32, ()> {
     }
     if any { Ok(mask) } else { Err(()) }
 }
-fn parse_regex(input: &str) -> Result<pcre2::bytes::Regex, ()> {
+pub(crate) fn parse_regex(input: &str) -> Result<pcre2::bytes::Regex, ()> {
     let input = input.trim();
     let body = input.strip_prefix('/').ok_or(())?;
     let mut escaped = false;
