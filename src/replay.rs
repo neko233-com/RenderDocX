@@ -3248,11 +3248,21 @@ pub mod test_support {
                 disassembly: "fixture disassembly".into(),
                 inputs: vec![],
                 outputs: vec![],
-                constant_blocks: 0,
+                constant_blocks: 1,
                 read_only_resources: 0,
                 read_write_resources: 0,
                 samplers: 0,
-                constant_block_details: Vec::new(),
+                constant_block_details: vec![ReflectedConstantBlock {
+                    name: "Fixture constants".into(),
+                    bind: 0,
+                    space: 0,
+                    array_size: 2,
+                    byte_size: 16,
+                    buffer_backed: true,
+                    inline_data: false,
+                    compile_constants: false,
+                    variables: Vec::new(),
+                }],
                 sampler_details: Vec::new(),
                 read_only_details: Vec::new(),
                 read_write_details: Vec::new(),
@@ -3274,6 +3284,35 @@ pub mod test_support {
                         contents: "included\n".into(),
                     },
                 ],
+            })
+        }
+
+        fn shader_constants(
+            &mut self,
+            event: u32,
+            stage: u32,
+            block: u32,
+            element: u32,
+        ) -> Result<ShaderConstants, String> {
+            if stage != 0 || block != 0 || element >= 2 {
+                return Err("Invalid fixture constants".into());
+            }
+            Ok(ShaderConstants {
+                event_id: event,
+                stage,
+                block,
+                element,
+                byte_offset: "0".into(),
+                byte_size: "16".into(),
+                variables: vec![DebugVariable {
+                    name: "fixture_value".into(),
+                    rows: 1,
+                    columns: 1,
+                    variable_type: 4,
+                    flags: 0,
+                    value_hex: format!("{:02x}000000", element + 42),
+                    members: Vec::new(),
+                }],
             })
         }
     }
