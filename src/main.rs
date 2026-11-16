@@ -17,10 +17,10 @@ use renderdocx::{
         LiveSession, capture_directory, capture_notice, enumerate, parse_target_pid,
     },
     replay::{
-        HistogramRequest, MeshInfo, MeshSelection, Pipeline, Pixel, RESOURCE_USAGE_PAGE_LIMIT,
-        ResourceUsagePage, SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session, ShaderReport, Snapshot,
-        StructurePage, StructuredNode, TextureSelection, TextureStatistics, resource_type_name,
-        resource_usage_name,
+        HistogramRequest, MeshInfo, MeshSelection, PIXEL_HISTORY_PAGE_LIMIT, Pipeline, Pixel,
+        PixelHistoryPage, RESOURCE_USAGE_PAGE_LIMIT, ResourceUsagePage, SHADER_STAGES,
+        STRUCTURE_PAGE_LIMIT, Session, ShaderReport, Snapshot, StructurePage, StructuredNode,
+        TextureSelection, TextureStatistics, resource_type_name, resource_usage_name,
     },
     vertex_input::{INPUT_PAGE_LIMIT, InputPage},
 };
@@ -205,6 +205,8 @@ struct Workspace {
     pixel_x: Entity<InputState>,
     pixel_y: Entity<InputState>,
     pixel: Option<Pixel>,
+    pixel_history: Option<PixelHistoryPage>,
+    history_selected: Option<usize>,
     stats_min: Entity<InputState>,
     stats_max: Entity<InputState>,
     statistics: Option<TextureStatistics>,
@@ -756,6 +758,8 @@ impl Workspace {
                         this.export_pending = false;
                         this.preview = None;
                         this.pixel = None;
+                        this.pixel_history = None;
+                        this.history_selected = None;
                         this.statistics = None;
                         this.status = None;
                     }
@@ -813,6 +817,8 @@ impl Workspace {
         self.replay_pending = true;
         self.preview = None;
         self.pixel = None;
+        self.pixel_history = None;
+        self.history_selected = None;
         self.statistics = None;
         self.buffer_data = None;
         self.shader_data = None;
@@ -1588,6 +1594,8 @@ impl Workspace {
         self.preview = None;
         self.pixel = None;
         self.statistics = None;
+        self.pixel_history = None;
+        self.history_selected = None;
         self.status = None;
         cx.notify();
     }
@@ -1686,6 +1694,136 @@ impl Workspace {
                         )
                     ),
                 });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn read_pixel_history(&mut self, offset: u64, reuse: bool, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            self.status = Some(
+                self.t(
+                    "Wait for the current operation.",
+                    "请等待当前操作完成。",
+                    "現在の処理が完了するまでお待ちください。",
+                    "현재 작업이 끝날 때까지 기다려 주세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let Some(event) = self.pipeline.as_ref().map(|pipeline| pipeline.event_id) else {
+            self.status = Some(
+                self.t(
+                    "Select an event before inspecting pixel history.",
+                    "请先选择事件再查看像素历史。",
+                    "ピクセル履歴を見る前にイベントを選択してください。",
+                    "픽셀 기록을 확인하기 전에 이벤트를 선택하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let coordinates = if reuse {
+            self.pixel_history.as_ref().map(|page| (page.x, page.y))
+        } else {
+            self.pixel_x
+                .read(cx)
+                .value()
+                .parse::<u32>()
+                .ok()
+                .zip(self.pixel_y.read(cx).value().parse::<u32>().ok())
+        };
+        let Some((x, y)) = coordinates else {
+            self.status = Some(
+                self.t(
+                    "Enter nonnegative integer pixel coordinates.",
+                    "请输入非负整数像素坐标。",
+                    "非負の整数ピクセル座標を入力してください。",
+                    "음이 아닌 정수 픽셀 좌표를 입력하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let (Some(session), Some(index)) = (self.session.clone(), self.selected_texture) else {
+            return;
+        };
+        let Some(texture) = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.textures.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        let Ok(texture_index) = u32::try_from(index) else {
+            return;
+        };
+        let selection = self.texture_selection;
+        let revision = self.open_revision;
+        let selection_revision = self.selection_revision;
+        if !reuse {
+            self.pixel_history = None;
+            self.history_selected = None;
+        }
+        self.resource_pending = true;
+        self.status = Some(
+            self.t(
+                "Replaying pixel history; this may take time…",
+                "正在回放像素历史，可能需要一些时间…",
+                "ピクセル履歴をリプレイ中です。時間がかかる場合があります…",
+                "픽셀 기록을 리플레이하는 중입니다. 시간이 걸릴 수 있습니다…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            session.pixel_history(
+                event,
+                texture_index,
+                &texture,
+                selection,
+                x,
+                y,
+                offset,
+                PIXEL_HISTORY_PAGE_LIMIT,
+            )
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision || this.selection_revision != selection_revision {
+                    return;
+                }
+                this.resource_pending = false;
+                if this.selected_texture != Some(index) || this.texture_selection != selection {
+                    this.status = None;
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok(page) => {
+                        this.history_selected = (!page.entries.is_empty()).then_some(0);
+                        this.pixel_history = Some(page);
+                        this.status = None;
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Could not inspect pixel history",
+                                "无法查看像素历史",
+                                "ピクセル履歴を表示できません",
+                                "픽셀 기록을 확인할 수 없습니다"
+                            )
+                        ));
+                    }
+                }
                 cx.notify();
             });
         })
@@ -1884,6 +2022,8 @@ impl Workspace {
         let revision = self.open_revision;
         let selection_revision = self.selection_revision;
         self.pixel = None;
+        self.pixel_history = None;
+        self.history_selected = None;
         self.resource_pending = true;
         self.status = Some(
             self.t(
@@ -2711,6 +2851,8 @@ impl Workspace {
                                         this.texture_selection = TextureSelection::default();
                                         this.preview = None;
                                         this.pixel = None;
+                                        this.pixel_history = None;
+                                        this.history_selected = None;
                                         this.statistics = None;
                                         cx.notify();
                                     })),
@@ -3398,6 +3540,8 @@ impl Workspace {
                 cx,
             );
             let pixel = self.pixel.clone();
+            let history = self.pixel_history.clone();
+            let history_selected = self.history_selected;
             let pixel_title = self.t(
                 "Pixel coordinates (top-left)",
                 "像素坐标（左上角为原点）",
@@ -3405,6 +3549,58 @@ impl Workspace {
                 "픽셀 좌표 (왼쪽 위 원점)",
             );
             let pick = self.t("Pick pixel", "读取像素", "ピクセルを取得", "픽셀 읽기");
+            let history_label = self.t("Pixel history", "像素历史", "ピクセル履歴", "픽셀 기록");
+            let history_empty = self.t(
+                "No modifications were returned through this event.",
+                "截至当前事件未返回修改记录。",
+                "このイベントまでの変更履歴はありません。",
+                "이 이벤트까지 반환된 수정 기록이 없습니다.",
+            );
+            let history_note = self.t(
+                "An empty result can mean the backend could not inspect this pixel; RenderDoc excludes CPU writes and resource discards.",
+                "空结果也可能表示后端无法检查此像素；RenderDoc 不包含 CPU 写入和资源丢弃。",
+                "空の結果は検査できなかった場合もあります。RenderDoc は CPU 書き込みとリソース破棄を含めません。",
+                "빈 결과는 픽셀을 검사할 수 없다는 뜻일 수도 있습니다. RenderDoc은 CPU 쓰기와 리소스 폐기를 제외합니다.",
+            );
+            let history_sample_note = self.t("For multisampling, choose a sample explicitly; backend default handling varies.", "多重采样请明确选择样本；后端默认处理可能不同。", "マルチサンプルの場合はサンプルを明示してください。既定の処理はバックエンドにより異なります。", "멀티샘플링에서는 샘플을 명시적으로 선택하세요. 기본 처리는 백엔드마다 다를 수 있습니다.");
+            let backend_default = self.t(
+                "backend default",
+                "后端默认",
+                "バックエンド既定",
+                "백엔드 기본값",
+            );
+            let fragment_label = self.t("Fragment", "片元", "フラグメント", "프래그먼트");
+            let primitive_label = self.t("Primitive", "图元", "プリミティブ", "프리미티브");
+            let passed_label = self.t("Passed", "通过", "通過", "통과");
+            let failed_label = self.t("Failed", "未通过", "失敗", "실패");
+            let before_label = self.t("Before", "修改前", "変更前", "변경 전");
+            let shader_output_label = self.t(
+                "Shader output",
+                "着色器输出",
+                "シェーダー出力",
+                "셰이더 출력",
+            );
+            let after_label = self.t("After", "修改后", "変更後", "변경 후");
+            let jump_label = self.t(
+                "Go to event",
+                "跳转到事件",
+                "イベントへ移動",
+                "이벤트로 이동",
+            );
+            let unavailable_history = self.t("Unavailable", "不可用", "利用不可", "사용할 수 없음");
+            let direct_write_label = self.t(
+                "Direct shader write",
+                "着色器直接写入",
+                "シェーダー直接書き込み",
+                "셰이더 직접 쓰기",
+            );
+            let unbound_shader_label = self.t(
+                "Pixel shader unbound",
+                "像素着色器未绑定",
+                "ピクセルシェーダー未バインド",
+                "픽셀 셰이더 바인딩 안 됨",
+            );
+            let stencil_label = self.t("Stencil", "模板", "ステンシル", "스텐실");
             let float_label = self.t(
                 "Float interpretation",
                 "浮点解释",
@@ -3547,7 +3743,8 @@ impl Workspace {
                                 false,
                                 |this, cx| this.pick_texture_pixel(cx),
                                 cx,
-                            )),
+                            ))
+                            .child(button("pixel-history", history_label, false, |this, cx| this.read_pixel_history(0, false, cx), cx)),
                     )
                     .when_some(pixel, |view, pixel| {
                         let bits = pixel
@@ -3565,6 +3762,64 @@ impl Workspace {
                         .child(format!("{float_label}: {}", pixel.float_values.join(", ")))
                         .child(format!("{uint_label}: {:?}", pixel.uint_values))
                         .child(format!("{int_label}: {:?}", pixel.int_values))
+                    })
+                    .when_some(history, |view, page| {
+                        let history_sample = if page.sample == u32::MAX { backend_default.to_owned() } else { page.sample.to_string() };
+                        let mut view = view.child(div().id("pixel-history-result").test_support().text_color(rgb(0x82aaff))
+                            .child(format!("{history_label} · {event_label} {} · ({}, {}) · {samples_label}: {history_sample} · {} / {}", page.event_id, page.x, page.y, page.offset, page.total)))
+                            .child(div().text_sm().text_color(rgb(0x91a7c0)).child(history_note));
+                        if page.sample == u32::MAX { view = view.child(div().text_sm().text_color(rgb(0x91a7c0)).child(history_sample_note)); }
+                        if page.total == "0" { view = view.child(history_empty); }
+                        else {
+                            view = view.child(div().flex().gap_2()
+                                .child(button("history-previous", previous_label, false, |this, cx| {
+                                    if let Some(page) = &this.pixel_history { if let Ok(offset) = page.offset.parse::<u64>() { if offset > 0 { this.read_pixel_history(offset.saturating_sub(u64::from(PIXEL_HISTORY_PAGE_LIMIT)), true, cx); } } }
+                                }, cx))
+                                .child(button("history-next", next_label, false, |this, cx| {
+                                    if let Some(page) = &this.pixel_history {
+                                        if let (Ok(offset), Ok(total)) = (page.offset.parse::<u64>(), page.total.parse::<u64>()) {
+                                            if let Some(next) = offset.checked_add(page.entries.len() as u64) { if next < total { this.read_pixel_history(next, true, cx); } }
+                                        }
+                                    }
+                                }, cx)));
+                            for (row, entry) in page.entries.iter().enumerate() {
+                                view = view.child(div().id(("pixel-history-row", row)).test_support().cursor_pointer().px_2().py_1()
+                                    .bg(rgb(if history_selected == Some(row) { 0x304c7c } else { 0x192332 }))
+                                    .child(format!("{event_label} {} · {fragment_label} {} · {}", entry.event_id, entry.fragment, if entry.passed { passed_label } else { failed_label }))
+                                    .on_click(cx.listener(move |this, _, _, cx| { this.history_selected = Some(row); cx.notify(); })));
+                            }
+                            if let Some(entry) = history_selected.and_then(|index| page.entries.get(index)) {
+                                let mut failures = Vec::new();
+                                let tests = &entry.tests;
+                                for (failed, label) in [
+                                    (tests.sample_masked, self.t("Sample mask", "采样掩码", "サンプルマスク", "샘플 마스크")),
+                                    (tests.backface_culled, self.t("Backface culling", "背面剔除", "背面カリング", "후면 컬링")),
+                                    (tests.depth_clipped, self.t("Depth clip", "深度裁剪", "深度クリップ", "깊이 클립")),
+                                    (tests.depth_bounds_failed, self.t("Depth bounds", "深度范围", "深度範囲", "깊이 범위")),
+                                    (tests.view_clipped, self.t("Viewport clip", "视口裁剪", "ビューポートクリップ", "뷰포트 클립")),
+                                    (tests.scissor_clipped, self.t("Scissor clip", "裁剪矩形", "シザークリップ", "시저 클립")),
+                                    (tests.shader_discarded, self.t("Shader discard", "着色器丢弃", "シェーダー破棄", "셰이더 폐기")),
+                                    (tests.depth_test_failed, self.t("Depth test", "深度测试", "深度テスト", "깊이 테스트")),
+                                    (tests.stencil_test_failed, self.t("Stencil test", "模板测试", "ステンシルテスト", "스텐실 테스트")),
+                                    (tests.predication_skipped, self.t("Predication", "谓词跳过", "プレディケーション", "조건부 렌더링")),
+                                ] { if failed { failures.push(label); } }
+                                let event = entry.event_id;
+                                let primitive = if entry.primitive == u32::MAX { unavailable_history.to_owned() } else { entry.primitive.to_string() };
+                                view = view.child(div().id("pixel-history-detail").test_support().child(format!("{event_label} {event} · {primitive_label} {primitive} · {}", if failures.is_empty() { passed_label.to_owned() } else { failures.join(", ") })))
+                                    .child(div().id("pixel-history-jump").test_support().text_color(rgb(0x82aaff)).cursor_pointer().child(jump_label)
+                                        .on_click(cx.listener(move |this, _, window, cx| this.jump_to_usage(event, window, cx))));
+                                if entry.direct_shader_write { view = view.child(direct_write_label); }
+                                if entry.unbound_pixel_shader { view = view.child(unbound_shader_label); }
+                                for (label, value) in [(before_label, &entry.pre), (shader_output_label, &entry.shader_output), (after_label, &entry.post)] {
+                                    if let Some(value) = value {
+                                        let color = value.color.as_ref().map(|color| color.float_values.join(", ")).unwrap_or_default();
+                                        view = view.child(format!("{label} · {float_label}: {color} · {depth_label}: {} · {stencil_label}: {}", value.depth.as_deref().unwrap_or("—"), value.stencil))
+                                            .child(format!("{uint_label}: {:?} · {int_label}: {:?}", value.color_bits, value.color_bits.map(|bits| bits as i32)));
+                                    } else { view = view.child(format!("{label}: {unavailable_history}")); }
+                                }
+                            }
+                        }
+                        view
                     })
                     .child(
                         div()
@@ -3932,6 +4187,8 @@ impl Workspace {
                             this.usage_page = None;
                             this.preview = None;
                             this.pixel = None;
+                            this.pixel_history = None;
+                            this.history_selected = None;
                             this.statistics = None;
                             this.status = None;
                             cx.notify();
@@ -5206,6 +5463,8 @@ fn main() {
                         pixel_x,
                         pixel_y,
                         pixel: None,
+                        pixel_history: None,
+                        history_selected: None,
                         stats_min,
                         stats_max,
                         statistics: None,
@@ -5338,6 +5597,8 @@ mod ui_tests {
                         pixel_x,
                         pixel_y,
                         pixel: None,
+                        pixel_history: None,
+                        history_selected: None,
                         stats_min,
                         stats_max,
                         statistics: None,
@@ -5648,6 +5909,8 @@ mod ui_tests {
                         pixel_x,
                         pixel_y,
                         pixel: None,
+                        pixel_history: None,
+                        history_selected: None,
                         stats_min,
                         stats_max,
                         statistics: None,
@@ -5777,9 +6040,39 @@ mod ui_tests {
             assert_eq!(pixel.float_values, ["0.25", "0.5", "0.75", "1"]);
         });
         cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("pixel-history", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let history = view.read(cx).pixel_history.as_ref().unwrap();
+            assert_eq!((history.event_id, history.x, history.y), (42, 3, 4));
+            assert_eq!(history.entries.len(), 2);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
             window.scroll(
                 "capture-details-scroll",
-                ScrollDelta::Pixels(point(px(0.), px(-700.))),
+                ScrollDelta::Pixels(point(px(0.), px(-500.))),
+                cx,
+            );
+            window.click(("pixel-history-row", 1usize), cx);
+        })
+        .unwrap();
+        cx.update(|cx| {
+            let view = view.read(cx);
+            assert_eq!(view.history_selected, Some(1));
+            assert!(
+                view.pixel_history.as_ref().unwrap().entries[1]
+                    .tests
+                    .scissor_clipped
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(-2400.))),
                 cx,
             );
             window.click("histogram-analyze", cx);
@@ -5820,6 +6113,7 @@ mod ui_tests {
         cx.update(|cx| {
             assert!(view.read(cx).pixel.is_none());
             assert!(view.read(cx).statistics.is_none());
+            assert!(view.read(cx).pixel_history.is_none());
         });
         assert_eq!(
             *selections.lock().unwrap(),
@@ -6250,6 +6544,22 @@ mod ui_tests {
                     .find(|(_, action)| action.name.contains("DrawIndexed"))
                     .map(|(index, action)| (index, action.event_id))
                     .expect("captured indexed draw");
+                let (history_draw_index, history_draw_event) = real_snapshot
+                    .actions
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, action)| action.name.contains("DrawIndexed"))
+                    .nth(1)
+                    .map(|(index, action)| (index, action.event_id))
+                    .expect("history draw");
+                let (scissor_draw_index, scissor_draw_event) = real_snapshot
+                    .actions
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, action)| action.name.contains("DrawIndexed"))
+                    .nth(2)
+                    .map(|(index, action)| (index, action.event_id))
+                    .expect("scissor draw");
                 let (action_index, api_index, event_id) = real_snapshot
                     .actions
                     .iter()
@@ -6655,6 +6965,140 @@ mod ui_tests {
                 cx.update_window(handle.into(), |_, window, cx| {
                     window.render_frame(cx);
                     assert!(window.find(("mesh-row", 0usize)).visible());
+                })
+                .unwrap();
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.click("events-tab", cx);
+                    window.click("event-filter", cx);
+                    window.press("ctrl-a", cx);
+                    window.input("DrawIndexed", cx);
+                })
+                .unwrap();
+                cx.run_until_parked();
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    window.click(scissor_draw_index, cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx)
+                            .pipeline
+                            .as_ref()
+                            .is_some_and(|state| state.event_id == scissor_draw_event)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "scissored draw did not replay"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.click("textures-tab", cx);
+                    window.click(SharedString::from(format!("texture-{color_index}")), cx);
+                    window.scroll(
+                        "capture-details-scroll",
+                        ScrollDelta::Pixels(point(px(0.), px(2000.))),
+                        cx,
+                    );
+                    window.scroll(
+                        "capture-details-scroll",
+                        ScrollDelta::Pixels(point(px(0.), px(-550.))),
+                        cx,
+                    );
+                    window.click("pixel-history", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                let (failed_row, passed_row) = loop {
+                    cx.run_until_parked();
+                    if let Some(rows) = cx.update(|cx| {
+                        view.read(cx).pixel_history.as_ref().and_then(|page| {
+                            Some((
+                                page.entries.iter().position(|entry| {
+                                    entry.event_id == scissor_draw_event
+                                        && entry.tests.scissor_clipped
+                                })?,
+                                page.entries.iter().position(|entry| {
+                                    entry.event_id == history_draw_event && entry.passed
+                                })?,
+                            ))
+                        })
+                    }) {
+                        break rows;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real pixel history did not load: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                };
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    window.scroll(
+                        "capture-details-scroll",
+                        ScrollDelta::Pixels(point(px(0.), px(-500.))),
+                        cx,
+                    );
+                    window.click(("pixel-history-row", failed_row), cx);
+                })
+                .unwrap();
+                cx.update(|cx| {
+                    assert!(
+                        view.read(cx).pixel_history.as_ref().unwrap().entries
+                            [view.read(cx).history_selected.unwrap()]
+                        .tests
+                        .scissor_clipped
+                    )
+                });
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    window.click(("pixel-history-row", passed_row), cx);
+                    for _ in 0..20 {
+                        let target = window.find("pixel-history-jump");
+                        if target.visible() {
+                            break;
+                        }
+                        let viewport = window.find("capture-details-scroll").bounds();
+                        let delta = if target.bounds().origin.y < viewport.origin.y {
+                            100.0
+                        } else {
+                            -100.0
+                        };
+                        window.scroll(
+                            "capture-details-scroll",
+                            ScrollDelta::Pixels(point(px(0.), px(delta))),
+                            cx,
+                        );
+                    }
+                    window.click("pixel-history-jump", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx)
+                            .pipeline
+                            .as_ref()
+                            .is_some_and(|state| state.event_id == history_draw_event)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "pixel history navigation did not replay event"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    assert!(window.find(history_draw_index).visible());
                 })
                 .unwrap();
             }

@@ -64,6 +64,10 @@ int wmain(int argc, wchar_t **argv)
   PROC(void (APIENTRY *)(GLuint, GLfloat, GLfloat, GLfloat, GLfloat), glVertexAttrib4f);
   PROC(void (APIENTRY *)(GLuint, GLint, GLint, GLint, GLint), glVertexAttribI4i);
   PROC(void (APIENTRY *)(GLuint, GLuint, GLuint, GLuint, GLuint), glVertexAttribI4ui);
+  PROC(void (APIENTRY *)(GLsizei, GLuint *), glGenFramebuffers);
+  PROC(void (APIENTRY *)(GLenum, GLuint), glBindFramebuffer);
+  PROC(void (APIENTRY *)(GLenum, GLenum, GLenum, GLuint, GLint), glFramebufferTexture2D);
+  PROC(GLenum (APIENTRY *)(GLenum), glCheckFramebufferStatus);
 #undef PROC
   const char *vs = "#version 130\nin vec2 position; in vec4 tint; in ivec2 flags; in uvec2 counters; out vec4 color; void main(){ gl_Position=vec4(position,0,1); color=tint+vec4(float(flags.x+flags.y)*0.001,float(counters.x+counters.y)*0.001,0,0); }";
   const char *fs = "#version 130\nin vec4 color; uniform sampler2D tex; out vec4 result; void main(){ result=color+texture(tex,vec2(0.25,0.25))*0.001; }";
@@ -87,8 +91,18 @@ int wmain(int argc, wchar_t **argv)
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  GLuint target = 0, framebuffer = 0;
+  glGenTextures(1, &target); glBindTexture(GL_TEXTURE_2D, target);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 16, 16, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  glGenFramebuffers(1, &framebuffer); glBindFramebuffer(0x8D40, framebuffer);
+  glFramebufferTexture2D(0x8D40, 0x8CE0, GL_TEXTURE_2D, target, 0);
+  if(glCheckFramebufferStatus(0x8D40) != 0x8CD5) { std::cerr << "Framebuffer incomplete"; return 19; }
+  glBindTexture(GL_TEXTURE_2D, texture); glViewport(0, 0, 16, 16);
   api->StartFrameCapture(nullptr, nullptr);
   if(!api->IsFrameCapturing()) { std::cerr << "OpenGL capture did not start"; return 15; }
+  glBindFramebuffer(0x8D40, framebuffer);
+  glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
   glDrawArrays(GL_TRIANGLES, 0, 3); glFinish();
   if(!api->EndFrameCapture(nullptr, nullptr)) { std::cerr << "OpenGL capture did not complete"; return 16; }
   uint32_t length = 0;

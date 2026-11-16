@@ -401,6 +401,61 @@ pub struct TextureStatistics {
     pub histogram: Vec<u32>,
 }
 
+pub const PIXEL_HISTORY_PAGE_LIMIT: u32 = 128;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HistoryValue {
+    pub color_bits: [u32; 4],
+    pub depth_bits: u32,
+    pub stencil: i32,
+    #[serde(default)]
+    pub color: Option<PixelComponents>,
+    #[serde(default)]
+    pub depth: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct FragmentTests {
+    pub sample_masked: bool,
+    pub backface_culled: bool,
+    pub depth_clipped: bool,
+    pub depth_bounds_failed: bool,
+    pub view_clipped: bool,
+    pub scissor_clipped: bool,
+    pub shader_discarded: bool,
+    pub depth_test_failed: bool,
+    pub stencil_test_failed: bool,
+    pub predication_skipped: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PixelModification {
+    pub event_id: u32,
+    pub fragment: u32,
+    pub primitive: u32,
+    pub direct_shader_write: bool,
+    pub unbound_pixel_shader: bool,
+    pub passed: bool,
+    pub pre: Option<HistoryValue>,
+    pub shader_output: Option<HistoryValue>,
+    pub post: Option<HistoryValue>,
+    pub tests: FragmentTests,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PixelHistoryPage {
+    pub event_id: u32,
+    pub index: u32,
+    pub mip: u32,
+    pub slice: u32,
+    pub sample: u32,
+    pub x: u32,
+    pub y: u32,
+    pub offset: String,
+    pub total: String,
+    pub entries: Vec<PixelModification>,
+}
+
 impl TextureSelection {
     pub fn validate(&self, texture: &Texture) -> Result<(), String> {
         let slices = if texture.dimension == 3 {
@@ -566,6 +621,7 @@ enum Reply {
         max_bits: [u32; 4],
         histogram: Vec<u32>,
     },
+    PixelHistory(PixelHistoryPage),
     StructuredBuffer {
         event_id: u32,
         path: Vec<String>,
@@ -797,6 +853,19 @@ trait Transport: Send {
     ) -> Result<TextureStatistics, String> {
         Err("Texture statistics are not supported by this transport".into())
     }
+    fn pixel_history(
+        &mut self,
+        _event: u32,
+        _index: u32,
+        _selection: TextureSelection,
+        _sample: u32,
+        _x: u32,
+        _y: u32,
+        _offset: u64,
+        _limit: u32,
+    ) -> Result<PixelHistoryPage, String> {
+        Err("Pixel history is not supported by this transport".into())
+    }
     fn shader(&mut self, _stage: u32, _target: Option<u32>) -> Result<ShaderReport, String> {
         Err("Shader inspection is not supported by this transport".into())
     }
@@ -837,6 +906,64 @@ trait Transport: Send {
 }
 
 impl Transport for Process {
+    fn pixel_history(
+        &mut self,
+        event: u32,
+        index: u32,
+        selection: TextureSelection,
+        sample: u32,
+        x: u32,
+        y: u32,
+        offset: u64,
+        limit: u32,
+    ) -> Result<PixelHistoryPage, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        let requested = selection
+            .sample
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "resolve".into());
+        writeln!(
+            input,
+            "history {index} {} {} {requested} {x} {y} {offset} {limit}",
+            selection.mip, selection.slice
+        )
+        .and_then(|_| input.flush())
+        .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::PixelHistory(mut page) => {
+                let total = page
+                    .total
+                    .parse::<u64>()
+                    .map_err(|_| "Invalid pixel history total")?;
+                if page.event_id != event
+                    || page.index != index
+                    || page.mip != selection.mip
+                    || page.slice != selection.slice
+                    || page.sample != sample
+                    || page.x != x
+                    || page.y != y
+                    || page.offset != offset.to_string()
+                    || offset > total
+                    || page.entries.len() as u64 != (total - offset).min(u64::from(limit))
+                    || page.entries.iter().any(|entry| entry.event_id > event)
+                {
+                    return Err("Invalid pixel history response".into());
+                }
+                for entry in &mut page.entries {
+                    for value in [&mut entry.pre, &mut entry.shader_output, &mut entry.post]
+                        .into_iter()
+                        .flatten()
+                    {
+                        value.color = Some(value.color_bits.into());
+                        value.depth = Some(f32::from_bits(value.depth_bits).to_string());
+                    }
+                }
+                Ok(page)
+            }
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected pixel history response".into()),
+        }
+    }
     fn texture_statistics(
         &mut self,
         event: u32,
@@ -1404,6 +1531,36 @@ impl Session {
         Ok(result)
     }
 
+    pub fn pixel_history(
+        &self,
+        event: u32,
+        index: u32,
+        texture: &Texture,
+        selection: TextureSelection,
+        x: u32,
+        y: u32,
+        offset: u64,
+        limit: u32,
+    ) -> Result<PixelHistoryPage, String> {
+        selection.validate_pixel(texture, x, y)?;
+        if limit == 0 || limit > PIXEL_HISTORY_PAGE_LIMIT {
+            return Err("Invalid pixel history page limit".into());
+        }
+        let sample = selection
+            .sample
+            .unwrap_or(if texture.samples > 1 { u32::MAX } else { 0 });
+        let revision = self.revision.load(Ordering::SeqCst);
+        let mut process = self.process.lock().map_err(|e| e.to_string())?;
+        if self.revision.load(Ordering::SeqCst) != revision {
+            return Err("Replay selection changed".into());
+        }
+        let result = process.pixel_history(event, index, selection, sample, x, y, offset, limit)?;
+        if self.revision.load(Ordering::SeqCst) != revision {
+            return Err("Replay selection changed".into());
+        }
+        Ok(result)
+    }
+
     pub fn vertex_input_page(
         &self,
         action: &Action,
@@ -1570,6 +1727,79 @@ pub mod test_support {
     use super::*;
     struct RecordingTransport(Arc<Mutex<Vec<u32>>>, Arc<Mutex<Vec<TextureSelection>>>);
     impl Transport for RecordingTransport {
+        fn pixel_history(
+            &mut self,
+            event: u32,
+            index: u32,
+            selection: TextureSelection,
+            sample: u32,
+            x: u32,
+            y: u32,
+            offset: u64,
+            limit: u32,
+        ) -> Result<PixelHistoryPage, String> {
+            if offset > 2 {
+                return Err("Invalid history offset".into());
+            }
+            let bits = [
+                0.25_f32.to_bits(),
+                0.5_f32.to_bits(),
+                0.75_f32.to_bits(),
+                1.0_f32.to_bits(),
+            ];
+            let value = HistoryValue {
+                color_bits: bits,
+                depth_bits: (-1.0_f32).to_bits(),
+                stencil: -1,
+                color: Some(bits.into()),
+                depth: Some("-1".into()),
+            };
+            let all = [
+                PixelModification {
+                    event_id: 41,
+                    fragment: 0,
+                    primitive: 0,
+                    direct_shader_write: false,
+                    unbound_pixel_shader: false,
+                    passed: true,
+                    pre: Some(value.clone()),
+                    shader_output: None,
+                    post: Some(value.clone()),
+                    tests: FragmentTests::default(),
+                },
+                PixelModification {
+                    event_id: 42,
+                    fragment: 0,
+                    primitive: 1,
+                    direct_shader_write: false,
+                    unbound_pixel_shader: false,
+                    passed: false,
+                    pre: Some(value.clone()),
+                    shader_output: Some(value.clone()),
+                    post: Some(value),
+                    tests: FragmentTests {
+                        scissor_clipped: true,
+                        ..FragmentTests::default()
+                    },
+                },
+            ];
+            Ok(PixelHistoryPage {
+                event_id: event,
+                index,
+                mip: selection.mip,
+                slice: selection.slice,
+                sample,
+                x,
+                y,
+                offset: offset.to_string(),
+                total: "2".into(),
+                entries: all
+                    .into_iter()
+                    .skip(offset as usize)
+                    .take(limit as usize)
+                    .collect(),
+            })
+        }
         fn texture_statistics(
             &mut self,
             event: u32,

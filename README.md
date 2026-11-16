@@ -10,6 +10,8 @@ Select an action and open **API calls** to inspect its associated API events, or
 
 The texture details view can pick a pixel at explicit top-left coordinates for the selected mip, slice and sample. It shows RenderDoc's returned component bits and their float, signed and unsigned interpretations; these are not necessarily the texture's original storage bytes.
 
+Pixel history lists modifications through the selected event, including fragment test failures and before, shader-output and after values. Select an entry to inspect it or replay its event. History can require substantial GPU replay work, and an empty result can also indicate that the upstream backend could not inspect the pixel.
+
 The same view can calculate RenderDoc's per-channel minimum and maximum and display a histogram for a chosen numeric range and channel. RenderDoc's public minimum/maximum call does not report a separate success status, so its returned values cannot by themselves prove the operation succeeded.
 
 **Resources** lists captured resources and their initialization chunk indices, parent and derived relationships, and paged static usage. Filter by name, type or session-scoped `#index`, and select a recorded usage to replay its event. Some resource types do not have usage tracking in RenderDoc; that state is shown separately from an empty tracked list.

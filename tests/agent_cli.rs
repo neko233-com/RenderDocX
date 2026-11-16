@@ -191,6 +191,29 @@ fn real_opengl_vertex_inputs_include_generic_and_normalized_values() {
     assert_eq!(histogram.len(), 256);
     assert_eq!(histogram[0], 2);
     assert_eq!(histogram[255], 2);
+    let target = opened["data"]["capture"]["textures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|texture| texture["width"] == 16 && texture["height"] == 16)
+        .expect("OpenGL render target");
+    let history = agent.send(
+        &serde_json::json!({"command":"pixel_history","index":target,"x":12,"y":8}).to_string(),
+    );
+    assert_eq!(history["ok"], true, "{history}");
+    let fragment = history["data"]["history"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["event_id"] == draw && entry["passed"] == true)
+        .unwrap_or_else(|| panic!("OpenGL draw fragment: {history}"));
+    let after = agent
+        .send(&serde_json::json!({"command":"pick_pixel","index":target,"x":12,"y":8}).to_string());
+    assert_eq!(after["ok"], true, "{after}");
+    assert_eq!(
+        after["data"]["pixel"]["bits"],
+        fragment["post"]["color"]["bits"]
+    );
     agent.quit();
 }
 
@@ -213,6 +236,14 @@ fn capabilities_advertises_versioned_machine_readable_contract() {
             .any(|name| name == "texture_statistics")
     );
     assert_eq!(value["resource_usage_page_limit"], 128);
+    assert_eq!(value["pixel_history_page_limit"], 128);
+    assert!(
+        value["serve_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|name| name == "pixel_history")
+    );
     assert!(
         value["serve_commands"]
             .as_array()
@@ -273,6 +304,10 @@ fn agent_jsonl_session_has_correlated_errors_and_clean_shutdown() {
     assert_eq!(reply["schema"], "renderdocx.agent.v1");
     assert_eq!(reply["id"], 17);
     assert_eq!(reply["error"]["code"], "no_capture");
+    assert_eq!(
+        agent.send(r#"{"command":"pixel_history","index":0,"x":0,"y":0}"#)["error"]["code"],
+        "no_capture"
+    );
     assert_eq!(
         agent.send(r#"{"command":"texture_statistics","index":0}"#)["error"]["code"],
         "no_capture"
@@ -628,6 +663,32 @@ fn real_d3d11_capture_is_inspected_and_selected() {
                 result["capture"]["actions"]
             )
         })["event_id"]
+        .as_u64()
+        .unwrap();
+    let history_draw_event = result["capture"]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|action| {
+            action["name"]
+                .as_str()
+                .is_some_and(|name| name.contains("DrawIndexed"))
+        })
+        .nth(1)
+        .expect("history draw")["event_id"]
+        .as_u64()
+        .unwrap();
+    let scissor_draw_event = result["capture"]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|action| {
+            action["name"]
+                .as_str()
+                .is_some_and(|name| name.contains("DrawIndexed"))
+        })
+        .nth(2)
+        .expect("scissored draw")["event_id"]
         .as_u64()
         .unwrap();
     let api_event = result["capture"]["actions"]
@@ -1328,6 +1389,119 @@ fn real_d3d11_capture_is_inspected_and_selected() {
             .iter()
             .any(|output| output["bound"] == true),
         "{pipeline}"
+    );
+    let selected_history = agent
+        .send(&serde_json::json!({"command":"select","event_id":history_draw_event}).to_string());
+    assert_eq!(selected_history["ok"], true, "{selected_history}");
+    assert_eq!(
+        agent.send(r#"{"command":"mesh","stage":"vs_out"}"#)["ok"],
+        true
+    );
+    let request = serde_json::json!({"command":"pixel_history","index":texture_index,"x":8,"y":8});
+    let history = agent.send(&request.to_string());
+    assert_eq!(history["ok"], true, "{history}");
+    assert_eq!(
+        agent.send(r#"{"command":"mesh_read","kind":"vertex","offset":"0","length":16}"#)["error"]
+            ["code"],
+        "no_mesh"
+    );
+    let entries = history["data"]["history"]["entries"].as_array().unwrap();
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["event_id"].as_u64().unwrap().to_string() == event),
+        "{history}"
+    );
+    let draw = entries
+        .iter()
+        .find(|entry| entry["event_id"] == history_draw_event && entry["passed"] == true)
+        .expect("history draw fragment");
+    let pre = &draw["pre"]["color"]["float_values"];
+    let post = &draw["post"]["color"]["float_values"];
+    for (values, expected) in [
+        (pre, [0.25, 0.5, 0.75, 1.0]),
+        (post, [0.75, 0.25, 0.5, 1.0]),
+    ] {
+        for (value, expected) in values.as_array().unwrap().iter().zip(expected) {
+            assert!(
+                (value.as_str().unwrap().parse::<f32>().unwrap() - expected).abs() <= 1.0 / 255.0,
+                "{draw}"
+            );
+        }
+    }
+    let first = agent.send(
+        &serde_json::json!({"command":"pixel_history","index":texture_index,"x":8,"y":8,"limit":1})
+            .to_string(),
+    );
+    assert_eq!(
+        first["data"]["history"]["entries"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let total = history["data"]["history"]["total"]
+        .as_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    if total > 1 {
+        let next = agent.send(&serde_json::json!({"command":"pixel_history","index":texture_index,"x":8,"y":8,"offset":"1","limit":1}).to_string());
+        assert_eq!(next["ok"], true, "{next}");
+        assert_eq!(
+            next["data"]["history"]["entries"][0],
+            history["data"]["history"]["entries"][1]
+        );
+    }
+    let end = agent.send(&serde_json::json!({"command":"pixel_history","index":texture_index,"x":8,"y":8,"offset":total.to_string()}).to_string());
+    assert!(
+        end["data"]["history"]["entries"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let past_end = agent.send(&serde_json::json!({"command":"pixel_history","index":texture_index,"x":8,"y":8,"offset":(total + 1).to_string()}).to_string());
+    assert_eq!(past_end["error"]["code"], "replay_pixel_history_failed");
+    let invalid_limit = agent.send(&serde_json::json!({"command":"pixel_history","index":texture_index,"x":8,"y":8,"limit":129}).to_string());
+    assert_eq!(invalid_limit["error"]["code"], "invalid_arguments");
+    let current = agent.send(r#"{"command":"pipeline"}"#);
+    assert_eq!(current["data"]["pipeline"]["event_id"], history_draw_event);
+    let picked_after = agent.send(
+        &serde_json::json!({"command":"pick_pixel","index":texture_index,"x":8,"y":8}).to_string(),
+    );
+    assert_eq!(
+        picked_after["data"]["pixel"]["bits"],
+        draw["post"]["color"]["bits"]
+    );
+    assert_eq!(
+        agent.send(&serde_json::json!({"command":"select","event_id":draw_event}).to_string())["ok"],
+        true
+    );
+    let earlier = agent.send(&request.to_string());
+    assert!(
+        earlier["data"]["history"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["event_id"].as_u64().unwrap() <= draw_event)
+    );
+    assert_eq!(
+        agent.send(
+            &serde_json::json!({"command":"select","event_id":scissor_draw_event}).to_string()
+        )["ok"],
+        true
+    );
+    let clipped = agent.send(&request.to_string());
+    assert_eq!(clipped["ok"], true, "{clipped}");
+    assert!(
+        clipped["data"]["history"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["event_id"] == scissor_draw_event
+                && entry["passed"] == false
+                && entry["tests"]["scissor_clipped"] == true),
+        "{clipped}"
     );
     assert_eq!(agent.send(r#"{"id":3,"command":"close"}"#)["ok"], true);
     assert_eq!(

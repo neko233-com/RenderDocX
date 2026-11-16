@@ -25,7 +25,7 @@ fn usage() -> Value {
         {"name":"select","arguments":["capture.rdc","event_id"],"description":"Replay a capture to an event."},
         {"name":"serve","arguments":[],"description":"Serve sequential JSONL requests using a persistent replay session."},
         {"name":"capabilities","arguments":[],"description":"Describe the commands currently implemented."}
-    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","vertex_input","mesh","mesh_read","structure","structure_buffer","read_buffer","resource_usage","pick_pixel","texture_statistics","export_texture","close","target_list","target_launch","target_connect","target_connect_pid","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
+    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","vertex_input","mesh","mesh_read","structure","structure_buffer","read_buffer","resource_usage","pick_pixel","pixel_history","texture_statistics","export_texture","close","target_list","target_launch","target_connect","target_connect_pid","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
 }
 
 fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
@@ -624,6 +624,43 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         }).map_err(|error| ("replay_usage_failed", error))
                     }
                     _ => Err(("invalid_arguments", "resource_usage requires a valid resource index, decimal-string offset and page limit".into())),
+                }
+            }
+            "pixel_history" => {
+                let number = |key: &str| {
+                    request
+                        .get(key)
+                        .and_then(Value::as_u64)
+                        .and_then(|v| u32::try_from(v).ok())
+                };
+                let offset = match request.get("offset") {
+                    None => Some(0),
+                    Some(value) => value.as_str().and_then(|v| v.parse::<u64>().ok()),
+                };
+                let limit = match request.get("limit") {
+                    None => Some(renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT),
+                    Some(value) => value.as_u64().and_then(|v| u32::try_from(v).ok()),
+                };
+                match (&opened, selected_event, number("index"), number("x"), number("y"), offset, limit) {
+                    (None, _, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some(_), None, _, _, _, _, _) => Err(("no_event", "Select an event before inspecting pixel history".into())),
+                    (Some((session, snapshot)), Some(event), Some(index), Some(x), Some(y), Some(offset), Some(limit))
+                        if limit > 0 && limit <= renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT => {
+                        let selection = serde_json::from_value::<TextureSelection>(Value::Object(request.clone()));
+                        match (snapshot.textures.get(index as usize), selection) {
+                            (Some(texture), Ok(selection)) => match selection.validate_pixel(texture, x, y) {
+                                Ok(()) => {
+                                    mesh_selection = None;
+                                    session.pixel_history(event, index, texture, selection, x, y, offset, limit)
+                                        .map(|page| json!({"history":page,"selection":selection}))
+                                        .map_err(|error| ("replay_pixel_history_failed", error))
+                                }
+                                Err(error) => Err(("invalid_arguments", error)),
+                            },
+                            _ => Err(("invalid_arguments", "Invalid texture index or selection".into())),
+                        }
+                    }
+                    _ => Err(("invalid_arguments", "pixel_history requires a texture index, x/y, decimal-string offset and valid page limit".into())),
                 }
             }
             "texture_statistics" => {

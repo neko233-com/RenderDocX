@@ -286,6 +286,36 @@ void write_mesh(const MeshFormat &mesh, uint32_t event, uint32_t instance, uint3
   std::cout << "],\"status\":"; json_string(mesh.status); std::cout << '}' << std::endl;
 }
 
+void write_modification_value(const ModificationValue &value)
+{
+  if(!value.IsValid()) { std::cout << "null"; return; }
+  uint32_t bits[4], depth_bits = 0;
+  std::memcpy(bits, &value.col, sizeof(bits));
+  std::memcpy(&depth_bits, &value.depth, sizeof(depth_bits));
+  std::cout << "{\"color_bits\":[" << bits[0] << ',' << bits[1] << ',' << bits[2] << ',' << bits[3]
+            << "],\"depth_bits\":" << depth_bits << ",\"stencil\":" << value.stencil << '}';
+}
+
+void write_pixel_modification(const PixelModification &mod)
+{
+  std::cout << "{\"event_id\":" << mod.eventId << ",\"fragment\":" << mod.fragIndex << ",\"primitive\":" << mod.primitiveID
+            << ",\"direct_shader_write\":" << (mod.directShaderWrite ? "true" : "false")
+            << ",\"unbound_pixel_shader\":" << (mod.unboundPS ? "true" : "false")
+            << ",\"passed\":" << (mod.Passed() ? "true" : "false") << ",\"pre\":";
+  write_modification_value(mod.preMod); std::cout << ",\"shader_output\":"; write_modification_value(mod.shaderOut);
+  std::cout << ",\"post\":"; write_modification_value(mod.postMod);
+  std::cout << ",\"tests\":{\"sample_masked\":" << (mod.sampleMasked ? "true" : "false")
+            << ",\"backface_culled\":" << (mod.backfaceCulled ? "true" : "false")
+            << ",\"depth_clipped\":" << (mod.depthClipped ? "true" : "false")
+            << ",\"depth_bounds_failed\":" << (mod.depthBoundsFailed ? "true" : "false")
+            << ",\"view_clipped\":" << (mod.viewClipped ? "true" : "false")
+            << ",\"scissor_clipped\":" << (mod.scissorClipped ? "true" : "false")
+            << ",\"shader_discarded\":" << (mod.shaderDiscarded ? "true" : "false")
+            << ",\"depth_test_failed\":" << (mod.depthTestFailed ? "true" : "false")
+            << ",\"stencil_test_failed\":" << (mod.stencilTestFailed ? "true" : "false")
+            << ",\"predication_skipped\":" << (mod.predicationSkipped ? "true" : "false") << "}}";
+}
+
 // Preserve upstream type metadata and scalar values; child arrays are paged separately.
 void write_structured_node(const SDObject *object, const std::map<ResourceId, size_t> &resources)
 {
@@ -532,6 +562,9 @@ int run(const std::string &capture, bool structure_worker)
   bool mesh_ready = false;
   MeshFormat selected_mesh;
   uint32_t mesh_instance = 0, mesh_view = 0, mesh_stage = 0;
+  bool history_ready = false;
+  uint32_t history_event = 0, history_index = 0, history_mip = 0, history_slice = 0, history_sample = 0, history_x = 0, history_y = 0;
+  rdcarray<PixelModification> cached_history;
 
   std::string command;
   while(std::getline(std::cin, command))
@@ -798,6 +831,47 @@ int run(const std::string &capture, bool structure_worker)
       std::cout << "\"}" << std::endl;
       continue;
     }
+    if(command.compare(0, 8, "history ") == 0)
+    {
+      if(!selected) { error("Select an event before inspecting pixel history"); continue; }
+      std::istringstream arguments(command.substr(8));
+      std::string index_text, mip_text, slice_text, sample_text, x_text, y_text, offset_text, limit_text, extra;
+      uint64_t index = 0, mip = 0, slice = 0, sample = 0, x = 0, y = 0, offset = 0, limit = 0;
+      if(!(arguments >> index_text >> mip_text >> slice_text >> sample_text >> x_text >> y_text >> offset_text >> limit_text) || (arguments >> extra) ||
+         !decimal(index_text, index) || !decimal(mip_text, mip) || !decimal(slice_text, slice) ||
+         (sample_text != "resolve" && !decimal(sample_text, sample)) || !decimal(x_text, x) || !decimal(y_text, y) ||
+         !decimal(offset_text, offset) || !decimal(limit_text, limit) || index >= texture_ids.size() || limit == 0 || limit > 128)
+      { error("Invalid pixel history request"); continue; }
+      const TextureRef &texture = texture_ids[size_t(index)];
+      if(mip >= texture.mips || mip >= 32 || !texture.width || !texture.height || !texture.samples)
+      { error("Invalid texture dimensions, mip or sample count"); continue; }
+      const uint32_t width = (std::max)(1U, texture.width >> uint32_t(mip));
+      const uint32_t height = (std::max)(1U, texture.height >> uint32_t(mip));
+      const uint32_t depth = texture.dimension == 3 ? (std::max)(1U, texture.depth >> uint32_t(mip)) : texture.arraysize;
+      if(x >= width || y >= height || slice >= depth || (sample_text != "resolve" && sample >= texture.samples))
+      { error("Pixel history selection is out of range"); continue; }
+      const uint32_t actual_sample = sample_text == "resolve" ? (texture.samples > 1 ? UINT32_MAX : 0U) : uint32_t(sample);
+      mesh_ready = false;
+      if(!history_ready || history_event != selected_event || history_index != index || history_mip != mip || history_slice != slice ||
+         history_sample != actual_sample || history_x != x || history_y != y)
+      {
+        history_ready = false;
+        cached_history = rdcarray<PixelModification>();
+        cached_history = replay.controller->PixelHistory(texture.id, uint32_t(x), uint32_t(y), Subresource(uint32_t(mip), uint32_t(slice), actual_sample), CompType::Typeless);
+        result = replay.controller->GetFatalErrorStatus();
+        if(!result.OK()) { error(result_message(result)); break; }
+        history_event = selected_event; history_index = uint32_t(index); history_mip = uint32_t(mip); history_slice = uint32_t(slice);
+        history_sample = actual_sample; history_x = uint32_t(x); history_y = uint32_t(y); history_ready = true;
+      }
+      if(offset > cached_history.size()) { error("Pixel history offset is out of range"); continue; }
+      const size_t start = size_t(offset), end = start + (std::min)(size_t(limit), cached_history.size() - start);
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"pixel_history\",\"event_id\":" << selected_event << ",\"index\":" << index
+                << ",\"mip\":" << mip << ",\"slice\":" << slice << ",\"sample\":" << actual_sample << ",\"x\":" << x << ",\"y\":" << y
+                << ",\"offset\":\"" << offset << "\",\"total\":\"" << cached_history.size() << "\",\"entries\":[";
+      for(size_t i = start; i < end; ++i) { if(i != start) std::cout << ','; write_pixel_modification(cached_history[i]); }
+      std::cout << "]}" << std::endl;
+      continue;
+    }
     if(command.compare(0, 6, "stats ") == 0)
     {
       if(!selected) { error("Select an event before computing texture statistics"); continue; }
@@ -950,6 +1024,8 @@ int run(const std::string &capture, bool structure_worker)
     }
     if(!valid || event_ids.count(uint32_t(event)) == 0) { error("Unknown capture event"); continue; }
     mesh_ready = false;
+    history_ready = false;
+    cached_history = rdcarray<PixelModification>();
     replay.controller->SetFrameEvent(uint32_t(event), false);
     result = replay.controller->GetFatalErrorStatus();
     if(!result.OK()) { error(result_message(result)); break; }

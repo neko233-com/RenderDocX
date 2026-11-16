@@ -116,6 +116,22 @@ int wmain(int argc, wchar_t **argv)
   if(SUCCEEDED(hr)) hr = device->CreatePixelShader(pixel_code->GetBufferPointer(), pixel_code->GetBufferSize(), nullptr, &pixel);
   if(FAILED(hr)) { std::cerr << "Could not create fixture shaders"; return 15; }
   vertex_code->Release(); pixel_code->Release();
+  const char *history_source = "float4 main() : SV_Target { return float4(0.75,0.25,0.5,1); }";
+  ID3DBlob *history_code = nullptr;
+  ID3D11PixelShader *history_shader = nullptr;
+  hr = compile(history_source, strlen(history_source), nullptr, nullptr, nullptr, "main", "ps_4_0", 0, 0, &history_code, nullptr);
+  if(SUCCEEDED(hr)) hr = device->CreatePixelShader(history_code->GetBufferPointer(), history_code->GetBufferSize(), nullptr, &history_shader);
+  if(FAILED(hr)) { std::cerr << "Could not create history shader"; return 21; }
+  history_code->Release();
+  D3D11_RASTERIZER_DESC raster_desc = {};
+  raster_desc.FillMode = D3D11_FILL_SOLID; raster_desc.CullMode = D3D11_CULL_NONE; raster_desc.DepthClipEnable = TRUE;
+  ID3D11RasterizerState *history_rasterizer = nullptr;
+  hr = device->CreateRasterizerState(&raster_desc, &history_rasterizer);
+  if(FAILED(hr)) { std::cerr << "Could not create history rasterizer"; return 22; }
+  ID3D11RasterizerState *scissor_rasterizer = nullptr;
+  raster_desc.ScissorEnable = TRUE;
+  hr = device->CreateRasterizerState(&raster_desc, &scissor_rasterizer);
+  if(FAILED(hr)) { std::cerr << "Could not create scissor rasterizer"; return 23; }
   const float vertices[] = {0, 2, 2, 2, 2, 2, 2};
   const uint16_t indices[] = {0, 0, 1, 2};
   D3D11_BUFFER_DESC buffer_desc = {};
@@ -151,6 +167,15 @@ int wmain(int argc, wchar_t **argv)
   D3D11_VIEWPORT viewport = {0, 0, 16, 16, 0, 1};
   context->RSSetViewports(1, &viewport);
   context->DrawIndexed(3, 0, 0);
+  const float history_vertices[] = {0, -1, -1, 3, -1, -1, 3};
+  context->UpdateSubresource(vertex_buffer, 0, nullptr, history_vertices, 0, 0);
+  context->RSSetState(history_rasterizer);
+  context->PSSetShader(history_shader, nullptr, 0);
+  context->DrawIndexed(3, 0, 0);
+  const D3D11_RECT clipped = {0, 0, 1, 1};
+  context->RSSetState(scissor_rasterizer);
+  context->RSSetScissorRects(1, &clipped);
+  context->DrawIndexed(3, 0, 0);
   context->Flush();
   if(!api->EndFrameCapture(device, nullptr)) { std::cerr << "Capture did not complete"; return 10; }
   if(api->GetNumCaptures() == 0) { std::cerr << "No capture was recorded"; return 11; }
@@ -163,6 +188,6 @@ int wmain(int argc, wchar_t **argv)
   for(auto *layer_view : layered_views) layer_view->Release();
   for(auto *volume_view : volume_views) volume_view->Release();
   if(msaa_view) msaa_view->Release(); if(msaa_texture) msaa_texture->Release();
-  volume->Release(); integer_view->Release(); integer_texture->Release(); layered->Release(); index_buffer->Release(); vertex_buffer->Release(); layout->Release(); vertex->Release(); pixel->Release(); view->Release(); texture->Release(); context->Release(); device->Release();
+  scissor_rasterizer->Release(); history_rasterizer->Release(); history_shader->Release(); volume->Release(); integer_view->Release(); integer_texture->Release(); layered->Release(); index_buffer->Release(); vertex_buffer->Release(); layout->Release(); vertex->Release(); pixel->Release(); view->Release(); texture->Release(); context->Release(); device->Release();
   return 0;
 }
