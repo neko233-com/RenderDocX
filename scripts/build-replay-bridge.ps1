@@ -39,6 +39,19 @@ try {
     $destination = Join-Path $root 'target/renderdocx-runtime'
     New-Item -ItemType Directory -Force -Path $destination | Out-Null
     Copy-Item -LiteralPath 'target/replay-bridge/Release/renderdocx-replay.exe', 'target/replay-bridge/Release/renderdocx-target.exe', $dll -Destination $destination -Force
+    # An explicit, process-local layer lets the matching core capture Vulkan without
+    # modifying the machine's registered RenderDoc installation.
+    $versionHeader = Get-Content 'renderdoc/api/replay/version.h' -Raw
+    if ($versionHeader -notmatch '(?m)^#define RENDERDOC_VERSION_MINOR\s+(\d+)\s*$') { throw 'Cannot determine the RenderDoc minor version.' }
+    $minorVersion = $Matches[1]
+    $layer = Get-Content 'renderdoc/driver/vulkan/renderdoc.json' -Raw | ConvertFrom-Json
+    $layer.layer.name = 'VK_LAYER_RENDERDOCX_Capture'
+    $layer.layer.library_path = '.\renderdoc.dll'
+    $layer.layer.implementation_version = $minorVersion
+    $layer.layer.PSObject.Properties.Remove('enable_environment')
+    $layer.layer.PSObject.Properties.Remove('disable_environment')
+    $layer.layer.PSObject.Properties.Remove('pre_instance_functions')
+    $layer | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $destination 'renderdocx-vulkan.json') -Encoding utf8
     foreach ($dependency in @('d3dcompiler_47.dll', 'dbghelp.dll', 'symsrv.dll', 'symsrv.yes')) {
         $path = Join-Path $root "x64/$CoreConfiguration/$dependency"
         if (Test-Path -LiteralPath $path -PathType Leaf) { Copy-Item -LiteralPath $path -Destination $destination -Force }

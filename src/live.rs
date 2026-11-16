@@ -187,6 +187,56 @@ fn target_helper(settings: &Settings) -> Result<PathBuf, String> {
     }
 }
 
+// Only packaged Windows runtimes provide this process-local explicit layer.
+// User-specified environment modifications follow these defaults and may override them.
+#[cfg(windows)]
+fn local_vulkan_environment(
+    helper: &Path,
+    user: &[EnvironmentModification],
+) -> Vec<EnvironmentModification> {
+    let Some(runtime) = helper
+        .parent()
+        .and_then(|path| std::path::absolute(path).ok())
+    else {
+        return user.to_vec();
+    };
+    let Some(path) = runtime.to_str() else {
+        return user.to_vec();
+    };
+    // Vulkan Loader on Windows does not reliably search verbatim paths.
+    let path = if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else {
+        path.strip_prefix(r"\\?\").unwrap_or(path).to_owned()
+    };
+    if !runtime.join("renderdocx-vulkan.json").is_file() || !runtime.join("renderdoc.dll").is_file()
+    {
+        return user.to_vec();
+    }
+    let mut environment = vec![
+        EnvironmentModification {
+            name: "VK_ADD_LAYER_PATH".into(),
+            value: path,
+            operation: EnvOperation::Prepend,
+            separator: EnvSeparator::Platform,
+        },
+        EnvironmentModification {
+            name: "VK_INSTANCE_LAYERS".into(),
+            value: "VK_LAYER_RENDERDOCX_Capture".into(),
+            operation: EnvOperation::Prepend,
+            separator: EnvSeparator::Platform,
+        },
+        EnvironmentModification {
+            name: "VK_LOADER_LAYERS_DISABLE".into(),
+            value: ",VK_LAYER_RENDERDOC_Capture".into(),
+            operation: EnvOperation::Append,
+            separator: EnvSeparator::NoSep,
+        },
+    ];
+    environment.extend_from_slice(user);
+    environment
+}
+
 pub fn capture_notice(event: &Value) -> Option<(u32, PathBuf, bool)> {
     if event.get("type")?.as_str()? != "capture" {
         return None;
@@ -641,7 +691,11 @@ impl LiveSession {
         );
         let refs: Vec<&std::ffi::OsStr> = args.iter().map(|arg| arg.as_os_str()).collect();
         let timeout = Duration::from_secs(30 + u64::from(config.options.delay_for_debugger));
-        let mut session = Self::start(settings, &refs, Some(&config.environment), timeout)?;
+        #[cfg(windows)]
+        let environment = local_vulkan_environment(&target_helper(settings)?, &config.environment);
+        #[cfg(not(windows))]
+        let environment = config.environment.clone();
+        let mut session = Self::start(settings, &refs, Some(&environment), timeout)?;
         session.capture_template = Some(template);
         Ok(session)
     }
@@ -847,6 +901,33 @@ pub fn capture_directory() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn local_vulkan_layer_defaults_precede_user_environment() {
+        let runtime = tempfile::tempdir().unwrap();
+        let helper = runtime.path().join("renderdocx-target.exe");
+        let user = vec![EnvironmentModification {
+            name: "VK_INSTANCE_LAYERS".into(),
+            value: "user-layer".into(),
+            operation: EnvOperation::Set,
+            separator: EnvSeparator::NoSep,
+        }];
+        assert_eq!(local_vulkan_environment(&helper, &user).len(), 1);
+        std::fs::write(runtime.path().join("renderdocx-vulkan.json"), "{}").unwrap();
+        std::fs::write(runtime.path().join("renderdoc.dll"), "").unwrap();
+        let mods = local_vulkan_environment(&helper, &user);
+        assert_eq!(mods.len(), 4);
+        assert_eq!(mods[0].name, "VK_ADD_LAYER_PATH");
+        assert_eq!(mods[1].name, "VK_INSTANCE_LAYERS");
+        assert_eq!(mods[2].name, "VK_LOADER_LAYERS_DISABLE");
+        assert_eq!(mods[3].value, "user-layer");
+        assert!(matches!(mods[3].operation, EnvOperation::Set));
+        let verbatim_helper = PathBuf::from(format!(r"\\?\{}", helper.display()));
+        let verbatim_mods = local_vulkan_environment(&verbatim_helper, &[]);
+        assert_eq!(verbatim_mods.len(), 3);
+        assert!(!verbatim_mods[0].value.starts_with(r"\\?\"));
+    }
+
     #[test]
     #[ignore = "subprocess fixture for helper liveness"]
     fn helper_exits_for_liveness_test() {

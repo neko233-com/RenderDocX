@@ -122,6 +122,107 @@ fn invoke(args: &[&str]) -> (bool, Value) {
     )
 }
 
+#[cfg(windows)]
+#[test]
+#[ignore = "requires the upstream Vulkan mesh demo, a GLSL compiler, and a matching Windows runtime"]
+fn real_vulkan_target_launch_uses_packaged_layer() {
+    use std::{
+        os::windows::process::CommandExt,
+        path::PathBuf,
+        time::{Duration, Instant},
+    };
+    struct Stop(u32);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            let _ = Command::new("taskkill")
+                .args(["/PID", &self.0.to_string(), "/T", "/F"])
+                .creation_flags(0x08000000)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+    let bridge = PathBuf::from(
+        std::env::var_os("RENDERDOCX_TEST_BRIDGE").expect("set RENDERDOCX_TEST_BRIDGE"),
+    );
+    let demo = PathBuf::from(
+        std::env::var_os("RENDERDOCX_TEST_VULKAN_MESH_DEMO")
+            .expect("set RENDERDOCX_TEST_VULKAN_MESH_DEMO"),
+    );
+    assert!(
+        bridge
+            .parent()
+            .unwrap()
+            .join("renderdocx-vulkan.json")
+            .is_file(),
+        "packaged layer manifest missing"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let mut agent = Agent::new(bridge.to_str());
+    let mut arguments = "VK_Mesh_Shader --width 128 --height 128".to_owned();
+    if let Ok(gpu) = std::env::var("RENDERDOCX_TEST_VULKAN_GPU") {
+        assert!(
+            gpu.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
+        arguments.push_str(&format!(" --gpu {gpu}"));
+    }
+    let launch = agent.send(&serde_json::json!({"command":"target_launch", "path":demo,
+        "capture_directory":dir.path(), "configuration":{"arguments":arguments, "working_directory":demo.parent()}}).to_string());
+    assert_eq!(launch["ok"], true, "{launch}");
+    let _stop = Stop(launch["data"]["target"]["pid"].as_u64().unwrap() as u32);
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let mut ready = false;
+    let mut observed = Vec::new();
+    while Instant::now() < deadline && !ready {
+        let reply = agent.send(r#"{"command":"target_events"}"#);
+        assert_eq!(reply["data"]["connected"], true, "{reply}");
+        observed.extend(reply["data"]["events"].as_array().unwrap().iter().cloned());
+        ready = reply["data"]["events"].as_array().unwrap().iter().any(|e| {
+            e["type"] == "api"
+                && e["name"] == "Vulkan"
+                && e["supported"] == true
+                && e["presenting"] == true
+        });
+        if !ready {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    assert!(ready, "Vulkan target did not become ready: {observed:?}");
+    assert_eq!(
+        agent.send(r#"{"command":"target_trigger","frames":1}"#)["ok"],
+        true
+    );
+    let mut captured = None;
+    while Instant::now() < deadline && captured.is_none() {
+        let reply = agent.send(r#"{"command":"target_events"}"#);
+        assert_eq!(reply["data"]["connected"], true, "{reply}");
+        captured = reply["data"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["type"] == "capture")
+            .cloned();
+        if captured.is_none() {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    let captured = captured.expect("target did not produce a capture");
+    assert_eq!(captured["api"], "Vulkan");
+    let opened =
+        agent.send(&serde_json::json!({"command":"open", "path":captured["path"]}).to_string());
+    assert_eq!(opened["ok"], true, "{opened}");
+    assert!(
+        opened["data"]["capture"]["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["flags"].as_u64().is_some_and(|f| f & 0x8 != 0)),
+        "{opened}"
+    );
+    agent.quit();
+}
+
 #[test]
 #[ignore = "requires a Vulkan mesh-shader capture and a matching RenderDoc replay bridge"]
 fn real_vulkan_mesh_shader_debug_trace() {
