@@ -1710,6 +1710,49 @@ int run(const std::string &capture, bool structure_worker)
       std::cout << "}" << std::endl;
       continue;
     }
+    if(command.compare(0, 9, "bindings ") == 0)
+    {
+      std::istringstream arguments(command.substr(9));
+      std::string stage_text, kind, offset_text, limit_text, extra;
+      uint64_t stage_index = 0, offset = 0, limit = 0;
+      if(!(arguments >> stage_text >> kind >> offset_text >> limit_text) || (arguments >> extra) ||
+         !decimal(stage_text, stage_index) || !decimal(offset_text, offset) || !decimal(limit_text, limit) ||
+         stage_index >= 8 || limit == 0 || limit > 128 ||
+         (kind != "constants" && kind != "read_only" && kind != "read_write" && kind != "samplers"))
+      { error("Invalid shader bindings request"); continue; }
+      if(!selected) { error("Select an event first"); continue; }
+      const PipeState &state = replay.controller->GetPipelineState();
+      const ShaderStage stage = ShaderStage(stage_index);
+      if(state.GetShader(stage) == ResourceId()) { error("No shader is bound to this stage"); continue; }
+      rdcarray<UsedDescriptor> bindings;
+      if(kind == "constants") bindings = state.GetConstantBlocks(stage);
+      else if(kind == "read_only") bindings = state.GetReadOnlyResources(stage);
+      else if(kind == "read_write") bindings = state.GetReadWriteResources(stage);
+      else bindings = state.GetSamplers(stage);
+      if(offset > bindings.size()) { error("Shader binding offset is out of range"); continue; }
+      const size_t start = size_t(offset), end = start + (std::min)(size_t(limit), bindings.size() - start);
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"shader_bindings\",\"event_id\":" << selected_event
+                << ",\"stage\":" << stage_index << ",\"kind\":"; json_string(kind.data(), kind.size());
+      std::cout << ",\"offset\":\"" << offset << "\",\"total\":\"" << bindings.size() << "\",\"entries\":[";
+      for(size_t i = start; i < end; ++i)
+      {
+        if(i != start) std::cout << ',';
+        const UsedDescriptor &binding = bindings[i];
+        const auto &access = binding.access;
+        const auto store = resource_indices.find(access.descriptorStore);
+        std::cout << "{\"binding\":" << access.index << ",\"array_element\":" << access.arrayElement
+                  << ",\"type\":" << uint32_t(access.type) << ",\"statically_unused\":" << (access.staticallyUnused ? "true" : "false")
+                  << ",\"store_resource\":";
+        if(store == resource_indices.end() || access.descriptorStore == ResourceId()) std::cout << "null"; else std::cout << store->second;
+        std::cout << ",\"store_offset\":" << access.byteOffset << ",\"store_size\":" << access.byteSize << ",\"descriptor\":";
+        if(kind == "samplers") std::cout << "null"; else write_descriptor(binding.descriptor, resource_indices);
+        std::cout << ",\"sampler\":";
+        if(kind == "samplers" || kind == "read_only") write_sampler(binding.sampler, resource_indices); else std::cout << "null";
+        std::cout << '}';
+      }
+      std::cout << "]}" << std::endl;
+      continue;
+    }
     if(command.compare(0, 7, "consts ") == 0)
     {
       std::istringstream arguments(command.substr(7));

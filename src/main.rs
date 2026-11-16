@@ -476,6 +476,7 @@ struct Workspace {
     selected_shader: Option<usize>,
     shader_data: Option<ShaderReport>,
     shader_constants: Option<renderdocx::replay::ShaderConstants>,
+    shader_bindings: Option<renderdocx::replay::ShaderBindings>,
     shader_report_stale: bool,
     shader_source: Option<usize>,
     shader_source_page: usize,
@@ -1711,6 +1712,7 @@ impl Workspace {
                         this.selected_shader = None;
                         this.shader_data = None;
                         this.shader_constants = None;
+                        this.shader_bindings = None;
                         this.shader_editor = None;
                         this.structure = StructureView::default();
                         this.mesh = MeshView::default();
@@ -1823,6 +1825,7 @@ impl Workspace {
         self.buffer_data = None;
         self.shader_data = None;
         self.shader_constants = None;
+        self.shader_bindings = None;
         self.structure = StructureView::default();
         self.mesh = MeshView::default();
         self.input_page = None;
@@ -2012,6 +2015,7 @@ impl Workspace {
         self.selected_shader = Some(stage);
         self.shader_data = None;
         self.shader_constants = None;
+        self.shader_bindings = None;
         self.resource_pending = true;
         self.status = Some(
             self.t(
@@ -3843,6 +3847,75 @@ impl Workspace {
                         )
                     ),
                 });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn inspect_shader_bindings(&mut self, kind: String, offset: u64, cx: &mut Context<Self>) {
+        if self.replay_pending
+            || self.resource_pending
+            || self.export_pending
+            || self.shader_report_stale
+        {
+            return;
+        }
+        let (Some(session), Some(stage), Some(report)) = (
+            self.session.clone(),
+            self.selected_shader,
+            self.shader_data.as_ref(),
+        ) else {
+            return;
+        };
+        let event = report.event_id;
+        let revision = self.open_revision;
+        let selection_revision = self.selection_revision;
+        self.resource_pending = true;
+        self.status = Some(
+            self.t(
+                "Loading shader bindings…",
+                "正在加载着色器绑定…",
+                "シェーダーバインドを読み込み中…",
+                "셰이더 바인딩을 불러오는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            session.shader_bindings(
+                event,
+                stage as u32,
+                &kind,
+                offset,
+                renderdocx::replay::SHADER_BINDING_PAGE_LIMIT,
+            )
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision || this.selection_revision != selection_revision {
+                    return;
+                }
+                this.resource_pending = false;
+                match result {
+                    Ok(page) if this.selected_shader == Some(stage) => {
+                        this.shader_bindings = Some(page);
+                        this.status = None;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Shader bindings unavailable",
+                                "着色器绑定不可用",
+                                "シェーダーバインドを利用できません",
+                                "셰이더 바인딩을 사용할 수 없습니다"
+                            )
+                        ))
+                    }
+                }
                 cx.notify();
             });
         })
@@ -7367,6 +7440,7 @@ impl Workspace {
                     }).unwrap_or_default();
                     let constant_page = self.shader_constants.as_ref().filter(|values| values.event_id == shader.event_id && values.stage == shader.stage)
                         .and_then(|values| shader.constant_block_details.get(values.block as usize).map(|block| (values.block, values.element, block.array_size, block.name.clone())));
+                    let binding_page = self.shader_bindings.as_ref().filter(|page| page.event_id == shader.event_id && page.stage == shader.stage).cloned();
                     let mut view = view
                         .child(format!("{entry_label}: {}", shader.entry_point))
                         .child(format!(
@@ -7389,6 +7463,43 @@ impl Workspace {
                                     move |this, cx| this.inspect_shader_constants(block, element + 1, cx), cx)))
                         })
                         .children(constant_values.into_iter().map(|line| div().text_sm().child(line)))
+                        .child(div().flex().flex_wrap().gap_2()
+                            .child(button("shader-bindings-constants", self.t("Bound constants", "常量绑定", "定数バインド", "상수 바인딩"), false, |this, cx| this.inspect_shader_bindings("constants".into(), 0, cx), cx))
+                            .child(button("shader-bindings-readonly", self.t("Read-only bindings", "只读绑定", "読み取り専用バインド", "읽기 전용 바인딩"), false, |this, cx| this.inspect_shader_bindings("read_only".into(), 0, cx), cx))
+                            .child(button("shader-bindings-readwrite", self.t("Read/write bindings", "读写绑定", "読み書きバインド", "읽기/쓰기 바인딩"), false, |this, cx| this.inspect_shader_bindings("read_write".into(), 0, cx), cx))
+                            .child(button("shader-bindings-samplers", self.t("Sampler bindings", "采样器绑定", "サンプラーバインド", "샘플러 바인딩"), false, |this, cx| this.inspect_shader_bindings("samplers".into(), 0, cx), cx)))
+                        .when_some(binding_page, |view, page| {
+                            let offset = page.offset.parse::<u64>().unwrap_or(0);
+                            let total = page.total.parse::<u64>().unwrap_or(0);
+                            let next = offset.saturating_add(page.entries.len() as u64);
+                            let prev_kind = page.kind.clone();
+                            let next_kind = page.kind.clone();
+                            let mut view = view.child(format!("{}: {}–{} / {}", self.t("Runtime bindings", "运行时绑定", "実行時バインド", "런타임 바인딩"), offset, next, total))
+                                .when(offset > 0, |view| view.child(button("shader-bindings-previous", self.t("Previous page", "上一页", "前のページ", "이전 페이지"), false,
+                                    move |this, cx| this.inspect_shader_bindings(prev_kind.clone(), offset.saturating_sub(u64::from(renderdocx::replay::SHADER_BINDING_PAGE_LIMIT)), cx), cx)))
+                                .when(next < total, |view| view.child(button("shader-bindings-next", self.t("Next page", "下一页", "次のページ", "다음 페이지"), false,
+                                    move |this, cx| this.inspect_shader_bindings(next_kind.clone(), next, cx), cx)));
+                            for (row_index, entry) in page.entries.iter().enumerate() {
+                                let binding = entry.get("binding").and_then(|v| v.as_u64()).unwrap_or(u16::MAX as u64);
+                                let element = entry.get("array_element").and_then(|v| v.as_u64()).unwrap_or(0);
+                                let name = usize::try_from(binding).ok().and_then(|index| match page.kind.as_str() {
+                                    "constants" => shader.constant_block_details.get(index).map(|v| v.name.as_str()),
+                                    "read_only" => shader.read_only_details.get(index).map(|v| v.name.as_str()),
+                                    "read_write" => shader.read_write_details.get(index).map(|v| v.name.as_str()),
+                                    "samplers" => shader.sampler_details.get(index).map(|v| v.name.as_str()),
+                                    _ => None,
+                                }).unwrap_or("");
+                                let resource = entry.get("descriptor").and_then(|d| d.get("resource")).and_then(|v| v.as_u64()).and_then(|v| usize::try_from(v).ok());
+                                let display = resource.and_then(|index| snapshot.resources.get(index).map(|res| self.resource_display_name(Some(index), &res.name))).unwrap_or("—");
+                                let unused = entry.get("statically_unused").and_then(|v| v.as_bool()).unwrap_or(false);
+                                let line = format!("{name} #{binding}[{element}] · {display}{}", if unused { self.t(" · unused", " · 未使用", " · 未使用", " · 미사용") } else { "" });
+                                view = view.child(div().id(("shader-binding", row_index)).test_support().text_sm().child(line)
+                                    .when_some(resource, |row, resource| row.cursor_pointer().text_color(rgb(0x91cfff)).on_click(cx.listener(move |this, _, _, cx| {
+                                        this.tab = CaptureTab::Resources; this.refresh_resources(); this.read_resource_usage(resource, 0, cx);
+                                    }))));
+                            }
+                            view
+                        })
                         .child(format!("{shader_inputs_label}: {}", inputs.len()))
                         .children(inputs.into_iter().map(|line| div().text_sm().child(line)))
                         .child(format!("{shader_outputs_label}: {}", outputs.len()))
@@ -8745,7 +8856,7 @@ impl Workspace {
                             this.export_pending = false;
                             this.resource_pending = false;
                             this.buffer_data = None;
-                            this.shader_data = None; this.shader_constants = None;
+                            this.shader_data = None; this.shader_constants = None; this.shader_bindings = None;
                             this.shader_editor = None;
                             this.structure = StructureView::default();
                             this.mesh = MeshView::default();
@@ -10234,6 +10345,7 @@ fn main() {
                         selected_shader: None,
                         shader_data: None,
                         shader_constants: None,
+                        shader_bindings: None,
                         shader_report_stale: false,
                         shader_source: None,
                         shader_source_page: 0,
@@ -10427,6 +10539,7 @@ mod ui_tests {
                         selected_shader: None,
                         shader_data: None,
                         shader_constants: None,
+                        shader_bindings: None,
                         shader_report_stale: false,
                         shader_source: None,
                         shader_source_page: 0,
@@ -10853,6 +10966,7 @@ mod ui_tests {
                         selected_shader: None,
                         shader_data: None,
                         shader_constants: None,
+                        shader_bindings: None,
                         shader_report_stale: false,
                         shader_source: None,
                         shader_source_page: 0,
@@ -11202,9 +11316,43 @@ mod ui_tests {
         .unwrap();
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(view.read(cx).shader_constants.as_ref().unwrap().element, 0));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("shader-bindings-readwrite", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let page = view.read(cx).shader_bindings.as_ref().unwrap();
+            assert_eq!(page.kind, "read_write");
+            assert_eq!(page.entries[0]["descriptor"]["resource"], 0);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(-200.))),
+                cx,
+            );
+            window.render_frame(cx);
+            window.click(("shader-binding", 0usize), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(view.read(cx).tab == CaptureTab::Resources);
+            assert_eq!(view.read(cx).selected_resource, Some(0));
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("shaders-tab", cx);
+            window.click("shader-0", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
         cx.update(|cx| {
             view.update(cx, |view, cx| {
                 view.shader_constants = None;
+                view.shader_bindings = None;
                 let shader = view.shader_data.as_mut().unwrap();
                 shader.constant_block_details.clear();
                 shader.constant_blocks = 0;
@@ -11221,11 +11369,15 @@ mod ui_tests {
             assert!(window.find("shader-disassembly").visible());
             window.click(("shader-source-file", 0usize), cx);
             window.render_frame(cx);
+            window.scroll("capture-details-scroll", ScrollDelta::Pixels(point(px(0.), px(-400.))), cx);
+            window.render_frame(cx);
             assert!(window.find("shader-source-code").visible());
             window.click("shader-source-next", cx);
             assert_eq!(view.read(cx).shader_source_page, 1);
             window.click("shader-source-previous", cx);
             assert_eq!(view.read(cx).shader_source_page, 0);
+            window.scroll("capture-details-scroll", ScrollDelta::Pixels(point(px(0.), px(2000.))), cx);
+            window.render_frame(cx);
             window.click(("shader-source-file", 1usize), cx);
             assert_eq!(view.read(cx).shader_source, Some(1));
             view.update(cx, |view, _| {

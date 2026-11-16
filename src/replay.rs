@@ -558,6 +558,18 @@ pub struct ShaderConstants {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ShaderBindings {
+    pub event_id: u32,
+    pub stage: u32,
+    pub kind: String,
+    pub offset: String,
+    pub total: String,
+    pub entries: Vec<serde_json::Value>,
+}
+
+pub const SHADER_BINDING_PAGE_LIMIT: u32 = 128;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ShaderCompileFlag {
     pub name: String,
     pub value: String,
@@ -1110,6 +1122,7 @@ enum Reply {
     },
     Shader(ShaderReport),
     ShaderConstants(ShaderConstants),
+    ShaderBindings(ShaderBindings),
     ShaderEdit(ShaderEdit),
     DebugStarted(DebugTrace),
     DebugStates(DebugStates),
@@ -1441,6 +1454,16 @@ trait Transport: Send {
         _element: u32,
     ) -> Result<ShaderConstants, String> {
         Err("Shader constant inspection is not supported by this transport".into())
+    }
+    fn shader_bindings(
+        &mut self,
+        _event: u32,
+        _stage: u32,
+        _kind: &str,
+        _offset: u64,
+        _limit: u32,
+    ) -> Result<ShaderBindings, String> {
+        Err("Shader binding inspection is not supported by this transport".into())
     }
     fn shader_edit(
         &mut self,
@@ -2154,6 +2177,40 @@ impl Transport for Process {
         }
     }
 
+    fn shader_bindings(
+        &mut self,
+        event: u32,
+        stage: u32,
+        kind: &str,
+        offset: u64,
+        limit: u32,
+    ) -> Result<ShaderBindings, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(input, "bindings {stage} {kind} {offset} {limit}")
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::ShaderBindings(page) => {
+                let total = page
+                    .total
+                    .parse::<u64>()
+                    .map_err(|_| "Invalid shader binding total")?;
+                if page.event_id != event
+                    || page.stage != stage
+                    || page.kind != kind
+                    || page.offset != offset.to_string()
+                    || offset > total
+                    || page.entries.len() as u64 != (total - offset).min(u64::from(limit))
+                {
+                    return Err("Invalid shader bindings response".into());
+                }
+                Ok(page)
+            }
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected shader bindings response".into()),
+        }
+    }
+
     fn shader_edit(
         &mut self,
         event: u32,
@@ -2658,6 +2715,27 @@ impl Session {
             .lock()
             .map_err(|e| e.to_string())?
             .shader_constants(event, stage, block, element)
+    }
+
+    pub fn shader_bindings(
+        &self,
+        event: u32,
+        stage: u32,
+        kind: &str,
+        offset: u64,
+        limit: u32,
+    ) -> Result<ShaderBindings, String> {
+        if stage as usize >= SHADER_STAGES.len()
+            || !matches!(kind, "constants" | "read_only" | "read_write" | "samplers")
+            || limit == 0
+            || limit > SHADER_BINDING_PAGE_LIMIT
+        {
+            return Err("Invalid shader bindings request".into());
+        }
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .shader_bindings(event, stage, kind, offset, limit)
     }
 
     pub fn shader_edit(
@@ -3313,6 +3391,29 @@ pub mod test_support {
                     value_hex: format!("{:02x}000000", element + 42),
                     members: Vec::new(),
                 }],
+            })
+        }
+
+        fn shader_bindings(
+            &mut self,
+            event: u32,
+            stage: u32,
+            kind: &str,
+            offset: u64,
+            _limit: u32,
+        ) -> Result<ShaderBindings, String> {
+            if stage != 0 || kind != "read_write" || offset != 0 {
+                return Err("Invalid fixture bindings".into());
+            }
+            Ok(ShaderBindings {
+                event_id: event,
+                stage,
+                kind: kind.into(),
+                offset: "0".into(),
+                total: "1".into(),
+                entries: vec![
+                    serde_json::json!({"binding":0,"array_element":0,"statically_unused":false,"descriptor":{"resource":0}}),
+                ],
             })
         }
     }

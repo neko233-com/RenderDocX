@@ -245,6 +245,20 @@ fn real_d3d11_mesh_draw_order() {
     );
     let invalid = agent.send(&serde_json::json!({"command":"shader_constants","stage":"compute","block":block,"element":1}).to_string());
     assert_eq!(invalid["error"]["code"], "replay_shader_constants_failed");
+    let bindings = agent
+        .send(r#"{"command":"shader_bindings","stage":"compute","kind":"read_write","limit":1}"#);
+    assert_eq!(bindings["ok"], true, "{bindings}");
+    let entry = &bindings["data"]["page"]["entries"][0];
+    assert_eq!(entry["binding"], 0);
+    assert_eq!(entry["descriptor"]["resource_present"], true);
+    assert!(entry["descriptor"]["resource"].is_u64());
+    let constants =
+        agent.send(r#"{"command":"shader_bindings","stage":"compute","kind":"constants"}"#);
+    assert_eq!(constants["ok"], true, "{constants}");
+    assert_eq!(
+        constants["data"]["page"]["entries"][0]["descriptor"]["resource_present"],
+        true
+    );
     agent.quit();
 }
 
