@@ -878,6 +878,15 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                             .map(Some)
                             .map_err(|error| error.to_string()),
                     };
+                let processor: Result<
+                    Option<renderdocx::shader_processor::ShaderProcessor>,
+                    String,
+                > = match request.get("processor") {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(value) => serde_json::from_value(value.clone())
+                        .map(Some)
+                        .map_err(|error| error.to_string()),
+                };
                 match (&opened, selected_event, stage) {
                     (None, _, _) => Err(("no_capture", "No capture is open".into())),
                     (Some(_), None, _) => {
@@ -896,19 +905,35 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                             .map_err(|error| ("shader_edit_failed", error))
                     }
                     (Some((session, _)), Some(event), Some(stage)) => match (
-                        encoding, entry, source, flags,
+                        encoding, entry, source, flags, processor,
                     ) {
-                        (Some(encoding), Some(entry), Ok(Some(source)), Ok(flags)) if !source.is_empty() => {
-                            session
-                                .shader_edit_with_flags(event, stage as u32, Some((encoding, entry, &source)), flags.as_deref())
-                                .map(|edit| {
-                                    pipeline = Some(edit.pipeline.clone());
-                                    mesh_selection = None;
-                                    json!({"edit":edit})
-                                })
-                                .map_err(|error| ("shader_edit_failed", error))
+                        (Some(encoding), Some(entry), Ok(Some(source)), Ok(flags), Ok(processor)) if !source.is_empty() => {
+                            let prepared: Result<(u32, Vec<u8>, String), (&str, String)> = if let Some(processor) = processor {
+                                if processor.input_encoding != encoding {
+                                    Err(("invalid_arguments", "Processor input encoding does not match source encoding".into()))
+                                } else {
+                                    session.shader(stage as u32, None).map_err(|error| ("shader_processor_failed", error)).and_then(|report| {
+                                        if report.event_id != event || !report.target_encodings.contains(&processor.output_encoding) {
+                                            return Err(("shader_processor_failed", "Processor output encoding is unsupported for the selected event".into()));
+                                        }
+                                        let spirv = flags.as_ref().unwrap_or(&report.compile_flags).iter().find(|flag| flag.name == "@spirver").map(|flag| flag.value.as_str()).unwrap_or("");
+                                        renderdocx::shader_processor::run(&processor, &source, stage, entry, spirv)
+                                            .map(|output| (processor.output_encoding, output.bytes, output.diagnostics))
+                                            .map_err(|error| ("shader_processor_failed", error))
+                                    })
+                                }
+                            } else { Ok((encoding, source, String::new())) };
+                            prepared.and_then(|(output_encoding, source, processor_diagnostics)| {
+                                session.shader_edit_with_flags(event, stage as u32, Some((output_encoding, entry, &source)), flags.as_deref())
+                                    .map(|edit| {
+                                        pipeline = Some(edit.pipeline.clone());
+                                        mesh_selection = None;
+                                        json!({"edit":edit,"processor_diagnostics":processor_diagnostics})
+                                    })
+                                    .map_err(|error| ("shader_edit_failed", error))
+                            })
                         }
-                        (_, _, Err(error), _) | (_, _, _, Err(error)) => Err(("invalid_arguments", error)),
+                        (_, _, Err(error), _, _) | (_, _, _, Err(error), _) | (_, _, _, _, Err(error)) => Err(("invalid_arguments", error)),
                         _ => Err((
                             "invalid_arguments",
                             "shader_apply requires encoding, entry and exactly one of source, source_hex or text files"

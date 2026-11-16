@@ -5,5 +5,6 @@ pub mod i18n;
 pub mod live;
 pub mod replay;
 pub mod shader_export;
+pub mod shader_processor;
 pub mod shader_source;
 pub mod vertex_input;
