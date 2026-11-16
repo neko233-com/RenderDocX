@@ -224,6 +224,9 @@ pub struct MeshInfo {
 pub struct Snapshot {
     pub protocol: u32,
     pub api: u32,
+    /// API used by the replay renderer; older bridges may omit this field.
+    #[serde(default)]
+    pub local_renderer: Option<u32>,
     pub frame: u32,
     pub degraded: bool,
     #[serde(default)]

@@ -78,6 +78,13 @@ int wmain(int argc, wchar_t **argv)
   hr = device->CreateTexture2D(&float_desc, nullptr, &float_texture);
   if(SUCCEEDED(hr)) hr = device->CreateRenderTargetView(float_texture, nullptr, &float_view);
   if(FAILED(hr)) { std::cerr << "Could not create float texture"; return 25; }
+  D3D11_TEXTURE1D_DESC strip_desc = {};
+  strip_desc.Width = 16; strip_desc.MipLevels = 1; strip_desc.ArraySize = 1;
+  strip_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; strip_desc.Usage = D3D11_USAGE_DEFAULT;
+  strip_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+  ID3D11Texture1D *strip_texture = nullptr;
+  hr = device->CreateTexture1D(&strip_desc, nullptr, &strip_texture);
+  if(FAILED(hr)) { std::cerr << "Could not create 1D texture"; return 26; }
   D3D11_TEXTURE3D_DESC volume_desc = {};
   volume_desc.Width = 4; volume_desc.Height = 4; volume_desc.Depth = 2; volume_desc.MipLevels = 1;
   volume_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; volume_desc.Usage = D3D11_USAGE_DEFAULT; volume_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
@@ -208,6 +215,9 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint3 id : 
     pattern[base + 3] = 1.0f;
   }
   context->UpdateSubresource(float_texture, 0, nullptr, pattern, 4 * 4 * sizeof(float), 0);
+  unsigned char strip_pixels[16 * 4] = {};
+  for(unsigned x = 0; x < 16; ++x) { strip_pixels[x * 4] = (unsigned char)(x * 16); strip_pixels[x * 4 + 3] = 255; }
+  context->UpdateSubresource(strip_texture, 0, nullptr, strip_pixels, sizeof(strip_pixels), 0);
   context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   const UINT stride = 8, offset = 4;
   context->IASetInputLayout(layout);
@@ -249,7 +259,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint3 id : 
   for(auto *layer_view : layered_views) layer_view->Release();
   for(auto *volume_view : volume_views) volume_view->Release();
   if(msaa_view) msaa_view->Release(); if(msaa_texture) msaa_texture->Release();
-  constant_buffer->Release(); compute_uav->Release(); compute_buffer->Release(); compute_shader->Release();
+  strip_texture->Release(); constant_buffer->Release(); compute_uav->Release(); compute_buffer->Release(); compute_shader->Release();
   scissor_rasterizer->Release(); history_rasterizer->Release(); history_shader->Release(); volume->Release(); float_view->Release(); float_texture->Release(); integer_view->Release(); integer_texture->Release(); layered->Release(); index_buffer->Release(); vertex_buffer->Release(); layout->Release(); vertex->Release(); pixel->Release(); view->Release(); texture->Release(); context->Release(); device->Release();
   return 0;
 }

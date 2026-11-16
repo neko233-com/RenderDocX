@@ -5968,8 +5968,12 @@ impl Workspace {
             .as_ref()?
             .textures
             .get(self.selected_texture?)?;
-        let width = texture.width.max(1) as f32;
-        let height = texture.height.max(1) as f32;
+        let [width, height] = renderdocx::texture_view::display_extent(
+            [texture.width, texture.height],
+            texture.dimension,
+            self.snapshot.as_ref()?.local_renderer,
+        )?
+        .map(|value| value as f32);
         let scale = (512.0 / width).min(360.0 / height);
         Some((
             scale,
@@ -6017,10 +6021,6 @@ impl Workspace {
             else {
                 return;
             };
-            // 1D preview height differs by replay backend; do not invent a mapping.
-            if texture.dimension == 1 {
-                return;
-            }
             let local_x =
                 f32::from(position.x - bounds.origin.x) - (width - 512.0 * display_scale) / 2.0;
             let local_y =
@@ -6029,11 +6029,20 @@ impl Workspace {
             if output[0] < 0.0 || output[0] >= 512.0 || output[1] < 0.0 || output[1] >= 360.0 {
                 return;
             }
+            let base = [texture.width, texture.height];
+            let Some(extent) = renderdocx::texture_view::display_extent(
+                base,
+                texture.dimension,
+                self.snapshot.as_ref().and_then(|s| s.local_renderer),
+            ) else {
+                return;
+            };
             let Some([x, y]) = renderdocx::texture_view::texel_at(
                 output,
                 scale,
                 offset,
-                [texture.width, texture.height],
+                base,
+                extent,
                 self.texture_selection.mip,
                 self.texture_selection.preview_flip_y,
             ) else {
@@ -9543,10 +9552,10 @@ impl Workspace {
         let export_label = self.t("Export PNG", "导出 PNG", "PNG を書き出す", "PNG 내보내기");
         let preview_label = self.t("Preview", "预览", "プレビュー", "미리 보기");
         let preview_note = self.t(
-            "Click a 2D or 3D preview to pick a pixel; scroll to zoom and drag to pan.",
-            "点击 2D 或 3D 预览读取像素；滚轮缩放，拖动平移。",
-            "2D・3D プレビューをクリックしてピクセルを取得。スクロールで拡大縮小、ドラッグで移動。",
-            "2D 또는 3D 미리보기를 클릭해 픽셀을 읽고, 스크롤로 확대하고 드래그해 이동합니다.",
+            "Click 2D/3D or D3D 1D previews to pick a pixel; scroll to zoom and drag to pan.",
+            "点击 2D/3D 或 D3D 1D 预览读取像素；滚轮缩放，拖动平移。",
+            "2D/3D または D3D 1D プレビューをクリックして取得。スクロールで拡大縮小、ドラッグで移動。",
+            "2D/3D 또는 D3D 1D 미리보기를 클릭해 픽셀을 읽고, 스크롤로 확대하고 드래그해 이동합니다.",
         );
         let export_note = self.t(
             "Existing files are never replaced.",
@@ -15630,6 +15639,7 @@ mod ui_tests {
                         capture: Some("capture.rdc".into()),
                         session: None,
                         snapshot: Some(Snapshot {
+                            local_renderer: Some(0),
                             protocol: 1,
                             api: 3,
                             frame: 2,
@@ -16056,6 +16066,7 @@ mod ui_tests {
                         capture: Some("capture.rdc".into()),
                         session: Some(session),
                         snapshot: Some(Snapshot {
+                            local_renderer: Some(0),
                             protocol: 1,
                             api: 0,
                             frame: 2,
@@ -18335,6 +18346,70 @@ mod ui_tests {
                     );
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
+                let strip_index = cx.update(|cx| {
+                    view.read(cx)
+                        .snapshot
+                        .as_ref()
+                        .unwrap()
+                        .textures
+                        .iter()
+                        .position(|texture| texture.dimension == 1 && texture.width == 16)
+                        .expect("captured 1D strip")
+                });
+                cx.update(|cx| {
+                    view.update(cx, |view, cx| {
+                        view.selected_texture = Some(strip_index);
+                        view.texture_selection = TextureSelection::default();
+                        view.preview_texture(cx);
+                    })
+                });
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| view.read(cx).preview.is_some()) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "1D preview did not load: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    reveal_details(window, "texture-preview-image", cx);
+                    window.click("texture-preview-image", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx).pixel.as_ref().is_some_and(|pixel| {
+                            pixel.index as usize == strip_index && pixel.x == 8 && pixel.y == 0
+                        })
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "1D preview pixel click did not load: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update(|cx| {
+                    let pixel = view.read(cx).pixel.as_ref().unwrap();
+                    let red: f32 = pixel.float_values[0].parse().unwrap();
+                    assert!((red - 128.0 / 255.0).abs() < 0.001, "1D red: {red}");
+                });
+                cx.update(|cx| {
+                    view.update(cx, |view, cx| {
+                        view.selected_texture = Some(color_index);
+                        view.texture_selection = TextureSelection::default();
+                        cx.notify();
+                    })
+                });
                 cx.update_window(handle.into(), |_, window, cx| {
                     reveal_details(window, "histogram-analyze", cx);
                     window.click("histogram-analyze", cx);

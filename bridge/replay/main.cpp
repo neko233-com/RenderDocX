@@ -348,6 +348,7 @@ void write_snapshot(IReplayController *controller, const ReplayOptions &options,
   for(size_t i = roots.size(); i > 0; --i) pending.push_back({&roots[i - 1], 0, -1});
 
   std::cout << "\nRENDERDOCX/1 {\"type\":\"snapshot\",\"protocol\":1,\"api\":" << uint32_t(api.pipelineType)
+            << ",\"local_renderer\":" << uint32_t(api.localRenderer)
             << ",\"frame\":" << frame.frameNumber << ",\"degraded\":"
             << (api.degraded ? "true" : "false")
             << ",\"replay_options\":{\"api_validation\":" << (options.apiValidation ? "true" : "false")

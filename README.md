@@ -26,7 +26,7 @@ Texture preview and export accept black and white points. The preview uses a hea
 
 Native preview supports independent RGBA channel toggles, vertical flip and linear-as-gamma display. These controls affect preview only; the existing single-channel selection continues to control export. The default preview behavior remains compatible with earlier replay bridges, while the new options require an updated bridge.
 
-Clicking a 2D or 3D texture preview selects a mip texel and requests the original texture pixel, using the current zoom, pan and vertical-flip settings. Background clicks are ignored. A real D3D11 capture exercises a 2D click; 3D and other APIs remain unverified. Direct picking from 1D previews and picking overlay or custom-shader output are not implemented.
+Clicking a texture preview selects a mip texel and requests the original texture pixel, using the current zoom, pan and vertical-flip settings. Background clicks are ignored. Real D3D11 captures exercise 1D and 2D clicks; 3D, D3D12 and other APIs remain unverified. 1D picking requires an updated bridge and is currently enabled for D3D11/D3D12 renderers only. Picking overlay or custom-shader output is not implemented.
 
 Preview can fit the texture or use explicit zoom and pixel offsets for panning; scroll over the preview to zoom at the cursor and drag to pan, with rendering refreshed on release. These affect the rendered preview only. A D3D11 capture exercises the zoom and pan path; other APIs remain unverified.
 
