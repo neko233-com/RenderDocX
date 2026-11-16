@@ -1680,7 +1680,10 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         serde_json::json!({"command":"pick_pixel","index":texture_index,"x":8,"y":8}).to_string();
     let original = agent.send(&pick);
     assert_eq!(original["ok"], true, "{original}");
-    let replacement = agent.send(&serde_json::json!({"command":"shader_apply","stage":"fragment","encoding":5,"entry":"main","source":"float4 main() : SV_Target { return float4(1,0,0,1); }"}).to_string());
+    let fragment_report = agent.send(r#"{"command":"shader","stage":"fragment"}"#);
+    assert_eq!(fragment_report["ok"], true, "{fragment_report}");
+    let replacement_request = serde_json::json!({"command":"shader_apply","stage":"fragment","encoding":5,"entry":"main","flags":fragment_report["data"]["shader"]["compile_flags"],"files":[{"name":"main.hlsl","contents":"#include \"color.hlsl\"\nfloat4 main() : SV_Target { return color(); }"},{"name":"color.hlsl","contents":"#pragma once\nfloat4 color() { return float4(1,0,0,1); }"}]}).to_string();
+    let replacement = agent.send(&replacement_request);
     assert_eq!(
         replacement["data"]["edit"]["applied"], true,
         "{replacement}"
@@ -1690,6 +1693,16 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     assert_ne!(
         changed["data"]["pixel"]["bits"],
         original["data"]["pixel"]["bits"]
+    );
+    let bad_flags = agent.send(&serde_json::json!({"command":"shader_apply","stage":"fragment","encoding":5,"entry":"main","source":"float4 main() : SV_Target { return 1; }","flags":[{"name":"@cmdline","value":"/T invalid_profile"}]}).to_string());
+    assert_eq!(bad_flags["data"]["edit"]["applied"], false, "{bad_flags}");
+    assert_eq!(
+        agent.send(&pick)["data"]["pixel"]["bits"],
+        original["data"]["pixel"]["bits"]
+    );
+    assert_eq!(
+        agent.send(&replacement_request)["data"]["edit"]["applied"],
+        true
     );
     let restored = agent.send(r#"{"command":"shader_revert","stage":"fragment"}"#);
     assert_eq!(restored["ok"], true, "{restored}");

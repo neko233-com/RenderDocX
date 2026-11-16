@@ -1408,8 +1408,25 @@ int run(const std::string &capture, bool structure_worker)
       std::string event_text, stage_text, encoding_text, entry_text, source_text, extra;
       uint64_t requested_event = 0, stage_index = 0, encoding = 0;
       if(!(args >> event_text >> stage_text) || !decimal(event_text, requested_event) || requested_event > UINT32_MAX || !decimal(stage_text, stage_index) || stage_index >= 8 ||
-         (applying && (!(args >> encoding_text >> entry_text >> source_text) || !decimal(encoding_text, encoding) || encoding >= uint32_t(ShaderEncoding::Count))) || (args >> extra))
+         (applying && (!(args >> encoding_text >> entry_text >> source_text) || !decimal(encoding_text, encoding) || encoding >= uint32_t(ShaderEncoding::Count))))
       { error("Invalid shader replacement request"); continue; }
+      ShaderCompileFlags supplied_flags;
+      bool has_flags = false, flags_valid = true;
+      if(applying && (args >> extra))
+      {
+        uint64_t count = 0;
+        has_flags = true;
+        if(!decimal(extra, count) || count > command.size() / 4) flags_valid = false;
+        for(uint64_t i = 0; flags_valid && i < count; ++i)
+        {
+          std::string name, value; bytebuf name_bytes, value_bytes;
+          if(!(args >> name >> value) || !decode_section_hex(name, name_bytes) || !decode_section_hex(value, value_bytes)) { flags_valid = false; break; }
+          const rdcstr flag_name = name_bytes.empty() ? rdcstr() : rdcstr((const char *)name_bytes.data(), name_bytes.size());
+          const rdcstr flag_value = value_bytes.empty() ? rdcstr() : rdcstr((const char *)value_bytes.data(), value_bytes.size());
+          supplied_flags.flags.push_back({flag_name, flag_value});
+        }
+      }
+      if(!flags_valid || (args >> extra)) { error("Invalid shader compile flags"); continue; }
       if(!selected) { error("Select an event before editing a shader"); continue; }
       if(requested_event != selected_event) { error("Shader edit event changed"); continue; }
       const ShaderStage stage = ShaderStage(stage_index);
@@ -1430,7 +1447,7 @@ int run(const std::string &capture, bool structure_worker)
         { error("Shader encoding is not supported by the replay device"); continue; }
         const ShaderReflection *reflection = state.GetShaderReflection(stage);
         if(!reflection) { error("Shader reflection is unavailable"); continue; }
-        ShaderCompileFlags flags = reflection->debugInfo.compileFlags;
+        ShaderCompileFlags flags = has_flags ? supplied_flags : reflection->debugInfo.compileFlags;
         const rdcstr entry((const char *)entry_bytes.data(), entry_bytes.size());
         auto built = replay.controller->BuildTargetShader(entry, ShaderEncoding(encoding), source_bytes, flags, stage);
         diagnostics = built.second;

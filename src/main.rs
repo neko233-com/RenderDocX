@@ -87,6 +87,7 @@ struct ShaderEditor {
     filename: String,
     resource_key: Option<String>,
     files: Vec<serde_json::Value>,
+    baseline_files: Vec<serde_json::Value>,
     file_index: usize,
     flags: serde_json::Map<String, serde_json::Value>,
     command_line: String,
@@ -94,6 +95,7 @@ struct ShaderEditor {
     baseline: String,
     baseline_entry: String,
     baseline_encoding: String,
+    baseline_command_line: String,
     input: Entity<TextareaState>,
 }
 
@@ -500,6 +502,7 @@ struct Workspace {
     shader_editor: Option<ShaderEditor>,
     shader_edit_entry: Entity<InputState>,
     shader_edit_encoding: Entity<InputState>,
+    shader_edit_command: Entity<InputState>,
     structure: StructureView,
     mesh: MeshView,
     input_page: Option<InputPage>,
@@ -569,9 +572,18 @@ impl Workspace {
 
     fn shader_editor_dirty(&self, cx: &Context<Self>) -> bool {
         self.shader_editor.as_ref().is_some_and(|editor| {
-            editor.input.read(cx).value().as_ref() != editor.baseline
+            editor.files != editor.baseline_files
+                || editor.input.read(cx).value().as_ref()
+                    != editor
+                        .files
+                        .get(editor.file_index)
+                        .and_then(|file| file.get("contents"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
                 || self.shader_edit_entry.read(cx).value().as_ref() != editor.baseline_entry
                 || self.shader_edit_encoding.read(cx).value().as_ref() != editor.baseline_encoding
+                || self.shader_edit_command.read(cx).value().as_ref()
+                    != editor.baseline_command_line
         })
     }
 
@@ -1964,7 +1976,12 @@ impl Workspace {
                 )
             })
             .collect();
-        let mut command_line = String::new();
+        let mut command_line = report
+            .compile_flags
+            .iter()
+            .find(|flag| flag.name == "@cmdline")
+            .map(|flag| flag.value.clone())
+            .unwrap_or_default();
         let mut tool = "Builtin".to_owned();
         let mut encoding = report
             .source_encoding
@@ -2127,6 +2144,9 @@ impl Workspace {
         self.shader_edit_encoding.update(cx, |input, cx| {
             input.set_value(encoding.to_string(), window, cx)
         });
+        self.shader_edit_command.update(cx, |input, cx| {
+            input.set_value(command_line.clone(), window, cx)
+        });
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .default_value(baseline.clone())
@@ -2137,16 +2157,60 @@ impl Workspace {
             event,
             filename,
             resource_key,
+            baseline_files: files.clone(),
             files,
             file_index,
             flags,
-            command_line,
+            command_line: command_line.clone(),
             tool,
             baseline,
             baseline_entry: entry,
             baseline_encoding: encoding.to_string(),
+            baseline_command_line: command_line.clone(),
             input,
         });
+        cx.notify();
+    }
+
+    fn switch_shader_editor_file(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.resource_pending || self.replay_pending || self.export_pending {
+            return;
+        }
+        let Some(editor) = self.shader_editor.as_mut() else {
+            return;
+        };
+        if index >= editor.files.len() || index == editor.file_index {
+            return;
+        }
+        let current = editor.input.read(cx).value().to_string();
+        if let Some(file) = editor
+            .files
+            .get_mut(editor.file_index)
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            file.insert("contents".into(), serde_json::Value::String(current));
+        }
+        editor.file_index = index;
+        editor.filename = editor.files[index]["name"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        let text = editor.files[index]["contents"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        editor.baseline = editor.baseline_files[index]["contents"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        editor
+            .input
+            .update(cx, |input, cx| input.set_value(text, window, cx));
         cx.notify();
     }
 
@@ -2176,27 +2240,6 @@ impl Workspace {
                 cx.notify();
                 return;
             }
-            let current_flags: serde_json::Map<String, serde_json::Value> = self
-                .shader_data
-                .as_ref()
-                .map(|report| {
-                    report
-                        .compile_flags
-                        .iter()
-                        .map(|flag| {
-                            (
-                                flag.name.clone(),
-                                serde_json::Value::String(flag.value.clone()),
-                            )
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            if current_flags != editor.flags {
-                self.status = Some(self.t("This draft has different compile flags; applying saved flags is not yet supported.", "此草稿的编译参数不同；暂不支持按保存的参数编译。", "この下書きのコンパイルフラグは異なります。保存済みフラグでのコンパイルはまだサポートされていません。", "이 초안의 컴파일 플래그가 다릅니다. 저장된 플래그 적용은 아직 지원되지 않습니다.").to_owned());
-                cx.notify();
-                return;
-            }
             let Ok(encoding) = self.shader_edit_encoding.read(cx).value().parse::<u32>() else {
                 self.status = Some(
                     self.t(
@@ -2210,10 +2253,66 @@ impl Workspace {
                 cx.notify();
                 return;
             };
+            let mut files = editor.files.clone();
+            if let Some(file) = files
+                .get_mut(editor.file_index)
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                file.insert(
+                    "contents".into(),
+                    serde_json::Value::String(editor.input.read(cx).value().to_string()),
+                );
+            }
+            let parsed: Result<Vec<renderdocx::shader_source::SourceFile>, _> =
+                files.iter().cloned().map(serde_json::from_value).collect();
+            let Ok(parsed) = parsed else { return };
+            let source = if matches!(encoding, 2 | 5 | 9) {
+                match renderdocx::shader_source::assemble(&parsed) {
+                    Ok(source) => source,
+                    Err(error) => {
+                        self.status = Some(format!(
+                            "{}: {error}",
+                            self.t(
+                                "Could not assemble shader source",
+                                "无法合并着色器源码",
+                                "シェーダーソースを結合できません",
+                                "셰이더 소스를 결합할 수 없습니다"
+                            )
+                        ));
+                        cx.notify();
+                        return;
+                    }
+                }
+            } else {
+                parsed
+                    .first()
+                    .map(|file| file.contents.clone())
+                    .unwrap_or_default()
+            };
+            let mut flags = editor
+                .flags
+                .iter()
+                .map(|(name, value)| renderdocx::replay::ShaderCompileFlag {
+                    name: name.clone(),
+                    value: value.as_str().unwrap_or("").to_owned(),
+                })
+                .collect::<Vec<_>>();
+            let command_line = self.shader_edit_command.read(cx).value().to_string();
+            if let Some(flag) = flags.iter_mut().find(|flag| flag.name == "@cmdline") {
+                flag.value = command_line.clone();
+            } else {
+                flags.push(renderdocx::replay::ShaderCompileFlag {
+                    name: "@cmdline".into(),
+                    value: command_line.clone(),
+                });
+            }
             Some((
                 encoding,
                 self.shader_edit_entry.read(cx).value().to_string(),
-                editor.input.read(cx).value().to_string(),
+                source,
+                files,
+                flags,
+                command_line,
             ))
         };
         self.resource_pending = true;
@@ -2231,9 +2330,14 @@ impl Workspace {
         let task = cx.background_executor().spawn(async move {
             let request = replacement
                 .as_ref()
-                .map(|(encoding, entry, source)| (*encoding, entry.as_str(), source.as_bytes()));
+                .map(|(encoding, entry, source, _, _, _)| {
+                    (*encoding, entry.as_str(), source.as_bytes())
+                });
+            let flags = replacement
+                .as_ref()
+                .map(|(_, _, _, _, flags, _)| flags.as_slice());
             session
-                .shader_edit(event, stage as u32, request)
+                .shader_edit_with_flags(event, stage as u32, request, flags)
                 .map(|edit| (edit, replacement))
         });
         cx.spawn(async move |this, cx| {
@@ -2258,12 +2362,21 @@ impl Workspace {
                         this.counter_page = None;
                         this.buffer_data = None;
                         if edit.applied {
-                            if let (Some(editor), Some((encoding, entry, source))) =
-                                (this.shader_editor.as_mut(), replacement)
+                            if let (
+                                Some(editor),
+                                Some((encoding, entry, _source, files, _flags, command_line)),
+                            ) = (this.shader_editor.as_mut(), replacement)
                             {
-                                editor.baseline = source;
+                                editor.baseline = files[editor.file_index]["contents"]
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .to_owned();
+                                editor.files = files.clone();
+                                editor.baseline_files = files;
                                 editor.baseline_entry = entry;
                                 editor.baseline_encoding = encoding.to_string();
+                                editor.baseline_command_line = command_line.clone();
+                                editor.command_line = command_line;
                             }
                         }
                         let label = if revert {
@@ -2347,6 +2460,7 @@ impl Workspace {
             return;
         };
         let entry = self.shader_edit_entry.read(cx).value().to_string();
+        let command_line = self.shader_edit_command.read(cx).value().to_string();
         let source = editor.input.read(cx).value().to_string();
         let stage = editor.stage;
         let file_index = editor.file_index;
@@ -2358,7 +2472,7 @@ impl Workspace {
             return;
         };
         file.insert("contents".into(), serde_json::Value::String(source.clone()));
-        let data = serde_json::json!({"id":resource_key,"stage":stage,"entryPoint":entry,"encoding":encoding,"commandLine":editor.command_line,"tool":editor.tool,"flags":editor.flags,"files":files});
+        let data = serde_json::json!({"id":resource_key,"stage":stage,"entryPoint":entry,"encoding":encoding,"commandLine":command_line,"tool":editor.tool,"flags":editor.flags,"files":files});
         self.resource_pending = true;
         let revision = self.open_revision;
         self.status = Some(
@@ -2383,6 +2497,8 @@ impl Workspace {
                 source,
                 entry,
                 encoding,
+                files,
+                command_line,
             ))
         });
         cx.spawn(async move |this, cx| {
@@ -2391,11 +2507,11 @@ impl Workspace {
                 if this.open_revision != revision { return; }
                 this.resource_pending = false;
                 match result {
-                    Ok((document, resource_key, stage, file_index, source, entry, encoding)) => {
+                    Ok((document, resource_key, stage, file_index, source, entry, encoding, files, command_line)) => {
                         this.annotations.edits = Some(document);
                         if let Some(editor) = this.shader_editor.as_mut().filter(|editor| editor.stage == stage && editor.resource_key.as_deref() == Some(&resource_key) && editor.file_index == file_index) {
-                            if let Some(file) = editor.files.get_mut(file_index).and_then(serde_json::Value::as_object_mut) { file.insert("contents".into(), serde_json::Value::String(source.clone())); }
-                            editor.baseline = source; editor.baseline_entry = entry; editor.baseline_encoding = encoding.to_string();
+                            editor.files = files.clone(); editor.baseline_files = files;
+                            editor.baseline = source; editor.baseline_entry = entry; editor.baseline_encoding = encoding.to_string(); editor.command_line = command_line.clone(); editor.baseline_command_line = command_line;
                         }
                         this.status = Some(this.t("Shader draft saved to capture; it was not applied.", "着色器草稿已保存到捕获文件；尚未应用。", "シェーダーの下書きをキャプチャに保存しました。適用はされていません。", "셰이더 초안을 캡처에 저장했습니다. 적용되지는 않았습니다.").to_owned());
                     }
@@ -6828,11 +6944,19 @@ impl Workspace {
                     if let Some(editor) = &self.shader_editor {
                         let entry_label = self.t("Entry point", "入口函数", "エントリーポイント", "진입점");
                         let encoding_label = self.t("Encoding ID", "编码 ID", "エンコーディング ID", "인코딩 ID");
+                        let command_label = self.t("Compiler command line", "编译参数", "コンパイラーコマンドライン", "컴파일러 명령줄");
+                        let mut editor_files = div().flex().flex_wrap().gap_2();
+                        for (index, file) in editor.files.iter().enumerate() {
+                            let name = file.get("name").and_then(serde_json::Value::as_str).unwrap_or("").to_owned();
+                            editor_files = editor_files.child(div().id(("shader-edit-file", index)).test_support().cursor_pointer().px_3().py_2().rounded_md().bg(rgb(if editor.file_index == index { 0x4169e1 } else { 0x252f40 })).child(name).on_click(cx.listener(move |this, _, window, cx| this.switch_shader_editor_file(index, window, cx))));
+                        }
                         view = view.child(format!("{}: {}", edit_label, editor.filename))
-                            .child(self.t("Replacements affect this replay session only. Supply complete source accepted by the device; includes are not assembled automatically.", "替换仅作用于当前回放会话。请提供设备支持的完整源码；不会自动合并 include。", "置換はこのリプレイセッションにのみ適用されます。デバイスが受け入れる完全なソースを指定してください。include は自動結合されません。", "교체는 현재 리플레이 세션에만 적용됩니다. 장치가 허용하는 전체 소스를 입력하세요. include는 자동으로 합쳐지지 않습니다."))
+                            .child(self.t("Replacements affect this replay session only. Captured source files are used to resolve includes; external compilers are not supported.", "替换仅作用于当前回放会话。include 从捕获的源码文件中解析；暂不支持外部编译器。", "置換はこのリプレイセッションにのみ適用されます。include はキャプチャされたソースファイルから解決されます。外部コンパイラーには未対応です。", "교체는 현재 리플레이 세션에만 적용됩니다. include는 캡처된 소스 파일에서 찾습니다. 외부 컴파일러는 지원되지 않습니다."))
                             .child(format!("{}: {:?}", self.t("Supported encoding IDs", "支持的编码 ID", "対応エンコーディング ID", "지원 인코딩 ID"), shader.target_encodings))
                             .child(div().flex().flex_wrap().gap_2().child(entry_label).child(Input::new(&self.shader_edit_entry).id("shader-edit-entry").aria_label(entry_label).w(px(150.)))
-                                .child(encoding_label).child(Input::new(&self.shader_edit_encoding).id("shader-edit-encoding").aria_label(encoding_label).w(px(80.))))
+                                .child(encoding_label).child(Input::new(&self.shader_edit_encoding).id("shader-edit-encoding").aria_label(encoding_label).w(px(80.)))
+                                .child(command_label).child(Input::new(&self.shader_edit_command).id("shader-edit-command").aria_label(command_label).w(px(220.))))
+                            .child(editor_files)
                             .child(Textarea::new(&editor.input).aria_label(edit_label))
                             .child(div().flex().gap_2()
                                 .child(button("shader-edit-apply", self.t("Compile and apply", "编译并应用", "コンパイルして適用", "컴파일 및 적용"), true, |this, cx| this.edit_shader(false, cx), cx))
@@ -9150,6 +9274,7 @@ fn main() {
                     let vertex_view = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let shader_edit_entry = cx.new(|cx| InputState::new(window, cx));
                     let shader_edit_encoding = cx.new(|cx| InputState::new(window, cx));
+                    let shader_edit_command = cx.new(|cx| InputState::new(window, cx));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
@@ -9227,6 +9352,7 @@ fn main() {
                         shader_editor: None,
                         shader_edit_entry,
                         shader_edit_encoding,
+                        shader_edit_command,
                         structure: StructureView::default(),
                         mesh: MeshView::default(),
                         input_page: None,
@@ -9323,6 +9449,7 @@ mod ui_tests {
                     let vertex_view = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let shader_edit_entry = cx.new(|cx| InputState::new(window, cx));
                     let shader_edit_encoding = cx.new(|cx| InputState::new(window, cx));
+                    let shader_edit_command = cx.new(|cx| InputState::new(window, cx));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
@@ -9417,6 +9544,7 @@ mod ui_tests {
                         shader_editor: None,
                         shader_edit_entry,
                         shader_edit_encoding,
+                        shader_edit_command,
                         structure: StructureView::default(),
                         mesh: MeshView::default(),
                         input_page: None,
@@ -9641,6 +9769,7 @@ mod ui_tests {
                     let vertex_view = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let shader_edit_entry = cx.new(|cx| InputState::new(window, cx));
                     let shader_edit_encoding = cx.new(|cx| InputState::new(window, cx));
+                    let shader_edit_command = cx.new(|cx| InputState::new(window, cx));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
@@ -9840,6 +9969,7 @@ mod ui_tests {
                         shader_editor: None,
                         shader_edit_entry,
                         shader_edit_encoding,
+                        shader_edit_command,
                         structure: StructureView::default(),
                         mesh: MeshView::default(),
                         input_page: None,
@@ -10147,6 +10277,15 @@ mod ui_tests {
             window.click("shader-edit-begin", cx);
             assert_eq!(view.read(cx).shader_editor.as_ref().unwrap().baseline, "saved include");
             assert_eq!(view.read(cx).shader_edit_entry.read(cx).value().as_ref(), "saved_entry");
+            let source = view.read(cx).shader_editor.as_ref().unwrap().input.clone();
+            source.update(cx, |source, cx| source.set_value("modified include", window, cx));
+            view.update(cx, |view, cx| {
+                view.switch_shader_editor_file(0, window, cx);
+                assert_eq!(view.shader_editor.as_ref().unwrap().files[1]["contents"], "modified include");
+                assert!(view.shader_editor_dirty(cx));
+                view.switch_shader_editor_file(1, window, cx);
+                assert_eq!(view.shader_editor.as_ref().unwrap().input.read(cx).value().as_ref(), "modified include");
+            });
             let entry = view.read(cx).shader_edit_entry.clone();
             entry.update(cx, |entry, cx| entry.set_value("changed", window, cx));
             view.update(cx, |view, cx| {

@@ -841,18 +841,43 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     .get("entry")
                     .and_then(Value::as_str)
                     .filter(|v| !v.is_empty() && !v.contains('\0'));
-                let source = match (request.get("source"), request.get("source_hex")) {
-                    (Some(Value::String(text)), None) => Some(text.as_bytes().to_vec()),
-                    (None, Some(Value::String(hex))) if hex.len() % 2 == 0 && hex.is_ascii() => hex
-                        .as_bytes()
-                        .chunks_exact(2)
-                        .map(|pair| {
-                            let digit = |b: u8| (b as char).to_digit(16);
-                            Some((digit(pair[0])? * 16 + digit(pair[1])?) as u8)
-                        })
-                        .collect::<Option<Vec<_>>>(),
-                    _ => None,
+                let source: Result<Option<Vec<u8>>, String> = match (
+                    request.get("source"),
+                    request.get("source_hex"),
+                    request.get("files"),
+                ) {
+                    (Some(Value::String(text)), None, None) => Ok(Some(text.as_bytes().to_vec())),
+                    (None, Some(Value::String(hex)), None)
+                        if hex.len() % 2 == 0 && hex.is_ascii() =>
+                    {
+                        Ok(hex
+                            .as_bytes()
+                            .chunks_exact(2)
+                            .map(|pair| {
+                                let digit = |b: u8| (b as char).to_digit(16);
+                                Some((digit(pair[0])? * 16 + digit(pair[1])?) as u8)
+                            })
+                            .collect::<Option<Vec<_>>>())
+                    }
+                    (None, None, Some(files))
+                        if encoding.is_some_and(|encoding| matches!(encoding, 2 | 5 | 9)) =>
+                    {
+                        serde_json::from_value::<Vec<renderdocx::shader_source::SourceFile>>(
+                            files.clone(),
+                        )
+                        .map_err(|error| error.to_string())
+                        .and_then(|files| renderdocx::shader_source::assemble(&files))
+                        .map(|source| Some(source.into_bytes()))
+                    }
+                    _ => Ok(None),
                 };
+                let flags: Result<Option<Vec<renderdocx::replay::ShaderCompileFlag>>, String> =
+                    match request.get("flags") {
+                        None => Ok(None),
+                        Some(value) => serde_json::from_value(value.clone())
+                            .map(Some)
+                            .map_err(|error| error.to_string()),
+                    };
                 match (&opened, selected_event, stage) {
                     (None, _, _) => Err(("no_capture", "No capture is open".into())),
                     (Some(_), None, _) => {
@@ -871,11 +896,11 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                             .map_err(|error| ("shader_edit_failed", error))
                     }
                     (Some((session, _)), Some(event), Some(stage)) => match (
-                        encoding, entry, source,
+                        encoding, entry, source, flags,
                     ) {
-                        (Some(encoding), Some(entry), Some(source)) if !source.is_empty() => {
+                        (Some(encoding), Some(entry), Ok(Some(source)), Ok(flags)) if !source.is_empty() => {
                             session
-                                .shader_edit(event, stage as u32, Some((encoding, entry, &source)))
+                                .shader_edit_with_flags(event, stage as u32, Some((encoding, entry, &source)), flags.as_deref())
                                 .map(|edit| {
                                     pipeline = Some(edit.pipeline.clone());
                                     mesh_selection = None;
@@ -883,9 +908,10 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                                 })
                                 .map_err(|error| ("shader_edit_failed", error))
                         }
+                        (_, _, Err(error), _) | (_, _, _, Err(error)) => Err(("invalid_arguments", error)),
                         _ => Err((
                             "invalid_arguments",
-                            "shader_apply requires encoding, entry and either source or source_hex"
+                            "shader_apply requires encoding, entry and exactly one of source, source_hex or text files"
                                 .into(),
                         )),
                     },

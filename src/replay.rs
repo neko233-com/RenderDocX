@@ -1246,6 +1246,7 @@ trait Transport: Send {
         _event: u32,
         _stage: u32,
         _replacement: Option<(u32, &str, &[u8])>,
+        _flags: Option<&[ShaderCompileFlag]>,
     ) -> Result<ShaderEdit, String> {
         Err("Shader editing is not supported by this transport".into())
     }
@@ -1926,6 +1927,7 @@ impl Transport for Process {
         event: u32,
         stage: u32,
         replacement: Option<(u32, &str, &[u8])>,
+        flags: Option<&[ShaderCompileFlag]>,
     ) -> Result<ShaderEdit, String> {
         let input = self.input.as_mut().ok_or("Replay session has closed")?;
         if let Some((encoding, entry, source)) = replacement {
@@ -1938,12 +1940,28 @@ impl Transport for Process {
                 }
                 encoded
             };
-            writeln!(
-                input,
+            let mut command = format!(
                 "shader_apply {event} {stage} {encoding} {} {}",
                 hex(entry.as_bytes()),
                 hex(source)
-            )
+            );
+            if let Some(flags) = flags {
+                command.push_str(&format!(" {}", flags.len()));
+                for flag in flags {
+                    let name = if flag.name.is_empty() {
+                        "_".into()
+                    } else {
+                        hex(flag.name.as_bytes())
+                    };
+                    let value = if flag.value.is_empty() {
+                        "_".into()
+                    } else {
+                        hex(flag.value.as_bytes())
+                    };
+                    command.push_str(&format!(" {name} {value}"));
+                }
+            }
+            writeln!(input, "{command}")
         } else {
             writeln!(input, "shader_revert {event} {stage}")
         }
@@ -2400,6 +2418,16 @@ impl Session {
         stage: u32,
         replacement: Option<(u32, &str, &[u8])>,
     ) -> Result<ShaderEdit, String> {
+        self.shader_edit_with_flags(event, stage, replacement, None)
+    }
+
+    pub fn shader_edit_with_flags(
+        &self,
+        event: u32,
+        stage: u32,
+        replacement: Option<(u32, &str, &[u8])>,
+        flags: Option<&[ShaderCompileFlag]>,
+    ) -> Result<ShaderEdit, String> {
         if stage as usize >= SHADER_STAGES.len() {
             return Err("Invalid shader stage".into());
         }
@@ -2409,10 +2437,12 @@ impl Session {
             return Err("Shader entry point and source must be nonempty".into());
         }
         self.next_revision();
-        self.process
-            .lock()
-            .map_err(|e| e.to_string())?
-            .shader_edit(event, stage, replacement)
+        self.process.lock().map_err(|e| e.to_string())?.shader_edit(
+            event,
+            stage,
+            replacement,
+            flags,
+        )
     }
 
     pub fn debug_vertex(
