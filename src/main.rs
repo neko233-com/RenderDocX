@@ -641,7 +641,6 @@ struct Workspace {
     stats_min: Entity<InputState>,
     stats_max: Entity<InputState>,
     statistics: Option<TextureStatistics>,
-    statistics_source: Option<(TextureSelection, u64)>,
     selected_buffer: Option<usize>,
     buffer_offset: u64,
     buffer_format: Option<renderdocx::buffer_format::ScalarFormat>,
@@ -5949,57 +5948,130 @@ impl Workspace {
         if !self.preview_edit_ready(cx) {
             return;
         }
-        let current = self.texture_selection;
-        let valid = self.statistics_source.is_some_and(|(source, revision)| {
-            source.mip == current.mip
-                && source.slice == current.slice
-                && source.sample == current.sample
-                && source.analysis_type_cast == current.analysis_type_cast
-                && source.preview_custom_shader == current.preview_custom_shader
-                && (!current.preview_custom_shader
-                    || (source.preview_type_cast == current.preview_type_cast
-                        && revision == self.texture_custom_revision))
-        });
-        let range = self
-            .statistics
-            .as_ref()
-            .filter(|stats| {
-                valid
-                    && self.selected_texture == Some(stats.index as usize)
-                    && self
-                        .pipeline
-                        .as_ref()
-                        .is_some_and(|pipeline| pipeline.event_id == stats.event_id)
-            })
-            .and_then(|stats| {
-                self.snapshot
-                    .as_ref()
-                    .and_then(|snapshot| snapshot.textures.get(stats.index as usize))
-                    .and_then(|texture| {
-                        renderdocx::texture_view::fit_range(
-                            stats,
-                            texture.component_type,
-                            current.analysis_type_cast,
-                            texture.component_count,
-                            current.effective_preview_channels(),
-                        )
-                        .ok()
-                    })
-            });
-        if let Some(range) = range {
-            self.set_texture_range(range, window, cx);
-        } else {
+        let (Some(session), Some(event), Some(index)) = (
+            self.session.clone(),
+            self.pipeline.as_ref().map(|pipeline| pipeline.event_id),
+            self.selected_texture,
+        ) else {
             self.status = Some(
                 self.t(
-                    "Analyze this texture and enable a channel before fitting the range.",
-                    "请先分析当前纹理并启用至少一个通道，再自适应范围。",
-                    "範囲を調整する前に現在のテクスチャを解析し、チャンネルを有効にしてください。",
-                    "범위를 맞추기 전에 현재 텍스처를 분석하고 채널을 활성화하세요.",
+                    "Select an event and texture before fitting the range.",
+                    "请先选择事件和纹理，再自适应范围。",
+                    "範囲を調整する前にイベントとテクスチャを選択してください。",
+                    "범위를 맞추기 전에 이벤트와 텍스처를 선택하세요.",
                 )
                 .to_owned(),
             );
             cx.notify();
+            return;
+        };
+        let Some(texture) = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.textures.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        let Ok(texture_index) = u32::try_from(index) else {
+            return;
+        };
+        let selection = self.texture_selection;
+        let channels = selection.effective_preview_channels();
+        if !channels
+            .iter()
+            .take(texture.component_count as usize)
+            .any(|enabled| *enabled)
+        {
+            self.status = Some(
+                self.t(
+                    "Enable a texture channel before fitting the range.",
+                    "请至少启用一个纹理通道，再自适应范围。",
+                    "範囲を調整する前にチャンネルを有効にしてください。",
+                    "범위를 맞추기 전에 텍스처 채널을 활성화하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
         }
+        let request = HistogramRequest {
+            min: 0.0,
+            max: 1.0,
+            channels,
+        };
+        let revision = self.open_revision;
+        let selection_revision = self.selection_revision;
+        let shader_revision = self.texture_custom_revision;
+        let handle = window.window_handle();
+        self.resource_pending = true;
+        self.status = Some(
+            self.t(
+                "Fitting texture range…",
+                "正在自适应纹理范围…",
+                "テクスチャの範囲を調整中…",
+                "텍스처 범위를 맞추는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            let stats =
+                session.texture_statistics(event, texture_index, &texture, selection, request)?;
+            let range = renderdocx::texture_view::fit_range(
+                &stats,
+                texture.component_type,
+                selection.analysis_type_cast,
+                texture.component_count,
+                channels,
+            )
+            .map_err(str::to_owned)?;
+            Ok::<_, String>((stats, range))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = handle.update(cx, |_, window, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    if this.open_revision != revision
+                        || this.selection_revision != selection_revision
+                    {
+                        return;
+                    }
+                    this.resource_pending = false;
+                    if this.selected_texture != Some(index)
+                        || this.texture_selection != selection
+                        || this.texture_custom_revision != shader_revision
+                        || !this
+                            .pipeline
+                            .as_ref()
+                            .is_some_and(|pipeline| pipeline.event_id == event)
+                    {
+                        this.status = None;
+                        cx.notify();
+                        return;
+                    }
+                    match result {
+                        Ok((stats, range)) => {
+                            this.statistics = Some(stats);
+                            this.set_texture_range(range, window, cx);
+                        }
+                        Err(error) => {
+                            this.status = Some(format!(
+                                "{}: {error}",
+                                this.t(
+                                    "Could not fit texture range",
+                                    "无法自适应纹理范围",
+                                    "テクスチャ範囲を調整できません",
+                                    "텍스처 범위를 맞출 수 없습니다"
+                                )
+                            ));
+                            cx.notify();
+                        }
+                    }
+                });
+            });
+        })
+        .detach();
     }
 
     fn apply_texture_range(&mut self, cx: &mut Context<Self>) {
@@ -8137,7 +8209,6 @@ impl Workspace {
                 match result {
                     Ok(stats) => {
                         this.statistics = Some(stats);
-                        this.statistics_source = Some((selection, this.texture_custom_revision));
                         this.status = None;
                     }
                     Err(error) => {
@@ -9533,7 +9604,7 @@ impl Workspace {
                 .child(Input::new(&self.texture_white_point).id("texture-white-point").aria_label(self.t("White point", "白点", "白点", "백점")).w(px(90.)))
                 .child(button("texture-apply-range", self.t("Apply range", "应用范围", "範囲を適用", "범위 적용"), false, |this, cx| this.apply_texture_range(cx), cx))
                 .child(Button::new("texture-reset-range").label(self.t("Reset range", "重置范围", "範囲をリセット", "범위 초기화")).secondary().on_click(cx.listener(|this, _, window, cx| this.reset_texture_range(window, cx))))
-                .child(Button::new("texture-fit-range").label(self.t("Fit analyzed range", "按分析结果自适应", "解析結果に範囲を合わせる", "분석 결과에 범위 맞추기")).secondary().on_click(cx.listener(|this, _, window, cx| this.fit_texture_range(window, cx))))
+                .child(Button::new("texture-fit-range").label(self.t("Fit range", "自适应范围", "範囲を自動調整", "범위 자동 맞춤")).secondary().on_click(cx.listener(|this, _, window, cx| this.fit_texture_range(window, cx))))
                 .child(button("texture-reset-range-on-switch", self.t("Reset range on texture change", "切换纹理时重置范围", "テクスチャ変更時に範囲をリセット", "텍스처 변경 시 범위 초기화"), self.settings.texture_reset_range, |this, cx| { this.settings.texture_reset_range = !this.settings.texture_reset_range; this.save(); cx.notify(); }, cx)))
             .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t("Preview uses native texture display. Export applies the range only when RenderDoc converts the data.", "预览使用原生纹理显示；导出仅在 RenderDoc 转换数据时应用范围。", "プレビューはネイティブ表示を使用し、書き出しでは変換時のみ範囲が適用されます。", "미리보기는 기본 텍스처 표시를 사용하며 내보내기는 데이터 변환 시에만 범위를 적용합니다.")))
     }
@@ -16328,7 +16399,6 @@ fn main() {
                         stats_min,
                         stats_max,
                         statistics: None,
-                        statistics_source: None,
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_format: None,
@@ -17097,7 +17167,6 @@ mod ui_tests {
                         stats_min,
                         stats_max,
                         statistics: None,
-                        statistics_source: None,
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_format: None,
@@ -17673,7 +17742,6 @@ mod ui_tests {
                         stats_min,
                         stats_max,
                         statistics: None,
-                        statistics_source: None,
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_format: None,
@@ -18084,11 +18152,13 @@ mod ui_tests {
             assert_eq!(stats.histogram[64], 16);
             assert_eq!(stats.request.channels, [true, true, true, true]);
         });
+        cx.update(|cx| view.update(cx, |view, _| view.statistics = None));
         cx.update_window(handle.into(), |_, window, cx| {
             reveal_details(window, "texture-fit-range", cx);
             window.click("texture-fit-range", cx);
         })
         .unwrap();
+        cx.run_until_parked();
         cx.update(|cx| {
             assert_eq!(
                 view.read(cx).texture_selection.display_range,
@@ -20028,7 +20098,36 @@ mod ui_tests {
                     );
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
+                cx.update(|cx| view.update(cx, |view, _| view.statistics = None));
                 cx.update_window(handle.into(), |_, window, cx| {
+                    reveal_details(window, "texture-fit-range", cx);
+                    window.click("texture-fit-range", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        !view.read(cx).resource_pending
+                            && view
+                                .read(cx)
+                                .statistics
+                                .as_ref()
+                                .is_some_and(|stats| stats.custom_shader)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real custom range fit failed: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update(|cx| assert!(view.read(cx).texture_selection.display_range.is_some()));
+                cx.update_window(handle.into(), |_, window, cx| {
+                    reveal_details(window, "texture-reset-range", cx);
+                    window.click("texture-reset-range", cx);
                     reveal_details(window, "texture-custom-clear", cx);
                     window.click("texture-custom-clear", cx);
                 })
