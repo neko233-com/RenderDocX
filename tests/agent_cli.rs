@@ -10,6 +10,49 @@ struct Agent {
     output: BufReader<ChildStdout>,
 }
 
+#[test]
+fn saved_event_filters_survive_restart_and_stay_separate_from_formats() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut agent = Agent::with_config(None, false, Some(dir.path()));
+    let saved = agent.send(
+        r#"{"command":"event_filter_save","name":"筛选/../例","expression":"+$action() -Copy"}"#,
+    );
+    assert_eq!(saved["data"]["filter"]["expression"], "+$action() -Copy");
+    assert_eq!(
+        agent.send(r#"{"command":"event_filter_save","name":"empty","expression":""}"#)["ok"],
+        true
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"buffer_formats_list"}"#)["data"]["formats"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    agent.quit();
+    let mut restarted = Agent::with_config(None, false, Some(dir.path()));
+    assert_eq!(
+        restarted.send(r#"{"command":"event_filter_get","name":"筛选/../例"}"#)["data"]["filter"]["expression"],
+        "+$action() -Copy"
+    );
+    assert_eq!(
+        restarted.send(r#"{"command":"event_filters_list"}"#)["data"]["filters"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        restarted.send(r#"{"command":"event_filter_delete","name":"筛选/../例"}"#)["ok"],
+        true
+    );
+    assert_eq!(
+        restarted.send(r#"{"command":"event_filter_get","name":"筛选/../例"}"#)["error"]["code"],
+        "event_filter_store_failed"
+    );
+    restarted.quit();
+}
+
 impl Agent {
     fn new(bridge: Option<&str>) -> Self {
         Self::with_handoff_environment(bridge, false)
@@ -881,6 +924,20 @@ fn capabilities_advertises_versioned_machine_readable_contract() {
     assert_eq!(value["structure_page_limit"], 128);
     assert_eq!(value["vertex_input_page_limit"], 64);
     assert_eq!(value["task_payload_page_limit"], 32);
+    for command in [
+        "event_filters_list",
+        "event_filter_get",
+        "event_filter_save",
+        "event_filter_delete",
+    ] {
+        assert!(
+            value["serve_commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry == command)
+        );
+    }
     assert!(
         value["serve_commands"]
             .as_array()

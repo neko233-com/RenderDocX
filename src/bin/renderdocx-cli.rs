@@ -99,6 +99,15 @@ fn usage() -> Value {
     capabilities["serve_commands"]
         .as_array_mut()
         .expect("capabilities commands")
+        .extend([
+            json!("event_filters_list"),
+            json!("event_filter_get"),
+            json!("event_filter_save"),
+            json!("event_filter_delete"),
+        ]);
+    capabilities["serve_commands"]
+        .as_array_mut()
+        .expect("capabilities commands")
         .push(json!("event_times"));
     capabilities["serve_commands"]
         .as_array_mut()
@@ -236,6 +245,37 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
         let command = request.get("command").and_then(Value::as_str).unwrap_or("");
         let result: Result<Value, (&str, String)> = match command {
             "capabilities" => Ok(usage()),
+            "event_filters_list" => renderdocx::event_filters::FilterStore::new()
+                .and_then(|store| store.list())
+                .map(|filters| json!({"filters":filters}))
+                .map_err(|error| ("event_filter_store_failed", error)),
+            "event_filter_get" => match request.get("name").and_then(Value::as_str) {
+                Some(name) => renderdocx::event_filters::FilterStore::new()
+                    .and_then(|store| store.get(name))
+                    .map(|filter| json!({"filter":filter}))
+                    .map_err(|error| ("event_filter_store_failed", error)),
+                None => Err(("invalid_arguments", "name must be a string".into())),
+            },
+            "event_filter_save" => match (
+                request.get("name").and_then(Value::as_str),
+                request.get("expression").and_then(Value::as_str),
+            ) {
+                (Some(name), Some(expression)) => renderdocx::event_filters::FilterStore::new()
+                    .and_then(|store| store.save(name, expression))
+                    .map(|filter| json!({"filter":filter}))
+                    .map_err(|error| ("event_filter_store_failed", error)),
+                _ => Err((
+                    "invalid_arguments",
+                    "name and expression must be strings".into(),
+                )),
+            },
+            "event_filter_delete" => match request.get("name").and_then(Value::as_str) {
+                Some(name) => renderdocx::event_filters::FilterStore::new()
+                    .and_then(|store| store.delete(name))
+                    .map(|()| json!({"deleted":name}))
+                    .map_err(|error| ("event_filter_store_failed", error)),
+                None => Err(("invalid_arguments", "name must be a string".into())),
+            },
             "buffer_formats_list" => renderdocx::buffer_formats::FormatStore::new()
                 .and_then(|store| store.list())
                 .map(|formats| json!({"formats":formats}))

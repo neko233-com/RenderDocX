@@ -575,6 +575,8 @@ struct Workspace {
     event_tree: EventTree,
     event_scroll: UniformListScrollHandle,
     event_search: Entity<InputState>,
+    event_filter_name: Entity<InputState>,
+    saved_event_filters: Vec<renderdocx::event_filters::SavedFilter>,
     event_find: Entity<InputState>,
     _event_search_subscription: gpui::Subscription,
     resource_search: Entity<InputState>,
@@ -2573,6 +2575,7 @@ impl Workspace {
                         this.open_revision += 1;
                         this.capture = Some(capture);
                         this.event_tree.reset(&snapshot.actions);
+                        this.refresh_event_filters(cx);
                         this.timeline.reset(&snapshot.actions);
                         this.snapshot = Some(snapshot);
                         this.session = Some(session.clone());
@@ -2788,6 +2791,126 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    fn event_filter_store(&self) -> Result<renderdocx::event_filters::FilterStore, String> {
+        #[cfg(test)]
+        if let Some(path) = &self.buffer_store_override {
+            return Ok(renderdocx::event_filters::FilterStore::at(
+                path.join("event-filters"),
+            ));
+        }
+        renderdocx::event_filters::FilterStore::new()
+    }
+
+    fn refresh_event_filters(&mut self, cx: &mut Context<Self>) {
+        match self.event_filter_store().and_then(|store| store.list()) {
+            Ok(filters) => self.saved_event_filters = filters,
+            Err(error) => {
+                self.status = Some(format!(
+                    "{}: {error}",
+                    self.t(
+                        "Could not load saved filters",
+                        "无法加载已保存的筛选",
+                        "保存したフィルターを読み込めません",
+                        "저장된 필터를 불러올 수 없습니다"
+                    )
+                ))
+            }
+        }
+        cx.notify();
+    }
+
+    fn save_event_filter(&mut self, cx: &mut Context<Self>) {
+        let name = self.event_filter_name.read(cx).value().trim().to_owned();
+        let expression = self.event_search.read(cx).value().to_string();
+        match self
+            .event_filter_store()
+            .and_then(|store| store.save(&name, &expression))
+        {
+            Ok(_) => {
+                self.refresh_event_filters(cx);
+                self.status = Some(
+                    self.t(
+                        "Filter saved.",
+                        "筛选已保存。",
+                        "フィルターを保存しました。",
+                        "필터를 저장했습니다.",
+                    )
+                    .to_owned(),
+                );
+            }
+            Err(error) => {
+                self.status = Some(format!(
+                    "{}: {error}",
+                    self.t(
+                        "Could not save filter",
+                        "无法保存筛选",
+                        "フィルターを保存できません",
+                        "필터를 저장할 수 없습니다"
+                    )
+                ))
+            }
+        }
+        cx.notify();
+    }
+
+    fn delete_event_filter(&mut self, cx: &mut Context<Self>) {
+        let name = self.event_filter_name.read(cx).value().trim().to_owned();
+        match self
+            .event_filter_store()
+            .and_then(|store| store.delete(&name))
+        {
+            Ok(()) => {
+                self.refresh_event_filters(cx);
+                self.status = Some(
+                    self.t(
+                        "Filter deleted.",
+                        "筛选已删除。",
+                        "フィルターを削除しました。",
+                        "필터를 삭제했습니다.",
+                    )
+                    .to_owned(),
+                );
+            }
+            Err(error) => {
+                self.status = Some(format!(
+                    "{}: {error}",
+                    self.t(
+                        "Could not delete filter",
+                        "无法删除筛选",
+                        "フィルターを削除できません",
+                        "필터를 삭제할 수 없습니다"
+                    )
+                ))
+            }
+        }
+        cx.notify();
+    }
+
+    fn load_event_filter(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match self.event_filter_store().and_then(|store| store.get(name)) {
+            Ok(filter) => {
+                self.event_filter_name
+                    .update(cx, |input, cx| input.set_value(filter.name, window, cx));
+                self.event_search.update(cx, |input, cx| {
+                    input.set_value(filter.expression.clone(), window, cx)
+                });
+                self.event_tree.set_filter(&filter.expression);
+            }
+            Err(error) => {
+                self.status = Some(format!(
+                    "{}: {error}",
+                    self.t(
+                        "Could not load filter",
+                        "无法加载筛选",
+                        "フィルターを読み込めません",
+                        "필터를 불러올 수 없습니다"
+                    )
+                ))
+            }
+        }
+        cx.notify();
     }
 
     fn buffer_format_store(&self) -> Result<renderdocx::buffer_formats::FormatStore, String> {
@@ -13035,6 +13158,16 @@ impl Workspace {
                                                 .aria_label(event_filter_label)
                                                 .w_full(),
                                         )
+                                        .child(div().flex().flex_wrap().gap_2()
+                                            .child(Input::new(&self.event_filter_name).id("event-filter-name").aria_label(self.t("Saved filter name", "已保存筛选名称", "保存フィルター名", "저장된 필터 이름")).w(px(180.)))
+                                            .child(button("event-filter-save", self.t("Save filter", "保存筛选", "フィルターを保存", "필터 저장"), false, |this, cx| this.save_event_filter(cx), cx))
+                                            .child(button("event-filter-delete", self.t("Delete filter", "删除筛选", "フィルターを削除", "필터 삭제"), false, |this, cx| this.delete_event_filter(cx), cx))
+                                            .child(button("event-filter-refresh", self.t("Refresh filters", "刷新筛选", "フィルターを更新", "필터 새로고침"), false, |this, cx| this.refresh_event_filters(cx), cx)))
+                                        .child(div().flex().flex_wrap().gap_2().children(self.saved_event_filters.iter().enumerate().map(|(index, filter)| {
+                                            let name = filter.name.clone();
+                                            div().id(("saved-event-filter", index)).test_support().cursor_pointer().px_2().py_1().bg(rgb(0x252f40)).child(name.clone())
+                                                .on_click(cx.listener(move |this, _, window, cx| this.load_event_filter(&name, window, cx)))
+                                        })))
                                         .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
                                             "Examples: +$action() +$event(EID >= 100), \"draw indexed\"",
                                             "示例：+$action() +$event(EID >= 100)、\"draw indexed\"",
@@ -14058,6 +14191,7 @@ fn main() {
                     let shader_edit_encoding = cx.new(|cx| InputState::new(window, cx));
                     let shader_edit_command = cx.new(|cx| InputState::new(window, cx));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
+                    let event_filter_name = cx.new(|cx| InputState::new(window, cx));
                     let event_find = cx.new(|cx| InputState::new(window, cx));
                     let buffer_seek = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let buffer_layout_input = cx.new(|cx| {
@@ -14119,6 +14253,8 @@ fn main() {
                             cx,
                         ),
                         event_search,
+                        event_filter_name,
+                        saved_event_filters: Vec::new(),
                         event_find,
                         selected: None,
                         pipeline: None,
@@ -14366,6 +14502,7 @@ mod ui_tests {
                     let shader_edit_command = cx.new(|cx| InputState::new(window, cx));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let event_find = cx.new(|cx| InputState::new(window, cx));
+                    let event_filter_name = cx.new(|cx| InputState::new(window, cx));
                     let buffer_seek = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let buffer_layout_input = cx.new(|cx| {
                         TextareaState::new(window, cx)
@@ -14445,6 +14582,8 @@ mod ui_tests {
                         ),
                         event_search,
                         event_find,
+                        event_filter_name,
+                        saved_event_filters: Vec::new(),
                         selected: None,
                         pipeline: None,
                         tab: CaptureTab::Events,
@@ -14767,6 +14906,7 @@ mod ui_tests {
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let event_find = cx.new(|cx| InputState::new(window, cx));
                     let buffer_seek = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let event_filter_name = cx.new(|cx| InputState::new(window, cx));
                     let buffer_layout_input = cx.new(|cx| {
                         TextareaState::new(window, cx)
                             .rows(4)
@@ -14966,6 +15106,8 @@ mod ui_tests {
                         event_search,
                         event_find,
                         selected: None,
+                        event_filter_name,
+                        saved_event_filters: Vec::new(),
                         pipeline: None,
                         tab: CaptureTab::Events,
                         selected_texture: None,
@@ -16181,6 +16323,25 @@ mod ui_tests {
         .unwrap();
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(view.read(cx).event_tree.visible, [0]));
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.buffer_store_override = Some(format_dir.path().to_path_buf());
+                view.event_filter_name.update(cx, |input, cx| {
+                    input.set_value("saved event filter", window, cx)
+                });
+                view.save_event_filter(cx);
+                assert_eq!(view.saved_event_filters.len(), 1);
+                view.event_search.update(cx, |input, cx| {
+                    input.set_value("nothing matches", window, cx)
+                });
+                view.load_event_filter("saved event filter", window, cx);
+                assert_eq!(view.event_search.read(cx).value().as_ref(), "cHiLd");
+                assert_eq!(view.event_tree.visible, [0]);
+                view.delete_event_filter(cx);
+                assert!(view.saved_event_filters.is_empty());
+            });
+        })
+        .unwrap();
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             window.click("event-toggle-0", cx);
