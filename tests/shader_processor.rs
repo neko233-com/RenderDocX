@@ -11,6 +11,7 @@ fn subprocess_supports_stdin_stdout_files_and_failures() {
         input_encoding: 5,
         output_encoding: 1,
         arguments: vec!["{stdin}".into()],
+        timeout_ms: None,
     };
     let source = "中文 shader\n".as_bytes();
     let result = run(&tool, source, 4, "main", "spirv1.3").unwrap();
@@ -23,5 +24,12 @@ fn subprocess_supports_stdin_stdout_files_and_failures() {
         run(&tool, source, 4, "main", "")
             .unwrap_err()
             .contains("fixture compiler failed")
+    );
+    tool.arguments = vec!["--sleep".into()];
+    tool.timeout_ms = Some(30);
+    assert!(
+        run(&tool, source, 4, "main", "")
+            .unwrap_err()
+            .contains("timed out")
     );
 }
