@@ -3,6 +3,7 @@ pub mod backend;
 pub mod buffer_binding;
 pub mod buffer_export;
 pub mod buffer_format;
+pub mod buffer_formats;
 pub mod buffer_layout;
 pub mod buffer_search;
 pub mod debug_navigation;

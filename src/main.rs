@@ -589,6 +589,10 @@ struct Workspace {
     buffer_layout: Option<renderdocx::buffer_layout::Layout>,
     buffer_layout_origin: u64,
     buffer_layout_input: Entity<InputState>,
+    buffer_format_name: Entity<InputState>,
+    saved_buffer_formats: Vec<renderdocx::buffer_formats::SavedFormat>,
+    #[cfg(test)]
+    buffer_store_override: Option<PathBuf>,
     buffer_seek: Entity<InputState>,
     buffer_search: Entity<InputState>,
     buffer_search_last: Option<BufferSearchHit>,
@@ -2748,6 +2752,123 @@ impl Workspace {
         .detach();
     }
 
+    fn buffer_format_store(&self) -> Result<renderdocx::buffer_formats::FormatStore, String> {
+        #[cfg(test)]
+        if let Some(path) = &self.buffer_store_override {
+            return Ok(renderdocx::buffer_formats::FormatStore::at(path));
+        }
+        renderdocx::buffer_formats::FormatStore::new()
+    }
+
+    fn refresh_buffer_formats(&mut self, cx: &mut Context<Self>) {
+        match self.buffer_format_store().and_then(|store| store.list()) {
+            Ok(formats) => self.saved_buffer_formats = formats,
+            Err(error) => {
+                self.status = Some(format!(
+                    "{}: {error}",
+                    self.t(
+                        "Could not load saved formats",
+                        "无法加载已保存的格式",
+                        "保存した形式を読み込めません",
+                        "저장된 형식을 불러올 수 없습니다"
+                    )
+                ))
+            }
+        }
+        cx.notify();
+    }
+
+    fn save_buffer_format(&mut self, cx: &mut Context<Self>) {
+        let name = self.buffer_format_name.read(cx).value().trim().to_owned();
+        let layout = self.buffer_layout_input.read(cx).value().to_string();
+        match self
+            .buffer_format_store()
+            .and_then(|store| store.save(&name, &layout))
+        {
+            Ok(_) => {
+                self.refresh_buffer_formats(cx);
+                self.status = Some(
+                    self.t(
+                        "Format saved.",
+                        "格式已保存。",
+                        "形式を保存しました。",
+                        "형식을 저장했습니다.",
+                    )
+                    .to_owned(),
+                );
+            }
+            Err(error) => {
+                self.status = Some(format!(
+                    "{}: {error}",
+                    self.t(
+                        "Could not save format",
+                        "无法保存格式",
+                        "形式を保存できません",
+                        "형식을 저장할 수 없습니다"
+                    )
+                ))
+            }
+        }
+        cx.notify();
+    }
+
+    fn delete_buffer_format(&mut self, cx: &mut Context<Self>) {
+        let name = self.buffer_format_name.read(cx).value().trim().to_owned();
+        match self
+            .buffer_format_store()
+            .and_then(|store| store.delete(&name))
+        {
+            Ok(()) => {
+                self.refresh_buffer_formats(cx);
+                self.status = Some(
+                    self.t(
+                        "Format deleted.",
+                        "格式已删除。",
+                        "形式を削除しました。",
+                        "형식을 삭제했습니다.",
+                    )
+                    .to_owned(),
+                );
+            }
+            Err(error) => {
+                self.status = Some(format!(
+                    "{}: {error}",
+                    self.t(
+                        "Could not delete format",
+                        "无法删除格式",
+                        "形式を削除できません",
+                        "형식을 삭제할 수 없습니다"
+                    )
+                ))
+            }
+        }
+        cx.notify();
+    }
+
+    fn load_buffer_format(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match self.buffer_format_store().and_then(|store| store.get(name)) {
+            Ok(format) => {
+                self.buffer_format_name
+                    .update(cx, |input, cx| input.set_value(format.name, window, cx));
+                self.buffer_layout_input
+                    .update(cx, |input, cx| input.set_value(format.layout, window, cx));
+                self.apply_buffer_layout(cx);
+            }
+            Err(error) => {
+                self.status = Some(format!(
+                    "{}: {error}",
+                    self.t(
+                        "Could not load format",
+                        "无法加载格式",
+                        "形式を読み込めません",
+                        "형식을 불러올 수 없습니다"
+                    )
+                ));
+                cx.notify();
+            }
+        }
+    }
+
     fn buffer_page_size_at(&self, offset: u64) -> u64 {
         match &self.buffer_layout {
             Some(layout) => {
@@ -3154,6 +3275,7 @@ impl Workspace {
         self.buffer_binding_range = Some(range);
         self.buffer_layout_origin = range.start;
         self.tab = CaptureTab::Buffers;
+        self.refresh_buffer_formats(cx);
         self.read_buffer(range.index, range.start, cx);
     }
 
@@ -10012,6 +10134,16 @@ impl Workspace {
                         .child(self.t("Buffer layout (#pack)", "缓冲区布局（#pack）", "バッファ配置（#pack）", "버퍼 레이아웃 (#pack)"))
                         .child(Input::new(&self.buffer_layout_input).id("buffer-layout-input").aria_label(self.t("Buffer layout (#pack)", "缓冲区布局（#pack）", "バッファ配置（#pack）", "버퍼 레이아웃 (#pack)")).w(px(300.)))
                         .child(button("buffer-layout-apply", self.t("Apply layout", "应用布局", "レイアウト適用", "레이아웃 적용"), false, |this, cx| this.apply_buffer_layout(cx), cx)))
+                    .child(div().flex().flex_wrap().gap_2()
+                        .child(Input::new(&self.buffer_format_name).id("buffer-format-name").aria_label(self.t("Saved format name", "已保存格式名称", "保存形式の名前", "저장된 형식 이름")).w(px(180.)))
+                        .child(button("buffer-format-save", self.t("Save format", "保存格式", "形式を保存", "형식 저장"), false, |this, cx| this.save_buffer_format(cx), cx))
+                        .child(button("buffer-format-delete", self.t("Delete format", "删除格式", "形式を削除", "형식 삭제"), false, |this, cx| this.delete_buffer_format(cx), cx))
+                        .child(button("buffer-format-refresh", self.t("Refresh formats", "刷新格式", "形式を更新", "형식 새로고침"), false, |this, cx| this.refresh_buffer_formats(cx), cx)))
+                    .child(div().flex().flex_wrap().gap_2().children(self.saved_buffer_formats.iter().enumerate().map(|(index, format)| {
+                        let name = format.name.clone();
+                        div().id(("saved-buffer-format", index)).test_support().cursor_pointer().px_2().py_1().bg(rgb(0x252f40)).child(name.clone())
+                            .on_click(cx.listener(move |this, _, window, cx| this.load_buffer_format(&name, window, cx)))
+                    })))
                     .when(self.buffer_format.is_some() || self.buffer_layout.is_some(), |view| view.child(self.t("Typed offsets are decimal; values start at the current byte offset.", "类型视图的偏移为十进制；值从当前字节偏移开始解码。", "型付き表示のオフセットは 10 進数で、現在のバイト位置からデコードします。", "형식 보기의 오프셋은 10진수이며 현재 바이트 위치부터 디코딩합니다.")))
                     .child(
                         div()
@@ -11332,6 +11464,7 @@ impl Workspace {
                                         self.tab == CaptureTab::Buffers,
                                         |this, cx| {
                                             this.tab = CaptureTab::Buffers;
+                                            this.refresh_buffer_formats(cx);
                                             cx.notify();
                                         },
                                         cx,
@@ -12700,6 +12833,7 @@ fn main() {
                     let buffer_layout_input = cx.new(|cx| {
                         InputState::new(window, cx).default_value("float3 position; uint id;")
                     });
+                    let buffer_format_name = cx.new(|cx| InputState::new(window, cx));
                     let buffer_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
@@ -12771,6 +12905,10 @@ fn main() {
                         buffer_layout: None,
                         buffer_layout_origin: 0,
                         buffer_layout_input,
+                        buffer_format_name,
+                        saved_buffer_formats: Vec::new(),
+                        #[cfg(test)]
+                        buffer_store_override: None,
                         buffer_seek,
                         buffer_search,
                         buffer_search_last: None,
@@ -12955,6 +13093,7 @@ mod ui_tests {
                     let buffer_layout_input = cx.new(|cx| {
                         InputState::new(window, cx).default_value("float3 position; uint id;")
                     });
+                    let buffer_format_name = cx.new(|cx| InputState::new(window, cx));
                     let buffer_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
@@ -13044,6 +13183,10 @@ mod ui_tests {
                         buffer_layout: None,
                         buffer_layout_origin: 0,
                         buffer_layout_input,
+                        buffer_format_name,
+                        saved_buffer_formats: Vec::new(),
+                        #[cfg(test)]
+                        buffer_store_override: None,
                         buffer_seek,
                         buffer_search,
                         buffer_search_last: None,
@@ -13305,6 +13448,7 @@ mod ui_tests {
 
     #[gpui_kit::test]
     fn clicking_an_action_replays_its_exact_event(cx: &mut TestAppContext) {
+        let format_dir = tempfile::tempdir().unwrap();
         cx.update(gpui_kit::init);
         let (session, events, selections) =
             renderdocx::replay::test_support::recording_remote_session();
@@ -13337,6 +13481,7 @@ mod ui_tests {
                     let buffer_layout_input = cx.new(|cx| {
                         InputState::new(window, cx).default_value("float3 position; uint id;")
                     });
+                    let buffer_format_name = cx.new(|cx| InputState::new(window, cx));
                     let buffer_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
@@ -13537,6 +13682,10 @@ mod ui_tests {
                         buffer_layout: None,
                         buffer_layout_origin: 0,
                         buffer_layout_input,
+                        buffer_format_name,
+                        saved_buffer_formats: Vec::new(),
+                        #[cfg(test)]
+                        buffer_store_override: None,
                         buffer_seek,
                         buffer_search,
                         buffer_search_last: None,
@@ -14028,6 +14177,49 @@ mod ui_tests {
             assert_eq!(view.buffer_offset, 0);
             assert_eq!(view.buffer_data.as_ref().unwrap().len(), 256);
         });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.buffer_store_override = Some(format_dir.path().to_path_buf());
+                view.buffer_format_name
+                    .update(cx, |input, cx| input.set_value("test format", window, cx));
+                view.buffer_layout_input
+                    .update(cx, |input, cx| input.set_value("uint saved;", window, cx));
+                view.save_buffer_format(cx);
+                assert_eq!(view.saved_buffer_formats.len(), 1);
+                view.buffer_layout_input.update(cx, |input, cx| {
+                    input.set_value("float changed;", window, cx)
+                });
+            });
+            window.render_frame(cx);
+            let y = window
+                .find(("saved-buffer-format", 0usize))
+                .bounds()
+                .origin
+                .y;
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(400.) - y)),
+                cx,
+            );
+            window.render_frame(cx);
+            assert!(window.find(("saved-buffer-format", 0usize)).visible());
+            window.click(("saved-buffer-format", 0usize), cx);
+            assert_eq!(
+                view.read(cx).buffer_layout_input.read(cx).value().as_ref(),
+                "uint saved;"
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                assert!(view.buffer_layout.is_some());
+                view.delete_buffer_format(cx);
+                assert!(view.saved_buffer_formats.is_empty());
+                view.buffer_layout = None;
+            });
+        });
+
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             let y = window.find("buffer-layout-input").bounds().origin.y;

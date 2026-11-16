@@ -16,7 +16,14 @@ impl Agent {
     }
 
     fn with_handoff_environment(bridge: Option<&str>, handoff: bool) -> Self {
+        Self::with_config(bridge, handoff, None)
+    }
+
+    fn with_config(bridge: Option<&str>, handoff: bool, config: Option<&std::path::Path>) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_renderdocx-cli"));
+        if let Some(config) = config {
+            command.env("RENDERDOCX_CONFIG_DIR", config);
+        }
         if handoff {
             command.env("RENDERDOCX_CONNECT_PID", "12345");
             command.env("RENDERDOCX_OPEN_CAPTURE", "stale.rdc");
@@ -51,6 +58,52 @@ impl Agent {
         assert_eq!(self.send(r#"{"id":"done","command":"quit"}"#)["ok"], true);
         assert!(self.child.wait().unwrap().success());
     }
+}
+
+#[test]
+fn saved_buffer_formats_survive_agent_restart_and_are_isolated() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut agent = Agent::with_config(None, false, Some(dir.path()));
+    let saved = agent.send(
+        r#"{"command":"buffer_format_save","name":"纹理/../layout","layout":"float4 value;"}"#,
+    );
+    assert_eq!(saved["data"]["format"]["name"], "纹理/../layout", "{saved}");
+    assert_eq!(
+        agent.send(r#"{"command":"buffer_formats_list"}"#)["data"]["formats"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"buffer_format_save","name":" ","layout":"uint x;"}"#)["ok"],
+        false
+    );
+    agent.quit();
+    let mut restarted = Agent::with_config(None, false, Some(dir.path()));
+    assert_eq!(
+        restarted.send(r#"{"command":"buffer_format_get","name":"纹理/../layout"}"#)["data"]["format"]
+            ["layout"],
+        "float4 value;"
+    );
+    assert_eq!(
+        restarted
+            .send(r#"{"command":"buffer_format_save","name":"纹理/../layout","layout":"uint x;"}"#)
+            ["ok"],
+        true
+    );
+    assert_eq!(
+        restarted.send(r#"{"command":"buffer_format_delete","name":"纹理/../layout"}"#)["ok"],
+        true
+    );
+    assert_eq!(
+        restarted.send(r#"{"command":"buffer_formats_list"}"#)["data"]["formats"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    restarted.quit();
 }
 
 fn invoke(args: &[&str]) -> (bool, Value) {

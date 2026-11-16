@@ -46,7 +46,7 @@ fn usage() -> Value {
         {"name":"select","arguments":["capture.rdc","event_id"],"description":"Replay a capture to an event."},
         {"name":"serve","arguments":[],"description":"Serve sequential JSONL requests using a persistent replay session."},
         {"name":"capabilities","arguments":[],"description":"Describe the commands currently implemented."}
-    ],"serve_commands":["capabilities","open","snapshot","timeline","timeline_usage","timeline_history","select","pipeline","shader","shader_bindings","shader_binding_read","shader_constants","shader_export","shader_apply","shader_revert","debug_vertex","debug_pixel","debug_compute","debug_collect","debug_state","debug_breakpoint","debug_navigate","debug_next","debug_stop","vertex_input","mesh","mesh_read","mesh_draw","mesh_draw_export","structure","structure_buffer","callstack","read_buffer","decode_buffer","decode_buffer_layout","export_buffer","find_buffer","resource_usage","resource_rename","annotation_read","annotation_write","dependencies","dependencies_save","descriptors","debug_messages","clear_debug_messages","counter_fetch","counter_page","pick_pixel","pixel_history","texture_statistics","export_texture","close","gpu_list","remote_list","remote_download","target_list","target_launch","target_connect","target_connect_pid","target_copy","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"mesh_draw_page_limit":renderdocx::mesh_draw::PAGE_LIMIT,"shader_binding_page_limit":renderdocx::replay::SHADER_BINDING_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"counter_page_limit":renderdocx::replay::COUNTER_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
+    ],"serve_commands":["capabilities","open","snapshot","timeline","timeline_usage","timeline_history","select","pipeline","shader","shader_bindings","shader_binding_read","shader_constants","shader_export","shader_apply","shader_revert","debug_vertex","debug_pixel","debug_compute","debug_collect","debug_state","debug_breakpoint","debug_navigate","debug_next","debug_stop","vertex_input","mesh","mesh_read","mesh_draw","mesh_draw_export","structure","structure_buffer","callstack","read_buffer","decode_buffer","decode_buffer_layout","buffer_formats_list","buffer_format_get","buffer_format_save","buffer_format_delete","export_buffer","find_buffer","resource_usage","resource_rename","annotation_read","annotation_write","dependencies","dependencies_save","descriptors","debug_messages","clear_debug_messages","counter_fetch","counter_page","pick_pixel","pixel_history","texture_statistics","export_texture","close","gpu_list","remote_list","remote_download","target_list","target_launch","target_connect","target_connect_pid","target_copy","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"mesh_draw_page_limit":renderdocx::mesh_draw::PAGE_LIMIT,"shader_binding_page_limit":renderdocx::replay::SHADER_BINDING_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"counter_page_limit":renderdocx::replay::COUNTER_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
 }
 
 fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
@@ -155,6 +155,37 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
         let command = request.get("command").and_then(Value::as_str).unwrap_or("");
         let result: Result<Value, (&str, String)> = match command {
             "capabilities" => Ok(usage()),
+            "buffer_formats_list" => renderdocx::buffer_formats::FormatStore::new()
+                .and_then(|store| store.list())
+                .map(|formats| json!({"formats":formats}))
+                .map_err(|error| ("buffer_format_store_failed", error)),
+            "buffer_format_get" => match request.get("name").and_then(Value::as_str) {
+                Some(name) => renderdocx::buffer_formats::FormatStore::new()
+                    .and_then(|store| store.get(name))
+                    .map(|format| json!({"format":format}))
+                    .map_err(|error| ("buffer_format_store_failed", error)),
+                None => Err(("invalid_arguments", "name must be a string".into())),
+            },
+            "buffer_format_save" => match (
+                request.get("name").and_then(Value::as_str),
+                request.get("layout").and_then(Value::as_str),
+            ) {
+                (Some(name), Some(layout)) => renderdocx::buffer_formats::FormatStore::new()
+                    .and_then(|store| store.save(name, layout))
+                    .map(|format| json!({"format":format}))
+                    .map_err(|error| ("buffer_format_store_failed", error)),
+                _ => Err((
+                    "invalid_arguments",
+                    "name and layout must be strings".into(),
+                )),
+            },
+            "buffer_format_delete" => match request.get("name").and_then(Value::as_str) {
+                Some(name) => renderdocx::buffer_formats::FormatStore::new()
+                    .and_then(|store| store.delete(name))
+                    .map(|()| json!({"deleted":name}))
+                    .map_err(|error| ("buffer_format_store_failed", error)),
+                None => Err(("invalid_arguments", "name must be a string".into())),
+            },
             "target_list" => {
                 let url = match request.get("url") {
                     None | Some(Value::Null) => Some(None),
