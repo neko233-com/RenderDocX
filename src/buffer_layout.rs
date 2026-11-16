@@ -18,6 +18,8 @@ struct Field {
     nested: Option<Arc<Layout>>,
     array_stride: usize,
     matrix_stride: usize,
+    bit_offset: u32,
+    bit_size: Option<u32>,
     count: usize,
     offset: usize,
 }
@@ -113,6 +115,10 @@ pub struct FieldValue {
     pub enum_flags: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enum_names: Option<Vec<Vec<String>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bit_offset: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bit_size: Option<u32>,
     pub values: Vec<Vec<String>>,
 }
 #[derive(Serialize)]
@@ -395,6 +401,7 @@ impl Layout {
         let mut cursor = 0usize;
         let mut alignment = 1usize;
         let mut last_full_end = 0usize;
+        let mut bit_cursor: Option<usize> = None;
         while i < t.len() {
             let mut specified_offset = None;
             let mut padding = false;
@@ -457,6 +464,11 @@ impl Layout {
                 i += 1;
             }
             if let Some(nested) = definitions.get(typename) {
+                if let Some(bits) = bit_cursor.take() {
+                    cursor = cursor
+                        .checked_add(bits.div_ceil(8))
+                        .ok_or("Layout size overflow")?;
+                }
                 if unsigned || normalization.is_some() || packed_name.is_some() || major.is_some() {
                     return Err("Unsupported annotation or qualifier on struct field".into());
                 }
@@ -523,6 +535,8 @@ impl Layout {
                         nested: Some(nested.clone()),
                         array_stride: nested.stride,
                         matrix_stride: 0,
+                        bit_offset: 0,
+                        bit_size: None,
                         count,
                         offset: cursor,
                     });
@@ -618,19 +632,29 @@ impl Layout {
                     _ => return Err("Normalization requires a byte or short integer".into()),
                 };
             }
-            let name = *t.get(i).ok_or("Missing field name")?;
-            i += 1;
-            if !name
-                .bytes()
-                .next()
-                .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
-                || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
-                || (!padding && !names.insert(name))
+            let anonymous = t.get(i) == Some(&":");
+            let name = if anonymous {
+                padding = true;
+                ""
+            } else {
+                let name = *t.get(i).ok_or("Missing field name")?;
+                i += 1;
+                name
+            };
+            if !anonymous
+                && (!name
+                    .bytes()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
+                    || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                    || (!padding && !names.insert(name)))
             {
                 return Err("Invalid or duplicate field name".into());
             }
             let mut count = 1usize;
+            let mut array_declared = false;
             if t.get(i) == Some(&"[") {
+                array_declared = true;
                 count = t
                     .get(i + 1)
                     .and_then(|v| v.parse::<usize>().ok())
@@ -641,11 +665,103 @@ impl Layout {
                 }
                 i += 3;
             }
+            let bit_size = if t.get(i) == Some(&":") {
+                let bits = t
+                    .get(i + 1)
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .filter(|v| *v > 0)
+                    .ok_or("Invalid bitfield width")?;
+                i += 2;
+                Some(bits)
+            } else {
+                None
+            };
+            if anonymous && bit_size.is_none() {
+                return Err("Anonymous field requires a bit width".into());
+            }
             if t.get(i) != Some(&";") {
-                return Err("Expected semicolon").map_err(String::from);
+                return Err("Expected semicolon".into());
             }
             i += 1;
             let width = if packed.is_some() { 4 } else { format.width() };
+            if let Some(bits) = bit_size {
+                if components != 1
+                    || matrix_rows != 1
+                    || count != 1
+                    || array_declared
+                    || packed.is_some()
+                    || !matches!(
+                        format,
+                        ScalarFormat::U8
+                            | ScalarFormat::I8
+                            | ScalarFormat::U16
+                            | ScalarFormat::I16
+                            | ScalarFormat::U32
+                            | ScalarFormat::I32
+                            | ScalarFormat::U64
+                            | ScalarFormat::I64
+                    )
+                    || bits as usize > width * 8
+                {
+                    return Err(
+                        "Bitfields require a scalar integer or enum and a valid width".into(),
+                    );
+                }
+                if !padding {
+                    alignment = alignment.max(width);
+                }
+                if enum_def.is_some() && bit_cursor.is_none() {
+                    cursor = align(cursor, width).ok_or("Layout size overflow")?;
+                }
+                let mut position = bit_cursor.unwrap_or(0);
+                let capacity = width * 8;
+                if position + bits as usize > capacity {
+                    cursor = cursor
+                        .checked_add(
+                            position
+                                .div_ceil(capacity)
+                                .checked_mul(width)
+                                .ok_or("Layout size overflow")?,
+                        )
+                        .ok_or("Layout size overflow")?;
+                    position = 0;
+                }
+                if let Some(offset) = specified_offset {
+                    if offset < cursor {
+                        return Err("Explicit offset overlaps earlier data".into());
+                    }
+                    if offset > cursor {
+                        position = 0;
+                    }
+                    cursor = offset;
+                }
+                bit_cursor = Some(position + bits as usize);
+                if !padding {
+                    last_full_end = cursor.checked_add(width).ok_or("Layout size overflow")?;
+                    fields.push(Field {
+                        name: name.to_owned(),
+                        format,
+                        components: 1,
+                        matrix_rows: 1,
+                        row_major: false,
+                        packed: None,
+                        enum_def,
+                        nested: None,
+                        array_stride: width,
+                        matrix_stride: 0,
+                        bit_offset: position as u32,
+                        bit_size: Some(bits),
+                        count: 1,
+                        offset: cursor,
+                    });
+                }
+                continue;
+            }
+            if let Some(bits) = bit_cursor.take() {
+                cursor = cursor
+                    .checked_add(bits.div_ceil(8))
+                    .ok_or("Layout size overflow")?;
+            }
             let vector_size = if matrix_rows > 1 && !row_major {
                 matrix_rows
             } else {
@@ -758,11 +874,18 @@ impl Layout {
                     nested: None,
                     array_stride,
                     matrix_stride,
+                    bit_offset: 0,
+                    bit_size: None,
                     count,
                     offset: cursor,
                 });
             }
             cursor = cursor.checked_add(size).ok_or("Layout size overflow")?;
+        }
+        if let Some(bits) = bit_cursor {
+            cursor = cursor
+                .checked_add(bits.div_ceil(8))
+                .ok_or("Layout size overflow")?;
         }
         if fields.is_empty() {
             return Err("Layout must contain fields".into());
@@ -821,6 +944,69 @@ impl Layout {
                     continue;
                 }
                 let width = field.format.width();
+                if let Some(bits) = field.bit_size {
+                    let byte_count =
+                        ((field.bit_offset as usize + bits as usize).div_ceil(8)).min(width);
+                    let mut raw = [0u8; 8];
+                    let data = bytes
+                        .get(field_start..field_start + byte_count)
+                        .ok_or("Incomplete bitfield")?;
+                    raw[..byte_count].copy_from_slice(data);
+                    let mask = if bits == 64 {
+                        u64::MAX
+                    } else {
+                        (1u64 << bits) - 1
+                    };
+                    let value = (u64::from_le_bytes(raw) >> field.bit_offset) & mask;
+                    let signed = matches!(
+                        field.format,
+                        ScalarFormat::I8
+                            | ScalarFormat::I16
+                            | ScalarFormat::I32
+                            | ScalarFormat::I64
+                    );
+                    let signed_value = if signed {
+                        ((value << (64 - bits)) as i64) >> (64 - bits)
+                    } else {
+                        0
+                    };
+                    let numeric = if signed {
+                        signed_value.to_string()
+                    } else {
+                        value.to_string()
+                    };
+                    let enum_bits = if signed {
+                        (signed_value as u64)
+                            & if width == 8 {
+                                u64::MAX
+                            } else {
+                                (1u64 << (width * 8)) - 1
+                            }
+                    } else {
+                        value
+                    };
+                    fields.push(FieldValue {
+                        name,
+                        offset: (row_offset + field_start as u64).to_string(),
+                        matrix_rows: None,
+                        matrix_columns: None,
+                        row_major: None,
+                        packed: None,
+                        enum_type: field
+                            .enum_def
+                            .as_ref()
+                            .map(|definition| definition.name.clone()),
+                        enum_flags: field.enum_def.as_ref().map(|definition| definition.flags),
+                        enum_names: field
+                            .enum_def
+                            .as_ref()
+                            .map(|definition| vec![definition.names(enum_bits)]),
+                        bit_offset: Some(field.bit_offset),
+                        bit_size: Some(bits),
+                        values: vec![vec![numeric]],
+                    });
+                    continue;
+                }
                 let mut values = Vec::new();
                 let mut enum_names = field.enum_def.as_ref().map(|_| Vec::new());
                 for item in 0..field.count {
@@ -865,6 +1051,8 @@ impl Layout {
                         .map(|definition| definition.name.clone()),
                     enum_flags: field.enum_def.as_ref().map(|definition| definition.flags),
                     enum_names,
+                    bit_offset: None,
+                    bit_size: None,
                     values,
                 });
             }
@@ -889,6 +1077,74 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bitfields_follow_upstream_rollover_and_sign_extension() {
+        let layout =
+            Layout::parse("uint first:8; uint :4; uint upper:4; int signed:4; uint tail:12;")
+                .unwrap();
+        assert_eq!(layout.stride(), 4);
+        let fields = &layout.decode(0, &[0x12, 0xa0, 0x0f, 0x00]).unwrap().rows[0].fields;
+        assert_eq!(
+            fields
+                .iter()
+                .map(|f| f.values[0][0].as_str())
+                .collect::<Vec<_>>(),
+            ["18", "10", "-1", "0"]
+        );
+        assert_eq!(
+            fields
+                .iter()
+                .map(|f| f.bit_offset.unwrap())
+                .collect::<Vec<_>>(),
+            [0, 12, 16, 20]
+        );
+        let mixed =
+            Layout::parse("uint first:24; ubyte small:4; ubyte next:4; uint last:1;").unwrap();
+        assert_eq!(
+            mixed
+                .fields
+                .iter()
+                .map(|f| (f.offset, f.bit_offset))
+                .collect::<Vec<_>>(),
+            [(0, 0), (3, 0), (3, 4), (3, 8)]
+        );
+        let shifted = Layout::parse("uint a:13; [[offset(8)]] uint b:14;").unwrap();
+        assert_eq!(
+            (
+                shifted.fields[1].offset,
+                shifted.fields[1].bit_offset,
+                shifted.stride()
+            ),
+            (8, 0, 12)
+        );
+        let nested = Layout::parse("struct A { [[offset(1)]] uint bit:1; }; A a;").unwrap();
+        let page = nested.decode(0, &[0, 1, 0, 0, 0, 0, 0, 0]).unwrap();
+        assert_eq!(page.rows[0].fields[0].values[0][0], "1");
+        let full = Layout::parse("ulong bits:64;")
+            .unwrap()
+            .decode(0, &u64::MAX.to_le_bytes())
+            .unwrap();
+        assert_eq!(full.rows[0].fields[0].values[0][0], u64::MAX.to_string());
+        let en = Layout::parse("enum E : byte { Minus = -1 }; E value:3;")
+            .unwrap()
+            .decode(0, &[7])
+            .unwrap();
+        assert_eq!(
+            en.rows[0].fields[0].enum_names.as_ref().unwrap()[0],
+            ["Minus"]
+        );
+        for bad in [
+            "float f:2;",
+            "uint4 v:2;",
+            "uint n:33;",
+            "uint n:0;",
+            "uint n[2]:1;",
+            "uint n[1]:1;",
+        ] {
+            assert!(Layout::parse(bad).is_err(), "{bad}");
+        }
+    }
+
     #[test]
     fn enum_and_flags_preserve_numeric_values_and_names() {
         let layout = Layout::parse("enum State : byte { Missing = -1, Ready = 2 }; [[flags]] enum Bits : uint { None = 0, A = 1, B = 2 }; struct Data { State s; Bits mask; }; Data d;").unwrap();

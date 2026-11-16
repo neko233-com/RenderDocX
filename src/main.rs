@@ -13895,7 +13895,7 @@ mod ui_tests {
             window.click("buffer-layout-input", cx);
             window.press("ctrl-a", cx);
             window.input(
-                "#pack(cbuffer) enum State : uint { Ready = 1 }; struct V { float2 p; State id; }; V v; ushort q[2]; uint end;",
+                "#pack(cbuffer) enum State : uint { Ready = 1 }; struct V { float2 p; State id:3; uint :29; }; V v; ushort q[2]; uint end;",
                 cx,
             );
             window.click("buffer-layout-apply", cx);

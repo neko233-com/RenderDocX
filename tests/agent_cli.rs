@@ -1929,6 +1929,25 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     };
     let content = agent.send(&read("4", 8));
     assert_eq!(content["data"]["hex"], "0000404000004040", "{content}");
+    let bitfields = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"4", "length":4, "layout":"uint low:10; uint mid:10; uint high:10; uint alpha:2;"}).to_string());
+    let fields = bitfields["data"]["page"]["rows"][0]["fields"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        fields
+            .iter()
+            .map(|field| field["values"][0][0].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["0", "0", "4", "1"],
+        "{bitfields}"
+    );
+    assert_eq!(
+        fields
+            .iter()
+            .map(|field| field["bit_offset"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        [0, 10, 20, 30]
+    );
     let enumeration = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"4", "length":4, "layout":"enum State : uint { Three = 0x40400000 }; State value;"}).to_string());
     let enum_field = &enumeration["data"]["page"]["rows"][0]["fields"][0];
     assert_eq!(enum_field["values"][0][0], "1077936128", "{enumeration}");
