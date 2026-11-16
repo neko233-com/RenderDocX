@@ -3123,6 +3123,35 @@ impl Session {
         )
     }
 
+    /// Export decoded rows using the same locked replay selection as raw exports.
+    pub fn export_buffer_csv(
+        &self,
+        index: u32,
+        origin: u64,
+        length: u64,
+        layout: &crate::buffer_layout::Layout,
+        scope: crate::buffer_csv::CsvScope,
+        destination: &Path,
+    ) -> Result<crate::buffer_csv::CsvSummary, String> {
+        let revision = self.revision.load(Ordering::SeqCst);
+        let mut process = self.process.lock().map_err(|e| e.to_string())?;
+        crate::buffer_csv::write_new(
+            destination,
+            origin,
+            length,
+            layout,
+            scope,
+            |offset, count| process.read_buffer(index, offset, count),
+            || {
+                if self.revision.load(Ordering::SeqCst) == revision {
+                    Ok(())
+                } else {
+                    Err("Replay selection changed".into())
+                }
+            },
+        )
+    }
+
     pub fn find_buffer(
         &self,
         index: u32,

@@ -416,6 +416,13 @@ fn real_opengl_vertex_inputs_include_generic_and_normalized_values() {
         nested["data"]["page"]["rows"][0]["fields"][0]["name"], "root.values",
         "{nested}"
     );
+    let fixed_csv = dir.path().join("fixed.csv");
+    let exported = agent.send(&serde_json::json!({"command":"export_buffer_csv", "index":buffer_index, "offset":"0", "length":"12", "scope":"fixed", "layout":"struct Payload { uint header; uint2 values[]; }; Payload root;", "path":fixed_csv}).to_string());
+    assert_eq!(exported["data"]["summary"]["rows"], "1", "{exported}");
+    assert_eq!(
+        std::fs::read_to_string(fixed_csv).unwrap(),
+        format!("Byte Offset,root.header\n0,{header}\n")
+    );
     let attributes = selected["data"]["pipeline"]["vertex_inputs"]
         .as_array()
         .unwrap();
@@ -2169,6 +2176,15 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         serde_json::json!(["3", "3"]),
         "{layout_page}"
     );
+    let csv_path = dir.path().join("vertex-format.csv");
+    let csv = agent.send(&serde_json::json!({"command":"export_buffer_csv", "index":vertex_index, "offset":"4", "length":"8", "layout":"float2 position;", "path":csv_path}).to_string());
+    assert_eq!(csv["data"]["summary"]["rows"], "1", "{csv}");
+    assert_eq!(
+        std::fs::read_to_string(&csv_path).unwrap(),
+        "Byte Offset,position\n4,\"3, 3\"\n"
+    );
+    let retry = agent.send(&serde_json::json!({"command":"export_buffer_csv", "index":vertex_index, "offset":"4", "length":"8", "layout":"float2 position;", "path":csv_path}).to_string());
+    assert_eq!(retry["error"]["code"], "buffer_export_failed", "{retry}");
     assert_eq!(agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"4", "length":8, "layout":"#pack(unknown) float2 pos;"}).to_string())["error"]["code"], "invalid_layout");
     let decoded = agent.send(&serde_json::json!({"command":"decode_buffer", "index":vertex_index, "offset":"4", "length":8, "format":"float"}).to_string());
     assert_eq!(

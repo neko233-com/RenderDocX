@@ -5211,6 +5211,115 @@ impl Workspace {
         .detach();
     }
 
+    fn export_buffer_csv(
+        &mut self,
+        scope: renderdocx::buffer_csv::CsvScope,
+        cx: &mut Context<Self>,
+    ) {
+        if self.replay_pending
+            || self.resource_pending
+            || self.export_pending
+            || self.selected.is_none()
+        {
+            return;
+        }
+        let (Some(session), Some(index), Some(layout)) = (
+            self.session.clone(),
+            self.selected_buffer,
+            self.buffer_layout.clone(),
+        ) else {
+            return;
+        };
+        let Some(size) = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.buffers.get(index))
+            .and_then(|buffer| buffer.length.parse::<u64>().ok())
+        else {
+            return;
+        };
+        let range = self
+            .buffer_binding_range
+            .filter(|range| range.index == index);
+        let start = range.map_or(0, |range| range.start);
+        let end = range.map_or(size, |range| range.end.min(size));
+        let origin = self.buffer_layout_origin;
+        if origin < start || origin > end {
+            self.status = Some(
+                self.t(
+                    "The layout starts outside the current range.",
+                    "布局起点位于当前范围之外。",
+                    "レイアウトの開始位置が現在の範囲外です。",
+                    "레이아웃 시작 위치가 현재 범위 밖입니다.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let Ok(index) = u32::try_from(index) else {
+            return;
+        };
+        let Some(destination) = rfd::FileDialog::new()
+            .set_file_name("buffer.csv")
+            .add_filter("CSV", &["csv"])
+            .save_file()
+        else {
+            return;
+        };
+        let label = destination.display().to_string();
+        let revision = self.open_revision;
+        self.export_pending = true;
+        self.status = Some(
+            self.t(
+                "Exporting CSV…",
+                "正在导出 CSV…",
+                "CSV を書き出し中…",
+                "CSV를 내보내는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            session.export_buffer_csv(index, origin, end - origin, &layout, scope, &destination)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision {
+                    return;
+                }
+                this.export_pending = false;
+                this.status = Some(match result {
+                    Ok(summary) => format!(
+                        "{}: {label} ({}: {}, {}: {})",
+                        this.t(
+                            "CSV exported",
+                            "CSV 已导出",
+                            "CSV を書き出しました",
+                            "CSV를 내보냈습니다"
+                        ),
+                        this.t("rows", "行", "行", "행"),
+                        summary.rows,
+                        this.t("trailing bytes", "剩余字节", "残りのバイト", "남은 바이트"),
+                        summary.trailing_bytes
+                    ),
+                    Err(error) => format!(
+                        "{}: {error}",
+                        this.t(
+                            "CSV export failed",
+                            "CSV 导出失败",
+                            "CSV を書き出せません",
+                            "CSV 내보내기 실패"
+                        )
+                    ),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn export_texture(&mut self, cx: &mut Context<Self>) {
         if self.replay_pending
             || self.export_pending
@@ -10296,7 +10405,9 @@ impl Workspace {
                                 false,
                                 |this, cx| this.export_buffer(cx),
                                 cx,
-                            )),
+                            ))
+                            .when(self.buffer_layout.as_ref().is_some_and(|layout| !layout.is_single()), |view| view.child(button("buffer-export-csv", self.t("Export rows CSV", "导出行 CSV", "行を CSV で出力", "행 CSV 내보내기"), false, |this, cx| this.export_buffer_csv(renderdocx::buffer_csv::CsvScope::Repeating, cx), cx)))
+                            .when(self.buffer_layout.as_ref().is_some_and(|layout| layout.is_single() || layout.repeat_offset().is_some_and(|offset| offset > 0)), |view| view.child(button("buffer-export-fixed-csv", self.t("Export fixed CSV", "导出固定区 CSV", "固定部を CSV で出力", "고정 영역 CSV 내보내기"), false, |this, cx| this.export_buffer_csv(renderdocx::buffer_csv::CsvScope::Fixed, cx), cx))),
                     )
                     .children(
                         rows.unwrap_or_default()
@@ -14374,6 +14485,7 @@ mod ui_tests {
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(window.try_find("buffer-rgb-0-1").is_some());
+            assert!(window.try_find("buffer-export-csv").is_some());
             for _ in 0..40 {
                 let target = window.find("buffer-next");
                 let viewport = window.find("capture-details-scroll").bounds();
@@ -14488,6 +14600,7 @@ mod ui_tests {
             window.render_frame(cx);
             assert!(window.try_find("buffer-text-0-1").is_some());
             assert!(window.try_find("buffer-text-1-1").is_some());
+            assert!(window.try_find("buffer-export-fixed-csv").is_some());
             window.click("buffer-prev", cx);
         })
         .unwrap();

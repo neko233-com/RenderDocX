@@ -1,6 +1,7 @@
 pub mod annotations;
 pub mod backend;
 pub mod buffer_binding;
+pub mod buffer_csv;
 pub mod buffer_export;
 pub mod buffer_format;
 pub mod buffer_formats;
