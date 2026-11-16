@@ -7587,6 +7587,17 @@ impl Workspace {
         self.pixel = None;
         self.pixel_history = None;
         self.history_selected = None;
+        if selection.preview_overlay.uses_overlay_pixel() {
+            self.event_tree.clear_durations();
+            self.counter_page = None;
+            self.descriptor_page = None;
+            self.mesh.info = None;
+            self.mesh.bytes = None;
+            self.mesh.draw = None;
+            self.texture_raw_page = None;
+            self.texture_raw_last = None;
+            self.timeline.history = None;
+        }
         self.resource_pending = true;
         self.status = Some(
             self.t(
@@ -7599,7 +7610,11 @@ impl Workspace {
         );
         cx.notify();
         let task = cx.background_executor().spawn(async move {
-            session.pick_pixel(event, texture_index, &texture, selection, x, y)
+            if selection.preview_overlay.uses_overlay_pixel() {
+                session.pick_overlay_pixel(event, texture_index, &texture, selection, x, y)
+            } else {
+                session.pick_pixel(event, texture_index, &texture, selection, x, y)
+            }
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -12996,7 +13011,11 @@ impl Workspace {
                             .map(|v| format!("{v:08X}"))
                             .collect::<Vec<_>>()
                             .join(" ");
-                        view.child(
+                        view.child(div().text_sm().text_color(rgb(0x91a7c0)).child(if pixel.overlay {
+                            self.t("Overlay pixel", "叠加层像素", "オーバーレイのピクセル", "오버레이 픽셀")
+                        } else {
+                            self.t("Texture pixel", "纹理像素", "テクスチャのピクセル", "텍스처 픽셀")
+                        })).child(
                             div()
                                 .id("pixel-result")
                                 .test_support()
@@ -15711,6 +15730,35 @@ mod ui_tests {
     }
 
     #[inline(never)]
+    fn exercise_overlay_pixel(
+        cx: &mut TestAppContext,
+        view: &Entity<Workspace>,
+        handle: gpui::WindowHandle<Root>,
+    ) {
+        cx.update_window(handle.into(), |_, window, cx| {
+            reveal_details(window, "texture-overlay-12", cx);
+            window.click("texture-overlay-12", cx);
+            reveal_details(window, "pixel-pick", cx);
+            window.click("pixel-pick", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                view.read(cx)
+                    .pixel
+                    .as_ref()
+                    .is_some_and(|pixel| pixel.overlay)
+            )
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            reveal_details(window, "texture-overlay-1", cx);
+            window.click("texture-overlay-1", cx);
+        })
+        .unwrap();
+    }
+
+    #[inline(never)]
     fn exercise_texture_preview_gestures(
         cx: &mut TestAppContext,
         view: &Entity<Workspace>,
@@ -17095,6 +17143,7 @@ mod ui_tests {
             selections.lock().unwrap().last().unwrap().preview_overlay,
             renderdocx::texture_overlay::TextureOverlay::Drawcall
         );
+        exercise_overlay_pixel(cx, &view, handle);
         cx.update(|cx| view.update(cx, |view, cx| view.read_texture_raw_page(0, cx)));
         cx.run_until_parked();
         cx.update(|cx| {
@@ -18649,6 +18698,31 @@ mod ui_tests {
                     assert!(
                         std::time::Instant::now() < deadline,
                         "real preview pixel click did not load: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    reveal_details(window, "texture-overlay-12", cx);
+                    window.click("texture-overlay-12", cx);
+                    reveal_details(window, "pixel-pick", cx);
+                    window.click("pixel-pick", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx)
+                            .pixel
+                            .as_ref()
+                            .is_some_and(|pixel| pixel.event_id == draw_event && pixel.overlay)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real overlay pixel did not load: {:?}",
                         cx.update(|cx| view.read(cx).status.clone())
                     );
                     std::thread::sleep(std::time::Duration::from_millis(20));

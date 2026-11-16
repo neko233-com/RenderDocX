@@ -1089,6 +1089,38 @@ fn real_d3d11_mesh_draw_order() {
         std::fs::read(&draw_path).unwrap(),
         "draw overlay must affect the rendered image"
     );
+    let raw_before = agent.send(
+        &serde_json::json!({"command":"pick_pixel","index":texture_index,"x":0,"y":0}).to_string(),
+    );
+    assert_eq!(raw_before["ok"], true, "{raw_before}");
+    let overlay_pixel = agent.send(&serde_json::json!({"command":"pick_overlay_pixel","index":texture_index,"x":0,"y":0,"preview_overlay":"quad_overdraw_draw"}).to_string());
+    assert_eq!(overlay_pixel["ok"], true, "{overlay_pixel}");
+    assert_eq!(
+        overlay_pixel["data"]["pixel"]["overlay"], true,
+        "{overlay_pixel}"
+    );
+    assert_ne!(
+        overlay_pixel["data"]["pixel"]["bits"], raw_before["data"]["pixel"]["bits"],
+        "overlay must return distinct pixel values"
+    );
+    let raw_after = agent.send(
+        &serde_json::json!({"command":"pick_pixel","index":texture_index,"x":0,"y":0}).to_string(),
+    );
+    assert_eq!(
+        raw_after["data"]["pixel"]["bits"], raw_before["data"]["pixel"]["bits"],
+        "overlay picking must restore replay state"
+    );
+    let overlay_fallback = agent.send(&serde_json::json!({"command":"pick_overlay_pixel","index":float_index,"x":0,"y":0,"preview_overlay":"quad_overdraw_draw"}).to_string());
+    assert_eq!(overlay_fallback["ok"], true, "{overlay_fallback}");
+    assert_eq!(
+        overlay_fallback["data"]["pixel"]["overlay"], false,
+        "{overlay_fallback}"
+    );
+    let invalid_overlay_pixel = agent.send(&serde_json::json!({"command":"pick_overlay_pixel","index":texture_index,"x":0,"y":0,"preview_overlay":"drawcall"}).to_string());
+    assert_eq!(
+        invalid_overlay_pixel["error"]["code"], "invalid_arguments",
+        "{invalid_overlay_pixel}"
+    );
     let unsupported_overlay = agent.send(&serde_json::json!({"command":"render_texture","index":float_index,"width":4,"height":4,"path":dir.path().join("missing-overlay.png"),"preview_overlay":"drawcall"}).to_string());
     assert_eq!(
         unsupported_overlay["error"]["code"], "replay_render_failed",

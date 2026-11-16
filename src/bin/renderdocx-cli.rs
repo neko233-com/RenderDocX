@@ -127,6 +127,10 @@ fn usage() -> Value {
     capabilities["serve_commands"]
         .as_array_mut()
         .expect("capabilities commands")
+        .push(json!("pick_overlay_pixel"));
+    capabilities["serve_commands"]
+        .as_array_mut()
+        .expect("capabilities commands")
         .push(json!("filter_events"));
     capabilities["serve_commands"]
         .as_array_mut()
@@ -2471,7 +2475,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     )),
                 }
             }
-            "pick_pixel" => {
+            "pick_pixel" | "pick_overlay_pixel" => {
                 let number = |key: &str| {
                     request
                         .get(key)
@@ -2496,10 +2500,30 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         match (snapshot.textures.get(index as usize), selection) {
                             (Some(texture), Ok(selection)) => {
                                 match selection.validate_pixel(texture, x, y) {
-                                    Ok(()) => session
-                                        .pick_pixel(event, index, texture, selection, x, y)
-                                        .map(|pixel| json!({"pixel":pixel,"selection":selection}))
-                                        .map_err(|error| ("replay_pixel_failed", error)),
+                                    Ok(())
+                                        if command == "pick_overlay_pixel"
+                                            && !selection.preview_overlay.uses_overlay_pixel() =>
+                                    {
+                                        Err((
+                                            "invalid_arguments",
+                                            "Select a quad-overdraw or triangle-size overlay"
+                                                .into(),
+                                        ))
+                                    }
+                                    Ok(()) => {
+                                        let picked = if command == "pick_overlay_pixel" {
+                                            event_times = None;
+                                            mesh_selection = None;
+                                            session.pick_overlay_pixel(
+                                                event, index, texture, selection, x, y,
+                                            )
+                                        } else {
+                                            session
+                                                .pick_pixel(event, index, texture, selection, x, y)
+                                        };
+                                        picked.map(|pixel| json!({"pixel":pixel,"selection":selection}))
+                                            .map_err(|error| ("replay_pixel_failed", error))
+                                    }
                                     Err(error) => Err(("invalid_arguments", error)),
                                 }
                             }

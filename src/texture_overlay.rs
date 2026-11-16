@@ -41,6 +41,15 @@ impl TextureOverlay {
         Self::TriangleSizePass,
         Self::TriangleSizeDraw,
     ];
+    pub fn uses_overlay_pixel(self) -> bool {
+        matches!(
+            self,
+            Self::QuadOverdrawPass
+                | Self::QuadOverdrawDraw
+                | Self::TriangleSizePass
+                | Self::TriangleSizeDraw
+        )
+    }
     pub fn next(self) -> Self {
         Self::ALL[((self as usize) + 1) % Self::ALL.len()]
     }
