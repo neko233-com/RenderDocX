@@ -469,10 +469,13 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
     const TextureDescription &texture = textures[i];
     texture_ids.push_back({texture.resourceId, texture.width, texture.height, texture.dimension, texture.depth, texture.mips, texture.arraysize, texture.msSamp, texture.format.compCount});
     const auto found_name = resource_names.find(texture.resourceId);
+    const auto resource_index = resource_indices.find(texture.resourceId);
     const rdcstr *name = found_name == resource_names.end() ? nullptr : found_name->second;
     if(i) std::cout << ',';
     std::cout << "{\"name\":";
     if(name) json_string(*name); else json_string("", 0);
+    std::cout << ",\"resource_index\":";
+    if(resource_index == resource_indices.end()) std::cout << "null"; else std::cout << resource_index->second;
     std::cout << ",\"width\":" << texture.width << ",\"height\":" << texture.height
               << ",\"depth\":" << texture.depth << ",\"dimension\":" << texture.dimension
               << ",\"mips\":" << texture.mips << ",\"array_size\":" << texture.arraysize

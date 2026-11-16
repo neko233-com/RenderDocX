@@ -784,6 +784,14 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let resources = opened_copy["data"]["capture"]["resources"]
         .as_array()
         .unwrap();
+    for texture in opened_copy["data"]["capture"]["textures"]
+        .as_array()
+        .unwrap()
+    {
+        if let Some(index) = texture["resource_index"].as_u64() {
+            assert_eq!(texture["name"], resources[index as usize]["name"]);
+        }
+    }
     let (rename_index, rename_key) = resources
         .iter()
         .enumerate()

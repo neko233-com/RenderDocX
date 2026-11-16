@@ -593,6 +593,8 @@ pub struct Buffer {
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Texture {
     pub name: String,
+    #[serde(default)]
+    pub resource_index: Option<usize>,
     pub width: u32,
     pub height: u32,
     pub depth: u32,
@@ -2944,6 +2946,7 @@ mod tests {
     fn texture_selection_validates_mip_dependent_depth_and_components() {
         let texture = Texture {
             name: String::new(),
+            resource_index: None,
             width: 8,
             height: 8,
             depth: 8,

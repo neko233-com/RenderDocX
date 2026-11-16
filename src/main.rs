@@ -383,6 +383,17 @@ struct Workspace {
 }
 
 impl Workspace {
+    fn resource_display_name<'a>(&'a self, index: Option<usize>, fallback: &'a str) -> &'a str {
+        annotations::display_resource_name(
+            self.snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.resources.as_slice())
+                .unwrap_or_default(),
+            self.annotations.renames.as_ref().map(|(_, doc)| doc),
+            index,
+            fallback,
+        )
+    }
     fn annotation_dirty(&self, cx: &Context<Self>) -> bool {
         match (&self.annotations.notes, &self.annotations.editor) {
             (Some((_, doc)), Some(editor)) => {
@@ -3947,7 +3958,12 @@ impl Workspace {
                                 let name = description
                                     .resource
                                     .and_then(|i| snapshot.resources.get(i))
-                                    .map(|r| r.name.as_str())
+                                    .map(|r| {
+                                        resource_name(
+                                            r,
+                                            this.annotations.renames.as_ref().map(|(_, doc)| doc),
+                                        )
+                                    })
                                     .unwrap_or("");
                                 format!("#{index} {name} · {}", description.count)
                             } else {
@@ -4387,7 +4403,12 @@ impl Workspace {
                                 .iter()
                                 .find(|shader| shader.stage == stage)?;
                             let bound = shader.resource.bound;
-                            let name = shader.resource.name.clone();
+                            let name = this
+                                .resource_display_name(
+                                    shader.resource.resource_index,
+                                    &shader.resource.name,
+                                )
+                                .to_owned();
                             Some(
                                 div()
                                     .id(SharedString::from(format!("shader-{index}")))
@@ -4427,10 +4448,12 @@ impl Workspace {
                     range
                         .filter_map(|index| {
                             let buffer = this.snapshot.as_ref()?.buffers.get(index)?;
-                            let name = if buffer.name.is_empty() {
+                            let display_name =
+                                this.resource_display_name(buffer.resource_index, &buffer.name);
+                            let name = if display_name.is_empty() {
                                 format!("{buffer_label} {index}")
                             } else {
-                                buffer.name.clone()
+                                display_name.to_owned()
                             };
                             let size = buffer.length.clone();
                             Some(
@@ -4470,10 +4493,12 @@ impl Workspace {
                     range
                         .filter_map(|index| {
                             let texture = this.snapshot.as_ref()?.textures.get(index)?;
-                            let name = if texture.name.is_empty() {
+                            let display_name =
+                                this.resource_display_name(texture.resource_index, &texture.name);
+                            let name = if display_name.is_empty() {
                                 format!("{texture_label} {index}")
                             } else {
-                                texture.name.clone()
+                                display_name.to_owned()
                             };
                             let dimensions = format!(
                                 "{} × {} × {}",
@@ -5832,27 +5857,35 @@ impl Workspace {
                         .child(buffer_details),
                 )
                 .when_some(buffer_detail, |view, buffer| {
-                    view.child(div().font_weight(gpui::FontWeight::BOLD).child(buffer.name))
-                        .child(format!("{bytes_label}: {}", buffer.length))
-                        .child(format!("{flags_label}: 0x{:08X}", buffer.creation_flags))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .gap_2()
-                                .child(prev)
-                                .child(read_button)
-                                .child(next_button),
-                        )
-                        .children(rows.unwrap_or_default().into_iter().enumerate().map(
-                            |(index, line)| {
+                    view.child(
+                        div().font_weight(gpui::FontWeight::BOLD).child(
+                            self.resource_display_name(buffer.resource_index, &buffer.name)
+                                .to_owned(),
+                        ),
+                    )
+                    .child(format!("{bytes_label}: {}", buffer.length))
+                    .child(format!("{flags_label}: 0x{:08X}", buffer.creation_flags))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(prev)
+                            .child(read_button)
+                            .child(next_button),
+                    )
+                    .children(
+                        rows.unwrap_or_default()
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, line)| {
                                 div()
                                     .id(("buffer-line", index))
                                     .test_support()
                                     .text_sm()
                                     .child(line)
-                            },
-                        ))
+                            }),
+                    )
                 })
                 .when(self.selected_buffer.is_none(), |view| {
                     view.child(div().text_color(rgb(0x9eacc0)).child(buffer_empty))
@@ -6032,7 +6065,7 @@ impl Workspace {
                     view.child(
                         div()
                             .font_weight(gpui::FontWeight::BOLD)
-                            .child(texture.name),
+                            .child(self.resource_display_name(texture.resource_index, &texture.name).to_owned()),
                     )
                     .child(format!(
                         "{} × {} × {}",
@@ -6372,14 +6405,14 @@ impl Workspace {
                         .iter()
                         .filter(|shader| shader.resource.bound)
                         .map(|shader| {
+                            let name = self.resource_display_name(
+                                shader.resource.resource_index,
+                                &shader.resource.name,
+                            );
                             format!(
                                 "{}: {}",
                                 shader.stage,
-                                if shader.resource.name.is_empty() {
-                                    "—"
-                                } else {
-                                    &shader.resource.name
-                                }
+                                if name.is_empty() { "—" } else { name }
                             )
                         })
                         .collect::<Vec<_>>();
@@ -6389,15 +6422,9 @@ impl Workspace {
                         .enumerate()
                         .filter(|(_, output)| output.bound)
                         .map(|(index, output)| {
-                            format!(
-                                "{}: {}",
-                                index,
-                                if output.name.is_empty() {
-                                    "—"
-                                } else {
-                                    &output.name
-                                }
-                            )
+                            let name =
+                                self.resource_display_name(output.resource_index, &output.name);
+                            format!("{}: {}", index, if name.is_empty() { "—" } else { name })
                         })
                         .collect::<Vec<_>>();
                     let index = state
@@ -6407,7 +6434,12 @@ impl Workspace {
                             if buffer.resource.bound {
                                 format!(
                                     "{} · {offset_label} {} · {stride_label} {}",
-                                    buffer.resource.name, buffer.byte_offset, buffer.byte_stride
+                                    self.resource_display_name(
+                                        buffer.resource.resource_index,
+                                        &buffer.resource.name
+                                    ),
+                                    buffer.byte_offset,
+                                    buffer.byte_stride
                                 )
                             } else {
                                 "—".into()
@@ -6422,7 +6454,12 @@ impl Workspace {
                             .map(|(slot, buffer)| {
                                 format!(
                                     "{slot}: {} · {offset_label} {} · {stride_label} {}",
-                                    buffer.resource.name, buffer.byte_offset, buffer.byte_stride
+                                    self.resource_display_name(
+                                        buffer.resource.resource_index,
+                                        &buffer.resource.name
+                                    ),
+                                    buffer.byte_offset,
+                                    buffer.byte_stride
                                 )
                             })
                             .collect::<Vec<_>>()
@@ -8489,6 +8526,7 @@ mod ui_tests {
                             ],
                             textures: vec![renderdocx::replay::Texture {
                                 name: "Color".into(),
+                                resource_index: Some(0),
                                 width: 16,
                                 height: 16,
                                 depth: 1,
