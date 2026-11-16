@@ -927,6 +927,60 @@ void write_pipeline(IReplayController *controller, uint32_t event)
   std::cout << '}';
 }
 
+int run_structure_worker(ICaptureFile *file)
+{
+  std::cout << "\nRENDERDOCX/1 {\"type\":\"structure_ready\"}" << std::endl;
+  std::string command;
+  while(std::getline(std::cin, command))
+  {
+    if(command == "quit") break;
+    if(command.compare(0, 17, "structure_buffer ") != 0) { error("Invalid structured worker request"); continue; }
+    std::istringstream args(command.substr(17));
+    std::string event_text, chunk_text, offset_text, length_text, item;
+    uint64_t event = 0, chunk = 0, offset = 0, length = 0;
+    if(!(args >> event_text >> chunk_text >> offset_text >> length_text) || !decimal(event_text, event) ||
+       !decimal(chunk_text, chunk) || !decimal(offset_text, offset) || !decimal(length_text, length) ||
+       event > UINT32_MAX || length > 65536)
+    { error("Invalid structured buffer request"); continue; }
+    const SDFile &full = file->GetStructuredData();
+    if(chunk >= full.chunks.size() || !full.chunks[size_t(chunk)]) { error("Structured data is unavailable for this chunk"); continue; }
+    const SDObject *object = full.chunks[size_t(chunk)];
+    std::vector<const SDObject *> nodes{object};
+    std::vector<uint64_t> path;
+    bool valid = true;
+    while(args >> item)
+    {
+      uint64_t index = 0;
+      if(!decimal(item, index) || index >= object->NumChildren()) { valid = false; break; }
+      object = object->GetChild(size_t(index));
+      if(!object) { valid = false; break; }
+      path.push_back(index);
+      nodes.push_back(object);
+    }
+    if(!valid || object->type.basetype != SDBasic::Buffer || offset > object->type.byteSize ||
+       length > object->type.byteSize - offset || object->data.basic.u >= full.buffers.size() ||
+       !full.buffers[size_t(object->data.basic.u)] ||
+       full.buffers[size_t(object->data.basic.u)]->size() != object->type.byteSize)
+    { error("Structured buffer data is unavailable or range is invalid"); continue; }
+    const bytebuf &bytes = *full.buffers[size_t(object->data.basic.u)];
+    static const char hex[] = "0123456789abcdef";
+    std::cout << "\nRENDERDOCX/1 {\"type\":\"structured_buffer\",\"event_id\":" << event
+              << ",\"offset\":\"" << offset << "\",\"path\":[";
+    for(size_t i = 0; i < path.size(); ++i) { if(i) std::cout << ','; std::cout << '"' << path[i] << '"'; }
+    const SDChunk *source_chunk = full.chunks[size_t(chunk)];
+    std::cout << "],\"chunk_metadata\":{\"chunk_id\":" << source_chunk->metadata.chunkID
+              << ",\"length\":\"" << source_chunk->metadata.length << "\",\"thread_id\":\""
+              << source_chunk->metadata.threadID << "\"},\"nodes\":[";
+    const std::map<ResourceId, size_t> no_resources;
+    for(size_t i = 0; i < nodes.size(); ++i) { if(i) std::cout << ','; write_structured_node(nodes[i], no_resources); }
+    std::cout << "],\"hex\":\"";
+    for(size_t i = size_t(offset); i < size_t(offset + length); ++i)
+      std::cout << hex[bytes[i] >> 4] << hex[bytes[i] & 15];
+    std::cout << "\"}" << std::endl;
+  }
+  return 0;
+}
+
 int run(const std::string &capture, bool structure_worker, const std::string &remote_url)
 {
   const char *version = RENDERDOC_GetVersionString();
@@ -946,6 +1000,7 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
   if(!replay.file) { error("RenderDoc could not create a capture file handle"); return 1; }
   ResultDetails result = replay.file->OpenFile(capture.c_str(), "rdc", nullptr);
   if(!result.OK()) { error(result_message(result)); return 1; }
+  if(structure_worker) return run_structure_worker(replay.file);
   if(!remote_url.empty())
   {
     result = RENDERDOC_CreateRemoteServerConnection(remote_url.c_str(), &replay.remote);
@@ -1426,73 +1481,6 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       std::cout << "\"}" << std::endl;
       continue;
     }
-    if(command.compare(0, 17, "structure_buffer ") == 0)
-    {
-      if(!structure_worker || !replay.file) { error("Structured buffer export requires an isolated worker"); continue; }
-      std::istringstream arguments(command.substr(17));
-      std::string event_text, offset_text, length_text, item;
-      uint64_t event = 0, offset = 0, length = 0;
-      if(!(arguments >> event_text >> offset_text >> length_text) || !decimal(event_text, event) ||
-         !decimal(offset_text, offset) || !decimal(length_text, length) || event > UINT32_MAX || length > 65536)
-      { error("Invalid structured buffer request"); continue; }
-      auto found = event_chunks.find(uint32_t(event));
-      if(found == event_chunks.end()) { error("Structured data is unavailable for this event"); continue; }
-      const SDFile &replay_data = replay.controller->GetStructuredFile();
-      const SDChunk *replay_chunk = replay_data.chunks[found->second];
-      const SDObject *replay_object = replay_chunk;
-      std::vector<uint64_t> path;
-      bool valid = true;
-      while(arguments >> item)
-      {
-        uint64_t index = 0;
-        if(!decimal(item, index) || index >= replay_object->NumChildren()) { valid = false; break; }
-        replay_object = replay_object->GetChild(size_t(index));
-        if(!replay_object) { valid = false; break; }
-        path.push_back(index);
-      }
-      if(!valid || replay_object->type.basetype != SDBasic::Buffer || offset > replay_object->type.byteSize ||
-         length > replay_object->type.byteSize - offset)
-      { error("Invalid structured buffer path or range"); continue; }
-
-      // The replay export normally omits buffers. This explicit request asks the capture
-      // handle for its complete structured export and may use substantial memory.
-      const SDFile &full = replay.file->GetStructuredData();
-      if(found->second >= full.chunks.size() || !full.chunks[found->second])
-      { error("Full structured capture data is unavailable"); continue; }
-      const SDChunk *full_chunk = full.chunks[found->second];
-      if(full.chunks.size() != replay_data.chunks.size() || full_chunk->name != replay_chunk->name ||
-         full_chunk->metadata.chunkID != replay_chunk->metadata.chunkID ||
-         full_chunk->metadata.length != replay_chunk->metadata.length ||
-         full_chunk->metadata.threadID != replay_chunk->metadata.threadID)
-      { error("Structured capture data does not match the replay event"); continue; }
-      const SDObject *full_object = full_chunk;
-      const SDObject *replay_compare = replay_chunk;
-      for(uint64_t index : path)
-      {
-        if(index >= full_object->NumChildren() || index >= replay_compare->NumChildren()) { valid = false; break; }
-        full_object = full_object->GetChild(size_t(index));
-        replay_compare = replay_compare->GetChild(size_t(index));
-        if(!full_object || !replay_compare || full_object->name != replay_compare->name ||
-           full_object->type.name != replay_compare->type.name ||
-           full_object->type.basetype != replay_compare->type.basetype ||
-           full_object->type.byteSize != replay_compare->type.byteSize ||
-           full_object->NumChildren() != replay_compare->NumChildren()) { valid = false; break; }
-      }
-      if(!valid || full_object->type.basetype != SDBasic::Buffer || full_object->data.basic.u >= full.buffers.size() ||
-         !full.buffers[size_t(full_object->data.basic.u)] ||
-         full.buffers[size_t(full_object->data.basic.u)]->size() != replay_object->type.byteSize)
-      { error("Structured buffer data is unavailable or does not match the replay event"); continue; }
-      const bytebuf &bytes = *full.buffers[size_t(full_object->data.basic.u)];
-      static const char hex[] = "0123456789abcdef";
-      std::cout << "\nRENDERDOCX/1 {\"type\":\"structured_buffer\",\"event_id\":" << event
-                << ",\"offset\":\"" << offset << "\",\"path\":[";
-      for(size_t i = 0; i < path.size(); ++i) { if(i) std::cout << ','; std::cout << '"' << path[i] << '"'; }
-      std::cout << "],\"hex\":\"";
-      for(size_t i = size_t(offset); i < size_t(offset + length); ++i)
-        std::cout << hex[bytes[i] >> 4] << hex[bytes[i] & 15];
-      std::cout << "\"}" << std::endl;
-      continue;
-    }
     if(command.compare(0, 10, "structure ") == 0)
     {
       std::istringstream arguments(command.substr(10));
@@ -1528,7 +1516,10 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       std::cout << "\nRENDERDOCX/1 {\"type\":\"structure\",\"event_id\":" << event
                 << ",\"offset\":\"" << offset << "\",\"path\":[";
       for(size_t i = 0; i < path.size(); ++i) { if(i) std::cout << ','; std::cout << '"' << path[i] << '"'; }
-      std::cout << "],\"node\":"; write_structured_node(object, resource_indices);
+      const SDChunk *source_chunk = replay.controller->GetStructuredFile().chunks[found->second];
+      std::cout << "],\"chunk_metadata\":{\"chunk_id\":" << source_chunk->metadata.chunkID
+                << ",\"length\":\"" << source_chunk->metadata.length << "\",\"thread_id\":\""
+                << source_chunk->metadata.threadID << "\"},\"node\":"; write_structured_node(object, resource_indices);
       std::cout << ",\"children\":[";
       for(size_t i = 0; i < children.size(); ++i) { if(i) std::cout << ','; write_structured_node(children[i], resource_indices); }
       std::cout << "]}" << std::endl;

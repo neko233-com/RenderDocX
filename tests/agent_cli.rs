@@ -2411,6 +2411,35 @@ fn real_remote_replay_loopback() {
     let selected =
         agent.send(&serde_json::json!({"command":"select", "event_id":event}).to_string());
     assert_eq!(selected["ok"], true, "{selected}");
+    let update = opened["data"]["capture"]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|a| a["api_events"].as_array().unwrap())
+        .find(|e| {
+            e["name"]
+                .as_str()
+                .is_some_and(|n| n.contains("UpdateSubresource"))
+        })
+        .expect("update event")["event_id"]
+        .as_u64()
+        .unwrap();
+    let structure =
+        agent.send(&serde_json::json!({"command":"structure", "event_id":update}).to_string());
+    assert_eq!(structure["ok"], true, "{structure}");
+    let index = structure["data"]["structure"]["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|n| n["name"] == "pSrcData" && n["basic_type"] == 4)
+        .unwrap();
+    let data = agent.send(
+        &serde_json::json!({"command":"structure_buffer", "event_id":update,
+        "path":[index.to_string()], "offset":"0", "length":8})
+        .to_string(),
+    );
+    assert_eq!(data["ok"], true, "{data}");
+    assert_eq!(data["data"]["hex"], "0000000000004040");
     assert_eq!(agent.send(r#"{"command":"close"}"#)["ok"], true);
     agent.quit();
 }

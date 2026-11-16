@@ -56,6 +56,15 @@ pub struct StructurePage {
     pub path: Vec<String>,
     pub node: StructuredNode,
     pub children: Vec<StructuredNode>,
+    #[serde(default)]
+    pub chunk_metadata: Option<StructuredChunkMetadata>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct StructuredChunkMetadata {
+    pub chunk_id: u32,
+    pub length: String,
+    pub thread_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1159,8 +1168,11 @@ enum Reply {
         histogram: Vec<u32>,
     },
     PixelHistory(PixelHistoryPage),
+    StructureReady,
     StructuredBuffer {
         event_id: u32,
+        nodes: Vec<StructuredNode>,
+        chunk_metadata: StructuredChunkMetadata,
         path: Vec<String>,
         offset: String,
         hex: String,
@@ -1205,15 +1217,12 @@ impl Process {
     fn open(
         executable: &Path,
         capture: &Path,
-        worker: bool,
         remote: Option<&str>,
     ) -> Result<(Self, Snapshot), String> {
         let capture = std::fs::canonicalize(capture).unwrap_or_else(|_| capture.to_path_buf());
         let before = capture_stamp(&capture);
         let mut command = Command::new(executable);
-        if worker {
-            command.arg("--structure-worker");
-        } else if let Some(url) = remote {
+        if let Some(url) = remote {
             command.arg("--remote").arg(url);
         }
         command
@@ -1266,15 +1275,63 @@ impl Process {
         Ok((process, snapshot))
     }
 
+    fn open_structure_worker(executable: &Path, capture: &Path) -> Result<Self, String> {
+        let mut command = Command::new(executable);
+        command
+            .arg("--structure-worker")
+            .arg(capture)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .env_remove("RENDERDOCX_CONNECT_PID")
+            .env_remove("RENDERDOCX_OPEN_CAPTURE");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000);
+        }
+        let before = capture_stamp(capture);
+        let mut child = command.spawn().map_err(|e| e.to_string())?;
+        let input = child
+            .stdin
+            .take()
+            .ok_or("Missing structured worker input")?;
+        let output = child
+            .stdout
+            .take()
+            .ok_or("Missing structured worker output")?;
+        let mut process = Self {
+            child: Some(child),
+            input: Some(input),
+            output: Some(BufReader::new(output)),
+            executable: executable.to_path_buf(),
+            capture: capture.to_path_buf(),
+            capture_stamp: None,
+            events: HashMap::new(),
+            structure_worker: None,
+        };
+        match process.read()? {
+            Reply::StructureReady => (),
+            Reply::Error { message } => return Err(message),
+            _ => return Err("Unexpected structured worker response".into()),
+        }
+        if before.is_some() && capture_stamp(capture) == before {
+            process.capture_stamp = before;
+        }
+        Ok(process)
+    }
+
     fn read_structure_buffer_raw(
         &mut self,
         event: u32,
+        chunk: u32,
         path: &[u64],
         offset: u64,
         length: u32,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<(Vec<u8>, Vec<StructuredNode>, StructuredChunkMetadata), String> {
         let input = self.input.as_mut().ok_or("Replay session has closed")?;
-        write!(input, "structure_buffer {event} {offset} {length}").map_err(|e| e.to_string())?;
+        write!(input, "structure_buffer {event} {chunk} {offset} {length}")
+            .map_err(|e| e.to_string())?;
         for index in path {
             write!(input, " {index}").map_err(|e| e.to_string())?;
         }
@@ -1284,6 +1341,8 @@ impl Process {
         match self.read()? {
             Reply::StructuredBuffer {
                 event_id,
+                nodes,
+                chunk_metadata,
                 path: actual_path,
                 offset: actual_offset,
                 hex,
@@ -1297,7 +1356,7 @@ impl Process {
                     .as_deref()
                     == Some(path) =>
             {
-                decode_buffer_hex(&hex, length)
+                Ok((decode_buffer_hex(&hex, length)?, nodes, chunk_metadata))
             }
             Reply::Error { message } => Err(message),
             _ => Err("Unexpected structured buffer response".into()),
@@ -2015,14 +2074,24 @@ impl Transport for Process {
         if capture_stamp(&self.capture).as_ref() != Some(stamp) {
             return Err("Capture changed since it was opened".into());
         }
-        let original_event = self
+        let chunk = self
             .events
             .get(&event)
-            .ok_or("Structured data is unavailable for this event")?
-            .clone();
+            .and_then(|entry| entry.chunk_index)
+            .ok_or("Structured data is unavailable for this event")?;
+        let stamp = stamp.clone();
+        let mut expected = Vec::with_capacity(path.len() + 1);
+        let mut metadata = None;
+        for depth in 0..=path.len() {
+            let page = self.structure(event, &path[..depth], 0, 1)?;
+            if depth == 0 {
+                metadata = page.chunk_metadata;
+            }
+            expected.push(page.node);
+        }
         if self.structure_worker.is_none() {
-            let (worker, _) = Process::open(&self.executable, &self.capture, true, None)?;
-            if worker.capture_stamp.as_ref() != Some(stamp) {
+            let worker = Process::open_structure_worker(&self.executable, &self.capture)?;
+            if worker.capture_stamp.as_ref() != Some(&stamp) {
                 return Err("Capture changed while opening structured data".into());
             }
             self.structure_worker = Some(Box::new(worker));
@@ -2031,11 +2100,21 @@ impl Transport for Process {
             .structure_worker
             .as_mut()
             .ok_or("Structured worker is unavailable")?;
-        if worker.events.get(&event) != Some(&original_event) {
-            return Err("Structured worker event does not match the open capture".into());
+        let (bytes, actual, actual_metadata) =
+            worker.read_structure_buffer_raw(event, chunk, path, offset, length)?;
+        if metadata.as_ref() != Some(&actual_metadata)
+            || actual.len() != expected.len()
+            || actual.iter().zip(&expected).any(|(a, b)| {
+                a.name != b.name
+                    || a.type_name != b.type_name
+                    || a.basic_type != b.basic_type
+                    || a.byte_size != b.byte_size
+                    || a.child_count != b.child_count
+            })
+        {
+            return Err("Structured capture data does not match the replay event".into());
         }
-        let bytes = worker.read_structure_buffer_raw(event, path, offset, length)?;
-        if capture_stamp(&self.capture).as_ref() != Some(stamp) {
+        if capture_stamp(&self.capture).as_ref() != Some(&stamp) {
             self.structure_worker = None;
             return Err("Capture changed while reading structured data".into());
         }
@@ -2561,7 +2640,7 @@ impl Session {
         }
         let executable = find_tool(&settings.replay_bridge, "renderdocx-replay")?;
         let executable = std::fs::canonicalize(&executable).unwrap_or(executable);
-        let (process, snapshot) = Process::open(&executable, capture, false, remote)?;
+        let (process, snapshot) = Process::open(&executable, capture, remote)?;
         Ok((
             Self {
                 process: Arc::new(Mutex::new(Box::new(process))),
@@ -3228,6 +3307,7 @@ pub mod test_support {
                 offset: offset.to_string(),
                 node,
                 children,
+                chunk_metadata: None,
             })
         }
 
