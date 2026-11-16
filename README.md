@@ -34,7 +34,7 @@ Preview display modes include RGBM with an editable multiplier and YUVA decoding
 
 Preview background can use RenderDoc's checkerboard or an sRGB `#RRGGBB` color. A D3D11 capture checks solid background output; transparent texture blending and other APIs remain unverified.
 
-The texture viewer keeps display selections per texture for the current capture, including range, channels and subresource. Y flip remains global, matching the upstream default. If a custom shader is replaced, a saved selection using the old shader is not silently applied to the new one. Per-texture settings are cleared when another capture is opened; the upstream preference switches and automatic shader restoration are not yet implemented.
+The texture viewer keeps display selections per texture for the current capture, including range, channels and subresource. Per-texture settings are enabled by default; Y flip is global by default and can also be stored per texture. Both preferences can be changed in the viewer and are saved in settings. If a custom shader is replaced, a saved selection using the old shader is not silently applied to the new one. Per-texture settings are cleared when another capture is opened; automatic restoration of a replaced shader is not yet implemented.
 
 The texture viewer can compile and use one session-scoped custom visualization shader. A shared local library supports named records and snapshot imports from upstream shader directories; configured external processors can convert unsupported source encodings. Failed compilation retains the previous shader, and closing the replay frees it. D3D11 HLSL and a pass-through processor have targeted coverage; other processors and backends remain unverified.
 

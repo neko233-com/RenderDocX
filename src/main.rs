@@ -748,10 +748,38 @@ impl Workspace {
         let mut selection = if self.selected_texture == Some(index) {
             self.texture_selection
         } else {
-            let saved = self.texture_saved_selection.get(&index).copied();
-            let mut value = saved.map(|(selection, _)| selection).unwrap_or_default();
-            // Upstream defaults to a global Y flip unless per-texture Y flip is enabled.
-            value.preview_flip_y = self.texture_selection.preview_flip_y;
+            let saved = self
+                .settings
+                .texture_per_resource_settings
+                .then(|| self.texture_saved_selection.get(&index).copied())
+                .flatten();
+            let mut value = if self.settings.texture_per_resource_settings {
+                saved.map(|(selection, _)| selection).unwrap_or_default()
+            } else {
+                let mut current = self.texture_selection;
+                // Mip and slice selectors are rebuilt for the new texture upstream.
+                current.mip = 0;
+                current.slice = 0;
+                current.sample = None;
+                current.preview_type_cast = 0;
+                current.analysis_type_cast = 0;
+                if current.channel.is_some_and(|channel| {
+                    channel
+                        >= if current.preview_custom_shader {
+                            4
+                        } else {
+                            texture.component_count
+                        }
+                }) {
+                    current.channel = None;
+                }
+                current
+            };
+            if !self.settings.texture_per_resource_settings
+                || !self.settings.texture_per_resource_flip_y
+            {
+                value.preview_flip_y = self.texture_selection.preview_flip_y;
+            }
             value.preview_linear_as_gamma = self.texture_selection.preview_linear_as_gamma;
             value.preview_overlay = self.texture_selection.preview_overlay;
             value.preview_background = self.texture_selection.preview_background;
@@ -760,6 +788,16 @@ impl Workspace {
                 || !self.texture_custom_active
             {
                 value.preview_custom_shader = false;
+            }
+            if value.channel.is_some_and(|channel| {
+                channel
+                    >= if value.preview_custom_shader {
+                        4
+                    } else {
+                        texture.component_count
+                    }
+            }) {
+                value.channel = None;
             }
             value
         };
@@ -782,7 +820,7 @@ impl Workspace {
             cx.notify();
             return false;
         }
-        if self.selected_texture != Some(index) {
+        if self.settings.texture_per_resource_settings && self.selected_texture != Some(index) {
             if let Some(previous) = self.selected_texture {
                 self.texture_saved_selection.insert(
                     previous,
@@ -2596,7 +2634,16 @@ impl Workspace {
     }
 
     fn save(&mut self) {
-        if let Err(error) = self.settings.save() {
+        #[cfg(test)]
+        let result = if let Some(directory) = &self.buffer_store_override {
+            self.settings
+                .save_to(&directory.join("preferences").join("settings.json"))
+        } else {
+            self.settings.save()
+        };
+        #[cfg(not(test))]
+        let result = self.settings.save();
+        if let Err(error) = result {
             self.status = Some(format!(
                 "{}: {error}",
                 self.t(
@@ -9766,6 +9813,49 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(button(
+                        "texture-per-resource",
+                        self.t(
+                            "Per-texture settings",
+                            "按纹理保存设置",
+                            "テクスチャごとに設定を保存",
+                            "텍스처별 설정 저장",
+                        ),
+                        self.settings.texture_per_resource_settings,
+                        |this, cx| {
+                            this.settings.texture_per_resource_settings =
+                                !this.settings.texture_per_resource_settings;
+                            this.save();
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(button(
+                        "texture-per-resource-flip",
+                        self.t(
+                            "Per-texture Y flip",
+                            "按纹理保存 Y 翻转",
+                            "Y反転をテクスチャごとに保存",
+                            "텍스처별 Y 뒤집기 저장",
+                        ),
+                        self.settings.texture_per_resource_settings
+                            && self.settings.texture_per_resource_flip_y,
+                        |this, cx| {
+                            if this.settings.texture_per_resource_settings {
+                                this.settings.texture_per_resource_flip_y =
+                                    !this.settings.texture_per_resource_flip_y;
+                                this.save();
+                                cx.notify();
+                            }
+                        },
+                        cx,
+                    )),
+            )
             .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
                 "Preview channels and display",
                 "预览通道与显示",
@@ -18004,6 +18094,21 @@ mod ui_tests {
                 view.buffer_store_override = Some(format_dir.path().to_path_buf())
             })
         });
+        cx.update_window(handle.into(), |_, window, cx| {
+            reveal_details(window, "texture-per-resource-flip", cx);
+            window.click("texture-per-resource-flip", cx);
+        })
+        .unwrap();
+        let persisted: Settings = serde_json::from_slice(
+            &std::fs::read(format_dir.path().join("preferences").join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(persisted.texture_per_resource_flip_y);
+        cx.update_window(handle.into(), |_, window, cx| {
+            reveal_details(window, "texture-per-resource-flip", cx);
+            window.click("texture-per-resource-flip", cx);
+        })
+        .unwrap();
         exercise_custom_shader_editor(cx, &view, handle);
         let import_dir = format_dir.path().join("upstream-shaders");
         std::fs::create_dir(&import_dir).unwrap();
@@ -18046,6 +18151,35 @@ mod ui_tests {
                 assert!(view.switch_texture(old_index, None, window, cx));
                 assert!(!view.texture_selection.preview_custom_shader);
                 assert!(!view.switch_texture(old_index, Some((u32::MAX, 0, 0)), window, cx));
+                view.texture_saved_selection.clear();
+                view.settings.texture_per_resource_flip_y = true;
+                view.texture_selection.preview_flip_y = true;
+                assert!(view.switch_texture(original_count, None, window, cx));
+                assert!(!view.texture_selection.preview_flip_y);
+                assert!(view.switch_texture(old_index, None, window, cx));
+                assert!(view.texture_selection.preview_flip_y);
+                view.settings.texture_per_resource_settings = false;
+                view.texture_selection.display_range = Some([0.2, 0.8]);
+                view.texture_selection.mip = 1;
+                assert!(view.switch_texture(original_count, None, window, cx));
+                assert_eq!(view.texture_selection.display_range, Some([0.2, 0.8]));
+                assert_eq!(view.texture_selection.mip, 0);
+                assert!(view.texture_selection.preview_flip_y);
+                assert!(view.switch_texture(old_index, None, window, cx));
+                view.settings.texture_per_resource_settings = true;
+                view.settings.texture_per_resource_flip_y = false;
+                view.snapshot.as_mut().unwrap().textures[original_count].component_count = 1;
+                view.texture_saved_selection.clear();
+                let mut saved = TextureSelection::default();
+                saved.preview_custom_shader = true;
+                saved.channel = Some(3);
+                view.texture_saved_selection
+                    .insert(original_count, (saved, view.texture_custom_revision));
+                view.texture_custom_revision += 1;
+                assert!(view.switch_texture(original_count, None, window, cx));
+                assert!(!view.texture_selection.preview_custom_shader);
+                assert_eq!(view.texture_selection.channel, None);
+                assert!(view.switch_texture(old_index, None, window, cx));
                 view.snapshot.as_mut().unwrap().textures.pop();
                 view.texture_saved_selection.clear();
                 view.texture_selection = old_selection;

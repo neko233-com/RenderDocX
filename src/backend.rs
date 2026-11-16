@@ -7,7 +7,7 @@ use std::{
     process::Command,
 };
 
-#[derive(Clone, Default, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Settings {
     pub language: Language,
@@ -16,6 +16,23 @@ pub struct Settings {
     pub replay_bridge: Option<PathBuf>,
     pub replay_options: crate::replay::ReplayOptions,
     pub shader_processors: Vec<crate::shader_processor::NamedShaderProcessor>,
+    pub texture_per_resource_settings: bool,
+    pub texture_per_resource_flip_y: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            language: Default::default(),
+            qrenderdoc: None,
+            renderdoccmd: None,
+            replay_bridge: None,
+            replay_options: Default::default(),
+            shader_processors: Vec::new(),
+            texture_per_resource_settings: true,
+            texture_per_resource_flip_y: false,
+        }
+    }
 }
 
 impl Settings {
@@ -33,6 +50,10 @@ impl Settings {
 
     pub fn save(&self) -> Result<(), String> {
         let path = Self::path().ok_or("No configuration directory available")?;
+        self.save_to(&path)
+    }
+
+    pub fn save_to(&self, path: &Path) -> Result<(), String> {
         fs::create_dir_all(path.parent().ok_or("Invalid configuration path")?)
             .map_err(|e| e.to_string())?;
         let data = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
@@ -97,5 +118,14 @@ mod tests {
     fn older_settings_default_to_no_external_processors() {
         let settings: Settings = serde_json::from_str("{}").unwrap();
         assert!(settings.shader_processors.is_empty());
+        assert!(settings.texture_per_resource_settings);
+        assert!(!settings.texture_per_resource_flip_y);
+        let mut updated = settings;
+        updated.texture_per_resource_settings = false;
+        updated.texture_per_resource_flip_y = true;
+        let reloaded: Settings =
+            serde_json::from_str(&serde_json::to_string(&updated).unwrap()).unwrap();
+        assert!(!reloaded.texture_per_resource_settings);
+        assert!(reloaded.texture_per_resource_flip_y);
     }
 }
