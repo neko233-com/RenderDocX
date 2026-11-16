@@ -631,6 +631,16 @@ fn native_target_launch_triggers_capture_and_disconnects_without_stopping_target
             .any(|id| id.as_u64() == Some(ident)),
         "{discovered}"
     );
+    let remote_discovered = agent.send(r#"{"command":"target_list","url":"127.0.0.1"}"#);
+    assert_eq!(remote_discovered["ok"], true, "{remote_discovered}");
+    assert!(
+        remote_discovered["data"]["idents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id.as_u64() == Some(ident)),
+        "{remote_discovered}"
+    );
     let mut other = Agent::new(Some(bridge.to_str().unwrap()));
     let busy =
         other.send(&serde_json::json!({"command":"target_connect","ident":ident}).to_string());
@@ -746,6 +756,13 @@ fn native_target_launch_triggers_capture_and_disconnects_without_stopping_target
         assert!(Instant::now() < deadline, "{reconnected}");
         std::thread::sleep(Duration::from_millis(50));
     }
+    assert_eq!(agent.send(r#"{"command":"target_close"}"#)["ok"], true);
+    let remote = agent.send(
+        &serde_json::json!({"command":"target_connect","url":"127.0.0.1","ident":ident})
+            .to_string(),
+    );
+    assert_eq!(remote["ok"], true, "{remote}");
+    assert_eq!(remote["data"]["target"]["ident"], ident);
     assert_eq!(agent.send(r#"{"command":"target_close"}"#)["ok"], true);
     agent.quit();
 }

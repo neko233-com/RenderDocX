@@ -191,9 +191,25 @@ pub fn parse_target_pid(value: &std::ffi::OsStr) -> Option<u32> {
 }
 
 pub fn enumerate(settings: &Settings) -> Result<Vec<u32>, String> {
+    enumerate_target(settings, None)
+}
+
+fn valid_remote_url(url: &str) -> bool {
+    !url.is_empty() && url.trim() == url && !url.contains('\0')
+}
+
+pub fn enumerate_target(settings: &Settings, url: Option<&str>) -> Result<Vec<u32>, String> {
     let mut command = Command::new(target_helper(settings)?);
+    match url {
+        None => {
+            command.arg("--enumerate");
+        }
+        Some(url) if valid_remote_url(url) => {
+            command.args(["--enumerate-remote", url]);
+        }
+        Some(_) => return Err("Invalid remote target URL".into()),
+    }
     command
-        .arg("--enumerate")
         .stderr(Stdio::null())
         .env_remove("RENDERDOCX_CONNECT_PID")
         .env_remove("RENDERDOCX_OPEN_CAPTURE");
@@ -443,6 +459,18 @@ impl LiveSession {
             Duration::from_secs(30),
         )
     }
+    pub fn connect_remote(settings: &Settings, url: &str, ident: u32) -> Result<Self, String> {
+        if ident == 0 || !valid_remote_url(url) {
+            return Err("Invalid remote target URL or ident".into());
+        }
+        let value = ident.to_string();
+        Self::start(
+            settings,
+            &["--connect-remote".as_ref(), url.as_ref(), value.as_ref()],
+            None,
+            Duration::from_secs(30),
+        )
+    }
     pub fn connect_pid(settings: &Settings, pid: u32) -> Result<Self, String> {
         if pid == 0 {
             return Err("Process ID must be nonzero".into());
@@ -519,6 +547,14 @@ pub fn capture_directory() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn remote_urls_require_nonempty_clean_text() {
+        assert!(valid_remote_url("127.0.0.1"));
+        assert!(valid_remote_url("adb://device"));
+        assert!(!valid_remote_url(""));
+        assert!(!valid_remote_url(" host"));
+        assert!(!valid_remote_url("host\0x"));
+    }
     #[test]
     fn capture_notice_rejects_incomplete_or_non_capture_events() {
         let event = json!({"type":"capture","frame":42,"path":"frame.rdc","local":true});

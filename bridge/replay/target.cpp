@@ -77,17 +77,18 @@ struct Commands { std::mutex mutex; std::queue<std::string> values; };
 
 int run(const std::vector<std::string> &args)
 {
-  if(args.size() != 2 && args.size() != 3 && args.size() != 5 && args.size() != 18) { failure("Invalid target arguments"); return 2; }
+  if(args.size() != 2 && args.size() != 3 && args.size() != 4 && args.size() != 5 && args.size() != 18) { failure("Invalid target arguments"); return 2; }
   const char *version = RENDERDOC_GetVersionString(), *commit = RENDERDOC_GetCommitHash();
   if(!version || !commit || std::strcmp(version, MAJOR_MINOR_VERSION_STRING) || std::strcmp(commit, RENDERDOCX_CORE_COMMIT))
   { failure("RenderDoc core does not match the version and commit used to build this bridge"); return 1; }
   GlobalEnvironment env;
   RENDERDOC_InitialiseReplay(env, {});
-  if(args.size() == 2 && args[1] == "--enumerate")
+  if((args.size() == 2 && args[1] == "--enumerate") || (args.size() == 3 && args[1] == "--enumerate-remote" && !args[2].empty()))
   {
     std::vector<uint32_t> idents;
     uint32_t ident = 0;
-    while((ident = RENDERDOC_EnumerateRemoteTargets("", ident)) != 0) idents.push_back(ident);
+    const rdcstr url = args.size() == 3 ? args[2].c_str() : "";
+    while((ident = RENDERDOC_EnumerateRemoteTargets(url, ident)) != 0) idents.push_back(ident);
     std::cout << "\nRENDERDOCX-TARGET/1 {\"type\":\"targets\",\"idents\":[";
     for(size_t i = 0; i < idents.size(); ++i) { if(i) std::cout << ','; std::cout << idents[i]; }
     std::cout << "]}" << std::endl;
@@ -95,6 +96,7 @@ int run(const std::vector<std::string> &args)
   }
   uint32_t ident = 0;
   ITargetControl *target = nullptr;
+  rdcstr target_url;
   if(args[1] == "--launch" && args.size() == 5)
   {
     ExecuteResult result = RENDERDOC_ExecuteAndInject(args[2].c_str(), "", args[4].c_str(), {}, args[3].c_str(), CaptureOptions(), false);
@@ -158,8 +160,9 @@ int run(const std::vector<std::string> &args)
     { failure("No available local RenderDoc target for the requested process; it may not be loaded or may be busy"); RENDERDOC_ShutdownReplay(); return 1; }
   }
   else if(args[1] == "--connect" && args.size() == 3 && decimal(args[2], ident) && ident != 0) {}
+  else if(args[1] == "--connect-remote" && args.size() == 4 && !args[2].empty() && decimal(args[3], ident) && ident != 0) { target_url = args[2].c_str(); }
   else { failure("Invalid target arguments"); RENDERDOC_ShutdownReplay(); return 2; }
-  if(!target) target = RENDERDOC_CreateTargetControl("", ident, "RenderDocX", false);
+  if(!target) target = RENDERDOC_CreateTargetControl(target_url, ident, "RenderDocX", false);
   if(!target || !target->Connected() || !target->GetBusyClient().empty())
   {
     rdcstr busy = target ? target->GetBusyClient() : rdcstr();

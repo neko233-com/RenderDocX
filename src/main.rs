@@ -16,7 +16,7 @@ use renderdocx::{
     i18n::Language,
     live::{
         CaptureOptions, EnvOperation, EnvSeparator, EnvironmentModification, LaunchConfiguration,
-        LiveSession, capture_directory, capture_notice, enumerate, parse_target_pid,
+        LiveSession, capture_directory, capture_notice, enumerate_target, parse_target_pid,
     },
     replay::{
         AnnotationSection, COUNTER_PAGE_LIMIT, ComputeDebugSelection, CounterPage,
@@ -514,6 +514,8 @@ struct Workspace {
     live_status: Option<String>,
     live_captures: Vec<(u32, PathBuf, bool)>,
     live_targets: Vec<u32>,
+    live_target_url: Option<String>,
+    remote_target_url: Entity<InputState>,
     show_launch_config: bool,
     launch_arguments: Entity<InputState>,
     launch_delay: Entity<InputState>,
@@ -1119,6 +1121,10 @@ impl Workspace {
     }
 
     fn discover_live(&mut self, cx: &mut Context<Self>) {
+        self.discover_target(None, cx);
+    }
+
+    fn discover_target(&mut self, url: Option<String>, cx: &mut Context<Self>) {
         if self.live.is_some() || self.live_starting {
             self.status = Some(
                 self.t(
@@ -1133,22 +1139,25 @@ impl Workspace {
             return;
         }
         self.live_starting = true;
+        self.live_targets.clear();
+        self.live_target_url = None;
         self.live_generation += 1;
         let generation = self.live_generation;
         let settings = self.settings.clone();
         self.status = Some(
             self.t(
-                "Discovering local targets…",
-                "正在查找本机目标…",
-                "ローカルターゲットを検索中…",
-                "로컬 대상을 찾는 중…",
+                "Discovering targets…",
+                "正在查找目标…",
+                "ターゲットを検索中…",
+                "대상을 찾는 중…",
             )
             .to_owned(),
         );
         cx.notify();
+        let task_url = url.clone();
         let task = cx
             .background_executor()
-            .spawn(async move { enumerate(&settings) });
+            .spawn(async move { enumerate_target(&settings, task_url.as_deref()) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -1160,15 +1169,11 @@ impl Workspace {
                     Ok(targets) => {
                         this.status = Some(format!(
                             "{}: {}",
-                            this.t(
-                                "Local targets",
-                                "本机目标",
-                                "ローカルターゲット",
-                                "로컬 대상"
-                            ),
+                            this.t("Targets", "目标", "ターゲット", "대상"),
                             targets.len()
                         ));
                         this.live_targets = targets;
+                        this.live_target_url = url.clone();
                     }
                     Err(error) => {
                         this.status = Some(format!(
@@ -1189,10 +1194,16 @@ impl Workspace {
     }
 
     fn connect_live(&mut self, ident: u32, cx: &mut Context<Self>) {
-        self.connect_target(ident, false, cx);
+        self.connect_target(ident, false, self.live_target_url.clone(), cx);
     }
 
-    fn connect_target(&mut self, identifier: u32, by_pid: bool, cx: &mut Context<Self>) {
+    fn connect_target(
+        &mut self,
+        identifier: u32,
+        by_pid: bool,
+        url: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         if self.live.is_some() || self.live_starting {
             return;
         }
@@ -1213,6 +1224,8 @@ impl Workspace {
         let task = cx.background_executor().spawn(async move {
             if by_pid {
                 LiveSession::connect_pid(&settings, identifier)
+            } else if let Some(url) = url {
+                LiveSession::connect_remote(&settings, &url, identifier)
             } else {
                 LiveSession::connect(&settings, identifier)
             }
@@ -10147,6 +10160,12 @@ impl Render for Workspace {
                         })),
                 )
             })
+            .child(div().flex().flex_wrap().gap_2()
+                .child(Input::new(&self.remote_target_url).id("remote-target-url").aria_label(self.t("Remote target URL", "远程目标地址", "リモートターゲット URL", "원격 대상 URL")).w(px(260.)))
+                .child(button("discover-remote-targets", self.t("Discover remote targets", "查找远程目标", "リモートターゲットを検索", "원격 대상 검색"), false, |this, cx| {
+                    let url = this.remote_target_url.read(cx).value().to_string();
+                    this.discover_target(Some(url), cx);
+                }, cx)))
             .when(!live_targets.is_empty(), |view| {
                 view.child(
                     div()
@@ -10373,6 +10392,7 @@ fn main() {
                 },
                 cx,
                 |window, cx| {
+                    let remote_target_url = cx.new(|cx| InputState::new(window, cx));
                     let launch_arguments = cx.new(|cx| InputState::new(window, cx));
                     let launch_delay = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let launch_memory = cx.new(|cx| InputState::new(window, cx).default_value("0"));
@@ -10494,6 +10514,8 @@ fn main() {
                         live_status: None,
                         live_captures: Vec::new(),
                         live_targets: Vec::new(),
+                        live_target_url: None,
+                        remote_target_url,
                         show_launch_config: false,
                         launch_arguments,
                         launch_delay,
@@ -10511,7 +10533,7 @@ fn main() {
                         entity.update(cx, |view, cx| view.open(path, cx));
                     }
                     if let Some(pid) = initial_pid {
-                        entity.update(cx, |view, cx| view.connect_target(pid, true, cx));
+                        entity.update(cx, |view, cx| view.connect_target(pid, true, None, cx));
                     } else if invalid_pid {
                         entity.update(cx, |view, cx| {
                             view.status = Some(
@@ -10551,6 +10573,7 @@ mod ui_tests {
                 },
                 cx,
                 |window, cx| {
+                    let remote_target_url = cx.new(|cx| InputState::new(window, cx));
                     let launch_arguments = cx.new(|cx| InputState::new(window, cx));
                     let launch_delay = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let launch_memory = cx.new(|cx| InputState::new(window, cx).default_value("0"));
@@ -10689,6 +10712,8 @@ mod ui_tests {
                         live_status: None,
                         live_captures: Vec::new(),
                         live_targets: Vec::new(),
+                        live_target_url: None,
+                        remote_target_url,
                         show_launch_config: false,
                         launch_arguments,
                         launch_delay,
@@ -10874,6 +10899,7 @@ mod ui_tests {
                 },
                 cx,
                 |window, cx| {
+                    let remote_target_url = cx.new(|cx| InputState::new(window, cx));
                     let launch_arguments = cx.new(|cx| InputState::new(window, cx));
                     let launch_delay = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let launch_memory = cx.new(|cx| InputState::new(window, cx).default_value("0"));
@@ -11117,6 +11143,8 @@ mod ui_tests {
                         live_status: None,
                         live_captures: Vec::new(),
                         live_targets: Vec::new(),
+                        live_target_url: None,
+                        remote_target_url,
                         show_launch_config: false,
                         launch_arguments,
                         launch_delay,

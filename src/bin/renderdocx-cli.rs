@@ -1,7 +1,7 @@
 use renderdocx::{
     backend::Settings,
     debug_navigation::{Breakpoint, DebugNavigator, SourceStep, StopReason},
-    live::{CaptureOptions, LaunchConfiguration, LiveSession, enumerate},
+    live::{CaptureOptions, LaunchConfiguration, LiveSession, enumerate_target},
     mesh_draw, mesh_indices, mesh_positions,
     replay::{
         BUFFER_PAGE_LIMIT, ComputeDebugSelection, DebugState, DebugTrace, MeshInfo, MeshSelection,
@@ -152,9 +152,19 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
         let command = request.get("command").and_then(Value::as_str).unwrap_or("");
         let result: Result<Value, (&str, String)> = match command {
             "capabilities" => Ok(usage()),
-            "target_list" => enumerate(&settings)
-                .map(|idents| json!({"idents":idents}))
-                .map_err(|error| ("target_discovery_failed", error)),
+            "target_list" => {
+                let url = match request.get("url") {
+                    None | Some(Value::Null) => Some(None),
+                    Some(Value::String(url)) => Some(Some(url.as_str())),
+                    _ => None,
+                };
+                match url {
+                    Some(url) => enumerate_target(&settings, url)
+                        .map(|idents| json!({"idents":idents,"url":url}))
+                        .map_err(|error| ("target_discovery_failed", error)),
+                    None => Err(("invalid_arguments", "url must be a string or null".into())),
+                }
+            }
             "target_launch" => {
                 let app = request
                     .get("path")
@@ -213,9 +223,19 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     .and_then(Value::as_u64)
                     .and_then(|v| u32::try_from(v).ok())
                     .filter(|v| *v != 0);
-                match (&target, ident) {
-                    (Some(_), _) => Err(("target_open", "Close the existing target first".into())),
-                    (None, Some(ident)) => match LiveSession::connect(&settings, ident) {
+                let url = match request.get("url") {
+                    None | Some(Value::Null) => Some(None),
+                    Some(Value::String(url)) => Some(Some(url.as_str())),
+                    _ => None,
+                };
+                match (&target, ident, url) {
+                    (Some(_), _, _) => {
+                        Err(("target_open", "Close the existing target first".into()))
+                    }
+                    (None, Some(ident), Some(url)) => match match url {
+                        Some(url) => LiveSession::connect_remote(&settings, url, ident),
+                        None => LiveSession::connect(&settings, ident),
+                    } {
                         Ok(session) => {
                             let value = json!({"target":session.connected});
                             target = Some(session);
@@ -225,7 +245,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     },
                     _ => Err((
                         "invalid_arguments",
-                        "target_connect requires a nonzero ident".into(),
+                        "target_connect requires a nonzero ident and optional URL".into(),
                     )),
                 }
             }
