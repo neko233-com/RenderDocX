@@ -65,6 +65,7 @@ enum ShaderDebugContext {
         vertex: u32,
         instance: u32,
         index: u32,
+        view: u32,
     },
     Pixel(PixelDebugSelection),
     Compute(ComputeDebugSelection),
@@ -108,7 +109,8 @@ fn collect_shader_debug(
             vertex,
             instance,
             index,
-        } => session.debug_vertex(vertex, instance, index, 0)?,
+            view,
+        } => session.debug_vertex(vertex, instance, index, view)?,
         ShaderDebugContext::Pixel(selection) => session.debug_pixel(selection)?,
         ShaderDebugContext::Compute(selection) => session.debug_compute(selection)?,
     };
@@ -345,6 +347,8 @@ struct Workspace {
     structure: StructureView,
     mesh: MeshView,
     input_page: Option<InputPage>,
+    vertex_instance: Entity<InputState>,
+    vertex_view: Entity<InputState>,
     debug_vertex_selection: Option<(u32, u32, u32)>,
     debug_view: Option<ShaderDebugView>,
     compute_group: Entity<InputState>,
@@ -1985,14 +1989,47 @@ impl Workspace {
 
     fn debug_selected_vertex(&mut self, cx: &mut Context<Self>) {
         if let Some((vertex, instance, index)) = self.debug_vertex_selection {
+            let Ok(view) = self.vertex_view.read(cx).value().parse::<u32>() else {
+                self.status = Some(
+                    self.t(
+                        "Enter a nonnegative view index.",
+                        "请输入非负视图序号。",
+                        "0 以上のビュー番号を入力してください。",
+                        "0 이상의 뷰 번호를 입력하세요.",
+                    )
+                    .to_owned(),
+                );
+                cx.notify();
+                return;
+            };
             self.start_shader_debug(
                 ShaderDebugContext::Vertex {
                     vertex,
                     instance,
                     index,
+                    view,
                 },
                 cx,
             );
+        }
+    }
+
+    fn load_vertex_instance(&mut self, cx: &mut Context<Self>) {
+        let instance = self.vertex_instance.read(cx).value().parse::<u32>();
+        match instance {
+            Ok(instance) => self.read_vertex_input(instance, 0, cx),
+            Err(_) => {
+                self.status = Some(
+                    self.t(
+                        "Enter a nonnegative instance index.",
+                        "请输入非负实例序号。",
+                        "0 以上のインスタンス番号を入力してください。",
+                        "0 이상의 인스턴스 번호를 입력하세요.",
+                    )
+                    .to_owned(),
+                );
+                cx.notify();
+            }
         }
     }
 
@@ -2106,7 +2143,7 @@ impl Workspace {
         })
         .detach();
     }
-    fn read_vertex_input(&mut self, offset: u32, cx: &mut Context<Self>) {
+    fn read_vertex_input(&mut self, instance: u32, offset: u32, cx: &mut Context<Self>) {
         if self.replay_pending || self.export_pending || self.resource_pending {
             self.status = Some(
                 self.t(
@@ -2161,7 +2198,14 @@ impl Workspace {
         );
         cx.notify();
         let task = cx.background_executor().spawn(async move {
-            session.vertex_input_page(&action, &pipeline, &buffers, 0, offset, INPUT_PAGE_LIMIT)
+            session.vertex_input_page(
+                &action,
+                &pipeline,
+                &buffers,
+                instance,
+                offset,
+                INPUT_PAGE_LIMIT,
+            )
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -3189,11 +3233,13 @@ impl Workspace {
                 vertex,
                 instance,
                 index,
+                view,
             } => format!(
-                "{} {vertex} · {} {instance} · {} {index}",
+                "{} {vertex} · {} {instance} · {} {index} · {} {view}",
                 self.t("Vertex", "顶点", "頂点", "정점"),
                 self.t("Instance", "实例", "インスタンス", "인스턴스"),
-                self.t("Index", "索引", "インデックス", "인덱스")
+                self.t("Index", "索引", "インデックス", "인덱스"),
+                self.t("View", "视图", "ビュー", "뷰")
             ),
             ShaderDebugContext::Pixel(selection) => format!(
                 "{} ({}, {}) · {} {} · {} {} · {} {}",
@@ -5499,10 +5545,10 @@ impl Workspace {
                     ))
                     .child(format!("{offset_label}: {} / {}", page.offset, page.total))
                     .child(self.t(
-                        "Select a row to debug its vertex shader (instance 0).",
-                        "选择一行以调试其顶点着色器（实例 0）。",
-                        "行を選択して頂点シェーダーをデバッグします（インスタンス 0）。",
-                        "행을 선택해 정점 셰이더를 디버깅합니다 (인스턴스 0).",
+                        "Select a row to debug its vertex shader.",
+                        "选择一行以调试其顶点着色器。",
+                        "行を選択して頂点シェーダーをデバッグします。",
+                        "행을 선택해 정점 셰이더를 디버깅합니다.",
                     ));
                 if let Some((vertex, instance, index)) = self.debug_vertex_selection {
                     view = view
@@ -6829,7 +6875,7 @@ impl Workspace {
                                         |this, cx| {
                                             this.tab = CaptureTab::VertexInput;
                                             if this.input_page.is_none() {
-                                                this.read_vertex_input(0, cx);
+                                                this.load_vertex_instance(cx);
                                             }
                                             cx.notify();
                                         },
@@ -7011,12 +7057,20 @@ impl Workspace {
                                 )
                             })
                             .when(self.tab == CaptureTab::VertexInput, |view| {
+                                let instance_label = self.t("Instance", "实例", "インスタンス", "인스턴스");
+                                let view_label = self.t("View", "视图", "ビュー", "뷰");
                                 view.child(
                                     div()
                                         .flex()
+                                        .flex_wrap()
                                         .gap_2()
                                         .px_3()
                                         .pb_2()
+                                        .child(instance_label)
+                                        .child(Input::new(&self.vertex_instance).id("vertex-instance").aria_label(instance_label).w(px(80.)))
+                                        .child(button("vertex-instance-apply", self.t("Load instance", "加载实例", "インスタンスを読み込む", "인스턴스 불러오기"), false, |this, cx| this.load_vertex_instance(cx), cx))
+                                        .child(view_label)
+                                        .child(Input::new(&self.vertex_view).id("vertex-view").aria_label(view_label).w(px(80.)))
                                         .child(button(
                                             "vertex-input-previous",
                                             previous_label,
@@ -7025,6 +7079,7 @@ impl Workspace {
                                                 if let Some(page) = &this.input_page {
                                                     if page.offset > 0 {
                                                         this.read_vertex_input(
+                                                            page.instance,
                                                             page.offset
                                                                 .saturating_sub(INPUT_PAGE_LIMIT),
                                                             cx,
@@ -7045,7 +7100,7 @@ impl Workspace {
                                                         .checked_add(page.rows.len() as u32)
                                                     {
                                                         if next < page.total {
-                                                            this.read_vertex_input(next, cx);
+                                                            this.read_vertex_input(page.instance, next, cx);
                                                         }
                                                     }
                                                 }
@@ -8054,6 +8109,9 @@ fn main() {
                     let launch_memory = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let launch_env_name = cx.new(|cx| InputState::new(window, cx));
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
+                    let vertex_instance =
+                        cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let vertex_view = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
@@ -8124,6 +8182,8 @@ fn main() {
                         structure: StructureView::default(),
                         mesh: MeshView::default(),
                         input_page: None,
+                        vertex_instance,
+                        vertex_view,
                         debug_vertex_selection: None,
                         debug_view: None,
                         compute_group,
@@ -8210,6 +8270,9 @@ mod ui_tests {
                     let launch_memory = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let launch_env_name = cx.new(|cx| InputState::new(window, cx));
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
+                    let vertex_instance =
+                        cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let vertex_view = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
@@ -8297,6 +8360,8 @@ mod ui_tests {
                         structure: StructureView::default(),
                         mesh: MeshView::default(),
                         input_page: None,
+                        vertex_instance,
+                        vertex_view,
                         debug_vertex_selection: None,
                         debug_view: None,
                         compute_group,
@@ -8459,6 +8524,21 @@ mod ui_tests {
                 ));
                 view.annotations.editor = Some(editor);
             });
+            let (instance_input, view_input) = (
+                view.read(cx).vertex_instance.clone(),
+                view.read(cx).vertex_view.clone(),
+            );
+            instance_input.update(cx, |input, cx| input.set_value("-1", window, cx));
+            view_input.update(cx, |input, cx| input.set_value("-1", window, cx));
+            view.update(cx, |view, cx| {
+                view.load_vertex_instance(cx);
+                assert!(!view.resource_pending);
+                assert!(view.status.is_some());
+                view.debug_vertex_selection = Some((0, 0, 0));
+                view.debug_selected_vertex(cx);
+                assert!(!view.resource_pending);
+                assert!(view.status.is_some());
+            });
         })
         .unwrap();
         let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
@@ -8493,6 +8573,9 @@ mod ui_tests {
                     let launch_memory = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let launch_env_name = cx.new(|cx| InputState::new(window, cx));
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
+                    let vertex_instance =
+                        cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let vertex_view = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
@@ -8685,6 +8768,8 @@ mod ui_tests {
                         structure: StructureView::default(),
                         mesh: MeshView::default(),
                         input_page: None,
+                        vertex_instance,
+                        vertex_view,
                         debug_vertex_selection: None,
                         debug_view: None,
                         compute_group,
@@ -9740,7 +9825,8 @@ mod ui_tests {
                         ShaderDebugContext::Vertex {
                             vertex: 0,
                             instance: 0,
-                            index: 0
+                            index: 0,
+                            view: 0
                         }
                     ));
                     assert_eq!(debug.trace.event_id, draw_event);
