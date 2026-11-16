@@ -712,6 +712,24 @@ pub struct ShaderCompileFlag {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CustomShaderPrefix {
+    pub encoding: u32,
+    pub prefix: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CustomShaderInfo {
+    pub active: bool,
+    pub encodings: Vec<u32>,
+    pub prefixes: Vec<CustomShaderPrefix>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CustomShaderBuild {
+    pub compiled: bool,
+    pub active: bool,
+    pub diagnostics: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ShaderEdit {
     pub event_id: u32,
     pub stage: u32,
@@ -895,6 +913,7 @@ pub struct TextureSelection {
     pub preview_decode_yuv: bool,
     /// sRGB RGBA background; None and [0,0,0,0] select the upstream checkerboard.
     pub preview_background: Option<[f32; 4]>,
+    pub preview_custom_shader: bool,
     pub export: crate::texture_export::TextureExportOptions,
 }
 
@@ -1157,6 +1176,8 @@ impl TextureSelection {
                 .preview_hdr_multiplier
                 .is_some_and(|value| !value.is_finite() || value < 0.0)
             || (self.preview_hdr_multiplier.is_some() && self.preview_decode_yuv)
+            || (self.preview_custom_shader
+                && (self.preview_hdr_multiplier.is_some() || self.preview_decode_yuv))
             || self.preview_background.is_some_and(|color| {
                 color
                     .iter()
@@ -1412,6 +1433,8 @@ enum Reply {
     ShaderConstants(ShaderConstants),
     ShaderBindings(ShaderBindings),
     ShaderEdit(ShaderEdit),
+    CustomShaderInfo(CustomShaderInfo),
+    CustomShaderBuild(CustomShaderBuild),
     DebugStarted(DebugTrace),
     DebugStates(DebugStates),
     DebugStopped,
@@ -1901,6 +1924,22 @@ trait Transport: Send {
     ) -> Result<ShaderBindings, String> {
         Err("Shader binding inspection is not supported by this transport".into())
     }
+    fn custom_shader_info(&mut self) -> Result<CustomShaderInfo, String> {
+        Err("Custom shaders are not supported by this transport".into())
+    }
+    fn custom_shader_build(
+        &mut self,
+        _encoding: u32,
+        _entry: &str,
+        _source: &[u8],
+        _prefix: bool,
+        _flags: &[ShaderCompileFlag],
+    ) -> Result<CustomShaderBuild, String> {
+        Err("Custom shaders are not supported by this transport".into())
+    }
+    fn custom_shader_clear(&mut self) -> Result<CustomShaderBuild, String> {
+        Err("Custom shaders are not supported by this transport".into())
+    }
     fn shader_edit(
         &mut self,
         _event: u32,
@@ -2032,6 +2071,7 @@ impl Transport for Process {
             || selection.preview_hdr_multiplier.is_some()
             || selection.preview_decode_yuv
             || selection.preview_background.is_some()
+            || selection.preview_custom_shader
         {
             let channels = selection.effective_preview_channels();
             let mask = channels
@@ -2050,6 +2090,7 @@ impl Transport for Process {
                 || selection.preview_hdr_multiplier.is_some()
                 || selection.preview_decode_yuv
                 || selection.preview_background.is_some()
+                || selection.preview_custom_shader
             {
                 write!(input, " {}", selection.preview_overlay as u32)
                     .map_err(|e| e.to_string())?;
@@ -2058,6 +2099,7 @@ impl Transport for Process {
                 || selection.preview_hdr_multiplier.is_some()
                 || selection.preview_decode_yuv
                 || selection.preview_background.is_some()
+                || selection.preview_custom_shader
             {
                 write!(
                     input,
@@ -2071,6 +2113,7 @@ impl Transport for Process {
             if selection.preview_hdr_multiplier.is_some()
                 || selection.preview_decode_yuv
                 || selection.preview_background.is_some()
+                || selection.preview_custom_shader
             {
                 write!(
                     input,
@@ -2080,10 +2123,13 @@ impl Transport for Process {
                 )
                 .map_err(|e| e.to_string())?;
             }
-            if let Some(background) = selection.preview_background {
-                for value in background {
+            if selection.preview_background.is_some() || selection.preview_custom_shader {
+                for value in selection.preview_background.unwrap_or([0.0; 4]) {
                     write!(input, " {}", value.to_bits()).map_err(|e| e.to_string())?;
                 }
+            }
+            if selection.preview_custom_shader {
+                write!(input, " 1").map_err(|e| e.to_string())?;
             }
         }
         writeln!(input)
@@ -3289,6 +3335,76 @@ impl Transport for Process {
         }
     }
 
+    fn custom_shader_info(&mut self) -> Result<CustomShaderInfo, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(input, "custominfo")
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::CustomShaderInfo(info) => Ok(info),
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected custom shader info response".into()),
+        }
+    }
+    fn custom_shader_build(
+        &mut self,
+        encoding: u32,
+        entry: &str,
+        source: &[u8],
+        prefix: bool,
+        flags: &[ShaderCompileFlag],
+    ) -> Result<CustomShaderBuild, String> {
+        fn hex(bytes: &[u8]) -> String {
+            const D: &[u8; 16] = b"0123456789abcdef";
+            if bytes.is_empty() {
+                return "_".into();
+            }
+            let mut out = String::with_capacity(bytes.len().saturating_mul(2));
+            for &b in bytes {
+                out.push(D[(b >> 4) as usize] as char);
+                out.push(D[(b & 15) as usize] as char);
+            }
+            out
+        }
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        write!(
+            input,
+            "custombuild {encoding} {} {} {} {}",
+            hex(entry.as_bytes()),
+            hex(source),
+            u8::from(prefix),
+            flags.len()
+        )
+        .map_err(|e| e.to_string())?;
+        for flag in flags {
+            write!(
+                input,
+                " {} {}",
+                hex(flag.name.as_bytes()),
+                hex(flag.value.as_bytes())
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        writeln!(input)
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::CustomShaderBuild(result) => Ok(result),
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected custom shader build response".into()),
+        }
+    }
+    fn custom_shader_clear(&mut self) -> Result<CustomShaderBuild, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(input, "customclear")
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::CustomShaderBuild(result) => Ok(result),
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected custom shader clear response".into()),
+        }
+    }
     fn shader_edit(
         &mut self,
         event: u32,
@@ -4153,6 +4269,40 @@ impl Session {
             .shader_bindings(event, stage, kind, offset, limit)
     }
 
+    pub fn custom_shader_info(&self) -> Result<CustomShaderInfo, String> {
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .custom_shader_info()
+    }
+    pub fn custom_shader_build(
+        &self,
+        encoding: u32,
+        entry: &str,
+        source: &[u8],
+        prefix: bool,
+        flags: &[ShaderCompileFlag],
+    ) -> Result<CustomShaderBuild, String> {
+        if encoding == 0
+            || encoding > 9
+            || entry.is_empty()
+            || entry.contains('\0')
+            || source.is_empty()
+        {
+            return Err("Invalid custom shader request".into());
+        }
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .custom_shader_build(encoding, entry, source, prefix, flags)
+    }
+    pub fn custom_shader_clear(&self) -> Result<CustomShaderBuild, String> {
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .custom_shader_clear()
+    }
+
     pub fn shader_edit(
         &self,
         event: u32,
@@ -4725,6 +4875,34 @@ pub mod test_support {
                     .skip(offset as usize)
                     .take(limit as usize)
                     .collect(),
+            })
+        }
+        fn custom_shader_info(&mut self) -> Result<CustomShaderInfo, String> {
+            Ok(CustomShaderInfo {
+                active: false,
+                encodings: vec![1, 5],
+                prefixes: Vec::new(),
+            })
+        }
+        fn custom_shader_build(
+            &mut self,
+            _encoding: u32,
+            _entry: &str,
+            _source: &[u8],
+            _prefix: bool,
+            _flags: &[ShaderCompileFlag],
+        ) -> Result<CustomShaderBuild, String> {
+            Ok(CustomShaderBuild {
+                compiled: true,
+                active: true,
+                diagnostics: String::new(),
+            })
+        }
+        fn custom_shader_clear(&mut self) -> Result<CustomShaderBuild, String> {
+            Ok(CustomShaderBuild {
+                compiled: false,
+                active: false,
+                diagnostics: String::new(),
             })
         }
         fn pick_pixel(
@@ -5549,6 +5727,7 @@ mod tests {
             preview_hdr_multiplier: None,
             preview_decode_yuv: false,
             preview_background: None,
+            preview_custom_shader: false,
             export: Default::default(),
         };
         let raw = RawTextureSelection {

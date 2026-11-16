@@ -127,6 +127,14 @@ fn usage() -> Value {
     capabilities["serve_commands"]
         .as_array_mut()
         .expect("capabilities commands")
+        .extend([
+            json!("custom_shader_info"),
+            json!("custom_shader_build"),
+            json!("custom_shader_clear"),
+        ]);
+    capabilities["serve_commands"]
+        .as_array_mut()
+        .expect("capabilities commands")
         .push(json!("pick_overlay_pixel"));
     capabilities["serve_commands"]
         .as_array_mut()
@@ -1959,6 +1967,63 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     )),
                 }
             }
+            "custom_shader_info" | "custom_shader_build" | "custom_shader_clear" => match &opened {
+                None => Err(("no_capture", "No capture is open".into())),
+                Some((session, _)) if command == "custom_shader_info" => session
+                    .custom_shader_info()
+                    .map(|info| json!({"info":info}))
+                    .map_err(|error| ("custom_shader_failed", error)),
+                Some((session, _)) if command == "custom_shader_clear" => session
+                    .custom_shader_clear()
+                    .map(|result| json!({"result":result}))
+                    .map_err(|error| ("custom_shader_failed", error)),
+                Some((session, _)) => {
+                    let encoding = request
+                        .get("encoding")
+                        .and_then(Value::as_u64)
+                        .and_then(|v| u32::try_from(v).ok())
+                        .filter(|v| (1..=9).contains(v));
+                    let entry = request
+                        .get("entry")
+                        .and_then(Value::as_str)
+                        .filter(|v| !v.is_empty() && !v.contains('\0'));
+                    let source = match (request.get("source"), request.get("source_hex")) {
+                        (Some(Value::String(text)), None) => Some(text.as_bytes().to_vec()),
+                        (None, Some(Value::String(hex)))
+                            if hex.len() % 2 == 0 && hex.is_ascii() =>
+                        {
+                            hex.as_bytes()
+                                .chunks_exact(2)
+                                .map(|pair| {
+                                    Some(
+                                        ((pair[0] as char).to_digit(16)? * 16
+                                            + (pair[1] as char).to_digit(16)?)
+                                            as u8,
+                                    )
+                                })
+                                .collect::<Option<Vec<_>>>()
+                        }
+                        _ => None,
+                    };
+                    let flags = request
+                        .get("flags")
+                        .map(|v| {
+                            serde_json::from_value::<Vec<renderdocx::replay::ShaderCompileFlag>>(
+                                v.clone(),
+                            )
+                        })
+                        .transpose();
+                    let prefix = match request.get("apply_prefix") {
+                        None => Some(encoding.is_some_and(|v| matches!(v, 2 | 5 | 9))),
+                        Some(Value::Bool(value)) => Some(*value),
+                        _ => None,
+                    };
+                    match (encoding, entry, source, prefix, flags) {
+                            (Some(encoding), Some(entry), Some(source), Some(prefix), Ok(flags)) if !source.is_empty() => session.custom_shader_build(encoding, entry, &source, prefix, flags.as_deref().unwrap_or(&[])).map(|result| json!({"result":result})).map_err(|error| ("custom_shader_failed", error)),
+                            _ => Err(("invalid_arguments", "custom_shader_build requires encoding, entry and exactly one nonempty source or source_hex".into())),
+                        }
+                }
+            },
             "shader_apply" | "shader_revert" => {
                 let stage = request
                     .get("stage")

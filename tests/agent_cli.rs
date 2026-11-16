@@ -993,6 +993,49 @@ fn real_d3d11_mesh_draw_order() {
         invalid_background["error"]["code"], "invalid_arguments",
         "{invalid_background}"
     );
+    let custom_info = agent.send(r#"{"command":"custom_shader_info"}"#);
+    assert_eq!(custom_info["ok"], true, "{custom_info}");
+    assert!(
+        custom_info["data"]["info"]["encodings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == 5)
+    );
+    let shader = "float4 main(float4 pos : SV_Position, float4 uv : TEXCOORD0) : SV_Target0 { return float4(1, 0, 1, 1); }";
+    let build = agent.send(&serde_json::json!({"command":"custom_shader_build","encoding":5,"entry":"main","source":shader}).to_string());
+    assert_eq!(build["ok"], true, "{build}");
+    assert_eq!(build["data"]["result"]["compiled"], true, "{build}");
+    let custom = render_options(
+        &mut agent,
+        &dir.path().join("custom-shader.png"),
+        serde_json::json!({"preview_custom_shader":true}),
+    );
+    assert!(
+        custom[0] >= 250 && custom[1] <= 2 && custom[2] >= 250,
+        "custom pixel {:?}",
+        &custom[..3]
+    );
+    let failed = agent.send(&serde_json::json!({"command":"custom_shader_build","encoding":5,"entry":"main","source":"not a valid shader"}).to_string());
+    assert_eq!(failed["ok"], true, "{failed}");
+    assert_eq!(failed["data"]["result"]["compiled"], false, "{failed}");
+    assert_eq!(
+        failed["data"]["result"]["active"], true,
+        "failed compile must retain prior shader: {failed}"
+    );
+    let retained = render_options(
+        &mut agent,
+        &dir.path().join("custom-retained.png"),
+        serde_json::json!({"preview_custom_shader":true}),
+    );
+    assert_eq!(&retained[..3], &custom[..3]);
+    let cleared = agent.send(r#"{"command":"custom_shader_clear"}"#);
+    assert_eq!(cleared["data"]["result"]["active"], false, "{cleared}");
+    let missing = agent.send(&serde_json::json!({"command":"render_texture","index":float_index,"width":4,"height":4,"path":dir.path().join("custom-missing.png"),"preview_custom_shader":true}).to_string());
+    assert_eq!(
+        missing["error"]["code"], "replay_render_failed",
+        "{missing}"
+    );
     let rgbm = render_options(
         &mut agent,
         &dir.path().join("rgbm-options.png"),

@@ -613,6 +613,13 @@ struct Workspace {
     texture_export_grid: Entity<InputState>,
     texture_export_quality: Entity<InputState>,
     texture_export_color: Entity<InputState>,
+    texture_custom_entry: Entity<InputState>,
+    texture_custom_encoding: Entity<InputState>,
+    texture_custom_source: Entity<TextareaState>,
+    texture_custom_open: bool,
+    texture_custom_active: bool,
+    texture_custom_encodings: Vec<u32>,
+    texture_custom_diagnostics: String,
     texture_raw_page: Option<renderdocx::replay::RawTexturePage>,
     texture_raw_seek: Entity<InputState>,
     texture_raw_search: Entity<InputState>,
@@ -2791,6 +2798,10 @@ impl Workspace {
                         this.pipeline = None;
                         this.selected_texture = None;
                         this.texture_selection = TextureSelection::default();
+                        this.texture_custom_active = false;
+                        this.texture_custom_open = false;
+                        this.texture_custom_encodings.clear();
+                        this.texture_custom_diagnostics.clear();
                         this.tab = CaptureTab::Events;
                         this.selected_buffer = None;
                         this.buffer_binding_range = None;
@@ -5904,8 +5915,150 @@ impl Workspace {
         };
         self.texture_selection.preview_hdr_multiplier = multiplier;
         self.texture_selection.preview_decode_yuv = mode == 2;
+        self.texture_selection.preview_custom_shader = false;
         self.preview = None;
         self.status = None;
+        cx.notify();
+    }
+
+    fn custom_shader_info(&mut self, cx: &mut Context<Self>) {
+        if !self.preview_edit_ready(cx) {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        self.texture_custom_open = !self.texture_custom_open;
+        if !self.texture_custom_open {
+            cx.notify();
+            return;
+        }
+        self.resource_pending = true;
+        let revision = self.open_revision;
+        let task = cx
+            .background_executor()
+            .spawn(async move { session.custom_shader_info() });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision {
+                    return;
+                }
+                this.resource_pending = false;
+                match result {
+                    Ok(info) => {
+                        this.texture_custom_active = info.active;
+                        this.texture_custom_encodings = info.encodings;
+                        this.texture_custom_diagnostics.clear();
+                    }
+                    Err(error) => this.texture_custom_diagnostics = error,
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn custom_shader_apply(&mut self, clear: bool, cx: &mut Context<Self>) {
+        if !self.preview_edit_ready(cx) {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let entry = self.texture_custom_entry.read(cx).value().to_string();
+        let encoding = self
+            .texture_custom_encoding
+            .read(cx)
+            .value()
+            .parse::<u32>()
+            .ok();
+        let source = self.texture_custom_source.read(cx).value().to_string();
+        if !clear
+            && (entry.is_empty()
+                || entry.contains('\0')
+                || source.is_empty()
+                || !encoding.is_some_and(|v| (1..=9).contains(&v)))
+        {
+            self.texture_custom_diagnostics = self
+                .t(
+                    "Enter an encoding (1–9), entry point and shader source.",
+                    "请输入编码（1–9）、入口点和着色器源码。",
+                    "エンコード（1–9）、エントリポイント、ソースを入力してください。",
+                    "인코딩 (1–9), 진입점 및 셰이더 소스를 입력하세요.",
+                )
+                .to_owned();
+            cx.notify();
+            return;
+        }
+        self.resource_pending = true;
+        let revision = self.open_revision;
+        let task = cx.background_executor().spawn(async move {
+            if clear {
+                session.custom_shader_clear()
+            } else {
+                let encoding = encoding.unwrap();
+                session.custom_shader_build(
+                    encoding,
+                    &entry,
+                    source.as_bytes(),
+                    matches!(encoding, 2 | 5 | 9),
+                    &[],
+                )
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision {
+                    return;
+                }
+                this.resource_pending = false;
+                match result {
+                    Ok(result) => {
+                        this.texture_custom_active = result.active;
+                        this.texture_custom_diagnostics = result.diagnostics;
+                        if clear {
+                            this.texture_selection.preview_custom_shader = false;
+                            this.preview = None;
+                        } else if result.compiled {
+                            this.texture_selection.preview_hdr_multiplier = None;
+                            this.texture_selection.preview_decode_yuv = false;
+                            this.texture_selection.preview_custom_shader = true;
+                            this.preview = None;
+                        }
+                    }
+                    Err(error) => this.texture_custom_diagnostics = error,
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn use_custom_shader(&mut self, cx: &mut Context<Self>) {
+        if !self.preview_edit_ready(cx) {
+            return;
+        }
+        if !self.texture_custom_active {
+            self.status = Some(
+                self.t(
+                    "Compile a custom shader first.",
+                    "请先编译自定义着色器。",
+                    "先にカスタムシェーダーをコンパイルしてください。",
+                    "먼저 사용자 셰이더를 컴파일하세요.",
+                )
+                .to_owned(),
+            );
+        } else {
+            self.texture_selection.preview_hdr_multiplier = None;
+            self.texture_selection.preview_decode_yuv = false;
+            self.texture_selection.preview_custom_shader = true;
+            self.preview = None;
+            self.status = None;
+        }
         cx.notify();
     }
 
@@ -9110,7 +9263,8 @@ impl Workspace {
                 "texture-mode-rgba",
                 "RGBA",
                 self.texture_selection.preview_hdr_multiplier.is_none()
-                    && !self.texture_selection.preview_decode_yuv,
+                    && !self.texture_selection.preview_decode_yuv
+                    && !self.texture_selection.preview_custom_shader,
                 |this, cx| this.change_preview_mode(0, cx),
                 cx,
             ))
@@ -9134,6 +9288,126 @@ impl Workspace {
                 |this, cx| this.change_preview_mode(2, cx),
                 cx,
             ))
+            .child(button(
+                "texture-mode-custom",
+                self.t(
+                    "Custom shader",
+                    "自定义着色器",
+                    "カスタムシェーダー",
+                    "사용자 셰이더",
+                ),
+                self.texture_selection.preview_custom_shader,
+                |this, cx| this.use_custom_shader(cx),
+                cx,
+            ))
+            .child(button(
+                "texture-custom-editor",
+                self.t(
+                    "Edit custom shader",
+                    "编辑自定义着色器",
+                    "カスタムシェーダー編集",
+                    "사용자 셰이더 편집",
+                ),
+                self.texture_custom_open,
+                |this, cx| this.custom_shader_info(cx),
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn texture_custom_shader_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .when(self.texture_custom_open, |view| {
+                view.child(format!(
+                    "{}: {:?}",
+                    self.t(
+                        "Supported encodings",
+                        "支持的编码",
+                        "対応エンコード",
+                        "지원 인코딩"
+                    ),
+                    self.texture_custom_encodings
+                ))
+                .child(div().text_sm().text_color(rgb(0x9eacc0)).child("1 DXBC · 2 GLSL · 3 SPIR-V · 4 SPIR-V ASM · 5 HLSL · 6 DXIL · 7 OpenGL SPIR-V · 8 OpenGL SPIR-V ASM · 9 Slang"))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(
+                            Input::new(&self.texture_custom_entry)
+                                .id("texture-custom-entry")
+                                .aria_label(self.t(
+                                    "Entry point",
+                                    "入口点",
+                                    "エントリポイント",
+                                    "진입점",
+                                ))
+                                .w(px(100.)),
+                        )
+                        .child(
+                            Input::new(&self.texture_custom_encoding)
+                                .id("texture-custom-encoding")
+                                .aria_label(self.t(
+                                    "Shader encoding",
+                                    "着色器编码",
+                                    "シェーダーエンコード",
+                                    "셰이더 인코딩",
+                                ))
+                                .w(px(70.)),
+                        )
+                        .child(button(
+                            "texture-custom-build",
+                            self.t(
+                                "Compile custom shader",
+                                "编译自定义着色器",
+                                "カスタムシェーダーをコンパイル",
+                                "사용자 셰이더 컴파일",
+                            ),
+                            false,
+                            |this, cx| this.custom_shader_apply(false, cx),
+                            cx,
+                        ))
+                        .child(button(
+                            "texture-custom-clear",
+                            self.t(
+                                "Clear custom shader",
+                                "清除自定义着色器",
+                                "カスタムシェーダーを解除",
+                                "사용자 셰이더 지우기",
+                            ),
+                            false,
+                            |this, cx| this.custom_shader_apply(true, cx),
+                            cx,
+                        )),
+                )
+                .child(
+                    div()
+                        .id("texture-custom-source")
+                        .test_support()
+                        .w_full()
+                        .child(
+                            Textarea::new(&self.texture_custom_source).aria_label(self.t(
+                                "Custom shader source",
+                                "自定义着色器源码",
+                                "カスタムシェーダーのソース",
+                                "사용자 셰이더 소스",
+                            )),
+                        ),
+                )
+                .when(!self.texture_custom_diagnostics.is_empty(), |view| {
+                    view.child(
+                        div()
+                            .id("texture-custom-diagnostics")
+                            .test_support()
+                            .text_sm()
+                            .child(self.texture_custom_diagnostics.clone()),
+                    )
+                })
+            })
             .into_any_element()
     }
 
@@ -9216,6 +9490,7 @@ impl Workspace {
                 "채널 조합, 반전 및 감마는 미리보기에만 적용됩니다.",
             )))
             .child(self.texture_preview_modes(cx))
+            .child(self.texture_custom_shader_panel(cx))
             .child(self.texture_background_controls(cx))
             .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
                 "Preview zoom and pan (output pixels)",
@@ -15410,6 +15685,9 @@ fn main() {
                         cx.new(|cx| InputState::new(window, cx).default_value("90"));
                     let texture_export_color =
                         cx.new(|cx| InputState::new(window, cx).default_value("#000000"));
+                    let texture_custom_entry = cx.new(|cx| InputState::new(window, cx).default_value("main"));
+                    let texture_custom_encoding = cx.new(|cx| InputState::new(window, cx).default_value("5"));
+                    let texture_custom_source = cx.new(|cx| TextareaState::new(window, cx).default_value("float4 main(float4 pos : SV_Position, float4 uv : TEXCOORD0) : SV_Target0 { return float4(1, 0, 1, 1); }").auto_grow(4, 12));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_debug_primitive = cx.new(|cx| InputState::new(window, cx));
                     let pixel_debug_view = cx.new(|cx| InputState::new(window, cx));
@@ -15478,6 +15756,13 @@ fn main() {
                         texture_export_grid,
                         texture_export_quality,
                         texture_export_color,
+                        texture_custom_entry,
+                        texture_custom_encoding,
+                        texture_custom_source,
+                        texture_custom_open: false,
+                        texture_custom_active: false,
+                        texture_custom_encodings: Vec::new(),
+                        texture_custom_diagnostics: String::new(),
                         texture_raw_page: None,
                         texture_raw_seek,
                         texture_raw_search,
@@ -15730,6 +16015,50 @@ mod ui_tests {
     }
 
     #[inline(never)]
+    fn exercise_custom_shader_editor(
+        cx: &mut TestAppContext,
+        view: &Entity<Workspace>,
+        handle: gpui::WindowHandle<Root>,
+    ) {
+        cx.update_window(handle.into(), |_, window, cx| {
+            reveal_details(window, "texture-custom-editor", cx);
+            window.click("texture-custom-editor", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert!(view.read(cx).texture_custom_encodings.contains(&5)));
+        cx.update_window(handle.into(), |_, window, cx| {
+            reveal_details(window, "texture-custom-build", cx);
+            window.click("texture-custom-build", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                view.read(cx).texture_custom_active
+                    && view.read(cx).texture_selection.preview_custom_shader
+            )
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            reveal_details(window, "texture-custom-clear", cx);
+            window.click("texture-custom-clear", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                !view.read(cx).texture_custom_active
+                    && !view.read(cx).texture_selection.preview_custom_shader
+            )
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            reveal_details(window, "texture-custom-editor", cx);
+            window.click("texture-custom-editor", cx);
+        })
+        .unwrap();
+    }
+
+    #[inline(never)]
     fn exercise_overlay_pixel(
         cx: &mut TestAppContext,
         view: &Entity<Workspace>,
@@ -15970,6 +16299,9 @@ mod ui_tests {
                         cx.new(|cx| InputState::new(window, cx).default_value("90"));
                     let texture_export_color =
                         cx.new(|cx| InputState::new(window, cx).default_value("#000000"));
+                    let texture_custom_entry = cx.new(|cx| InputState::new(window, cx).default_value("main"));
+                    let texture_custom_encoding = cx.new(|cx| InputState::new(window, cx).default_value("5"));
+                    let texture_custom_source = cx.new(|cx| TextareaState::new(window, cx).default_value("float4 main(float4 pos : SV_Position, float4 uv : TEXCOORD0) : SV_Target0 { return float4(1, 0, 1, 1); }").auto_grow(4, 12));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_debug_primitive = cx.new(|cx| InputState::new(window, cx));
                     let pixel_debug_view = cx.new(|cx| InputState::new(window, cx));
@@ -16057,6 +16389,13 @@ mod ui_tests {
                         texture_export_grid,
                         texture_export_quality,
                         texture_export_color,
+                        texture_custom_entry,
+                        texture_custom_encoding,
+                        texture_custom_source,
+                        texture_custom_open: false,
+                        texture_custom_active: false,
+                        texture_custom_encodings: Vec::new(),
+                        texture_custom_diagnostics: String::new(),
                         texture_raw_page: None,
                         texture_raw_seek,
                         texture_raw_search,
@@ -16406,6 +16745,9 @@ mod ui_tests {
                         cx.new(|cx| InputState::new(window, cx).default_value("90"));
                     let texture_export_color =
                         cx.new(|cx| InputState::new(window, cx).default_value("#000000"));
+                    let texture_custom_entry = cx.new(|cx| InputState::new(window, cx).default_value("main"));
+                    let texture_custom_encoding = cx.new(|cx| InputState::new(window, cx).default_value("5"));
+                    let texture_custom_source = cx.new(|cx| TextareaState::new(window, cx).default_value("float4 main(float4 pos : SV_Position, float4 uv : TEXCOORD0) : SV_Target0 { return float4(1, 0, 1, 1); }").auto_grow(4, 12));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_debug_primitive = cx.new(|cx| InputState::new(window, cx));
                     let pixel_debug_view = cx.new(|cx| InputState::new(window, cx));
@@ -16613,6 +16955,13 @@ mod ui_tests {
                         texture_export_grid,
                         texture_export_quality,
                         texture_export_color,
+                        texture_custom_entry,
+                        texture_custom_encoding,
+                        texture_custom_source,
+                        texture_custom_open: false,
+                        texture_custom_active: false,
+                        texture_custom_encodings: Vec::new(),
+                        texture_custom_diagnostics: String::new(),
                         texture_raw_page: None,
                         texture_raw_seek,
                         texture_raw_search,
@@ -17081,6 +17430,7 @@ mod ui_tests {
                 preview_hdr_multiplier: None,
                 preview_decode_yuv: false,
                 preview_background: None,
+                preview_custom_shader: false,
                 export: Default::default(),
             }]
         );
@@ -17143,6 +17493,7 @@ mod ui_tests {
             selections.lock().unwrap().last().unwrap().preview_overlay,
             renderdocx::texture_overlay::TextureOverlay::Drawcall
         );
+        exercise_custom_shader_editor(cx, &view, handle);
         exercise_overlay_pixel(cx, &view, handle);
         cx.update(|cx| view.update(cx, |view, cx| view.read_texture_raw_page(0, cx)));
         cx.run_until_parked();
@@ -18727,6 +19078,107 @@ mod ui_tests {
                     );
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    reveal_details(window, "texture-overlay-0", cx);
+                    window.click("texture-overlay-0", cx);
+                    reveal_details(window, "texture-custom-editor", cx);
+                    window.click("texture-custom-editor", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        !view.read(cx).resource_pending
+                            && view.read(cx).texture_custom_encodings.contains(&5)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "custom shader encodings did not load: {:?}",
+                        cx.update(|cx| view.read(cx).texture_custom_diagnostics.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    reveal_details(window, "texture-custom-build", cx);
+                    window.click("texture-custom-build", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        !view.read(cx).resource_pending
+                            && view.read(cx).texture_custom_active
+                            && view.read(cx).texture_selection.preview_custom_shader
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "custom shader did not compile: {:?}",
+                        cx.update(|cx| view.read(cx).texture_custom_diagnostics.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    reveal_details(window, "texture-preview", cx);
+                    window.click("texture-preview", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                let custom_path = loop {
+                    cx.run_until_parked();
+                    if let Some(path) =
+                        cx.update(|cx| view.read(cx).preview.as_ref().map(|p| p.path.clone()))
+                    {
+                        break path;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "custom shader preview did not load: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                };
+                let mut reader = png::Decoder::new(std::io::BufReader::new(
+                    std::fs::File::open(custom_path).unwrap(),
+                ))
+                .read_info()
+                .unwrap();
+                let mut output = vec![0; reader.output_buffer_size().unwrap()];
+                reader.next_frame(&mut output).unwrap();
+                let pixel = &output[(180 * 512 + 256) * 3..][..3];
+                assert!(
+                    pixel[0] >= 250 && pixel[1] <= 2 && pixel[2] >= 250,
+                    "custom GUI preview: {pixel:?}"
+                );
+                cx.update_window(handle.into(), |_, window, cx| {
+                    reveal_details(window, "texture-custom-clear", cx);
+                    window.click("texture-custom-clear", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        !view.read(cx).resource_pending && !view.read(cx).texture_custom_active
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "custom shader did not clear"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    reveal_details(window, "texture-custom-editor", cx);
+                    window.click("texture-custom-editor", cx);
+                })
+                .unwrap();
                 let strip_index = cx.update(|cx| {
                     view.read(cx)
                         .snapshot

@@ -123,6 +123,14 @@ struct DebugTraceScope
   }
 };
 
+struct CustomShaderScope
+{
+  IReplayController *controller;
+  ResourceId active;
+  ~CustomShaderScope() { clear(); }
+  void clear() { if(active != ResourceId()) controller->FreeCustomShader(active); active = ResourceId(); }
+};
+
 struct ShaderReplacementScope
 {
   IReplayController *controller;
@@ -1086,6 +1094,7 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
   if(!replay.controller) { error("RenderDoc returned no replay controller"); return 1; }
   DebugTraceScope debug{replay.controller};
   ShaderReplacementScope replacements{replay.controller};
+  CustomShaderScope custom_shader{replay.controller};
   if(!structure_worker) { replay.file->Shutdown(); replay.file = nullptr; }
   std::set<uint32_t> event_ids;
   std::vector<TextureRef> texture_ids;
@@ -1916,6 +1925,62 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       std::cout << "]}" << std::endl;
       continue;
     }
+    if(command == "custominfo")
+    {
+      const auto encodings = replay.controller->GetCustomShaderEncodings();
+      const auto prefixes = replay.controller->GetCustomShaderSourcePrefixes();
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"custom_shader_info\",\"active\":" << (custom_shader.active != ResourceId() ? "true" : "false") << ",\"encodings\":[";
+      for(size_t i=0; i<encodings.size(); ++i) { if(i) std::cout << ','; std::cout << uint32_t(encodings[i]); }
+      std::cout << "],\"prefixes\":[";
+      for(size_t i=0; i<prefixes.size(); ++i) { if(i) std::cout << ','; std::cout << "{\"encoding\":" << uint32_t(prefixes[i].encoding) << ",\"prefix\":"; json_string(prefixes[i].prefix); std::cout << '}'; }
+      std::cout << "]}" << std::endl;
+      continue;
+    }
+    if(command == "customclear")
+    {
+      custom_shader.clear();
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"custom_shader_build\",\"compiled\":false,\"active\":false,\"diagnostics\":\"\"}" << std::endl;
+      continue;
+    }
+    if(command.compare(0, 12, "custombuild ") == 0)
+    {
+      std::istringstream args(command.substr(12));
+      std::string encoding_text, entry_text, source_text, prefix_text, count_text, extra;
+      uint64_t encoding=0, use_prefix=0, count=0;
+      bytebuf entry, source;
+      if(!(args >> encoding_text >> entry_text >> source_text >> prefix_text >> count_text) ||
+         !decimal(encoding_text,encoding) || encoding >= uint32_t(ShaderEncoding::Count) ||
+         !decode_section_hex(entry_text,entry) || entry.empty() || std::find(entry.begin(),entry.end(),byte(0)) != entry.end() ||
+         !decode_section_hex(source_text,source) || source.empty() || !decimal(prefix_text,use_prefix) || use_prefix > 1 ||
+         !decimal(count_text,count) || count > command.size() / 4)
+      { error("Invalid custom shader request"); continue; }
+      ShaderCompileFlags flags; bool valid=true;
+      for(uint64_t i=0; i<count; ++i)
+      {
+        std::string name, value; bytebuf n,v;
+        if(!(args >> name >> value) || !decode_section_hex(name,n) || !decode_section_hex(value,v)) { valid=false; break; }
+        flags.flags.push_back({n.empty() ? rdcstr() : rdcstr((const char *)n.data(),n.size()), v.empty() ? rdcstr() : rdcstr((const char *)v.data(),v.size())});
+      }
+      if(!valid || (args >> extra)) { error("Invalid custom shader flags"); continue; }
+      const auto encodings = replay.controller->GetCustomShaderEncodings();
+      if(std::find(encodings.begin(),encodings.end(),ShaderEncoding(encoding)) == encodings.end()) { error("Custom shader encoding is not supported"); continue; }
+      if(use_prefix)
+      {
+        const auto prefixes = replay.controller->GetCustomShaderSourcePrefixes();
+        for(const auto &prefix : prefixes) if(prefix.encoding == ShaderEncoding(encoding))
+        {
+          bytebuf combined; combined.append((const byte *)prefix.prefix.data(),prefix.prefix.size()); combined.append(source); source.swap(combined); break;
+        }
+      }
+      auto built = replay.controller->BuildCustomShader(rdcstr((const char *)entry.data(),entry.size()), ShaderEncoding(encoding), source, flags, ShaderStage::Pixel);
+      result = replay.controller->GetFatalErrorStatus();
+      if(!result.OK()) { if(built.first != ResourceId()) replay.controller->FreeCustomShader(built.first); error(result_message(result)); break; }
+      const bool compiled = built.first != ResourceId();
+      if(compiled) { custom_shader.clear(); custom_shader.active = built.first; }
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"custom_shader_build\",\"compiled\":" << (compiled ? "true" : "false") << ",\"active\":" << (custom_shader.active != ResourceId() ? "true" : "false") << ",\"diagnostics\":";
+      json_string(built.second); std::cout << "}" << std::endl;
+      continue;
+    }
     if(command.compare(0, 13, "shader_apply ") == 0 || command.compare(0, 14, "shader_revert ") == 0)
     {
       const bool applying = command.compare(0, 13, "shader_apply ") == 0;
@@ -2433,7 +2498,7 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
     {
       if(!selected) { error("Select an event before rendering textures"); continue; }
       std::istringstream arguments(command.substr(15));
-      std::string i_text, mip_text, slice_text, sample_text, channel_text, cast_text, width_text, height_text, black_text, white_text, mask_text, flip_text, gamma_text, overlay_text, scale_text, x_text, y_text, hdr_text, yuv_text, background_text, extra;
+      std::string i_text, mip_text, slice_text, sample_text, channel_text, cast_text, width_text, height_text, black_text, white_text, mask_text, flip_text, gamma_text, overlay_text, scale_text, x_text, y_text, hdr_text, yuv_text, background_text, custom_text, extra;
       uint64_t index=0, mip=0, slice=0, sample=0, channel=0, cast=0, width=0, height=0, black_bits=0, white_bits=0;
       if(!(arguments >> i_text >> mip_text >> slice_text >> sample_text >> channel_text >> cast_text >> width_text >> height_text >> black_text >> white_text) ||
          !decimal(i_text,index) || index >= texture_ids.size() || !decimal(mip_text,mip) || !decimal(slice_text,slice) ||
@@ -2488,6 +2553,9 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
         }
         if(!valid_background) { error("Invalid texture background"); continue; }
       }
+      uint64_t use_custom = 0;
+      if((arguments >> custom_text) && (!decimal(custom_text,use_custom) || use_custom > 1)) { error("Invalid custom shader option"); continue; }
+      if(use_custom && (custom_shader.active == ResourceId() || hdr_multiplier >= 0.0f || yuv != 0)) { error("Custom shader is unavailable or conflicts with display mode"); continue; }
       if(arguments >> extra) { error("Invalid texture display options"); continue; }
       const TextureRef &texture = texture_ids[size_t(index)];
       const uint64_t depth = texture.dimension == 3 ? (mip < 32 ? (std::max)(1U, texture.depth >> uint32_t(mip)) : 1U) : texture.arraysize;
@@ -2504,7 +2572,7 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       display.resourceId=texture.id; display.typeCast=CompType(cast);
       display.subresource=Subresource(uint32_t(mip), uint32_t(slice), sample_text == "resolve" ? TextureDisplay::ResolveSamples : uint32_t(sample));
       display.rangeMin=black; display.rangeMax=white; display.scale=scale; display.xOffset=x_offset; display.yOffset=y_offset;
-      display.overlay=DebugOverlay(overlay); display.hdrMultiplier=hdr_multiplier; display.decodeYUV=yuv != 0; display.backgroundColor=FloatVector(background[0],background[1],background[2],background[3]);
+      display.overlay=DebugOverlay(overlay); display.hdrMultiplier=hdr_multiplier; display.decodeYUV=yuv != 0; display.backgroundColor=FloatVector(background[0],background[1],background[2],background[3]); display.customShaderId=use_custom ? custom_shader.active : ResourceId();
       if(channel_text != "all") { display.red=channel==0; display.green=channel==1; display.blue=channel==2; display.alpha=channel==3; }
       if(has_options) { display.red=(mask & 1) != 0; display.green=(mask & 2) != 0; display.blue=(mask & 4) != 0; display.alpha=(mask & 8) != 0; display.flipY=flip != 0; display.linearDisplayAsGamma=gamma != 0; }
       output->SetTextureDisplay(display); output->Display();

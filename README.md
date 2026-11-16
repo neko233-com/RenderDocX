@@ -34,6 +34,8 @@ Preview display modes include RGBM with an editable multiplier and YUVA decoding
 
 Preview background can use RenderDoc's checkerboard or an sRGB `#RRGGBB` color. A D3D11 capture checks solid background output; transparent texture blending and other APIs remain unverified.
 
+The texture viewer can compile and use one session-scoped custom visualization shader using the replay device's supported encodings. Failed compilation retains the previously compiled shader, and closing the replay frees it. A D3D11 HLSL shader has been exercised through the GUI and Agent CLI. Persistent shader libraries, external shader processors, custom-output pixel picking and other backends remain incomplete or unverified.
+
 The native preview also exposes RenderDoc's texture debug overlays. Overlay rendering can replay the selected event; RenderDocX restores that event and invalidates dependent cached results afterward. A D3D11 capture verifies draw highlighting, clear-before-draw restoration and rejection of an unavailable overlay. Other overlay modes, graphics APIs and engines still need real-capture validation.
 
 Pixel history lists modifications through the selected event, including fragment test failures and before, shader-output and after values. Select an entry to inspect it or replay its event. History can require substantial GPU replay work, and an empty result can also indicate that the upstream backend could not inspect the pixel.
