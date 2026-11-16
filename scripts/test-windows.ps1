@@ -8,6 +8,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $previousBridge = $env:RENDERDOCX_TEST_BRIDGE
 $previousFixture = $env:RENDERDOCX_TEST_FIXTURE
 $previousMismatch = $env:RENDERDOCX_TEST_MISMATCH_BRIDGE
+$previousLiveFixture = $env:RENDERDOCX_TEST_LIVE_FIXTURE
 Push-Location $root
 try {
     & (Join-Path $PSScriptRoot 'build-replay-bridge.ps1') -WithFixtures
@@ -20,6 +21,7 @@ try {
     $env:RENDERDOCX_TEST_BRIDGE = Join-Path $root 'target/renderdocx-runtime/renderdocx-replay.exe'
     $env:RENDERDOCX_TEST_FIXTURE = Join-Path $root 'target/replay-bridge/Release/renderdocx-d3d11-fixture.exe'
     $env:RENDERDOCX_TEST_MISMATCH_BRIDGE = Join-Path $root 'target/replay-mismatch/Release/renderdocx-replay.exe'
+    $env:RENDERDOCX_TEST_LIVE_FIXTURE = Join-Path $root 'target/replay-bridge/Release/renderdocx-d3d11-live-fixture.exe'
 
     cargo test --no-default-features
     if ($LASTEXITCODE -ne 0) { throw 'Headless tests failed.' }
@@ -36,5 +38,6 @@ finally {
     $env:RENDERDOCX_TEST_BRIDGE = $previousBridge
     $env:RENDERDOCX_TEST_FIXTURE = $previousFixture
     $env:RENDERDOCX_TEST_MISMATCH_BRIDGE = $previousMismatch
+    $env:RENDERDOCX_TEST_LIVE_FIXTURE = $previousLiveFixture
     Pop-Location
 }

@@ -3,9 +3,8 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    io::{BufRead, BufReader},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
 };
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -86,65 +85,4 @@ pub fn open_upstream(settings: &Settings) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|e| e.to_string())
-}
-
-pub fn launch_capture(settings: &Settings, executable: &Path) -> Result<(), String> {
-    let program = find_tool(&settings.renderdoccmd, "renderdoccmd")?;
-    let frontend = find_tool(&settings.qrenderdoc, "qrenderdoc")?;
-    let mut child = Command::new(program)
-        .arg("capture")
-        .arg(executable)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    // A successful capture launch returns the target ident as the process exit
-    // code, so an ordinary success-status check would reject valid launches.
-    let mut stderr = BufReader::new(child.stderr.take().ok_or("Missing renderdoccmd stderr")?);
-    let mut detail = String::new();
-    let ident = loop {
-        let mut bytes = Vec::new();
-        match stderr.read_until(b'\n', &mut bytes) {
-            Ok(0) => {
-                let status = child.wait().map_err(|e| e.to_string())?;
-                return Err(if detail.is_empty() {
-                    format!("renderdoccmd exited: {status}")
-                } else {
-                    detail
-                });
-            }
-            Ok(_) => {
-                let line = String::from_utf8_lossy(&bytes);
-                if let Some(id) = line
-                    .trim()
-                    .strip_prefix("Launched as ID ")
-                    .and_then(|s| s.trim().parse::<u32>().ok())
-                    .filter(|id| *id != 0)
-                {
-                    break id;
-                }
-                if detail.len() < 8192 {
-                    detail.push_str(&line);
-                }
-            }
-            Err(error) => {
-                let _ = child.wait();
-                return Err(error.to_string());
-            }
-        }
-    };
-    // On Unix the target may inherit stderr. Drain it until all writers close,
-    // so a long-running target cannot block on a full pipe or delay handoff.
-    std::thread::spawn(move || {
-        let _ = std::io::copy(&mut stderr, &mut std::io::sink());
-    });
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Command::new(frontend)
-        .arg("--targetcontrol")
-        .arg(format!("localhost:{ident}"))
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("Target {ident} started, but qrenderdoc could not be opened: {e}"))
 }

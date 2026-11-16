@@ -11,6 +11,7 @@ use gpui_kit::{
 use renderdocx::{
     backend::{self, Settings},
     i18n::Language,
+    live::{LiveSession, capture_directory, capture_notice, enumerate},
     replay::{Pipeline, SHADER_STAGES, Session, ShaderReport, Snapshot, TextureSelection},
 };
 use std::path::PathBuf;
@@ -58,9 +59,319 @@ struct Workspace {
     replay_pending: bool,
     export_pending: bool,
     preview: Option<TexturePreview>,
+    live: Option<LiveSession>,
+    live_generation: u64,
+    live_starting: bool,
+    live_status: Option<String>,
+    live_captures: Vec<(u32, PathBuf, bool)>,
+    live_targets: Vec<u32>,
 }
 
 impl Workspace {
+    fn discover_live(&mut self, cx: &mut Context<Self>) {
+        if self.live.is_some() || self.live_starting {
+            self.status = Some(
+                self.t(
+                    "Close the current target first.",
+                    "请先关闭当前目标连接。",
+                    "現在のターゲット接続を先に閉じてください。",
+                    "현재 대상 연결을 먼저 닫아 주세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        self.live_starting = true;
+        self.live_generation += 1;
+        let generation = self.live_generation;
+        let settings = self.settings.clone();
+        self.status = Some(
+            self.t(
+                "Discovering local targets…",
+                "正在查找本机目标…",
+                "ローカルターゲットを検索中…",
+                "로컬 대상을 찾는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx
+            .background_executor()
+            .spawn(async move { enumerate(&settings) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.live_generation != generation {
+                    return;
+                }
+                this.live_starting = false;
+                match result {
+                    Ok(targets) => {
+                        this.status = Some(format!(
+                            "{}: {}",
+                            this.t(
+                                "Local targets",
+                                "本机目标",
+                                "ローカルターゲット",
+                                "로컬 대상"
+                            ),
+                            targets.len()
+                        ));
+                        this.live_targets = targets;
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Discovery failed",
+                                "目标查找失败",
+                                "検索に失敗しました",
+                                "대상 검색 실패"
+                            )
+                        ));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn connect_live(&mut self, ident: u32, cx: &mut Context<Self>) {
+        if self.live.is_some() || self.live_starting {
+            return;
+        }
+        self.live_starting = true;
+        self.live_generation += 1;
+        let generation = self.live_generation;
+        let settings = self.settings.clone();
+        self.status = Some(
+            self.t(
+                "Connecting to target…",
+                "正在连接目标…",
+                "ターゲットに接続中…",
+                "대상에 연결 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx
+            .background_executor()
+            .spawn(async move { LiveSession::connect(&settings, ident) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.live_generation != generation {
+                    return;
+                }
+                this.live_starting = false;
+                match result {
+                    Ok(session) => {
+                        this.live_status = Some(format!(
+                            "{}: {ident}",
+                            this.t("Connected", "已连接", "接続済み", "연결됨")
+                        ));
+                        this.live_targets.clear();
+                        this.live = Some(session.clone());
+                        this.status = None;
+                        this.poll_live(session, generation, cx);
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Connection failed",
+                                "连接失败",
+                                "接続に失敗しました",
+                                "연결 실패"
+                            )
+                        ))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn launch_live(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.live.is_some() || self.live_starting {
+            self.status = Some(
+                self.t(
+                    "Close the current target first.",
+                    "请先关闭当前目标连接。",
+                    "現在のターゲット接続を先に閉じてください。",
+                    "현재 대상 연결을 먼저 닫아 주세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        self.live_starting = true;
+        self.live_generation += 1;
+        let generation = self.live_generation;
+        let settings = self.settings.clone();
+        self.status = Some(
+            self.t(
+                "Starting capture target…",
+                "正在启动捕获目标…",
+                "キャプチャ対象を起動中…",
+                "캡처 대상을 시작하는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            let directory = capture_directory()?;
+            LiveSession::launch(&settings, &path, &directory, "")
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.live_generation != generation {
+                    return;
+                }
+                this.live_starting = false;
+                match result {
+                    Ok(session) => {
+                        this.live_status = Some(format!(
+                            "{} · {}",
+                            this.t("Connected", "已连接", "接続済み", "연결됨"),
+                            session
+                                .capture_template
+                                .as_ref()
+                                .map(|path| path.display().to_string())
+                                .unwrap_or_default()
+                        ));
+                        this.live = Some(session.clone());
+                        this.status = None;
+                        this.poll_live(session, generation, cx);
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Target launch failed",
+                                "目标启动失败",
+                                "ターゲットの起動に失敗しました",
+                                "대상 실행 실패"
+                            )
+                        ))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn poll_live(&mut self, session: LiveSession, generation: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(150))
+                    .await;
+                let events = session.drain().unwrap_or_default();
+                let alive = session.is_alive();
+                let updated = this.update(cx, |this, cx| {
+                    if this.live_generation != generation {
+                        return false;
+                    }
+                    let changed = !events.is_empty() || !alive;
+                    let mut error_seen = false;
+                    for event in events {
+                        match event.get("type").and_then(serde_json::Value::as_str) {
+                            Some("capture") => {
+                                if let Some(capture) = capture_notice(&event) {
+                                    if !this.live_captures.iter().any(|existing| {
+                                        existing.1 == capture.1 && existing.2 == capture.2
+                                    }) {
+                                        this.live_captures.push(capture);
+                                    }
+                                }
+                            }
+                            Some("api") => {
+                                let name = event
+                                    .get("name")
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or("");
+                                let supported = event
+                                    .get("supported")
+                                    .and_then(serde_json::Value::as_bool)
+                                    .unwrap_or(false);
+                                this.live_status = Some(format!(
+                                    "{}: {name} · {}",
+                                    this.t("API", "图形接口", "API", "API"),
+                                    if supported {
+                                        this.t("supported", "支持捕获", "対応", "지원")
+                                    } else {
+                                        this.t("unsupported", "不支持捕获", "非対応", "지원 안 됨")
+                                    }
+                                ));
+                            }
+                            Some("progress") => {
+                                if let Some(value) =
+                                    event.get("value").and_then(serde_json::Value::as_f64)
+                                {
+                                    if (0.0..=1.0).contains(&value) {
+                                        this.live_status = Some(format!(
+                                            "{}: {:.0}%",
+                                            this.t(
+                                                "Capturing",
+                                                "正在捕获",
+                                                "キャプチャ中",
+                                                "캡처 중"
+                                            ),
+                                            value * 100.
+                                        ));
+                                    }
+                                }
+                            }
+                            Some("error") => {
+                                error_seen = true;
+                                this.live_status = Some(format!(
+                                    "{}: {}",
+                                    this.t(
+                                        "Target error",
+                                        "目标错误",
+                                        "ターゲットエラー",
+                                        "대상 오류"
+                                    ),
+                                    event
+                                        .get("message")
+                                        .and_then(serde_json::Value::as_str)
+                                        .unwrap_or("")
+                                ))
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !alive && !error_seen {
+                        this.live_status = Some(
+                            this.t(
+                                "Target disconnected",
+                                "目标已断开",
+                                "ターゲット切断",
+                                "대상 연결 끊김",
+                            )
+                            .to_owned(),
+                        );
+                    }
+                    if changed {
+                        cx.notify();
+                    }
+                    alive
+                });
+                if !updated.unwrap_or(false) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     fn t(
         &self,
         en: &'static str,
@@ -1845,6 +2156,13 @@ impl Render for Workspace {
             "アプリを起動してキャプチャ",
             "앱 실행 및 캡처",
         );
+        let discover = self.t(
+            "Find local targets",
+            "查找本机目标",
+            "ローカルターゲットを検索",
+            "로컬 대상 찾기",
+        );
+        let connect_target = self.t("Connect", "连接", "接続", "연결");
         let upstream = self.t(
             "Open RenderDoc",
             "打开 RenderDoc",
@@ -1856,12 +2174,6 @@ impl Render for Workspace {
             "选择 qrenderdoc",
             "qrenderdoc を選択",
             "qrenderdoc 선택",
-        );
-        let configure_cmd = self.t(
-            "Select renderdoccmd",
-            "选择 renderdoccmd",
-            "renderdoccmd を選択",
-            "renderdoccmd 선택",
         );
         let configure_bridge = self.t(
             "Select replay bridge",
@@ -1876,11 +2188,37 @@ impl Render for Workspace {
             "UNITY / TUANJIE",
             "UNITY / TUANJIE",
         );
-        let integration_text = self.t("Use the engine's RenderDoc integration or launch a standalone player. Detailed inspection currently opens in RenderDoc.", "使用引擎自带的 RenderDoc 集成，或启动独立播放器。详细调试目前在 RenderDoc 中进行。", "エンジンの RenderDoc 統合、またはスタンドアロンプレイヤーを使用してください。詳細な解析は現在 RenderDoc で開きます。", "엔진의 RenderDoc 통합을 사용하거나 독립 실행형 플레이어를 실행하세요. 상세 분석은 현재 RenderDoc에서 열립니다.");
+        let integration_text = self.t("Use the engine's RenderDoc integration or launch a standalone player. Some detailed inspection still requires RenderDoc.", "使用引擎自带的 RenderDoc 集成，或启动独立播放器。部分详细调试仍需要 RenderDoc。", "エンジンの RenderDoc 統合またはスタンドアロンプレイヤーを使用します。詳細な解析の一部には RenderDoc が必要です。", "엔진의 RenderDoc 통합 또는 독립 실행형 플레이어를 사용하세요. 일부 상세 분석에는 RenderDoc이 필요합니다.");
+        let live_title = self.t(
+            "LIVE CAPTURE",
+            "实时捕获",
+            "ライブキャプチャ",
+            "실시간 캡처",
+        );
+        let trigger = self.t(
+            "Capture next frame",
+            "捕获下一帧",
+            "次のフレームをキャプチャ",
+            "다음 프레임 캡처",
+        );
+        let disconnect = self.t("Disconnect", "断开连接", "切断", "연결 끊기");
+        let frame_label = self.t("Frame", "帧", "フレーム", "프레임");
+        let remote_label = self.t(
+            "Remote capture",
+            "远程捕获",
+            "リモートキャプチャ",
+            "원격 캡처",
+        );
+        let active = self.live.is_some();
+        let live_status = self.live_status.clone();
+        let live_captures = self.live_captures.clone();
+        let live_targets = self.live_targets.clone();
         let status = self.status.clone();
 
         div()
+            .id("home-scroll")
             .size_full()
+            .overflow_y_scroll()
             .bg(rgb(0x101722))
             .text_color(rgb(0xe6edf6))
             .flex()
@@ -1925,27 +2263,16 @@ impl Render for Workspace {
                         false,
                         |this, cx| {
                             if let Some(path) = rfd::FileDialog::new().pick_file() {
-                                let settings = this.settings.clone();
-                                this.status = Some(
-                                    this.t(
-                                        "Starting capture target…",
-                                        "正在启动捕获目标…",
-                                        "キャプチャ対象を起動中…",
-                                        "캡처 대상을 시작하는 중…",
-                                    )
-                                    .to_owned(),
-                                );
-                                cx.notify();
-                                let job = cx.background_executor().spawn(async move {
-                                    backend::launch_capture(&settings, &path)
-                                });
-                                cx.spawn(async move |this, cx| {
-                                    let result = job.await;
-                                    let _ = this.update(cx, |this, cx| this.result(result, cx));
-                                })
-                                .detach();
+                                this.launch_live(path, cx);
                             }
                         },
+                        cx,
+                    ))
+                    .child(button(
+                        "discover-targets",
+                        discover,
+                        false,
+                        |this, cx| this.discover_live(cx),
                         cx,
                     ))
                     .child(button(
@@ -1972,6 +2299,158 @@ impl Render for Workspace {
                         cx,
                     )),
             )
+            .when(!live_targets.is_empty(), |view| {
+                view.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .children(live_targets.into_iter().map(|ident| {
+                            div()
+                                .id(SharedString::from(format!("target-{ident}")))
+                                .test_support()
+                                .cursor_pointer()
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .bg(rgb(0x252f40))
+                                .child(format!("{connect_target} {ident}"))
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.connect_live(ident, cx)),
+                                )
+                        })),
+                )
+            })
+            .when(
+                active || !live_captures.is_empty() || live_status.is_some(),
+                |view| {
+                    let capture_button = button(
+                        "live-trigger",
+                        trigger,
+                        true,
+                        |this, cx| {
+                            if let Some(session) = &this.live {
+                                this.live_status = Some(match session.trigger(1) {
+                                    Ok(()) => this
+                                        .t(
+                                            "Capture request submitted",
+                                            "捕获请求已提交",
+                                            "キャプチャ要求を送信しました",
+                                            "캡처 요청을 보냈습니다",
+                                        )
+                                        .to_owned(),
+                                    Err(error) => format!(
+                                        "{}: {error}",
+                                        this.t(
+                                            "Target error",
+                                            "目标错误",
+                                            "ターゲットエラー",
+                                            "대상 오류"
+                                        )
+                                    ),
+                                });
+                                cx.notify();
+                            }
+                        },
+                        cx,
+                    );
+                    let disconnect_button = button(
+                        "live-disconnect",
+                        disconnect,
+                        false,
+                        |this, cx| {
+                            if let Some(session) = this.live.take() {
+                                this.live_generation += 1;
+                                let generation = this.live_generation;
+                                this.live_status = Some(
+                                    this.t(
+                                        "Disconnecting…",
+                                        "正在断开…",
+                                        "切断中…",
+                                        "연결 해제 중…",
+                                    )
+                                    .to_owned(),
+                                );
+                                let task = cx
+                                    .background_executor()
+                                    .spawn(async move { session.close() });
+                                cx.spawn(async move |this, cx| {
+                                    let result = task.await;
+                                    let _ = this.update(cx, |this, cx| {
+                                        if this.live_generation != generation {
+                                            return;
+                                        }
+                                        this.live_status = Some(match result {
+                                            Ok(()) => this
+                                                .t(
+                                                    "Target disconnected",
+                                                    "目标已断开",
+                                                    "ターゲット切断",
+                                                    "대상 연결 끊김",
+                                                )
+                                                .to_owned(),
+                                            Err(error) => format!(
+                                                "{}: {error}",
+                                                this.t(
+                                                    "Disconnect failed",
+                                                    "断开失败",
+                                                    "切断に失敗しました",
+                                                    "연결 해제 실패"
+                                                )
+                                            ),
+                                        });
+                                        cx.notify();
+                                    });
+                                })
+                                .detach();
+                                cx.notify();
+                            }
+                        },
+                        cx,
+                    );
+                    view.child(
+                        div()
+                            .bg(rgb(0x192332))
+                            .rounded_lg()
+                            .p_5()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(div().text_sm().text_color(rgb(0x82aaff)).child(live_title))
+                            .when_some(live_status, |view, text| view.child(text))
+                            .when(active, |view| {
+                                view.child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .gap_2()
+                                        .child(capture_button)
+                                        .child(disconnect_button),
+                                )
+                            })
+                            .children(live_captures.into_iter().enumerate().map(
+                                |(index, (frame, path, local))| {
+                                    let label = format!(
+                                        "{frame_label} {frame} · {}{}",
+                                        path.display(),
+                                        if local { "" } else { remote_label }
+                                    );
+                                    div()
+                                        .id(SharedString::from(format!("live-capture-{index}")))
+                                        .test_support()
+                                        .cursor_pointer()
+                                        .text_sm()
+                                        .child(label)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if local {
+                                                this.open(path.clone(), cx);
+                                            }
+                                        }))
+                                },
+                            )),
+                    )
+                },
+            )
             .child(
                 div()
                     .bg(rgb(0x192332))
@@ -1983,38 +2462,19 @@ impl Render for Workspace {
                     .child(div().text_sm().text_color(rgb(0x82aaff)).child(integration))
                     .child(div().text_color(rgb(0xc3cedd)).child(integration_text)),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_3()
-                    .child(button(
-                        "configure-ui",
-                        configure_ui,
-                        false,
-                        |this, cx| {
-                            if let Some(path) = rfd::FileDialog::new().pick_file() {
-                                this.settings.qrenderdoc = Some(path);
-                                this.save();
-                                cx.notify();
-                            }
-                        },
-                        cx,
-                    ))
-                    .child(button(
-                        "configure-cmd",
-                        configure_cmd,
-                        false,
-                        |this, cx| {
-                            if let Some(path) = rfd::FileDialog::new().pick_file() {
-                                this.settings.renderdoccmd = Some(path);
-                                this.save();
-                                cx.notify();
-                            }
-                        },
-                        cx,
-                    )),
-            )
+            .child(div().flex().flex_wrap().gap_3().child(button(
+                "configure-ui",
+                configure_ui,
+                false,
+                |this, cx| {
+                    if let Some(path) = rfd::FileDialog::new().pick_file() {
+                        this.settings.qrenderdoc = Some(path);
+                        this.save();
+                        cx.notify();
+                    }
+                },
+                cx,
+            )))
             .child(div().text_sm().text_color(rgb(0x9eacc0)).child(language))
             .child(div().flex().flex_wrap().gap_2().children(
                 Language::ALL.into_iter().enumerate().map(|(i, lang)| {
@@ -2084,6 +2544,12 @@ fn main() {
                         replay_pending: false,
                         export_pending: false,
                         preview: None,
+                        live: None,
+                        live_generation: 0,
+                        live_starting: false,
+                        live_status: None,
+                        live_captures: Vec::new(),
+                        live_targets: Vec::new(),
                     });
                     if let Some(path) = initial_capture {
                         entity.update(cx, |view, cx| view.open(path, cx));
@@ -2146,6 +2612,12 @@ mod ui_tests {
                         replay_pending: false,
                         export_pending: false,
                         preview: None,
+                        live: None,
+                        live_generation: 0,
+                        live_starting: false,
+                        live_status: None,
+                        live_captures: Vec::new(),
+                        live_targets: Vec::new(),
                     })
                 },
             )
@@ -2160,6 +2632,29 @@ mod ui_tests {
         cx.update(|cx| {
             assert!(view.read(cx).snapshot.is_none());
             assert!(view.read(cx).capture.is_none());
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.settings.replay_bridge = Some("definitely-missing-replay-bridge".into());
+                view.live_status = Some("fixture".into());
+                view.live_targets = vec![38920];
+                view.live_captures
+                    .push((42, "missing-live-capture.rdc".into(), true));
+                cx.notify();
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("target-38920").visible());
+            assert!(window.find("live-capture-0").visible());
+            window.click("live-capture-0", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(view.read(cx).open_revision > 0);
+            assert!(view.read(cx).status.is_some());
+            assert!(view.read(cx).snapshot.is_none());
         });
     }
 
@@ -2238,6 +2733,12 @@ mod ui_tests {
                         replay_pending: false,
                         export_pending: false,
                         preview: None,
+                        live: None,
+                        live_generation: 0,
+                        live_starting: false,
+                        live_status: None,
+                        live_captures: Vec::new(),
+                        live_targets: Vec::new(),
                     })
                 },
             )

@@ -38,7 +38,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Replay bridge build failed.' }
     $destination = Join-Path $root 'target/renderdocx-runtime'
     New-Item -ItemType Directory -Force -Path $destination | Out-Null
-    Copy-Item -LiteralPath 'target/replay-bridge/Release/renderdocx-replay.exe', $dll -Destination $destination -Force
+    Copy-Item -LiteralPath 'target/replay-bridge/Release/renderdocx-replay.exe', 'target/replay-bridge/Release/renderdocx-target.exe', $dll -Destination $destination -Force
     foreach ($dependency in @('d3dcompiler_47.dll', 'dbghelp.dll', 'symsrv.dll', 'symsrv.yes')) {
         $path = Join-Path $root "x64/$CoreConfiguration/$dependency"
         if (Test-Path -LiteralPath $path -PathType Leaf) { Copy-Item -LiteralPath $path -Destination $destination -Force }

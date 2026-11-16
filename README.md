@@ -2,7 +2,7 @@
 
 RenderDocX is an in-progress Rust + GPUI desktop frontend for [RenderDoc](https://github.com/baldurk/renderdoc). Its goal is a clearer, more usable graphics-debugging experience while retaining RenderDoc's capture, replay, and file semantics.
 
-**Status: early prototype, not a replacement for RenderDoc.** The Rust workspace can open an `.rdc` with its version-matched replay helper, browse the action hierarchy and resource metadata, request event replay, inspect common pipeline state, bound shader disassembly and buffer bytes, select a texture mip, slice, sample and channel for preview, and export it to PNG without overwriting existing files. Preview and export use RenderDoc's 8-bit PNG mapping. Detailed inspection is still performed in `qrenderdoc`. `.cap` files and application launch use upstream tools; launch passes the target ident from `renderdoccmd` to `qrenderdoc --targetcontrol`. Starting these processes does not establish that the target connection or capture succeeded.
+**Status: early prototype, not a replacement for RenderDoc.** The Rust workspace can launch an application, connect to a local RenderDoc target, trigger a capture and open reported local captures. It can open an `.rdc` with its version-matched replay helper, browse the action hierarchy and resource metadata, request event replay, inspect common pipeline state, bound shader disassembly and buffer bytes, select a texture mip, slice, sample and channel for preview, and export it to PNG without overwriting existing files. Preview and export use RenderDoc's 8-bit PNG mapping. Some detailed inspection and `.cap` files still use `qrenderdoc`. A submitted capture request is not proof that a capture was produced.
 
 The interface detects the system language on startup and supports English, Simplified Chinese, Japanese, and Korean, with a manual language override. Its settings are stored in the operating system's user configuration directory.
 
@@ -22,17 +22,17 @@ On Windows, build the RenderDoc core and its matching replay helper from a commi
 ./scripts/build-replay-bridge.ps1
 ```
 
-Select `target/renderdocx-runtime/renderdocx-replay.exe` in the workspace. The helper checks the loaded core's version and build commit before using the C++ replay API. This build path currently targets Windows x64; the source-level CMake bridge can also be built against a matching Linux core, but that path has not yet been verified. The application and helper are not yet packaged together.
+Select `target/renderdocx-runtime/renderdocx-replay.exe` in the workspace. The replay and target helpers must stay together with their matching RenderDoc core; both check the loaded core's version and build commit before using the C++ API. This build path currently targets Windows x64; the source-level CMake bridge can also be built against a matching Linux core, but that path has not yet been verified. The application and helpers are not yet packaged together.
 
 The machine-readable [Agent CLI](docs/agent-cli.md) supports one-shot commands and a persistent JSONL replay session. It can be built without the GUI dependencies using `cargo build --no-default-features --bin renderdocx-cli`.
 
-Install or build a compatible RenderDoc distribution separately. RenderDocX looks for `qrenderdoc` and `renderdoccmd` next to its executable, in the standard Windows RenderDoc installation directory, or on `PATH`. The workspace also offers buttons to select each executable explicitly. Those binaries and their matching RenderDoc libraries must come from the same distribution; this prototype does not bundle them or check their version.
+For functionality not yet migrated, RenderDocX can open `qrenderdoc` separately. It searches next to the application, the standard Windows RenderDoc installation directory, or `PATH`; the workspace can also select it explicitly.
 
-Launching an application uses RenderDoc's default capture options and accepts no application arguments yet. Use the upstream UI for full configuration and capture control. Only capture applications you own or are authorized to debug, in accordance with upstream's usage policy.
+Launching from the GUI uses RenderDoc's default capture options and no application arguments; the Agent CLI also accepts a platform-specific argument string. Each GUI launch writes to a fresh session directory under the user application-data captures directory. Use the upstream UI for full capture configuration and remote workflows. Only capture applications you own or are authorized to debug, in accordance with upstream's usage policy.
 
 ## Unity and Tuanjie
 
-Unity's built-in RenderDoc integration can load RenderDoc in the Editor and capture from the Game or Scene view on supported platform/API combinations. Standalone players can be launched through RenderDoc. See the [Unity manual](https://docs.unity3d.com/Manual/RenderDocIntegration.html) and the engine version's documentation. An early [Unity package](integrations/unity/README.md) adds Editor handoff of saved captures and an optional wrapper for Unity's experimental external GPU profiler API. Tuanjie compatibility has not been established. RenderDocX does not yet receive Editor capture events directly or replace Unity's RenderDoc UI integration.
+Unity's built-in RenderDoc integration can load RenderDoc in the Editor and capture from the Game or Scene view on supported platform/API combinations. RenderDocX can discover local targets already running with RenderDoc and attempt a non-forced connection, but this flow has not been validated with Unity or Tuanjie. See the [Unity manual](https://docs.unity3d.com/Manual/RenderDocIntegration.html) and the engine version's documentation. An early [Unity package](integrations/unity/README.md) adds Editor handoff of saved captures and an optional wrapper for Unity's experimental external GPU profiler API. Tuanjie compatibility and automatic Editor handoff remain unverified.
 
 ## Source and compatibility
 
@@ -42,7 +42,7 @@ The native event browser, texture preview, and event replay are initial implemen
 
 ## Verification
 
-On Windows x64, `./scripts/test-windows.ps1` builds the matching core and helper, runs headless protocol and Agent CLI tests, exercises a generated D3D11 capture and replay, and runs GPUI interaction tests. Add `-IncludeFast` to include the experimental backend. The real-core tests need a supported D3D11 device or WARP and are marked ignored when running `cargo test` alone. Other graphics APIs, GPU combinations, Unity/Tuanjie, and platforms still need coverage.
+On Windows x64, `./scripts/test-windows.ps1` builds the matching core and helpers, runs headless protocol and Agent CLI tests, exercises generated D3D11 capture and replay as well as live target discovery, connection and capture, and runs GPUI interaction tests. Add `-IncludeFast` to include the experimental backend. The real-core tests need a supported D3D11 device or WARP and are marked ignored when running `cargo test` alone. Other graphics APIs, GPU combinations, Unity/Tuanjie, and platforms still need coverage.
 
 ## License
 

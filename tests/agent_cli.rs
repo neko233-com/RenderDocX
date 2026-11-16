@@ -99,7 +99,180 @@ fn agent_jsonl_session_has_correlated_errors_and_clean_shutdown() {
     assert_eq!(reply["schema"], "renderdocx.agent.v1");
     assert_eq!(reply["id"], 17);
     assert_eq!(reply["error"]["code"], "no_capture");
+    assert_eq!(
+        agent.send(r#"{"command":"target_events"}"#)["error"]["code"],
+        "no_target"
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"target_connect","ident":0}"#)["error"]["code"],
+        "invalid_arguments"
+    );
     assert_eq!(agent.send(r#"{"id":"c","command":"close"}"#)["ok"], true);
+    agent.quit();
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires a built live D3D11 fixture and matching RenderDoc target helper"]
+fn native_target_launch_triggers_capture_and_disconnects_without_stopping_target() {
+    use std::{
+        path::PathBuf,
+        time::{Duration, Instant},
+    };
+    struct Stop(PathBuf);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            let _ = std::fs::write(&self.0, b"stop");
+            let done = PathBuf::from(format!("{}.done", self.0.display()));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !done.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    }
+    let bridge = PathBuf::from(
+        std::env::var_os("RENDERDOCX_TEST_BRIDGE").expect("set RENDERDOCX_TEST_BRIDGE"),
+    );
+    let fixture = PathBuf::from(
+        std::env::var_os("RENDERDOCX_TEST_LIVE_FIXTURE").expect("set RENDERDOCX_TEST_LIVE_FIXTURE"),
+    );
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/renderdocx-fixtures");
+    std::fs::create_dir_all(&root).unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("live-捕获 空格-")
+        .tempdir_in(&root)
+        .unwrap();
+    let stop = dir.path().join("stop.flag");
+    let existing = dir.path().join("capture_frame1.rdc");
+    std::fs::write(&existing, b"existing capture").unwrap();
+    let _stop_guard = Stop(stop.clone());
+    let template = dir.path();
+    let arguments = format!("\"{}\"", stop.display());
+    let mut agent = Agent::new(Some(bridge.to_str().unwrap()));
+    let request = serde_json::json!({"command":"target_launch","path":fixture,"capture_directory":template,"arguments":arguments});
+    let launched = agent.send(&request.to_string());
+    assert_eq!(launched["ok"], true, "{launched}");
+    let ident = launched["data"]["target"]["ident"].as_u64().unwrap();
+    assert!(ident > 0);
+    assert!(launched["data"]["target"]["pid"].as_u64().unwrap() > 0);
+    let discovered = agent.send(r#"{"command":"target_list"}"#);
+    assert_eq!(discovered["ok"], true, "{discovered}");
+    assert!(
+        discovered["data"]["idents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id.as_u64() == Some(ident)),
+        "{discovered}"
+    );
+    let mut other = Agent::new(Some(bridge.to_str().unwrap()));
+    let busy =
+        other.send(&serde_json::json!({"command":"target_connect","ident":ident}).to_string());
+    assert_eq!(busy["error"]["code"], "target_connect_failed", "{busy}");
+    other.quit();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut ready = false;
+    while Instant::now() < deadline && !ready {
+        let reply = agent.send(r#"{"command":"target_events"}"#);
+        assert_eq!(reply["data"]["connected"], true, "{reply}");
+        ready = reply["data"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| {
+                event["type"] == "api" && event["supported"] == true && event["presenting"] == true
+            });
+        if !ready {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    assert!(ready, "target did not report a supported presenting API");
+    assert_eq!(
+        agent.send(r#"{"command":"target_trigger","frames":0}"#)["error"]["code"],
+        "invalid_arguments"
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"target_trigger","frames":1}"#)["data"]["submitted"],
+        true
+    );
+    let mut captured = None;
+    while Instant::now() < deadline && captured.is_none() {
+        let reply = agent.send(r#"{"command":"target_events"}"#);
+        assert_eq!(reply["data"]["connected"], true, "{reply}");
+        captured = reply["data"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["type"] == "capture")
+            .cloned();
+        if captured.is_none() {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    let capture = captured.expect("target must report a completed capture");
+    assert_eq!(
+        agent.send(r#"{"command":"target_cycle"}"#)["data"]["submitted"],
+        true
+    );
+    let queued_frame = capture["frame"].as_u64().unwrap() + 300;
+    let queued = agent.send(
+        &serde_json::json!({"command":"target_queue","frame":queued_frame,"frames":1}).to_string(),
+    );
+    assert_eq!(queued["data"]["submitted"], true, "{queued}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut queued_capture = None;
+    while Instant::now() < deadline && queued_capture.is_none() {
+        let reply = agent.send(r#"{"command":"target_events"}"#);
+        assert_eq!(reply["data"]["connected"], true, "{reply}");
+        queued_capture = reply["data"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| {
+                event["type"] == "capture" && event["frame"].as_u64() == Some(queued_frame)
+            })
+            .cloned();
+        if queued_capture.is_none() {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    assert!(
+        queued_capture.is_some(),
+        "queued frame {queued_frame} was not captured"
+    );
+    assert_eq!(capture["local"], true, "{capture}");
+    let path = PathBuf::from(capture["path"].as_str().unwrap());
+    assert!(path.is_file(), "capture path: {capture}");
+    assert!(
+        path.canonicalize()
+            .unwrap()
+            .starts_with(dir.path().canonicalize().unwrap())
+    );
+    assert_ne!(path.parent().unwrap(), dir.path());
+    assert_eq!(std::fs::read(&existing).unwrap(), b"existing capture");
+    let (success, inspected) = invoke(&[
+        "--bridge",
+        bridge.to_str().unwrap(),
+        "inspect",
+        path.to_str().unwrap(),
+    ]);
+    assert!(success, "{inspected}");
+    assert_eq!(agent.send(r#"{"command":"target_close"}"#)["ok"], true);
+    assert!(
+        !PathBuf::from(format!("{}.done", stop.display())).exists(),
+        "closing control must not stop the target"
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let reconnected =
+            agent.send(&serde_json::json!({"command":"target_connect","ident":ident}).to_string());
+        if reconnected["ok"] == true {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{reconnected}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(agent.send(r#"{"command":"target_close"}"#)["ok"], true);
     agent.quit();
 }
 

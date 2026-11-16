@@ -1,5 +1,6 @@
 use renderdocx::{
     backend::Settings,
+    live::{LiveSession, enumerate},
     replay::{BUFFER_PAGE_LIMIT, Pipeline, SHADER_STAGES, Session, Snapshot, TextureSelection},
 };
 use serde_json::{Value, json};
@@ -21,7 +22,7 @@ fn usage() -> Value {
         {"name":"select","arguments":["capture.rdc","event_id"],"description":"Replay a capture to an action event."},
         {"name":"serve","arguments":[],"description":"Serve sequential JSONL requests using a persistent replay session."},
         {"name":"capabilities","arguments":[],"description":"Describe the commands currently implemented."}
-    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","read_buffer","export_texture","close","quit"],"shader_stages":SHADER_STAGES,"buffer_page_limit":BUFFER_PAGE_LIMIT,"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
+    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","read_buffer","export_texture","close","target_list","target_launch","target_connect","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"buffer_page_limit":BUFFER_PAGE_LIMIT,"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
 }
 
 fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
@@ -106,6 +107,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
     let mut opened: Option<(Session, Snapshot)> = None;
     let mut selected_event: Option<u32> = None;
     let mut pipeline: Option<Pipeline> = None;
+    let mut target: Option<LiveSession> = None;
     for line in input.lines() {
         let line = line?;
         let parsed: Result<Value, _> = serde_json::from_str(&line);
@@ -125,6 +127,94 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
         let command = request.get("command").and_then(Value::as_str).unwrap_or("");
         let result: Result<Value, (&str, String)> = match command {
             "capabilities" => Ok(usage()),
+            "target_list" => enumerate(&settings)
+                .map(|idents| json!({"idents":idents}))
+                .map_err(|error| ("target_discovery_failed", error)),
+            "target_launch" => {
+                let app = request
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty());
+                let template = request
+                    .get("capture_directory")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty());
+                let arguments = request.get("arguments").map_or(Some(""), Value::as_str);
+                match (&target, app, template, arguments) {
+                    (Some(_), _, _, _) => Err(("target_open", "Close the existing target first".into())),
+                    (None, Some(app), Some(template), Some(arguments)) => match LiveSession::launch(&settings, PathBuf::from(app).as_path(), PathBuf::from(template).as_path(), arguments) {
+                        Ok(session) => { let value = json!({"target":session.connected, "capture_template":session.capture_template}); target = Some(session); Ok(value) },
+                        Err(error) => Err(("target_launch_failed", error)),
+                    },
+                    _ => Err(("invalid_arguments", "target_launch requires path and an existing absolute capture_directory; arguments must be a string".into())),
+                }
+            }
+            "target_connect" => {
+                let ident = request
+                    .get("ident")
+                    .and_then(Value::as_u64)
+                    .and_then(|v| u32::try_from(v).ok())
+                    .filter(|v| *v != 0);
+                match (&target, ident) {
+                    (Some(_), _) => Err(("target_open", "Close the existing target first".into())),
+                    (None, Some(ident)) => match LiveSession::connect(&settings, ident) {
+                        Ok(session) => {
+                            let value = json!({"target":session.connected});
+                            target = Some(session);
+                            Ok(value)
+                        }
+                        Err(error) => Err(("target_connect_failed", error)),
+                    },
+                    _ => Err((
+                        "invalid_arguments",
+                        "target_connect requires a nonzero ident".into(),
+                    )),
+                }
+            }
+            "target_events" => match &target {
+                None => Err(("no_target", "No target session is open".into())),
+                Some(session) => session
+                    .drain()
+                    .map(|events| json!({"connected":session.is_alive(),"events":events}))
+                    .map_err(|e| ("target_failed", e)),
+            },
+            "target_trigger" | "target_queue" | "target_cycle" => match &target {
+                None => Err(("no_target", "No target session is open".into())),
+                Some(session) => {
+                    let count = request
+                        .get("frames")
+                        .and_then(Value::as_u64)
+                        .and_then(|v| u32::try_from(v).ok())
+                        .filter(|v| *v > 0);
+                    let frame = request
+                        .get("frame")
+                        .and_then(Value::as_u64)
+                        .and_then(|v| u32::try_from(v).ok());
+                    let sent = match command {
+                        "target_cycle" => Some(session.cycle()),
+                        "target_trigger" => count.map(|count| session.trigger(count)),
+                        _ => frame
+                            .zip(count)
+                            .map(|(frame, count)| session.queue(frame, count)),
+                    };
+                    match sent {
+                        Some(result) => result
+                            .map(|_| json!({"submitted":true}))
+                            .map_err(|e| ("target_failed", e)),
+                        None => Err((
+                            "invalid_arguments",
+                            "A nonzero frames value and, for queue, frame are required".into(),
+                        )),
+                    }
+                }
+            },
+            "target_close" => match target.take() {
+                Some(session) => session
+                    .close()
+                    .map(|_| json!({}))
+                    .map_err(|e| ("target_close_failed", e)),
+                None => Ok(json!({})),
+            },
             "open" => match request
                 .get("path")
                 .and_then(Value::as_str)
@@ -324,6 +414,9 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
         }
     }
     if let Some((session, _)) = opened {
+        let _ = session.close();
+    }
+    if let Some(session) = target {
         let _ = session.close();
     }
     Ok(())
