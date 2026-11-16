@@ -1929,6 +1929,15 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     };
     let content = agent.send(&read("4", 8));
     assert_eq!(content["data"]["hex"], "0000404000004040", "{content}");
+    let enumeration = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"4", "length":4, "layout":"enum State : uint { Three = 0x40400000 }; State value;"}).to_string());
+    let enum_field = &enumeration["data"]["page"]["rows"][0]["fields"][0];
+    assert_eq!(enum_field["values"][0][0], "1077936128", "{enumeration}");
+    assert_eq!(enum_field["enum_type"], "State", "{enumeration}");
+    assert_eq!(
+        enum_field["enum_names"][0],
+        serde_json::json!(["Three"]),
+        "{enumeration}"
+    );
     let cbuffer = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"4", "length":8, "layout":"#pack(cbuffer) float2 position;"}).to_string());
     assert_eq!(cbuffer["data"]["page"]["packing"], "cbuffer", "{cbuffer}");
     assert_eq!(

@@ -14,12 +14,46 @@ struct Field {
     matrix_rows: usize,
     row_major: bool,
     packed: Option<PackedFormat>,
+    enum_def: Option<Arc<EnumDefinition>>,
     nested: Option<Arc<Layout>>,
     array_stride: usize,
     matrix_stride: usize,
     count: usize,
     offset: usize,
 }
+#[derive(Clone, Debug)]
+struct EnumDefinition {
+    name: String,
+    format: ScalarFormat,
+    flags: bool,
+    variants: Vec<(String, u64)>,
+}
+impl EnumDefinition {
+    fn names(&self, value: u64) -> Vec<String> {
+        if self.flags {
+            if value == 0 {
+                return self
+                    .variants
+                    .iter()
+                    .find(|(_, bits)| *bits == 0)
+                    .map(|(name, _)| vec![name.clone()])
+                    .unwrap_or_default();
+            }
+            self.variants
+                .iter()
+                .filter(|(_, bits)| value & *bits != 0)
+                .map(|(name, _)| name.clone())
+                .collect()
+        } else {
+            self.variants
+                .iter()
+                .find(|(_, bits)| value == *bits)
+                .map(|(name, _)| vec![name.clone()])
+                .unwrap_or_default()
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Packing {
     Scalar,
@@ -73,6 +107,12 @@ pub struct FieldValue {
     pub row_major: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub packed: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enum_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enum_flags: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enum_names: Option<Vec<Vec<String>>>,
     pub values: Vec<Vec<String>>,
 }
 #[derive(Serialize)]
@@ -121,7 +161,7 @@ fn tokens(source: &str) -> Result<Vec<&str>, String> {
             while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                 i += 1;
             }
-        } else if b"#()[];{}".contains(&bytes[i]) {
+        } else if b"#()[];{}:=,-".contains(&bytes[i]) {
             i += 1;
         } else {
             return Err("Unsupported format syntax".into());
@@ -157,6 +197,41 @@ fn base_type(name: &str) -> Option<ScalarFormat> {
         })
     })
 }
+fn enum_integer(text: &str, negative: bool, format: ScalarFormat) -> Result<u64, String> {
+    let signed = matches!(
+        format,
+        ScalarFormat::I8 | ScalarFormat::I16 | ScalarFormat::I32 | ScalarFormat::I64
+    );
+    if negative && !signed {
+        return Err("Unsigned enum value cannot be negative".into());
+    }
+    let (digits, radix) = if let Some(v) = text.strip_prefix("0x") {
+        (v, 16)
+    } else if text.len() > 1 && text.starts_with('0') {
+        (&text[1..], 8)
+    } else {
+        (text, 10)
+    };
+    let magnitude = u128::from_str_radix(digits, radix).map_err(|_| "Invalid enum value")?;
+    let width = format.width() * 8;
+    let limit = if signed {
+        1u128 << (width - 1)
+    } else {
+        1u128 << width
+    };
+    if (signed && ((!negative && magnitude >= limit) || (negative && magnitude > limit)))
+        || (!signed && magnitude >= limit)
+    {
+        return Err("Enum value is out of range".into());
+    }
+    let mask = (1u128 << width) - 1;
+    Ok(if negative {
+        (0u128.wrapping_sub(magnitude) & mask) as u64
+    } else {
+        magnitude as u64
+    })
+}
+
 impl Layout {
     pub fn stride(&self) -> usize {
         self.stride
@@ -184,9 +259,25 @@ impl Layout {
             i = 5;
         }
         let mut definitions: HashMap<&str, Arc<Layout>> = HashMap::new();
+        let mut enums: HashMap<&str, Arc<EnumDefinition>> = HashMap::new();
         let mut last = None;
-        while tokens.get(i) == Some(&"struct") {
-            let name = *tokens.get(i + 1).ok_or("Missing struct name")?;
+        loop {
+            let mut flags = false;
+            if tokens.get(i..i + 4).is_some_and(|slice| {
+                slice == ["[", "[", "flags", "]"] || slice == ["[", "[", "mask", "]"]
+            }) && tokens.get(i + 4) == Some(&"]")
+            {
+                flags = true;
+                i += 5;
+                if tokens.get(i) != Some(&"enum") {
+                    return Err("Flags annotation requires an enum".into());
+                }
+            }
+            let kind = tokens.get(i).copied();
+            if kind != Some("struct") && kind != Some("enum") {
+                break;
+            }
+            let name = *tokens.get(i + 1).ok_or("Missing type name")?;
             if !name
                 .bytes()
                 .next()
@@ -194,38 +285,107 @@ impl Layout {
                 || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
                 || base_type(name).is_some()
                 || definitions.contains_key(name)
-                || tokens.get(i + 2) != Some(&"{")
+                || enums.contains_key(name)
             {
-                return Err("Invalid or duplicate struct definition".into());
+                return Err("Invalid or duplicate type definition".into());
             }
-            let body = i + 3;
-            let end = (body..tokens.len())
-                .find(|&n| tokens[n] == "}")
-                .ok_or("Unterminated struct")?;
-            if tokens.get(end + 1) != Some(&";") {
-                return Err("Expected semicolon after struct".into());
+            if kind == Some("struct") {
+                if tokens.get(i + 2) != Some(&"{") {
+                    return Err("Invalid struct definition".into());
+                }
+                let body = i + 3;
+                let end = (body..tokens.len())
+                    .find(|&n| tokens[n] == "}")
+                    .ok_or("Unterminated struct")?;
+                if tokens.get(end + 1) != Some(&";") {
+                    return Err("Expected semicolon after struct".into());
+                }
+                let layout = Arc::new(Self::parse_body(
+                    &tokens[body..end],
+                    &definitions,
+                    &enums,
+                    packing,
+                    true,
+                )?);
+                definitions.insert(name, layout.clone());
+                last = Some(layout);
+                i = end + 2;
+            } else {
+                if tokens.get(i + 2) != Some(&":") || tokens.get(i + 4) != Some(&"{") {
+                    return Err("Enum requires an integer base type".into());
+                }
+                let format = base_type(tokens[i + 3])
+                    .filter(|v| {
+                        matches!(
+                            v,
+                            ScalarFormat::U8
+                                | ScalarFormat::I8
+                                | ScalarFormat::U16
+                                | ScalarFormat::I16
+                                | ScalarFormat::U32
+                                | ScalarFormat::I32
+                                | ScalarFormat::U64
+                                | ScalarFormat::I64
+                        )
+                    })
+                    .ok_or("Invalid enum base type")?;
+                let mut variants = Vec::new();
+                i += 5;
+                while tokens.get(i) != Some(&"}") {
+                    let variant = *tokens.get(i).ok_or("Unterminated enum")?;
+                    if !variant
+                        .bytes()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
+                        || !variant
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                        || tokens.get(i + 1) != Some(&"=")
+                    {
+                        return Err("Invalid enum value".into());
+                    }
+                    i += 2;
+                    let negative = tokens.get(i) == Some(&"-");
+                    if negative {
+                        i += 1;
+                    }
+                    let bits =
+                        enum_integer(tokens.get(i).ok_or("Missing enum value")?, negative, format)?;
+                    i += 1;
+                    variants.push((variant.to_owned(), bits));
+                    if tokens.get(i) == Some(&",") {
+                        i += 1;
+                    } else if tokens.get(i) != Some(&"}") {
+                        return Err("Expected comma in enum".into());
+                    }
+                }
+                if tokens.get(i + 1) != Some(&";") {
+                    return Err("Expected semicolon after enum".into());
+                }
+                enums.insert(
+                    name,
+                    Arc::new(EnumDefinition {
+                        name: name.to_owned(),
+                        format,
+                        flags,
+                        variants,
+                    }),
+                );
+                i += 2;
             }
-            let layout = Arc::new(Self::parse_body(
-                &tokens[body..end],
-                &definitions,
-                packing,
-                true,
-            )?);
-            definitions.insert(name, layout.clone());
-            last = Some(layout);
-            i = end + 2;
         }
         if i == tokens.len() {
             return last
                 .map(|layout| (*layout).clone())
                 .ok_or_else(|| "Layout must contain fields".into());
         }
-        Self::parse_body(&tokens[i..], &definitions, packing, false)
+        Self::parse_body(&tokens[i..], &definitions, &enums, packing, false)
     }
 
     fn parse_body(
         t: &[&str],
         definitions: &HashMap<&str, Arc<Layout>>,
+        enums: &HashMap<&str, Arc<EnumDefinition>>,
         packing: Packing,
         is_struct: bool,
     ) -> Result<Self, String> {
@@ -359,6 +519,7 @@ impl Layout {
                         matrix_rows: 1,
                         row_major: false,
                         packed: None,
+                        enum_def: None,
                         nested: Some(nested.clone()),
                         array_stride: nested.stride,
                         matrix_stride: 0,
@@ -368,6 +529,12 @@ impl Layout {
                 }
                 cursor = cursor.checked_add(size).ok_or("Layout size overflow")?;
                 continue;
+            }
+            let enum_def = enums.get(typename).cloned();
+            if enum_def.is_some()
+                && (unsigned || normalization.is_some() || packed_name.is_some() || major.is_some())
+            {
+                return Err("Unsupported qualifier on enum field".into());
             }
             let alias = match typename {
                 "uintten" => Some(("r10g10b10a2_uint", ScalarFormat::U32, 4)),
@@ -381,7 +548,9 @@ impl Layout {
             if let Some((name, _, _)) = alias {
                 packed_name = Some(name);
             }
-            let (mut format, matrix_rows, components) = if let Some((_, format, count)) = alias {
+            let (mut format, matrix_rows, components) = if let Some(definition) = &enum_def {
+                (definition.format, 1, 1)
+            } else if let Some((_, format, count)) = alias {
                 (format, 1, count)
             } else if let Some((left, right)) = typename.split_once('x') {
                 let (base, first) = left.split_at(left.len().saturating_sub(1));
@@ -585,6 +754,7 @@ impl Layout {
                     matrix_rows,
                     row_major,
                     packed,
+                    enum_def,
                     nested: None,
                     array_stride,
                     matrix_stride,
@@ -652,6 +822,7 @@ impl Layout {
                 }
                 let width = field.format.width();
                 let mut values = Vec::new();
+                let mut enum_names = field.enum_def.as_ref().map(|_| Vec::new());
                 for item in 0..field.count {
                     if let Some(packed) = field.packed {
                         let start = field_start + item * field.array_stride;
@@ -661,6 +832,11 @@ impl Layout {
                         continue;
                     }
                     let base = field_start + item * field.array_stride;
+                    if let (Some(definition), Some(names)) = (&field.enum_def, &mut enum_names) {
+                        let mut raw = [0u8; 8];
+                        raw[..width].copy_from_slice(&bytes[base..base + width]);
+                        names.push(definition.names(u64::from_le_bytes(raw)));
+                    }
                     let mut components = Vec::new();
                     for row in 0..field.matrix_rows {
                         for column in 0..field.components {
@@ -683,6 +859,12 @@ impl Layout {
                     matrix_columns: (field.matrix_rows > 1).then_some(field.components),
                     row_major: (field.matrix_rows > 1).then_some(field.row_major),
                     packed: field.packed.map(PackedFormat::name),
+                    enum_type: field
+                        .enum_def
+                        .as_ref()
+                        .map(|definition| definition.name.clone()),
+                    enum_flags: field.enum_def.as_ref().map(|definition| definition.flags),
+                    enum_names,
                     values,
                 });
             }
@@ -707,6 +889,47 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn enum_and_flags_preserve_numeric_values_and_names() {
+        let layout = Layout::parse("enum State : byte { Missing = -1, Ready = 2 }; [[flags]] enum Bits : uint { None = 0, A = 1, B = 2 }; struct Data { State s; Bits mask; }; Data d;").unwrap();
+        assert_eq!(layout.stride(), 8);
+        let page = layout.decode(0, &[255, 0, 0, 0, 3, 0, 0, 0]).unwrap();
+        assert_eq!(page.rows[0].fields[0].values[0], ["-1"]);
+        assert_eq!(
+            page.rows[0].fields[0].enum_names.as_ref().unwrap()[0],
+            ["Missing"]
+        );
+        assert_eq!(
+            page.rows[0].fields[1].enum_names.as_ref().unwrap()[0],
+            ["A", "B"]
+        );
+        let signed =
+            Layout::parse("enum Signed : long { Min = -0x8000000000000000 }; Signed value;")
+                .unwrap();
+        let page = signed.decode(0, &i64::MIN.to_le_bytes()).unwrap();
+        assert_eq!(page.rows[0].fields[0].values[0][0], i64::MIN.to_string());
+        assert_eq!(
+            page.rows[0].fields[0].enum_names.as_ref().unwrap()[0],
+            ["Min"]
+        );
+        let unknown = signed.decode(0, &0i64.to_le_bytes()).unwrap();
+        assert!(unknown.rows[0].fields[0].enum_names.as_ref().unwrap()[0].is_empty());
+        let zero = layout.decode(0, &[2, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        assert_eq!(
+            zero.rows[0].fields[1].enum_names.as_ref().unwrap()[0],
+            ["None"]
+        );
+        for bad in [
+            "enum E : ubyte { A = -1 }; E v;",
+            "enum E : byte { A = 128 }; E v;",
+            "enum E : float { A = 1 }; E v;",
+            "enum E : uint { A }; E v;",
+            "enum E : uint { A = 0x100000000 }; E v;",
+        ] {
+            assert!(Layout::parse(bad).is_err(), "{bad}");
+        }
+    }
+
     #[test]
     fn std140_and_cbuffer_align_arrays_matrices_and_structs() {
         let std = Layout::parse("#pack(std140) float a; float2 b; float c[2]; mat2x3 m;").unwrap();
