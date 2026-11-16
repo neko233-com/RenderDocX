@@ -1,8 +1,18 @@
 use renderdocx::replay::Action;
 
-/// A view of the upstream action hierarchy. Indices always refer to the snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventRow {
+    Action(usize),
+    Api { action: usize, event: usize },
+}
+
+/// Rows retain their snapshot identity even when filtering or expansion changes.
 #[derive(Default)]
 pub struct EventTree {
+    action_count: usize,
+    rows: Vec<EventRow>,
+    order: Vec<usize>,
+    show_api: bool,
     parents: Vec<Option<usize>>,
     names: Vec<String>,
     filter: String,
@@ -13,21 +23,53 @@ pub struct EventTree {
 
 impl EventTree {
     pub fn reset(&mut self, actions: &[Action]) {
+        self.action_count = actions.len();
+        self.rows = (0..actions.len()).map(EventRow::Action).collect();
+        self.order.clear();
         self.parents.clear();
         self.names = actions
             .iter()
             .map(|action| action.name.to_lowercase())
             .collect();
-        self.collapsed = vec![false; actions.len()];
         for (index, action) in actions.iter().enumerate() {
             let parent = usize::try_from(action.parent).ok().filter(|&p| p < index);
             self.parents.push(parent);
         }
+        for (action_index, action) in actions.iter().enumerate() {
+            for (event_index, event) in action.api_events.iter().enumerate() {
+                // The action itself occupies the row for its own API event.
+                if event.event_id == action.event_id {
+                    continue;
+                }
+                self.order.push(self.rows.len());
+                self.rows.push(EventRow::Api {
+                    action: action_index,
+                    event: event_index,
+                });
+                self.parents.push(self.parents[action_index]);
+                self.names.push(event.name.to_lowercase());
+            }
+            self.order.push(action_index);
+        }
+        self.collapsed = vec![false; self.parents.len()];
         self.rebuild();
     }
 
     pub fn len(&self) -> usize {
-        self.parents.len()
+        self.action_count
+    }
+
+    pub fn row(&self, index: usize) -> Option<EventRow> {
+        self.rows.get(index).copied()
+    }
+
+    pub fn show_api(&self) -> bool {
+        self.show_api
+    }
+
+    pub fn set_show_api(&mut self, show: bool) {
+        self.show_api = show;
+        self.rebuild();
     }
 
     pub fn has_children(&self, index: usize) -> bool {
@@ -55,7 +97,10 @@ impl EventTree {
         let mut matching: Vec<bool> = self
             .names
             .iter()
-            .map(|name| name.contains(&self.filter))
+            .enumerate()
+            .map(|(index, name)| {
+                (self.show_api || index < self.action_count) && name.contains(&self.filter)
+            })
             .collect();
         self.matching_children = vec![false; self.parents.len()];
         for index in (0..self.parents.len()).rev() {
@@ -70,10 +115,9 @@ impl EventTree {
         for (index, parent) in self.parents.iter().enumerate() {
             shown[index] = matching[index]
                 && parent.is_none_or(|parent| shown[parent] && !self.collapsed[parent]);
-            if shown[index] {
-                self.visible.push(index);
-            }
         }
+        self.visible
+            .extend(self.order.iter().copied().filter(|&index| shown[index]));
     }
 }
 
@@ -150,5 +194,46 @@ mod tests {
         replacement.name = "OTHER frame".into();
         tree.reset(&[replacement]);
         assert_eq!(tree.visible, [0]);
+    }
+
+    #[test]
+    fn api_calls_are_siblings_before_the_action_and_follow_its_parent_visibility() {
+        use renderdocx::replay::ApiEvent;
+        let mut parent = action(-1);
+        parent.event_id = 1;
+        parent.name = "Parent".into();
+        let mut draw = action(0);
+        draw.event_id = 4;
+        draw.name = "Draw".into();
+        draw.api_events = [(2, "Bind()"), (3, "State()"), (4, "Draw()")]
+            .into_iter()
+            .map(|(event_id, name)| ApiEvent {
+                event_id,
+                chunk_index: Some(event_id),
+                file_offset: "0".into(),
+                name: name.into(),
+            })
+            .collect();
+        let mut tree = EventTree::default();
+        tree.reset(&[parent, draw]);
+        assert_eq!(tree.visible, [0, 1]);
+        tree.set_show_api(true);
+        assert_eq!(tree.visible, [0, 2, 3, 1]);
+        assert_eq!(
+            tree.row(2),
+            Some(EventRow::Api {
+                action: 1,
+                event: 0
+            })
+        );
+        tree.toggle(0);
+        assert_eq!(tree.visible, [0]);
+        tree.toggle(0);
+        tree.set_filter("BIND");
+        assert_eq!(tree.visible, [0, 2]);
+        tree.set_show_api(false);
+        assert!(tree.visible.is_empty());
+        tree.set_filter("");
+        assert_eq!(tree.visible, [0, 1]);
     }
 }

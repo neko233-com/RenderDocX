@@ -27,6 +27,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Headless tests failed.' }
     cargo test --no-default-features --test agent_cli -- --ignored
     if ($LASTEXITCODE -ne 0) { throw 'Real-core and D3D11 integration tests failed.' }
+    Write-Host 'GPUI interaction tests include real D3D11 capture and replay.'
     cargo test --features ui-tests --bin renderdocx
     if ($LASTEXITCODE -ne 0) { throw 'GPUI interaction tests failed.' }
     if ($IncludeFast) {

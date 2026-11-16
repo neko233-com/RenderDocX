@@ -21,7 +21,7 @@ use renderdocx::{
 use std::path::PathBuf;
 
 mod event_tree;
-use event_tree::EventTree;
+use event_tree::{EventRow, EventTree};
 
 struct TexturePreview {
     path: PathBuf,
@@ -572,10 +572,6 @@ impl Workspace {
             });
         })
         .detach();
-    }
-
-    fn select(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.select_event(index, None, cx);
     }
 
     fn select_event(&mut self, index: usize, api_index: Option<usize>, cx: &mut Context<Self>) {
@@ -1208,11 +1204,26 @@ impl Workspace {
             "선택한 이벤트",
         );
         let event_filter_label = self.t(
-            "Filter action names",
-            "筛选操作名称",
-            "アクション名で絞り込み",
-            "작업 이름 필터",
+            "Filter event names",
+            "筛选事件名称",
+            "イベント名で絞り込み",
+            "이벤트 이름 필터",
         );
+        let show_api_events = if self.event_tree.show_api() {
+            self.t(
+                "Hide API events",
+                "隐藏 API 事件",
+                "API イベントを隠す",
+                "API 이벤트 숨기기",
+            )
+        } else {
+            self.t(
+                "Show API events",
+                "显示 API 事件",
+                "API イベントを表示",
+                "API 이벤트 표시",
+            )
+        };
         let textures_label = self.t("Textures", "纹理", "テクスチャ", "텍스처");
         let next_mip = self.t("Next mip", "切换 mip", "mip 切替", "mip 전환");
         let next_slice = self.t("Next slice", "切换层", "スライス切替", "슬라이스 전환");
@@ -1581,11 +1592,43 @@ impl Workspace {
                 cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
                     range
                         .filter_map(|row| {
-                            let index = *this.event_tree.visible.get(row)?;
+                            let node = *this.event_tree.visible.get(row)?;
+                            let (index, api_index) = match this.event_tree.row(node)? {
+                                EventRow::Action(index) => (index, None),
+                                EventRow::Api { action, event } => (action, Some(event)),
+                            };
                             let action = this.snapshot.as_ref()?.actions.get(index)?;
-                            let selected = this.selected == Some(index);
-                            let name = action.name.clone();
-                            let event = action.event_id;
+                            let (event, name, id): (u32, String, gpui::ElementId) = match api_index
+                            {
+                                Some(api_index) => {
+                                    let api = action.api_events.get(api_index)?;
+                                    let name = if api.name.is_empty() {
+                                        this.t(
+                                            "Unnamed API event",
+                                            "未命名 API 事件",
+                                            "名前のない API イベント",
+                                            "이름 없는 API 이벤트",
+                                        )
+                                        .to_owned()
+                                    } else {
+                                        api.name.clone()
+                                    };
+                                    (
+                                        api.event_id,
+                                        name,
+                                        SharedString::from(format!(
+                                            "event-api-{index}-{api_index}"
+                                        ))
+                                        .into(),
+                                    )
+                                }
+                                None => (action.event_id, action.name.clone(), index.into()),
+                            };
+                            let selected = this.selected == Some(index)
+                                && this
+                                    .pipeline
+                                    .as_ref()
+                                    .is_some_and(|state| state.event_id == event);
                             let indent = action.depth as f32 * 14.0 + 12.0;
                             Some(
                                 div()
@@ -1596,20 +1639,20 @@ impl Workspace {
                                     .items_center()
                                     .bg(rgb(if selected { 0x304c7c } else { 0x192332 }))
                                     .hover(|row| row.bg(rgb(0x263950)))
-                                    .child(if this.event_tree.has_children(index) {
+                                    .child(if this.event_tree.has_children(node) {
                                         div()
                                             .id(SharedString::from(format!("event-toggle-{index}")))
                                             .test_support()
                                             .w(px(22.))
                                             .flex_none()
                                             .cursor_pointer()
-                                            .child(if this.event_tree.is_collapsed(index) {
+                                            .child(if this.event_tree.is_collapsed(node) {
                                                 "▸"
                                             } else {
                                                 "▾"
                                             })
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.event_tree.toggle(index);
+                                                this.event_tree.toggle(node);
                                                 cx.notify();
                                             }))
                                             .into_any_element()
@@ -1618,7 +1661,7 @@ impl Workspace {
                                     })
                                     .child(
                                         div()
-                                            .id(index)
+                                            .id(id)
                                             .test_support()
                                             .flex_1()
                                             .flex()
@@ -1634,7 +1677,7 @@ impl Workspace {
                                             )
                                             .child(div().overflow_hidden().child(name))
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.select(index, cx)
+                                                this.select_event(index, api_index, cx)
                                             })),
                                     ),
                             )
@@ -2347,6 +2390,16 @@ impl Workspace {
                                                 .w_full(),
                                         ),
                                 )
+                                .child(button(
+                                    "toggle-api-events",
+                                    show_api_events,
+                                    self.event_tree.show_api(),
+                                    |this, cx| {
+                                        this.event_tree.set_show_api(!this.event_tree.show_api());
+                                        cx.notify();
+                                    },
+                                    cx,
+                                ))
                             })
                             .child(list),
                     )
@@ -3773,5 +3826,135 @@ mod ui_tests {
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(view.read(cx).shader_data.as_ref().unwrap().event_id, 41));
         assert_eq!(*events.lock().unwrap(), vec![42, 77, 43, 42, 41]);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("events-tab", cx);
+            window.click("toggle-api-events", cx);
+            window.render_frame(cx);
+            assert!(window.find("event-api-0-0").visible());
+            window.click("event-api-0-0", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 41));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("event-filter", cx);
+            window.input("iAsEt", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).event_tree.visible, [3]));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("event-api-0-0").visible());
+            window.click("toggle-api-events", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert!(view.read(cx).event_tree.visible.is_empty()));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("event-filter", cx);
+            window.press("ctrl-a", cx);
+            window.press("backspace", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).event_tree.visible, [0, 1, 2]));
+        assert_eq!(*events.lock().unwrap(), vec![42, 77, 43, 42, 41, 41]);
+
+        // When the local D3D11 fixtures are configured, repeat the interaction against
+        // a real capture and replay session, not the recording transport above.
+        #[cfg(windows)]
+        {
+            let bridge = std::env::var_os("RENDERDOCX_TEST_BRIDGE");
+            let fixture = std::env::var_os("RENDERDOCX_TEST_FIXTURE");
+            assert_eq!(
+                bridge.is_some(),
+                fixture.is_some(),
+                "configure both real-capture fixture paths together"
+            );
+            if let (Some(bridge), Some(fixture)) = (bridge, fixture) {
+                use std::os::windows::process::CommandExt;
+                let bridge = PathBuf::from(bridge);
+                let dir = tempfile::tempdir().unwrap();
+                let result = std::process::Command::new(fixture)
+                    .arg(bridge.parent().unwrap().join("renderdoc.dll"))
+                    .arg(dir.path().join("frame"))
+                    .creation_flags(0x08000000)
+                    .output()
+                    .unwrap();
+                assert!(
+                    result.status.success(),
+                    "fixture: {}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                let output = String::from_utf8(result.stdout).unwrap();
+                let capture = PathBuf::from(
+                    output
+                        .lines()
+                        .find_map(|line| line.strip_prefix("RENDERDOCX_CAPTURE="))
+                        .expect("capture path"),
+                );
+                let settings = Settings {
+                    replay_bridge: Some(bridge),
+                    ..Settings::default()
+                };
+                let (real_session, real_snapshot) = Session::open(&settings, &capture).unwrap();
+                let (action_index, api_index, event_id) = real_snapshot
+                    .actions
+                    .iter()
+                    .enumerate()
+                    .find_map(|(action_index, action)| {
+                        action
+                            .api_events
+                            .iter()
+                            .enumerate()
+                            .find(|(_, event)| {
+                                event.event_id != action.event_id
+                                    && event.name.contains("IASetPrimitiveTopology")
+                            })
+                            .map(|(api_index, event)| (action_index, api_index, event.event_id))
+                    })
+                    .expect("captured non-action topology event");
+                cx.update(|cx| {
+                    view.update(cx, |view, cx| {
+                        view.open_revision += 1;
+                        view.event_tree.reset(&real_snapshot.actions);
+                        view.snapshot = Some(real_snapshot);
+                        view.session = Some(real_session);
+                        view.selected = None;
+                        view.pipeline = None;
+                        view.tab = CaptureTab::Events;
+                        cx.notify();
+                    })
+                });
+                let api_row = format!("event-api-{action_index}-{api_index}");
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    window.click("toggle-api-events", cx);
+                    window.click("event-filter", cx);
+                    window.input("IASetPrimitiveTopology", cx);
+                    window.render_frame(cx);
+                    window.click(SharedString::from(api_row), cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx)
+                            .pipeline
+                            .as_ref()
+                            .is_some_and(|state| state.event_id == event_id)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real API event selection did not complete"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+        }
     }
 }

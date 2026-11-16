@@ -4,9 +4,9 @@ RenderDocX is an in-progress Rust + GPUI desktop frontend for [RenderDoc](https:
 
 **Status: early prototype, not a replacement for RenderDoc.** The Rust workspace can launch an application, connect to a local RenderDoc target, trigger a capture and open reported local captures. It can open an `.rdc` with its version-matched replay helper, expand or collapse the action hierarchy, browse resource metadata, request event replay, inspect common pipeline state, bound shader disassembly and buffer bytes, select a texture mip, slice, sample and channel for preview, and export it to PNG without overwriting existing files. Preview and export use RenderDoc's 8-bit PNG mapping. Some detailed inspection and `.cap` files still use `qrenderdoc`. A submitted capture request is not proof that a capture was produced.
 
-The event browser can filter action names using case-insensitive literal text, retaining matching actions' ancestors and existing expansion state. RenderDoc's full event-filter expression language is not implemented yet.
+The event browser can filter visible event names using case-insensitive literal text, retaining matching events' ancestors and existing expansion state. It defaults to action rows; **Show API events** also displays preceding API calls as siblings of their associated actions. RenderDoc's full event-filter expression language is not implemented yet.
 
-Select an action and open **API calls** to inspect and replay its associated API events. The list currently shows structured chunk names rather than fully formatted call parameters; displaying API events directly in the main hierarchy remains work in progress.
+Select an action and open **API calls** to inspect its associated API events, or select those events in the main hierarchy after enabling them. Both views can replay the selected event. API calls currently show structured chunk names rather than fully formatted call parameters.
 
 The interface detects the system language on startup and supports English, Simplified Chinese, Japanese, and Korean, with a manual language override. Its settings are stored in the operating system's user configuration directory.
 
@@ -46,7 +46,7 @@ The native event browser, texture preview, and event replay are initial implemen
 
 ## Verification
 
-On Windows x64, `./scripts/test-windows.ps1` builds the matching core and helpers, runs headless protocol and Agent CLI tests, exercises generated D3D11 capture and replay as well as live target discovery, connection and capture, and runs GPUI interaction tests. Add `-IncludeFast` to include the experimental backend. The real-core tests need a supported D3D11 device or WARP and are marked ignored when running `cargo test` alone. Other graphics APIs, GPU combinations, Unity/Tuanjie, and platforms still need coverage.
+On Windows x64, `./scripts/test-windows.ps1` builds the matching core and helpers, runs headless protocol and Agent CLI tests, exercises generated D3D11 capture and replay as well as live target discovery, connection and capture, and runs GPUI interaction tests with both a recording transport and a generated D3D11 capture. Add `-IncludeFast` to include the experimental backend. The real-core tests need a supported D3D11 device or WARP; the headless real-core tests are marked ignored when running `cargo test` alone, and the GPUI real-capture portion runs when both fixture environment variables are set. Other graphics APIs, GPU combinations, Unity/Tuanjie, and platforms still need coverage.
 
 ## License
 
