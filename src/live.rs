@@ -203,6 +203,168 @@ pub fn parse_target_pid(value: &std::ffi::OsStr) -> Option<u32> {
     value.to_str()?.parse::<u32>().ok().filter(|pid| *pid != 0)
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RemoteEntry {
+    pub name: String,
+    pub flags: u32,
+    pub last_modified: u32,
+    pub size: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RemoteDirectory {
+    pub home: String,
+    pub path: String,
+    pub drivers: Vec<String>,
+    pub proxies: Vec<String>,
+    pub entries: Vec<RemoteEntry>,
+}
+
+fn remote_request(
+    settings: &Settings,
+    args: &[&std::ffi::OsStr],
+    expected: &str,
+) -> Result<Value, String> {
+    let mut command = Command::new(target_helper(settings)?);
+    command
+        .args(args)
+        .stderr(Stdio::null())
+        .env_remove("RENDERDOCX_CONNECT_PID")
+        .env_remove("RENDERDOCX_OPEN_CAPTURE");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let output = command.output().map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8(output.stdout).map_err(|e| e.to_string())?;
+    let payload = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("RENDERDOCX-TARGET/1 "))
+        .ok_or("Remote server produced no response")?;
+    let value: Value = serde_json::from_str(payload).map_err(|e| e.to_string())?;
+    if !output.status.success() || value.get("type").and_then(Value::as_str) != Some(expected) {
+        return Err(value
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("Remote server request failed")
+            .to_owned());
+    }
+    Ok(value)
+}
+
+pub fn browse_remote(
+    settings: &Settings,
+    url: &str,
+    path: Option<&str>,
+) -> Result<RemoteDirectory, String> {
+    if !valid_remote_url(url) || path.is_some_and(|p| p.is_empty() || p.contains('\0')) {
+        return Err("Invalid remote server URL or directory".into());
+    }
+    let mut args: Vec<&std::ffi::OsStr> = vec!["--remote-list".as_ref(), url.as_ref()];
+    if let Some(path) = path {
+        args.push(path.as_ref());
+    }
+    let result: RemoteDirectory =
+        serde_json::from_value(remote_request(settings, &args, "remote_directory")?)
+            .map_err(|e| e.to_string())?;
+    if result
+        .entries
+        .iter()
+        .any(|entry| entry.size.parse::<u64>().is_err())
+    {
+        return Err("Invalid remote directory response".into());
+    }
+    Ok(result)
+}
+
+pub fn download_remote_capture(
+    settings: &Settings,
+    url: &str,
+    remote_path: &str,
+    size: u64,
+    root: &Path,
+) -> Result<PathBuf, String> {
+    if !valid_remote_url(url)
+        || remote_path.is_empty()
+        || remote_path.contains('\0')
+        || size == 0
+        || !root.is_absolute()
+        || !root.is_dir()
+    {
+        return Err("Invalid remote capture path, size or download directory".into());
+    }
+    let folder = tempfile::Builder::new()
+        .prefix("remote-file-")
+        .tempdir_in(root)
+        .map_err(|e| e.to_string())?;
+    let path = folder.path().join("capture.rdc");
+    remote_request(
+        settings,
+        &[
+            "--remote-copy".as_ref(),
+            url.as_ref(),
+            remote_path.as_ref(),
+            path.as_os_str(),
+        ],
+        "remote_copy",
+    )?;
+    let metadata = path.metadata().map_err(|e| e.to_string())?;
+    if !metadata.is_file() || metadata.len() != size {
+        return Err("Downloaded capture size differs from remote listing".into());
+    }
+    let _ = folder.keep();
+    Ok(path)
+}
+
+pub fn remote_parent(directory: &str) -> Option<String> {
+    let trimmed = directory.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() || (trimmed.len() == 2 && trimmed.as_bytes().get(1) == Some(&b':')) {
+        return None;
+    }
+    let index = trimmed.rfind(['/', '\\'])?;
+    if index == 0 {
+        return Some(trimmed[..=index].to_owned());
+    }
+    if index == 2 && trimmed.as_bytes().get(1) == Some(&b':') {
+        return Some(trimmed[..=index].to_owned());
+    }
+    Some(trimmed[..index].to_owned())
+}
+
+pub fn remote_join(directory: &str, name: &str) -> Option<String> {
+    if directory == "/"
+        && name.len() >= 2
+        && name.as_bytes()[0].is_ascii_alphabetic()
+        && name.as_bytes()[1] == b':'
+        && name[2..].chars().all(|c| c == '/' || c == '\\')
+    {
+        return Some(format!("{}:\\", &name[..1]));
+    }
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', '\0']) {
+        return None;
+    }
+    let windows = directory.as_bytes().get(1) == Some(&b':')
+        || directory.starts_with("\\\\")
+        || directory.contains('\\');
+    let separator = if windows { '\\' } else { '/' };
+    Some(
+        format!(
+            "{}{}{}",
+            directory,
+            if directory.ends_with(['/', '\\']) {
+                ""
+            } else if windows {
+                "\\"
+            } else {
+                "/"
+            },
+            name
+        )
+        .replace('/', &separator.to_string()),
+    )
+}
+
 pub fn enumerate(settings: &Settings) -> Result<Vec<u32>, String> {
     enumerate_target(settings, None)
 }
@@ -694,5 +856,28 @@ mod tests {
         assert!(invalid.validate().is_err());
         let whitespace: LaunchConfiguration = serde_json::from_str(r#"{"environment":[{"name":" NAME ","value":"value","operation":"set","separator":"no_sep"}]}"#).unwrap();
         assert!(whitespace.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod remote_path_tests {
+    use super::{remote_join, remote_parent};
+    #[test]
+    fn remote_paths_use_the_remote_syntax() {
+        assert_eq!(
+            remote_join("/home/user", "capture.rdc").as_deref(),
+            Some("/home/user/capture.rdc")
+        );
+        assert_eq!(
+            remote_join("C:\\Users\\Name", "capture.rdc").as_deref(),
+            Some("C:\\Users\\Name\\capture.rdc")
+        );
+        assert_eq!(remote_join("/", "folder").as_deref(), Some("/folder"));
+        assert!(remote_join("/tmp", "../other").is_none());
+        assert_eq!(remote_join("/", "C:").as_deref(), Some("C:\\"));
+        assert_eq!(remote_join("/", "C:/").as_deref(), Some("C:\\"));
+        assert_eq!(remote_parent("/home").as_deref(), Some("/"));
+        assert_eq!(remote_parent("C:\\Users").as_deref(), Some("C:\\"));
+        assert_eq!(remote_parent("C:\\"), None);
     }
 }

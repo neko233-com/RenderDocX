@@ -1,7 +1,10 @@
 use renderdocx::{
     backend::Settings,
     debug_navigation::{Breakpoint, DebugNavigator, SourceStep, StopReason},
-    live::{CaptureOptions, LaunchConfiguration, LiveSession, enumerate_target},
+    live::{
+        CaptureOptions, LaunchConfiguration, LiveSession, browse_remote, download_remote_capture,
+        enumerate_target,
+    },
     mesh_draw, mesh_indices, mesh_positions,
     replay::{
         BUFFER_PAGE_LIMIT, ComputeDebugSelection, DebugState, DebugTrace, MeshInfo, MeshSelection,
@@ -43,7 +46,7 @@ fn usage() -> Value {
         {"name":"select","arguments":["capture.rdc","event_id"],"description":"Replay a capture to an event."},
         {"name":"serve","arguments":[],"description":"Serve sequential JSONL requests using a persistent replay session."},
         {"name":"capabilities","arguments":[],"description":"Describe the commands currently implemented."}
-    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","shader_bindings","shader_binding_read","shader_constants","shader_export","shader_apply","shader_revert","debug_vertex","debug_pixel","debug_compute","debug_collect","debug_state","debug_breakpoint","debug_navigate","debug_next","debug_stop","vertex_input","mesh","mesh_read","mesh_draw","mesh_draw_export","structure","structure_buffer","callstack","read_buffer","resource_usage","resource_rename","annotation_read","annotation_write","descriptors","debug_messages","clear_debug_messages","counter_fetch","counter_page","pick_pixel","pixel_history","texture_statistics","export_texture","close","target_list","target_launch","target_connect","target_connect_pid","target_copy","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"mesh_draw_page_limit":renderdocx::mesh_draw::PAGE_LIMIT,"shader_binding_page_limit":renderdocx::replay::SHADER_BINDING_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"counter_page_limit":renderdocx::replay::COUNTER_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
+    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","shader_bindings","shader_binding_read","shader_constants","shader_export","shader_apply","shader_revert","debug_vertex","debug_pixel","debug_compute","debug_collect","debug_state","debug_breakpoint","debug_navigate","debug_next","debug_stop","vertex_input","mesh","mesh_read","mesh_draw","mesh_draw_export","structure","structure_buffer","callstack","read_buffer","resource_usage","resource_rename","annotation_read","annotation_write","descriptors","debug_messages","clear_debug_messages","counter_fetch","counter_page","pick_pixel","pixel_history","texture_statistics","export_texture","close","remote_list","remote_download","target_list","target_launch","target_connect","target_connect_pid","target_copy","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"mesh_draw_page_limit":renderdocx::mesh_draw::PAGE_LIMIT,"shader_binding_page_limit":renderdocx::replay::SHADER_BINDING_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"counter_page_limit":renderdocx::replay::COUNTER_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
 }
 
 fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
@@ -163,6 +166,48 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         .map(|idents| json!({"idents":idents,"url":url}))
                         .map_err(|error| ("target_discovery_failed", error)),
                     None => Err(("invalid_arguments", "url must be a string or null".into())),
+                }
+            }
+            "remote_list" => {
+                let url = request
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty());
+                let path = match request.get("path") {
+                    None => Some(None),
+                    Some(v) => v.as_str().filter(|s| !s.is_empty()).map(Some),
+                };
+                match (url, path) {
+                    (Some(url), Some(path)) => browse_remote(&settings, url, path)
+                        .map(|directory| json!({"directory":directory}))
+                        .map_err(|e| ("remote_list_failed", e)),
+                    _ => Err((
+                        "invalid_arguments",
+                        "remote_list requires url and optional path".into(),
+                    )),
+                }
+            }
+            "remote_download" => {
+                let url = request
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty());
+                let path = request
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty());
+                let directory = request
+                    .get("capture_directory")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty());
+                let size = request
+                    .get("size")
+                    .and_then(Value::as_str)
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .filter(|n| *n > 0);
+                match (url, path, directory, size) {
+                    (Some(url), Some(path), Some(directory), Some(size)) => download_remote_capture(&settings, url, path, size, PathBuf::from(directory).as_path()).map(|path| json!({"path":path})).map_err(|e| ("remote_download_failed",e)),
+                    _ => Err(("invalid_arguments", "remote_download requires url, path, capture_directory and nonzero decimal-string size".into())),
                 }
             }
             "target_launch" => {

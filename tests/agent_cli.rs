@@ -2387,7 +2387,58 @@ fn real_remote_replay_loopback() {
             .unwrap(),
     );
     let mut agent = Agent::new(bridge.to_str());
-    let request = serde_json::json!({"command":"open", "path":capture, "remote_url":format!("127.0.0.1:{port}")}).to_string();
+    let url = format!("127.0.0.1:{port}");
+    let listing_request =
+        serde_json::json!({"command":"remote_list", "url":url, "path":dir.path()}).to_string();
+    let mut listing = Value::Null;
+    for _ in 0..20 {
+        listing = agent.send(&listing_request);
+        if listing["ok"] == true {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(listing["ok"], true, "{listing}");
+    assert!(
+        !listing["data"]["directory"]["home"]
+            .as_str()
+            .unwrap()
+            .is_empty()
+    );
+    let filename = PathBuf::from(capture)
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let entry = listing["data"]["directory"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == filename)
+        .expect("remote capture entry");
+    let size = entry["size"].as_str().unwrap();
+    let download = agent.send(
+        &serde_json::json!({"command":"remote_download", "url":url, "path":capture,
+        "size":size, "capture_directory":dir.path()})
+        .to_string(),
+    );
+    assert_eq!(download["ok"], true, "{download}");
+    assert_eq!(
+        std::fs::read(download["data"]["path"].as_str().unwrap()).unwrap(),
+        std::fs::read(capture).unwrap()
+    );
+    let mismatch = agent.send(
+        &serde_json::json!({"command":"remote_download", "url":url, "path":capture,
+        "size":"1", "capture_directory":dir.path()})
+        .to_string(),
+    );
+    assert_eq!(
+        mismatch["error"]["code"], "remote_download_failed",
+        "{mismatch}"
+    );
+    let request =
+        serde_json::json!({"command":"open", "path":capture, "remote_url":url}).to_string();
     let mut opened = Value::Null;
     for _ in 0..20 {
         opened = agent.send(&request);

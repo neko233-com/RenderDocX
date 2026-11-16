@@ -83,6 +83,46 @@ int run(const std::vector<std::string> &args)
   { failure("RenderDoc core does not match the version and commit used to build this bridge"); return 1; }
   GlobalEnvironment env;
   RENDERDOC_InitialiseReplay(env, {});
+  if(args.size() >= 3 && args.size() <= 5 && (args[1] == "--remote-list" || args[1] == "--remote-copy"))
+  {
+    if(args[2].empty() || (args[1] == "--remote-list" && args.size() > 4) ||
+       (args[1] == "--remote-copy" && (args.size() != 5 || args[3].empty() || args[4].empty())))
+    { failure("Invalid remote server request"); RENDERDOC_ShutdownReplay(); return 2; }
+    IRemoteServer *server = nullptr;
+    ResultDetails connected = RENDERDOC_CreateRemoteServerConnection(args[2].c_str(), &server);
+    if(!connected.OK() || !server)
+    { failure(connected.OK() ? "Remote server returned no connection" : detail(connected)); RENDERDOC_ShutdownReplay(); return 1; }
+    if(args[1] == "--remote-copy")
+    {
+      server->CopyCaptureFromRemote(args[3].c_str(), args[4].c_str(), nullptr);
+      std::cout << "\nRENDERDOCX-TARGET/1 {\"type\":\"remote_copy\"}" << std::endl;
+    }
+    else
+    {
+      const rdcstr home = server->GetHomeFolder();
+      const rdcstr path = args.size() == 4 ? rdcstr(args[3].c_str()) : home;
+      if(path.empty()) { failure("Remote server returned an empty directory"); server->ShutdownConnection(); RENDERDOC_ShutdownReplay(); return 1; }
+      const auto files = server->ListFolder(path);
+      const auto drivers = server->RemoteSupportedReplays();
+      const auto proxies = server->LocalProxies();
+      std::cout << "\nRENDERDOCX-TARGET/1 {\"type\":\"remote_directory\",\"home\":"; json(home);
+      std::cout << ",\"path\":"; json(path);
+      std::cout << ",\"drivers\":[";
+      for(size_t i = 0; i < drivers.size(); ++i) { if(i) std::cout << ','; json(drivers[i]); }
+      std::cout << "],\"proxies\":[";
+      for(size_t i = 0; i < proxies.size(); ++i) { if(i) std::cout << ','; json(proxies[i]); }
+      std::cout << "],\"entries\":[";
+      for(size_t i = 0; i < files.size(); ++i)
+      {
+        if(i) std::cout << ',';
+        std::cout << "{\"name\":"; json(files[i].filename);
+        std::cout << ",\"flags\":" << uint32_t(files[i].flags) << ",\"last_modified\":" << files[i].lastmod
+                  << ",\"size\":\"" << files[i].size << "\"}";
+      }
+      std::cout << "]}" << std::endl;
+    }
+    server->ShutdownConnection(); RENDERDOC_ShutdownReplay(); return 0;
+  }
   if((args.size() == 2 && args[1] == "--enumerate") || (args.size() == 3 && args[1] == "--enumerate-remote" && !args[2].empty()))
   {
     std::vector<uint32_t> idents;
