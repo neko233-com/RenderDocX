@@ -19,6 +19,8 @@ The frame information, replay debug messages and recorded frame statistics are a
 
 The initial mesh output viewer can page vertex bytes or index bytes and decode 8-, 16- and 32-bit raw indices; it shows base vertex separately and does not yet reconstruct the complete draw-ordered geometry viewer. Its GPU-backed index-switch UI test is present but has not been run for this change.
 
+The shader inspector can switch between disassembly and captured source files, displaying source in 200-line pages. The CLI's shader report continues to expose complete source contents. Source editing, compilation and replacement workflows remain outstanding.
+
 An initial descriptor inspector pages the selected event's descriptor accesses or fixed-size stores through RenderDoc, including logical locations, resource references and sampler fields. Variable-sized store enumeration, richer typed presentation and cross-API descriptor validation remain outstanding.
 
 Version-one capture notes and bookmarks can be read and explicitly saved through RenderDoc sections from GPUI and the agent CLI. Concurrent-writer checks are best-effort rather than an atomic lock; ordinary window-close requests are blocked for unsaved drafts and in-flight operations. Forced termination, external-editor interoperability and broader platform validation remain outstanding.

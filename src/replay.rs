@@ -2877,7 +2877,16 @@ pub mod test_support {
                 debuggable: None,
                 source_debug_info: None,
                 debug_status: None,
-                source_files: Vec::new(),
+                source_files: vec![
+                    ShaderSourceFile {
+                        filename: "fixture.hlsl".into(),
+                        contents: (0..205).map(|i| format!("line {i}\n")).collect(),
+                    },
+                    ShaderSourceFile {
+                        filename: "include.hlsl".into(),
+                        contents: "included\n".into(),
+                    },
+                ],
             })
         }
     }

@@ -103,6 +103,21 @@ fn parse_optional_debug_selector(value: &str) -> Result<Option<u32>, ()> {
         .ok_or(())
 }
 
+const SHADER_SOURCE_PAGE_LINES: usize = 200;
+
+fn shader_source_page(contents: &str, page: usize) -> (usize, Vec<(usize, &str)>) {
+    let total = contents.lines().count();
+    let start = page.saturating_mul(SHADER_SOURCE_PAGE_LINES);
+    let lines = contents
+        .lines()
+        .enumerate()
+        .skip(start)
+        .take(SHADER_SOURCE_PAGE_LINES)
+        .map(|(line, text)| (line + 1, text))
+        .collect();
+    (total, lines)
+}
+
 fn collect_shader_debug(
     session: &Session,
     event: u32,
@@ -352,6 +367,24 @@ mod pixel_selector_tests {
     }
 }
 
+#[cfg(test)]
+mod shader_source_tests {
+    use super::shader_source_page;
+    #[test]
+    fn source_pages_preserve_unicode_and_line_numbers() {
+        let source = (1..=205).map(|i| format!("第{i}行\n")).collect::<String>();
+        let (total, first) = shader_source_page(&source, 0);
+        assert_eq!(total, 205);
+        assert_eq!(first.len(), 200);
+        assert_eq!(first[0], (1, "第1行"));
+        let (_, last) = shader_source_page(&source, 1);
+        assert_eq!(last.len(), 5);
+        assert_eq!(last[0], (201, "第201行"));
+        assert!(shader_source_page(&source, usize::MAX).1.is_empty());
+        assert_eq!(shader_source_page("", 0).0, 0);
+    }
+}
+
 fn structured_value(node: &StructuredNode) -> String {
     match (&node.custom_string, &node.value) {
         (Some(custom), Some(value)) if custom != value => format!("{custom} ({value})"),
@@ -444,6 +477,8 @@ struct Workspace {
     resource_pending: bool,
     selected_shader: Option<usize>,
     shader_data: Option<ShaderReport>,
+    shader_source: Option<usize>,
+    shader_source_page: usize,
     structure: StructureView,
     mesh: MeshView,
     input_page: Option<InputPage>,
@@ -1740,6 +1775,10 @@ impl Workspace {
         };
         if stage >= SHADER_STAGES.len() {
             return;
+        }
+        if self.selected_shader != Some(stage) || self.shader_data.is_none() {
+            self.shader_source = None;
+            self.shader_source_page = 0;
         }
         self.selected_shader = Some(stage);
         self.shader_data = None;
@@ -5904,7 +5943,7 @@ impl Workspace {
                         .child(line)
                 }))
         } else if self.tab == CaptureTab::Shaders {
-            let report = self.shader_data.clone();
+            let report = self.shader_data.as_ref();
             let compute_selected = self.selected_shader == Some(5) && report.is_some();
             let dispatch_action = detail.as_ref().filter(|action| {
                 self.pipeline
@@ -6066,7 +6105,8 @@ impl Workspace {
                             )
                         })
                         .collect::<Vec<_>>();
-                    view.child(format!("{entry_label}: {}", shader.entry_point))
+                    let mut view = view
+                        .child(format!("{entry_label}: {}", shader.entry_point))
                         .child(format!(
                             "{target_label}: {}",
                             if shader.target.is_empty() {
@@ -6080,15 +6120,117 @@ impl Workspace {
                         .child(format!("{shader_inputs_label}: {}", inputs.len()))
                         .children(inputs.into_iter().map(|line| div().text_sm().child(line)))
                         .child(format!("{shader_outputs_label}: {}", outputs.len()))
-                        .children(outputs.into_iter().map(|line| div().text_sm().child(line)))
-                        .child(format!("{disasm_label} · {}", shader.encoding))
+                        .children(outputs.into_iter().map(|line| div().text_sm().child(line)));
+                    let mut selectors = div().flex().flex_wrap().gap_2().child(button(
+                        "shader-show-disassembly",
+                        disasm_label,
+                        self.shader_source.is_none(),
+                        |this, cx| {
+                            this.shader_source = None;
+                            this.shader_source_page = 0;
+                            cx.notify();
+                        },
+                        cx,
+                    ));
+                    for (index, file) in shader.source_files.iter().enumerate() {
+                        let label = if file.filename.is_empty() {
+                            format!(
+                                "{} {}",
+                                self.t("Source", "源码", "ソース", "소스"),
+                                index + 1
+                            )
+                        } else {
+                            file.filename.clone()
+                        };
+                        selectors = selectors.child(
+                            div()
+                                .id(("shader-source-file", index))
+                                .test_support()
+                                .cursor_pointer()
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .bg(rgb(if self.shader_source == Some(index) {
+                                    0x4169e1
+                                } else {
+                                    0x252f40
+                                }))
+                                .child(label)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.shader_source = Some(index);
+                                    this.shader_source_page = 0;
+                                    cx.notify();
+                                })),
+                        );
+                    }
+                    view = view.child(selectors);
+                    if let Some(file) = self
+                        .shader_source
+                        .and_then(|index| shader.source_files.get(index))
+                    {
+                        let (total, lines) =
+                            shader_source_page(&file.contents, self.shader_source_page);
+                        let start = self
+                            .shader_source_page
+                            .saturating_mul(SHADER_SOURCE_PAGE_LINES)
+                            .min(total);
+                        let end = start + lines.len();
+                        view.child(format!(
+                            "{} · {}–{} / {}",
+                            file.filename,
+                            if total == 0 { 0 } else { start + 1 },
+                            start + lines.len(),
+                            total
+                        ))
                         .child(
                             div()
-                                .id("shader-disassembly")
+                                .flex()
+                                .gap_2()
+                                .child(button(
+                                    "shader-source-previous",
+                                    previous_label,
+                                    false,
+                                    |this, cx| {
+                                        this.shader_source_page =
+                                            this.shader_source_page.saturating_sub(1);
+                                        cx.notify();
+                                    },
+                                    cx,
+                                ))
+                                .child(button(
+                                    "shader-source-next",
+                                    next_label,
+                                    false,
+                                    move |this, cx| {
+                                        if end < total {
+                                            this.shader_source_page += 1;
+                                            cx.notify();
+                                        }
+                                    },
+                                    cx,
+                                )),
+                        )
+                        .child(
+                            div()
+                                .id("shader-source-code")
                                 .test_support()
                                 .text_sm()
-                                .child(shader.disassembly),
+                                .children(
+                                    lines.into_iter().map(|(line, text)| {
+                                        div().child(format!("{line:>5}  {text}"))
+                                    }),
+                                ),
                         )
+                    } else {
+                        view.child(format!("{disasm_label} · {}", shader.encoding))
+                            .child(
+                                div()
+                                    .id("shader-disassembly")
+                                    .test_support()
+                                    .text_sm()
+                                    .child(shader.disassembly.clone()),
+                            )
+                    }
                 })
                 .when(self.shader_data.is_none(), |view| {
                     view.child(div().text_color(rgb(0x9eacc0)).child(shader_empty))
@@ -8400,6 +8542,8 @@ fn main() {
                         resource_pending: false,
                         selected_shader: None,
                         shader_data: None,
+                        shader_source: None,
+                        shader_source_page: 0,
                         structure: StructureView::default(),
                         mesh: MeshView::default(),
                         input_page: None,
@@ -8582,6 +8726,8 @@ mod ui_tests {
                         resource_pending: false,
                         selected_shader: None,
                         shader_data: None,
+                        shader_source: None,
+                        shader_source_page: 0,
                         structure: StructureView::default(),
                         mesh: MeshView::default(),
                         input_page: None,
@@ -8997,6 +9143,8 @@ mod ui_tests {
                         resource_pending: false,
                         selected_shader: None,
                         shader_data: None,
+                        shader_source: None,
+                        shader_source_page: 0,
                         structure: StructureView::default(),
                         mesh: MeshView::default(),
                         input_page: None,
@@ -9288,6 +9436,16 @@ mod ui_tests {
                 cx,
             );
             assert!(window.find("shader-disassembly").visible());
+            window.click(("shader-source-file", 0usize), cx);
+            window.render_frame(cx);
+            assert!(window.find("shader-source-code").visible());
+            window.click("shader-source-next", cx);
+            assert_eq!(view.read(cx).shader_source_page, 1);
+            window.click("shader-source-previous", cx);
+            assert_eq!(view.read(cx).shader_source_page, 0);
+            window.click(("shader-source-file", 1usize), cx);
+            assert_eq!(view.read(cx).shader_source, Some(1));
+            window.click("shader-show-disassembly", cx);
             window.click("shader-next-target", cx);
         })
         .unwrap();
