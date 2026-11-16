@@ -1706,13 +1706,37 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     );
     let external = std::env::var_os("RENDERDOCX_TEST_SHADER_PROCESSOR")
         .expect("set RENDERDOCX_TEST_SHADER_PROCESSOR");
-    let processed = agent.send(&serde_json::json!({"command":"shader_apply","stage":"fragment","encoding":5,"entry":"main","source":"float4 main() : SV_Target { return float4(1,0,0,1); }","flags":fragment_report["data"]["shader"]["compile_flags"],"processor":{"executable":std::path::PathBuf::from(external),"input_encoding":5,"output_encoding":5,"arguments":["{stdin}"]}}).to_string());
+    let processed = agent.send(&serde_json::json!({"command":"shader_apply","stage":"fragment","encoding":5,"entry":"main","source":"float4 main() : SV_Target { return float4(1,0,0,1); }","flags":fragment_report["data"]["shader"]["compile_flags"],"processor":{"executable":std::path::PathBuf::from(external.clone()),"input_encoding":5,"output_encoding":5,"arguments":["{stdin}"]}}).to_string());
     assert_eq!(processed["data"]["edit"]["applied"], true, "{processed}");
     assert!(
         processed["data"]["processor_diagnostics"]
             .as_str()
             .unwrap()
             .contains("fixture compiler diagnostics")
+    );
+    assert_eq!(
+        agent.send(&pick)["data"]["pixel"]["bits"],
+        changed["data"]["pixel"]["bits"]
+    );
+    let processor_failure = agent.send(&serde_json::json!({"command":"shader_apply","stage":"fragment","encoding":5,"entry":"main","source":"float4 main() : SV_Target { return 0; }","processor":{"executable":std::path::PathBuf::from(external.clone()),"input_encoding":5,"output_encoding":5,"arguments":["--fail"]}}).to_string());
+    assert_eq!(
+        processor_failure["error"]["code"], "shader_processor_failed",
+        "{processor_failure}"
+    );
+    assert_eq!(
+        agent.send(&pick)["data"]["pixel"]["bits"],
+        changed["data"]["pixel"]["bits"]
+    );
+    let unsupported_processor = agent.send(&serde_json::json!({"command":"shader_apply","stage":"fragment","encoding":5,"entry":"main","source":"float4 main() : SV_Target { return 0; }","processor":{"executable":"definitely-missing-processor","input_encoding":5,"output_encoding":999,"arguments":[]}}).to_string());
+    assert_eq!(
+        unsupported_processor["error"]["code"], "shader_processor_failed",
+        "{unsupported_processor}"
+    );
+    assert!(
+        unsupported_processor["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unsupported")
     );
     assert_eq!(
         agent.send(&pick)["data"]["pixel"]["bits"],
