@@ -2437,8 +2437,12 @@ fn real_remote_replay_loopback() {
         mismatch["error"]["code"], "remote_download_failed",
         "{mismatch}"
     );
+    let local_gpus = agent.send(r#"{"command":"gpu_list"}"#);
+    assert_eq!(local_gpus["ok"], true, "{local_gpus}");
+    let remote_gpus = agent.send(&serde_json::json!({"command":"gpu_list", "url":url}).to_string());
+    assert_eq!(remote_gpus["ok"], true, "{remote_gpus}");
     let request =
-        serde_json::json!({"command":"open", "path":capture, "remote_url":url}).to_string();
+        serde_json::json!({"command":"open", "path":capture, "remote_url":url, "replay_options":{"optimisation":0}}).to_string();
     let mut opened = Value::Null;
     for _ in 0..20 {
         opened = agent.send(&request);
@@ -2448,6 +2452,13 @@ fn real_remote_replay_loopback() {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     assert_eq!(opened["ok"], true, "{opened}");
+    assert_eq!(
+        opened["data"]["capture"]["replay_options"]["optimisation"],
+        0
+    );
+    let active_gpus = agent.send(&serde_json::json!({"command":"gpu_list", "url":url}).to_string());
+    assert_eq!(active_gpus["ok"], true, "{active_gpus}");
+    assert_eq!(active_gpus["data"]["gpus"], remote_gpus["data"]["gpus"]);
     let mut other = Agent::new(bridge.to_str());
     let busy = other.send(&listing_request);
     assert_eq!(busy["error"]["code"], "remote_list_failed", "{busy}");
@@ -2660,5 +2671,23 @@ fn real_remote_target_launch_and_capture_loopback() {
         std::thread::sleep(Duration::from_millis(50));
     }
     assert!(done.exists(), "fixture did not exit");
+    agent.quit();
+}
+
+#[test]
+fn replay_options_reject_invalid_values_before_open() {
+    let mut agent = Agent::new(None);
+    for options in [
+        serde_json::json!({"optimisation":4}),
+        serde_json::json!({"gpu_vendor":11}),
+        serde_json::json!({"gpu_driver":"bad\0driver"}),
+        serde_json::json!({"unknown":true}),
+        serde_json::json!(null),
+    ] {
+        let request =
+            serde_json::json!({"command":"open", "path":"capture.rdc", "replay_options":options})
+                .to_string();
+        assert_eq!(agent.send(&request)["error"]["code"], "invalid_arguments");
+    }
     agent.quit();
 }

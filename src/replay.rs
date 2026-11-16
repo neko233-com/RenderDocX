@@ -11,6 +11,35 @@ use std::{
     },
 };
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ReplayOptions {
+    pub api_validation: bool,
+    pub gpu_vendor: u32,
+    pub gpu_device_id: u32,
+    pub gpu_driver: String,
+    pub optimisation: u32,
+}
+impl Default for ReplayOptions {
+    fn default() -> Self {
+        Self {
+            api_validation: false,
+            gpu_vendor: 0,
+            gpu_device_id: 0,
+            gpu_driver: String::new(),
+            optimisation: 2,
+        }
+    }
+}
+impl ReplayOptions {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.gpu_vendor > 10 || self.optimisation > 3 || self.gpu_driver.contains('\0') {
+            return Err("Invalid replay options".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Action {
     pub event_id: u32,
@@ -157,6 +186,8 @@ pub struct Snapshot {
     pub api: u32,
     pub frame: u32,
     pub degraded: bool,
+    #[serde(default)]
+    pub replay_options: Option<ReplayOptions>,
     #[serde(default)]
     pub frame_info: Option<FrameInfo>,
     #[serde(default)]
@@ -1150,6 +1181,9 @@ enum Reply {
     DebugStarted(DebugTrace),
     DebugStates(DebugStates),
     DebugStopped,
+    Gpus {
+        gpus: Vec<crate::live::ReplayGpu>,
+    },
     RemoteDirectory(crate::live::RemoteDirectory),
     RemoteCopy,
     Structure(StructurePage),
@@ -1235,11 +1269,27 @@ impl Process {
         executable: &Path,
         capture: &Path,
         remote: Option<&str>,
+        options: &ReplayOptions,
     ) -> Result<(Self, Snapshot), String> {
         let capture = std::fs::canonicalize(capture).unwrap_or_else(|_| capture.to_path_buf());
         let before = capture_stamp(&capture);
         let mut command = Command::new(executable);
-        if let Some(url) = remote {
+        if *options != ReplayOptions::default() {
+            let driver: String = options
+                .gpu_driver
+                .as_bytes()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            command
+                .arg("--open-options")
+                .arg(remote.unwrap_or("-"))
+                .arg(u8::from(options.api_validation).to_string())
+                .arg(options.gpu_vendor.to_string())
+                .arg(options.gpu_device_id.to_string())
+                .arg(options.optimisation.to_string())
+                .arg(if driver.is_empty() { "_" } else { &driver });
+        } else if let Some(url) = remote {
             command.arg("--remote").arg(url);
         }
         command
@@ -1577,6 +1627,9 @@ trait Transport: Send {
     }
     fn debug_stop(&mut self) -> Result<(), String> {
         Err("Shader debugging is not supported by this transport".into())
+    }
+    fn remote_gpus(&mut self) -> Result<Vec<crate::live::ReplayGpu>, String> {
+        Err("Remote GPU enumeration is not supported by this transport".into())
     }
     fn remote_list(&mut self, _path: Option<&str>) -> Result<crate::live::RemoteDirectory, String> {
         Err("Remote browsing is not supported by this transport".into())
@@ -2147,6 +2200,18 @@ impl Transport for Process {
         Ok(bytes)
     }
 
+    fn remote_gpus(&mut self) -> Result<Vec<crate::live::ReplayGpu>, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(input, "remote_gpus")
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::Gpus { gpus } => Ok(gpus),
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected GPU response".into()),
+        }
+    }
+
     fn remote_list(&mut self, path: Option<&str>) -> Result<crate::live::RemoteDirectory, String> {
         let path = path.unwrap_or("");
         if path.contains('\0') {
@@ -2657,6 +2722,15 @@ impl Session {
     pub fn is_remote_server(&self, url: &str) -> bool {
         self.remote_url.as_deref() == Some(url)
     }
+    pub fn remote_gpus(&self) -> Result<Vec<crate::live::ReplayGpu>, String> {
+        if self.remote_url.is_none() {
+            return Err("This capture does not use a remote server".into());
+        }
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .remote_gpus()
+    }
     pub fn remote_list(&self, path: Option<&str>) -> Result<crate::live::RemoteDirectory, String> {
         if self.remote_url.is_none() {
             return Err("This capture does not use a remote server".into());
@@ -2799,12 +2873,22 @@ impl Session {
         capture: &Path,
         remote: Option<&str>,
     ) -> Result<(Self, Snapshot), String> {
+        Self::open_with_options(settings, capture, remote, &settings.replay_options)
+    }
+
+    pub fn open_with_options(
+        settings: &Settings,
+        capture: &Path,
+        remote: Option<&str>,
+        options: &ReplayOptions,
+    ) -> Result<(Self, Snapshot), String> {
+        options.validate()?;
         if remote.is_some_and(|url| url.trim().is_empty() || url.contains('\0')) {
             return Err("Remote replay server must be a nonempty URL".into());
         }
         let executable = find_tool(&settings.replay_bridge, "renderdocx-replay")?;
         let executable = std::fs::canonicalize(&executable).unwrap_or(executable);
-        let (process, snapshot) = Process::open(&executable, capture, remote)?;
+        let (process, snapshot) = Process::open(&executable, capture, remote, options)?;
         Ok((
             Self {
                 process: Arc::new(Mutex::new(Box::new(process))),
@@ -3745,6 +3829,39 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_options_match_upstream_defaults_and_reject_invalid_values() {
+        let defaults: ReplayOptions = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults, ReplayOptions::default());
+        assert_eq!(defaults.optimisation, 2);
+        assert!(!defaults.api_validation);
+        assert!(
+            ReplayOptions {
+                gpu_vendor: 11,
+                ..defaults.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            ReplayOptions {
+                optimisation: 4,
+                ..defaults.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            ReplayOptions {
+                gpu_driver: "bad\0driver".into(),
+                ..defaults
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(serde_json::from_str::<ReplayOptions>(r#"{"unknown":true}"#).is_err());
+    }
 
     #[test]
     fn reflected_constants_preserve_nested_layout_and_u64_defaults() {

@@ -14,6 +14,7 @@ pub struct Settings {
     pub qrenderdoc: Option<PathBuf>,
     pub renderdoccmd: Option<PathBuf>,
     pub replay_bridge: Option<PathBuf>,
+    pub replay_options: crate::replay::ReplayOptions,
     pub shader_processors: Vec<crate::shader_processor::NamedShaderProcessor>,
 }
 

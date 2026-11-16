@@ -204,6 +204,28 @@ pub fn parse_target_pid(value: &std::ffi::OsStr) -> Option<u32> {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReplayGpu {
+    pub vendor: u32,
+    pub device_id: u32,
+    pub driver: String,
+    pub name: String,
+    pub apis: Vec<u32>,
+}
+
+pub fn enumerate_gpus(settings: &Settings, url: Option<&str>) -> Result<Vec<ReplayGpu>, String> {
+    if url.is_some_and(|url| !valid_remote_url(url)) {
+        return Err("Invalid remote server URL".into());
+    }
+    let mut args: Vec<&std::ffi::OsStr> = vec!["--gpus".as_ref()];
+    if let Some(url) = url {
+        args.push(url.as_ref());
+    }
+    let value = remote_request(settings, &args, "gpus")?;
+    serde_json::from_value(value.get("gpus").cloned().ok_or("Missing GPU list")?)
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RemoteEntry {
     pub name: String,
     pub flags: u32,

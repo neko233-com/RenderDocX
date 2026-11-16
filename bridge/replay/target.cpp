@@ -83,6 +83,32 @@ int run(const std::vector<std::string> &args)
   { failure("RenderDoc core does not match the version and commit used to build this bridge"); return 1; }
   GlobalEnvironment env;
   RENDERDOC_InitialiseReplay(env, {});
+  if((args.size() == 2 || args.size() == 3) && args[1] == "--gpus")
+  {
+    ICaptureFile *file = nullptr;
+    IRemoteServer *server = nullptr;
+    ICaptureAccess *access = nullptr;
+    if(args.size() == 3)
+    {
+      ResultDetails connected = RENDERDOC_CreateRemoteServerConnection(args[2].c_str(), &server);
+      if(args[2].empty() || !connected.OK() || !server) { failure(connected.OK() ? "Remote server unavailable" : detail(connected)); RENDERDOC_ShutdownReplay(); return 1; }
+      access = server;
+    }
+    else { file = RENDERDOC_OpenCaptureFile(); access = file; }
+    if(!access) { failure("Could not enumerate GPUs"); RENDERDOC_ShutdownReplay(); return 1; }
+    const auto gpus = access->GetAvailableGPUs();
+    std::cout << "\nRENDERDOCX-TARGET/1 {\"type\":\"gpus\",\"gpus\":[";
+    for(size_t i = 0; i < gpus.size(); ++i)
+    {
+      if(i) std::cout << ',';
+      std::cout << "{\"vendor\":" << uint32_t(gpus[i].vendor) << ",\"device_id\":" << gpus[i].deviceID << ",\"driver\":"; json(gpus[i].driver);
+      std::cout << ",\"name\":"; json(gpus[i].name); std::cout << ",\"apis\":[";
+      for(size_t j = 0; j < gpus[i].apis.size(); ++j) { if(j) std::cout << ','; std::cout << uint32_t(gpus[i].apis[j]); }
+      std::cout << "]}";
+    }
+    std::cout << "]}" << std::endl;
+    if(server) server->ShutdownConnection(); if(file) file->Shutdown(); RENDERDOC_ShutdownReplay(); return 0;
+  }
   if(args.size() >= 3 && args.size() <= 5 && (args[1] == "--remote-list" || args[1] == "--remote-copy"))
   {
     if(args[2].empty() || (args[1] == "--remote-list" && args.size() > 4) ||

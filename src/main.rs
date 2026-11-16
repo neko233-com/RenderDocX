@@ -534,6 +534,10 @@ struct Workspace {
     remote_browse_pending: bool,
     remote_browse_revision: u64,
     show_remote_browser: bool,
+    replay_gpus: Vec<renderdocx::live::ReplayGpu>,
+    replay_gpu_source: Option<String>,
+    gpu_query_pending: bool,
+    gpu_query_revision: u64,
     show_launch_config: bool,
     launch_arguments: Entity<InputState>,
     launch_delay: Entity<InputState>,
@@ -1532,6 +1536,90 @@ impl Workspace {
                 },
             )
             .into_any_element()
+    }
+
+    fn query_replay_gpus(&mut self, remote: bool, cx: &mut Context<Self>) {
+        if self.gpu_query_pending {
+            return;
+        }
+        let url = remote.then(|| self.remote_target_url.read(cx).value().to_string());
+        if url.as_ref().is_some_and(|value| value.trim().is_empty()) {
+            self.status = Some(
+                self.t(
+                    "Enter a remote server URL.",
+                    "请输入远程服务器地址。",
+                    "リモートサーバーの URL を入力してください。",
+                    "원격 서버 URL을 입력하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let session = url.as_ref().and_then(|url| {
+            self.session
+                .clone()
+                .filter(|session| session.is_remote_server(url))
+        });
+        let settings = self.settings.clone();
+        let expected_url = url.clone();
+        self.gpu_query_pending = true;
+        self.gpu_query_revision += 1;
+        let revision = self.gpu_query_revision;
+        self.status = Some(
+            self.t(
+                "Discovering replay GPUs…",
+                "正在发现回放 GPU…",
+                "リプレイ GPU を検索中…",
+                "리플레이 GPU를 검색하는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            match session {
+                Some(session) => session.remote_gpus(),
+                None => renderdocx::live::enumerate_gpus(&settings, url.as_deref()),
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.gpu_query_revision != revision {
+                    return;
+                }
+                this.gpu_query_pending = false;
+                if expected_url
+                    .as_ref()
+                    .is_some_and(|url| this.remote_target_url.read(cx).value().as_ref() != url)
+                {
+                    this.replay_gpus.clear();
+                    this.status = None;
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok(gpus) => {
+                        this.replay_gpu_source = expected_url;
+                        this.replay_gpus = gpus;
+                        this.status = None;
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "GPU discovery failed",
+                                "GPU 发现失败",
+                                "GPU の検索に失敗しました",
+                                "GPU 검색 실패"
+                            )
+                        ));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn browse_remote(&mut self, path: Option<String>, cx: &mut Context<Self>) {
@@ -10807,6 +10895,30 @@ impl Render for Workspace {
                         cx.notify();
                     } else { this.launch_live_with_remote(PathBuf::from(app), Some(url), cx); }
                 }, cx)))
+            .child(div().flex().flex_col().gap_2()
+                .child(self.t("Replay options for newly opened captures", "新打开捕获的回放选项", "新しく開くキャプチャのリプレイ設定", "새 캡처의 리플레이 옵션"))
+                .child(self.t("Faster optimisation may reduce replay correctness; OpenGL ignores GPU selection.", "较快的优化可能影响回放正确性；OpenGL 不支持 GPU 选择。", "高速な最適化はリプレイの正確性に影響する場合があります。OpenGL は GPU 選択に対応しません。", "빠른 최적화는 리플레이 정확도에 영향을 줄 수 있으며 OpenGL은 GPU 선택을 지원하지 않습니다."))
+                .child(div().flex().flex_wrap().gap_2()
+                    .child(button("replay-validation", self.t("API validation", "API 验证", "API 検証", "API 검증"), self.settings.replay_options.api_validation, |this, cx| { this.settings.replay_options.api_validation = !this.settings.replay_options.api_validation; this.save(); cx.notify(); }, cx))
+                    .child(button("replay-optimisation", match self.settings.replay_options.optimisation {
+                        0 => self.t("Optimisation: none", "优化：无", "最適化：なし", "최적화: 없음"),
+                        1 => self.t("Optimisation: conservative", "优化：保守", "最適化：保守的", "최적화: 보수적"),
+                        3 => self.t("Optimisation: fastest", "优化：最快", "最適化：最速", "최적화: 가장 빠름"),
+                        _ => self.t("Optimisation: balanced", "优化：平衡", "最適化：バランス", "최적화: 균형"),
+                    }, false, |this, cx| { this.settings.replay_options.optimisation = (this.settings.replay_options.optimisation % 4 + 1) % 4; this.save(); cx.notify(); }, cx))
+                    .child(button("replay-gpu-local", self.t("Discover local GPUs", "发现本地 GPU", "ローカル GPU を検索", "로컬 GPU 검색"), false, |this, cx| this.query_replay_gpus(false, cx), cx))
+                    .child(button("replay-gpu-remote", self.t("Discover remote GPUs", "发现远程 GPU", "リモート GPU を検索", "원격 GPU 검색"), false, |this, cx| this.query_replay_gpus(true, cx), cx))
+                    .child(button("replay-gpu-default", self.t("Default GPU", "默认 GPU", "既定の GPU", "기본 GPU"), false, |this, cx| { this.settings.replay_options.gpu_vendor = 0; this.settings.replay_options.gpu_device_id = 0; this.settings.replay_options.gpu_driver.clear(); this.save(); cx.notify(); }, cx)))
+                .child(format!("{}: {} / {} / {}", self.t("GPU override", "GPU 指定", "GPU 指定", "GPU 지정"), self.settings.replay_options.gpu_vendor, self.settings.replay_options.gpu_device_id, self.settings.replay_options.gpu_driver))
+                .child(format!("{}: {}", self.t("GPU list source", "GPU 列表来源", "GPU リストの取得元", "GPU 목록 출처"), self.replay_gpu_source.as_deref().unwrap_or(self.t("Local", "本地", "ローカル", "로컬"))))
+                .children(self.replay_gpus.clone().into_iter().filter(|_| self.replay_gpu_source.as_ref().is_none_or(|url| self.remote_target_url.read(cx).value().as_ref() == url)).enumerate().map(|(index, gpu)| {
+                    let label = format!("{} · {} / {} · {} · {:?}", gpu.name, gpu.vendor, gpu.device_id, gpu.driver, gpu.apis);
+                    div().id(("replay-gpu", index)).test_support().cursor_pointer().px_3().py_2().bg(rgb(0x252f40)).child(label)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.settings.replay_options.gpu_vendor = gpu.vendor; this.settings.replay_options.gpu_device_id = gpu.device_id;
+                            this.settings.replay_options.gpu_driver = gpu.driver.clone(); this.save(); cx.notify();
+                        }))
+                })))
             .child(self.remote_browser_view(false, cx))
             .when(!live_targets.is_empty(), |view| {
                 view.child(
@@ -11178,6 +11290,10 @@ fn main() {
                         remote_browse_pending: false,
                         remote_browse_revision: 0,
                         show_remote_browser: false,
+                        replay_gpus: Vec::new(),
+                        replay_gpu_source: None,
+                        gpu_query_pending: false,
+                        gpu_query_revision: 0,
                         show_launch_config: false,
                         launch_arguments,
                         launch_delay,
@@ -11275,6 +11391,7 @@ mod ui_tests {
                             api: 3,
                             frame: 2,
                             degraded: false,
+                            replay_options: None,
                             frame_info: None,
                             debug_messages: Vec::new(),
                             frame_statistics: None,
@@ -11387,6 +11504,10 @@ mod ui_tests {
                         remote_browse_pending: false,
                         remote_browse_revision: 0,
                         show_remote_browser: false,
+                        replay_gpus: Vec::new(),
+                        replay_gpu_source: None,
+                        gpu_query_pending: false,
+                        gpu_query_revision: 0,
                         show_launch_config: false,
                         launch_arguments,
                         launch_delay,
@@ -11436,11 +11557,14 @@ mod ui_tests {
             assert!(!view.read(cx).capture_options.allow_vsync);
         });
         cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let name_y = window.find("launch-env-name").bounds().origin.y;
             window.scroll(
                 "home-scroll",
-                ScrollDelta::Pixels(point(px(0.), px(-700.))),
+                ScrollDelta::Pixels(point(px(0.), px(180.) - name_y)),
                 cx,
             );
+            window.render_frame(cx);
             window.click("launch-env-name", cx);
             window.input("RENDERDOCX_TEST", cx);
             window.click("launch-env-value", cx);
@@ -11448,10 +11572,21 @@ mod ui_tests {
             window.click("launch-env-operation", cx);
             window.click("launch-env-separator", cx);
             window.click("launch-env-separator", cx);
+            view.update(cx, |view, cx| {
+                assert_eq!(
+                    view.launch_env_name.read(cx).value().as_ref(),
+                    "RENDERDOCX_TEST"
+                );
+            });
             window.click("launch-env-add", cx);
         })
         .unwrap();
         cx.update(|cx| {
+            assert!(
+                !view.read(cx).launch_environment.is_empty(),
+                "status: {:?}",
+                view.read(cx).status
+            );
             let entry = &view.read(cx).launch_environment[0];
             assert_eq!(entry.name, "RENDERDOCX_TEST");
             assert_eq!(entry.value, "fixture-value");
@@ -11503,6 +11638,13 @@ mod ui_tests {
             })
         });
         cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let capture_y = window.find("live-capture-0").bounds().origin.y;
+            window.scroll(
+                "home-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(500.) - capture_y)),
+                cx,
+            );
             window.render_frame(cx);
             assert!(window.find("target-38920").visible());
             assert!(window.find("live-capture-0").visible());
@@ -11618,6 +11760,7 @@ mod ui_tests {
                             api: 0,
                             frame: 2,
                             degraded: false,
+                            replay_options: None,
                             frame_info: None,
                             debug_messages: Vec::new(),
                             frame_statistics: None,
@@ -11835,6 +11978,10 @@ mod ui_tests {
                         remote_browse_pending: false,
                         remote_browse_revision: 0,
                         show_remote_browser: false,
+                        replay_gpus: Vec::new(),
+                        replay_gpu_source: None,
+                        gpu_query_pending: false,
+                        gpu_query_revision: 0,
                         show_launch_config: false,
                         launch_arguments,
                         launch_delay,

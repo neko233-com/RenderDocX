@@ -325,7 +325,7 @@ void write_section_hex(const bytebuf &bytes)
   for(byte b : bytes) std::cout << hex[b >> 4] << hex[b & 15];
 }
 
-void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids,
+void write_snapshot(IReplayController *controller, const ReplayOptions &options, std::set<uint32_t> &event_ids,
                     std::vector<TextureRef> &texture_ids, std::vector<BufferRef> &buffer_ids,
                     std::map<uint32_t, uint32_t> &event_chunks,
                     std::map<uint32_t, uint32_t> &draw_instances,
@@ -344,7 +344,11 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
   std::cout << "\nRENDERDOCX/1 {\"type\":\"snapshot\",\"protocol\":1,\"api\":" << uint32_t(api.pipelineType)
             << ",\"frame\":" << frame.frameNumber << ",\"degraded\":"
             << (api.degraded ? "true" : "false")
-            << ",\"frame_info\":{\"file_offset\":\"" << frame.fileOffset
+            << ",\"replay_options\":{\"api_validation\":" << (options.apiValidation ? "true" : "false")
+            << ",\"gpu_vendor\":" << uint32_t(options.forceGPUVendor) << ",\"gpu_device_id\":" << options.forceGPUDeviceID
+            << ",\"optimisation\":" << uint32_t(options.optimisation) << ",\"gpu_driver\":";
+  json_string(options.forceGPUDriverName);
+  std::cout << "},\"frame_info\":{\"file_offset\":\"" << frame.fileOffset
             << "\",\"uncompressed_size\":\"" << frame.uncompressedFileSize
             << "\",\"compressed_size\":\"" << frame.compressedFileSize
             << "\",\"persistent_size\":\"" << frame.persistentSize
@@ -981,7 +985,7 @@ int run_structure_worker(ICaptureFile *file)
   return 0;
 }
 
-int run(const std::string &capture, bool structure_worker, const std::string &remote_url)
+int run(const std::string &capture, bool structure_worker, const std::string &remote_url, const ReplayOptions &options)
 {
   const char *version = RENDERDOC_GetVersionString();
   const char *commit = RENDERDOC_GetCommitHash();
@@ -1007,13 +1011,13 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
     if(!result.OK() || !replay.remote) { error(result.OK() ? "Remote server returned no connection" : result_message(result)); return 1; }
     const rdcstr remote_path = replay.remote->CopyCaptureToRemote(capture.c_str(), nullptr);
     if(remote_path.empty()) { error("Could not copy capture to remote replay server"); return 1; }
-    auto opened = replay.remote->OpenCapture(IRemoteServer::NoPreference, remote_path, ReplayOptions(), nullptr);
+    auto opened = replay.remote->OpenCapture(IRemoteServer::NoPreference, remote_path, options, nullptr);
     if(!opened.first.OK()) { error(result_message(opened.first)); return 1; }
     replay.controller = opened.second;
   }
   else
   {
-    auto opened = replay.file->OpenCapture(ReplayOptions(), nullptr);
+    auto opened = replay.file->OpenCapture(options, nullptr);
     if(!opened.first.OK()) { error(result_message(opened.first)); return 1; }
     replay.controller = opened.second;
   }
@@ -1029,7 +1033,7 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
   std::map<uint32_t, uint32_t> draw_vertices;
   std::set<uint32_t> indexed_draws;
   std::map<uint32_t, const ActionDescription *> dispatch_actions;
-  write_snapshot(replay.controller, event_ids, texture_ids, buffer_ids, event_chunks, draw_instances, draw_vertices, indexed_draws, dispatch_actions);
+  write_snapshot(replay.controller, options, event_ids, texture_ids, buffer_ids, event_chunks, draw_instances, draw_vertices, indexed_draws, dispatch_actions);
   std::map<ResourceId, size_t> resource_indices;
   const auto &resources = replay.controller->GetResources();
   for(size_t i = 0; i < resources.size(); ++i) resource_indices.emplace(resources[i].resourceId, i);
@@ -1065,6 +1069,22 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       if(!result.OK()) { error(result_message(result)); break; }
       std::cout << "\nRENDERDOCX/1 {\"type\":\"debug_messages\",\"messages\":[";
       for(size_t i = 0; i < messages.size(); ++i) { if(i) std::cout << ','; write_debug_message(messages[i]); }
+      std::cout << "]}" << std::endl;
+      continue;
+    }
+    if(command == "remote_gpus")
+    {
+      if(!replay.remote) { error("This capture does not use a remote server"); continue; }
+      const auto gpus = replay.remote->GetAvailableGPUs();
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"gpus\",\"gpus\":[";
+      for(size_t i = 0; i < gpus.size(); ++i)
+      {
+        if(i) std::cout << ',';
+        std::cout << "{\"vendor\":" << uint32_t(gpus[i].vendor) << ",\"device_id\":" << gpus[i].deviceID << ",\"driver\":"; json_string(gpus[i].driver);
+        std::cout << ",\"name\":"; json_string(gpus[i].name); std::cout << ",\"apis\":[";
+        for(size_t j = 0; j < gpus[i].apis.size(); ++j) { if(j) std::cout << ','; std::cout << uint32_t(gpus[i].apis[j]); }
+        std::cout << "]}";
+      }
       std::cout << "]}" << std::endl;
       continue;
     }
@@ -2127,32 +2147,48 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
 }
 } // namespace
 
-#ifdef _WIN32
-std::string utf8_argument(const wchar_t *value)
+int run_args(const std::vector<std::string> &args)
 {
-  const int size = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value, -1, nullptr, 0, nullptr, nullptr);
-  if(size <= 0) return {};
-  std::vector<char> bytes(size_t(size), 0);
-  if(WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value, -1, bytes.data(), size, nullptr, nullptr) != size) return {};
-  return bytes.data();
+  ReplayOptions options;
+  const bool worker = args.size() == 3 && args[1] == "--structure-worker";
+  const bool remote = args.size() == 4 && args[1] == "--remote";
+  const bool custom = args.size() == 9 && args[1] == "--open-options";
+  if(args.size() != 2 && !worker && !remote && !custom) { error("Expected a capture path and optional replay options"); return 2; }
+  std::string url = remote ? args[2] : (custom && args[2] != "-" ? args[2] : "");
+  if((remote && url.empty()) || (custom && args[2].empty())) { error("Invalid remote server"); return 2; }
+  if(custom)
+  {
+    uint64_t validation = 0, vendor = 0, device = 0, optimisation = 0;
+    bytebuf driver;
+    if(!decimal(args[3], validation) || validation > 1 || !decimal(args[4], vendor) || vendor > uint32_t(GPUVendor::Samsung) ||
+       !decimal(args[5], device) || device > UINT32_MAX || !decimal(args[6], optimisation) || optimisation >= uint32_t(ReplayOptimisationLevel::Count) ||
+       !decode_section_hex(args[7], driver) || std::find(driver.begin(), driver.end(), byte(0)) != driver.end())
+    { error("Invalid replay options"); return 2; }
+    const std::string name(driver.begin(), driver.end());
+    options.apiValidation = validation != 0; options.forceGPUVendor = GPUVendor(vendor);
+    options.forceGPUDeviceID = uint32_t(device); options.forceGPUDriverName = name.c_str();
+    options.optimisation = ReplayOptimisationLevel(optimisation);
+  }
+  const std::string &capture = args[custom ? 8 : (remote ? 3 : (worker ? 2 : 1))];
+  if(capture.empty()) { error("Invalid capture path"); return 2; }
+  return run(capture, worker, url, options);
 }
+
+#ifdef _WIN32
 int wmain(int argc, wchar_t **argv)
 {
-  const bool worker = argc == 3 && std::wcscmp(argv[1], L"--structure-worker") == 0;
-  const bool remote = argc == 4 && std::wcscmp(argv[1], L"--remote") == 0;
-  if(argc != 2 && !worker && !remote) { error("Expected a capture path and optional remote server"); return 2; }
-  const std::string capture = utf8_argument(argv[remote ? 3 : (worker ? 2 : 1)]);
-  const std::string url = remote ? utf8_argument(argv[2]) : std::string();
-  if(capture.empty() || (remote && url.empty())) { error("Invalid Unicode path or remote server"); return 2; }
-  return run(capture, worker, url);
+  std::vector<std::string> args;
+  for(int i = 0; i < argc; ++i)
+  {
+    const int size = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, argv[i], -1, nullptr, 0, nullptr, nullptr);
+    if(size <= 0) { error("Invalid Unicode argument"); return 2; }
+    std::vector<char> bytes(size_t(size), 0);
+    if(!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, argv[i], -1, bytes.data(), size, nullptr, nullptr))
+    { error("Could not convert argument"); return 2; }
+    args.emplace_back(bytes.data());
+  }
+  return run_args(args);
 }
 #else
-int main(int argc, char **argv)
-{
-  const bool worker = argc == 3 && std::strcmp(argv[1], "--structure-worker") == 0;
-  const bool remote = argc == 4 && std::strcmp(argv[1], "--remote") == 0;
-  if(argc != 2 && !worker && !remote) { error("Expected a capture path and optional remote server"); return 2; }
-  if(remote && !argv[2][0]) { error("Remote server must not be empty"); return 2; }
-  return run(argv[remote ? 3 : (worker ? 2 : 1)], worker, remote ? argv[2] : "");
-}
+int main(int argc, char **argv) { return run_args(std::vector<std::string>(argv, argv + argc)); }
 #endif
