@@ -123,10 +123,18 @@ int wmain(int argc, wchar_t **argv)
   if(SUCCEEDED(hr)) hr = device->CreatePixelShader(history_code->GetBufferPointer(), history_code->GetBufferSize(), nullptr, &history_shader);
   if(FAILED(hr)) { std::cerr << "Could not create history shader"; return 21; }
   history_code->Release();
-  const char *compute_source = "RWStructuredBuffer<uint> output : register(u0); [numthreads(2,2,1)] void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint3 id : SV_DispatchThreadID) { output[id.x + id.y * 4] = 42 + group.x * 100 + thread.x + thread.y * 10; }";
+  const char *compute_source = R"(
+RWStructuredBuffer<uint> output : register(u0);
+[numthreads(2,2,1)]
+void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint3 id : SV_DispatchThreadID)
+{
+  uint value = 42 + group.x * 100 + thread.x + thread.y * 10;
+  output[id.x + id.y * 4] = value;
+}
+)";
   ID3DBlob *compute_code = nullptr;
   ID3D11ComputeShader *compute_shader = nullptr;
-  hr = compile(compute_source, strlen(compute_source), nullptr, nullptr, nullptr, "main", "cs_5_0", 0, 0, &compute_code, nullptr);
+  hr = compile(compute_source, strlen(compute_source), "compute-fixture.hlsl", nullptr, nullptr, "main", "cs_5_0", D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION, 0, &compute_code, nullptr);
   if(SUCCEEDED(hr)) hr = device->CreateComputeShader(compute_code->GetBufferPointer(), compute_code->GetBufferSize(), nullptr, &compute_shader);
   if(FAILED(hr)) { std::cerr << "Could not create compute shader"; return 24; }
   compute_code->Release();

@@ -20,8 +20,8 @@ use renderdocx::{
         ComputeDebugSelection, DebugState, DebugTrace, HistogramRequest, MeshInfo, MeshSelection,
         PIXEL_HISTORY_PAGE_LIMIT, Pipeline, Pixel, PixelDebugSelection, PixelHistoryPage,
         RESOURCE_USAGE_PAGE_LIMIT, ResourceUsagePage, SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session,
-        ShaderReport, Snapshot, StructurePage, StructuredNode, TextureSelection, TextureStatistics,
-        resource_type_name, resource_usage_name,
+        ShaderReport, ShaderSourceFile, Snapshot, StructurePage, StructuredNode, TextureSelection,
+        TextureStatistics, resource_type_name, resource_usage_name,
     },
     vertex_input::{INPUT_PAGE_LIMIT, InputPage},
 };
@@ -53,6 +53,7 @@ struct ShaderDebugView {
     states: Vec<DebugState>,
     position: usize,
     disassembly: String,
+    source_files: Vec<ShaderSourceFile>,
 }
 
 fn parse_debug_triplet(value: &str) -> Option<[u32; 3]> {
@@ -109,6 +110,7 @@ fn collect_shader_debug(
             states,
             position: 0,
             disassembly: shader.disassembly,
+            source_files: shader.source_files,
         })
     })();
     let stopped = session.debug_stop();
@@ -2501,6 +2503,79 @@ impl Workspace {
                         shader_debug::display_variable(&change.after)
                     ))
                 }));
+            if let Some(info) = debug.trace.instruction_info(state.next_instruction) {
+                if let Some(line) = shader_debug::line_at(&debug.disassembly, info.disassembly_line)
+                {
+                    view = view.child(
+                        div()
+                            .id("shader-debug-current-instruction")
+                            .test_support()
+                            .text_color(rgb(0x91cfff))
+                            .child(format!(
+                                "{} {}: {line}",
+                                self.t(
+                                    "Disassembly line",
+                                    "反汇编行",
+                                    "逆アセンブル行",
+                                    "역어셈블리 행"
+                                ),
+                                info.disassembly_line
+                            )),
+                    );
+                }
+                if let Ok(index) = usize::try_from(info.file_index) {
+                    if let Some(file) = debug.source_files.get(index) {
+                        if info.line_start > 0 && info.line_end >= info.line_start {
+                            let start = (info.line_start - 1) as usize;
+                            let count =
+                                ((info.line_end - info.line_start) as usize).saturating_add(1);
+                            let lines: Vec<_> = file
+                                .contents
+                                .lines()
+                                .enumerate()
+                                .skip(start)
+                                .take(count)
+                                .map(|(index, line)| format!("{}  {line}", index + 1))
+                                .collect();
+                            if !lines.is_empty() {
+                                view = view.child(
+                                    div()
+                                        .id("shader-debug-current-source")
+                                        .test_support()
+                                        .text_color(rgb(0x91cfff))
+                                        .child(format!(
+                                            "{}:{}:{}–{}:{}",
+                                            file.filename,
+                                            info.line_start,
+                                            info.column_start,
+                                            info.line_end,
+                                            info.column_end
+                                        ))
+                                        .children(
+                                            lines
+                                                .into_iter()
+                                                .map(|line| div().text_sm().child(line)),
+                                        ),
+                                );
+                            }
+                        }
+                    }
+                }
+                if !info.source_variables.is_empty() {
+                    view = view
+                        .child(self.t(
+                            "Source variable mappings",
+                            "源码变量映射",
+                            "ソース変数の対応",
+                            "소스 변수 매핑",
+                        ))
+                        .children(info.source_variables.iter().map(|variable| {
+                            div()
+                                .text_sm()
+                                .child(shader_debug::display_source_mapping(variable))
+                        }));
+                }
+            }
         } else {
             view = view.child(self.t(
                 "No debug states were returned.",
@@ -2508,6 +2583,20 @@ impl Workspace {
                 "デバッグ状態が返されませんでした。",
                 "디버그 상태가 반환되지 않았습니다.",
             ));
+        }
+        if !debug.trace.source_variables.is_empty() {
+            view = view
+                .child(self.t(
+                    "Trace-wide source mappings",
+                    "全轨迹源码变量映射",
+                    "トレース全体のソース変数対応",
+                    "전체 추적 소스 변수 매핑",
+                ))
+                .children(debug.trace.source_variables.iter().map(|variable| {
+                    div()
+                        .text_sm()
+                        .child(shader_debug::display_source_mapping(variable))
+                }));
         }
         let groups = [
             (
@@ -2541,11 +2630,37 @@ impl Workspace {
                 &debug.trace.samplers,
             ),
         ];
-        view = view.children(groups.into_iter().filter(|(_, variables)| !variables.is_empty()).map(|(label, variables)| {
-            div().flex().flex_col().gap_2().child(label).children(variables.iter().map(|variable| div().text_sm().child(shader_debug::display_variable(variable))))
-        }))
-            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t("Unsupported value types are shown as native-endian bytes; source mapping is not yet available.", "未解码的类型显示原生字节序的原始字节；暂不支持源码映射。", "未対応の型はネイティブエンディアンの生バイトで表示します。ソース対応は未実装です。", "지원하지 않는 유형은 네이티브 엔디언 원시 바이트로 표시합니다. 소스 매핑은 아직 지원되지 않습니다.")))
-            .child(div().id("vertex-debug-disassembly").test_support().text_sm().child(debug.disassembly.clone()));
+        view = view
+            .children(
+                groups
+                    .into_iter()
+                    .filter(|(_, variables)| !variables.is_empty())
+                    .map(|(label, variables)| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(label)
+                            .children(variables.iter().map(|variable| {
+                                div()
+                                    .text_sm()
+                                    .child(shader_debug::display_variable(variable))
+                            }))
+                    }),
+            )
+            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
+                "Unsupported value types are shown as native-endian bytes.",
+                "未解码的类型显示原生字节序的原始字节。",
+                "未対応の型はネイティブエンディアンの生バイトで表示します。",
+                "지원하지 않는 유형은 네이티브 엔디언 원시 바이트로 표시합니다.",
+            )))
+            .child(
+                div()
+                    .id("vertex-debug-disassembly")
+                    .test_support()
+                    .text_sm()
+                    .child(debug.disassembly.clone()),
+            );
         Some(view.into_any_element())
     }
 
@@ -7546,6 +7661,16 @@ mod ui_tests {
                     assert_eq!(debug.trace.event_id, draw_event);
                     assert!(debug.states.len() > 1);
                     assert!(debug.disassembly.contains("vs_4_0"));
+                    assert!(debug.source_files.is_empty());
+                    let mapping = debug
+                        .trace
+                        .instruction_info(debug.states[0].next_instruction)
+                        .unwrap();
+                    assert_eq!(mapping.file_index, -1);
+                    assert!(
+                        shader_debug::line_at(&debug.disassembly, mapping.disassembly_line)
+                            .is_some()
+                    );
                     assert!(debug.states.iter().any(|state| !state.changes.is_empty()));
                     assert_eq!(debug.position, 0);
                 });
@@ -8010,7 +8135,46 @@ mod ui_tests {
                             .any(|input| input.name == "vThreadID"
                                 && input.value_hex.starts_with("030000000100000000000000"))
                     );
+                    let info = debug
+                        .trace
+                        .instruction_info(debug.states[0].next_instruction)
+                        .unwrap();
+                    assert_eq!((info.file_index, info.line_start), (0, 6));
+                    assert!(
+                        debug.source_files[0]
+                            .contents
+                            .lines()
+                            .nth(5)
+                            .unwrap()
+                            .contains("uint value =")
+                    );
+                    assert!(
+                        shader_debug::line_at(&debug.disassembly, info.disassembly_line).is_some()
+                    );
                 });
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    for _ in 0..40 {
+                        let target = window.find("shader-debug-current-source");
+                        if target.visible() {
+                            break;
+                        }
+                        let viewport = window.find("capture-details-scroll").bounds();
+                        let delta = if target.bounds().origin.y < viewport.origin.y {
+                            100.0
+                        } else {
+                            -100.0
+                        };
+                        window.scroll(
+                            "capture-details-scroll",
+                            ScrollDelta::Pixels(point(px(0.), px(delta))),
+                            cx,
+                        );
+                    }
+                    assert!(window.find("shader-debug-current-source").visible());
+                    assert!(window.find("shader-debug-current-instruction").visible());
+                })
+                .unwrap();
             }
             if let Some(fixture) = std::env::var_os("RENDERDOCX_TEST_OPENGL_FIXTURE") {
                 use std::os::windows::process::CommandExt;

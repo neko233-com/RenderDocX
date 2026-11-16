@@ -292,6 +292,20 @@ pub struct ShaderReport {
     pub samplers: usize,
     #[serde(default)]
     pub dispatch_threads: Option<[u32; 3]>,
+    #[serde(default)]
+    pub debuggable: Option<bool>,
+    #[serde(default)]
+    pub source_debug_info: Option<bool>,
+    #[serde(default)]
+    pub debug_status: Option<String>,
+    #[serde(default)]
+    pub source_files: Vec<ShaderSourceFile>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ShaderSourceFile {
+    pub filename: String,
+    pub contents: String,
 }
 
 /// RenderDoc variable data as raw native-endian ShaderValue bytes, including nested members.
@@ -316,6 +330,53 @@ pub struct DebugTrace {
     pub read_only_resources: Vec<DebugVariable>,
     pub read_write_resources: Vec<DebugVariable>,
     pub samplers: Vec<DebugVariable>,
+    #[serde(default)]
+    pub source_variables: Vec<SourceVariableMapping>,
+    #[serde(default)]
+    pub instructions: Vec<InstructionSourceInfo>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DebugVariableReference {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub variable_type: u32,
+    pub component: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SourceVariableMapping {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub variable_type: u32,
+    pub undefined: bool,
+    pub rows: u32,
+    pub columns: u32,
+    pub offset: u32,
+    pub signature_index: i32,
+    pub variables: Vec<DebugVariableReference>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct InstructionSourceInfo {
+    pub instruction: u32,
+    pub disassembly_line: u32,
+    pub file_index: i32,
+    pub line_start: u32,
+    pub line_end: u32,
+    pub column_start: u32,
+    pub column_end: u32,
+    pub source_variables: Vec<SourceVariableMapping>,
+}
+
+impl DebugTrace {
+    /// Upstream records sparse ranges: an entry applies until the next entry.
+    pub fn instruction_info(&self, instruction: u32) -> Option<&InstructionSourceInfo> {
+        self.instructions
+            .iter()
+            .rev()
+            .find(|entry| entry.instruction <= instruction)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2328,6 +2389,10 @@ pub mod test_support {
                 read_write_resources: 0,
                 samplers: 0,
                 dispatch_threads: None,
+                debuggable: None,
+                source_debug_info: None,
+                debug_status: None,
+                source_files: Vec::new(),
             })
         }
     }
@@ -2356,6 +2421,22 @@ mod tests {
     use std::{io::Cursor, sync::Mutex};
 
     const SNAPSHOT: &str = r#"{"type":"snapshot","protocol":1,"api":3,"frame":7,"degraded":false,"actions":[{"event_id":10,"action_id":1,"depth":0,"parent":-1,"flags":0,"indices":0,"instances":0,"name":"pass"},{"event_id":11,"action_id":2,"depth":1,"parent":0,"flags":2,"indices":3,"instances":1,"name":"draw"}],"resource_count":4,"texture_count":2,"buffer_count":1}"#;
+
+    #[test]
+    fn sparse_instruction_mappings_cover_ranges_without_inventing_earlier_entries() {
+        let trace: DebugTrace = serde_json::from_value(serde_json::json!({
+            "event_id":1,"stage":5,"inputs":[],"constant_blocks":[],"read_only_resources":[],"read_write_resources":[],"samplers":[],
+            "instructions":[
+                {"instruction":3,"disassembly_line":8,"file_index":-1,"line_start":0,"line_end":0,"column_start":0,"column_end":0,"source_variables":[]},
+                {"instruction":7,"disassembly_line":12,"file_index":0,"line_start":4,"line_end":4,"column_start":1,"column_end":5,"source_variables":[]}
+            ]
+        })).unwrap();
+        assert!(trace.instruction_info(2).is_none());
+        assert_eq!(trace.instruction_info(3).unwrap().disassembly_line, 8);
+        assert_eq!(trace.instruction_info(6).unwrap().disassembly_line, 8);
+        assert_eq!(trace.instruction_info(7).unwrap().disassembly_line, 12);
+        assert_eq!(trace.instruction_info(9).unwrap().disassembly_line, 12);
+    }
 
     #[test]
     fn pipeline_keeps_large_buffer_values_and_unavailable_fields() {

@@ -1634,6 +1634,45 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     );
     let compute = agent.send(r#"{"command":"debug_compute","group":[1,0,0],"thread":[1,1,0]}"#);
     assert_eq!(compute["ok"], true, "{compute}");
+    assert_eq!(shader["data"]["shader"]["source_debug_info"], true);
+    let files = shader["data"]["shader"]["source_files"].as_array().unwrap();
+    assert!(
+        files[0]["filename"]
+            .as_str()
+            .unwrap()
+            .ends_with("compute-fixture.hlsl")
+    );
+    let source = files[0]["contents"].as_str().unwrap();
+    let mappings = compute["data"]["trace"]["instructions"].as_array().unwrap();
+    assert!(!mappings.is_empty());
+    assert!(
+        mappings
+            .windows(2)
+            .all(|pair| pair[0]["instruction"].as_u64() < pair[1]["instruction"].as_u64())
+    );
+    let first = &mappings[0];
+    assert_eq!(first["file_index"], 0);
+    assert_eq!(first["line_start"], 6);
+    assert!(source.lines().nth(5).unwrap().contains("uint value ="));
+    let disassembly_line = first["disassembly_line"].as_u64().unwrap() as usize;
+    assert!(disassembly_line > 0);
+    assert!(
+        shader["data"]["shader"]["disassembly"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .nth(disassembly_line - 1)
+            .is_some()
+    );
+    assert!(
+        first["source_variables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|variable| variable["name"] == "group"
+                && variable["variables"][0]["name"] == "vThreadGroupID")
+    );
+    assert!(mappings.iter().any(|mapping| mapping["line_start"] == 7));
     assert_eq!(compute["data"]["trace"]["stage"], 5);
     assert_eq!(compute["data"]["trace"]["event_id"], dispatch_event);
     let inputs = compute["data"]["trace"]["inputs"].as_array().unwrap();

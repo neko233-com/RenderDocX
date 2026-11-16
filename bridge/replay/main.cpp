@@ -127,6 +127,29 @@ void write_debug_variables(const rdcarray<ShaderVariable> &variables)
   std::cout << ']';
 }
 
+void write_source_variables(const rdcarray<SourceVariableMapping> &variables)
+{
+  std::cout << '[';
+  for(size_t i = 0; i < variables.size(); ++i)
+  {
+    if(i) std::cout << ',';
+    const auto &variable = variables[i];
+    std::cout << "{\"name\":"; json_string(variable.name);
+    std::cout << ",\"type\":" << uint32_t(variable.type) << ",\"undefined\":" << (variable.undefinedValue ? "true" : "false")
+              << ",\"rows\":" << variable.rows << ",\"columns\":" << variable.columns << ",\"offset\":" << variable.offset
+              << ",\"signature_index\":" << variable.signatureIndex << ",\"variables\":[";
+    for(size_t j = 0; j < variable.variables.size(); ++j)
+    {
+      if(j) std::cout << ',';
+      const auto &reference = variable.variables[j];
+      std::cout << "{\"name\":"; json_string(reference.name);
+      std::cout << ",\"type\":" << uint32_t(reference.type) << ",\"component\":" << reference.component << '}';
+    }
+    std::cout << "]}";
+  }
+  std::cout << ']';
+}
+
 void write_debug_trace(uint32_t event, const ShaderDebugTrace &trace)
 {
   std::cout << "\nRENDERDOCX/1 {\"type\":\"debug_started\",\"event_id\":" << event
@@ -136,6 +159,21 @@ void write_debug_trace(uint32_t event, const ShaderDebugTrace &trace)
   std::cout << ",\"read_only_resources\":"; write_debug_variables(trace.readOnlyResources);
   std::cout << ",\"read_write_resources\":"; write_debug_variables(trace.readWriteResources);
   std::cout << ",\"samplers\":"; write_debug_variables(trace.samplers);
+  std::cout << ",\"source_variables\":"; write_source_variables(trace.sourceVars);
+  std::cout << ",\"instructions\":[";
+  for(size_t i = 0; i < trace.instInfo.size(); ++i)
+  {
+    if(i) std::cout << ',';
+    const auto &info = trace.instInfo[i];
+    const auto &line = info.lineInfo;
+    std::cout << "{\"instruction\":" << info.instruction << ",\"disassembly_line\":" << line.disassemblyLine
+              << ",\"file_index\":" << line.fileIndex << ",\"line_start\":" << line.lineStart
+              << ",\"line_end\":" << line.lineEnd << ",\"column_start\":" << line.colStart
+              << ",\"column_end\":" << line.colEnd << ",\"source_variables\":";
+    write_source_variables(info.sourceVars);
+    std::cout << '}';
+  }
+  std::cout << ']';
   std::cout << "}" << std::endl;
 }
 
@@ -996,6 +1034,19 @@ int run(const std::string &capture, bool structure_worker)
       if(stage == ShaderStage::Compute)
         std::cout << '[' << reflection->dispatchThreadsDimension[0] << ',' << reflection->dispatchThreadsDimension[1] << ',' << reflection->dispatchThreadsDimension[2] << ']';
       else std::cout << "null";
+      std::cout << ",\"debuggable\":" << (reflection->debugInfo.debuggable ? "true" : "false")
+                << ",\"source_debug_info\":" << (reflection->debugInfo.sourceDebugInformation ? "true" : "false")
+                << ",\"debug_status\":";
+      json_string(reflection->debugInfo.debugStatus);
+      std::cout << ",\"source_files\":[";
+      for(size_t i = 0; i < reflection->debugInfo.files.size(); ++i)
+      {
+        if(i) std::cout << ',';
+        std::cout << "{\"filename\":"; json_string(reflection->debugInfo.files[i].filename);
+        std::cout << ",\"contents\":"; json_string(reflection->debugInfo.files[i].contents);
+        std::cout << '}';
+      }
+      std::cout << ']';
       std::cout << ",\"targets\":[";
       for(size_t i = 0; i < targets.size(); ++i) { if(i) std::cout << ','; json_string(targets[i]); }
       std::cout << "],\"disassembly\":"; json_string(disassembly);

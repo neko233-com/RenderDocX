@@ -1,4 +1,32 @@
-use renderdocx::replay::DebugVariable;
+use renderdocx::replay::{DebugVariable, SourceVariableMapping};
+
+pub fn line_at(text: &str, line: u32) -> Option<&str> {
+    let index = usize::try_from(line.checked_sub(1)?).ok()?;
+    text.lines().nth(index)
+}
+
+pub fn display_source_mapping(mapping: &SourceVariableMapping) -> String {
+    let references = mapping
+        .variables
+        .iter()
+        .map(|reference| {
+            format!(
+                "{}[{}] #{}",
+                reference.name, reference.component, reference.variable_type
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{} [{}×{}, #{}] → {}{}",
+        mapping.name,
+        mapping.rows,
+        mapping.columns,
+        mapping.variable_type,
+        references,
+        if mapping.undefined { " (?)" } else { "" }
+    )
+}
 
 /// Interpret only types whose layout is defined by RenderDoc's ShaderValue.
 /// Unknown types and half-floats remain in hexadecimal rather than being guessed.
@@ -99,5 +127,13 @@ mod tests {
         assert!(display_variable(&make(3, signed)).ends_with(": -7"));
         assert!(display_variable(&make(255, "1234".into())).ends_with(": 0x1234"));
         assert!(display_variable(&make(0, "z".into())).ends_with(": 0xz"));
+    }
+
+    #[test]
+    fn source_lines_use_one_based_indices() {
+        assert_eq!(line_at("alpha\r\nbeta\n", 1), Some("alpha"));
+        assert_eq!(line_at("alpha\r\nbeta\n", 2), Some("beta"));
+        assert_eq!(line_at("alpha", 0), None);
+        assert_eq!(line_at("alpha", 2), None);
     }
 }
