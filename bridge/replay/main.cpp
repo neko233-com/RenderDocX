@@ -196,6 +196,56 @@ void write_debug_message(const DebugMessage &message)
   std::cout << '}';
 }
 
+void write_descriptor(const Descriptor &d, const std::map<ResourceId, size_t> &indices)
+{
+  auto resource = [&](ResourceId id) {
+    const auto it = indices.find(id);
+    if(id == ResourceId() || it == indices.end()) std::cout << "null"; else std::cout << it->second;
+  };
+  uint32_t lod; std::memcpy(&lod, &d.minLODClamp, sizeof(lod));
+  std::cout << "{\"type\":" << uint32_t(d.type) << ",\"flags\":" << uint32_t(d.flags) << ",\"format\":";
+  json_string(d.format.Name());
+  std::cout << ",\"resource\":"; resource(d.resource);
+  std::cout << ",\"resource_present\":" << (d.resource != ResourceId() ? "true" : "false");
+  std::cout << ",\"secondary\":"; resource(d.secondary);
+  std::cout << ",\"secondary_present\":" << (d.secondary != ResourceId() ? "true" : "false");
+  std::cout << ",\"view\":"; resource(d.view);
+  std::cout << ",\"view_present\":" << (d.view != ResourceId() ? "true" : "false");
+  std::cout << ",\"byte_offset\":\"" << d.byteOffset << "\",\"byte_size\":\"" << d.byteSize
+            << "\",\"counter_byte_offset\":" << d.counterByteOffset << ",\"buffer_struct_count\":" << d.bufferStructCount
+            << ",\"element_byte_size\":" << d.elementByteSize << ",\"min_lod_bits\":" << lod
+            << ",\"first_slice\":" << d.firstSlice << ",\"num_slices\":" << d.numSlices
+            << ",\"first_mip\":" << uint32_t(d.firstMip) << ",\"num_mips\":" << uint32_t(d.numMips)
+            << ",\"texture_type\":" << uint32_t(d.textureType) << ",\"swizzle\":[" << uint32_t(d.swizzle.red) << ','
+            << uint32_t(d.swizzle.green) << ',' << uint32_t(d.swizzle.blue) << ',' << uint32_t(d.swizzle.alpha) << "]}";
+}
+
+void write_sampler(const SamplerDescriptor &s, const std::map<ResourceId, size_t> &indices)
+{
+  auto bits = [](float v) { uint32_t raw; std::memcpy(&raw, &v, sizeof(raw)); return raw; };
+  uint32_t border[4]; std::memcpy(border, &s.borderColorValue, sizeof(border));
+  const auto object = indices.find(s.object), ycbcr = indices.find(s.ycbcrSampler);
+  std::cout << "{\"object\":";
+  if(s.object == ResourceId() || object == indices.end()) std::cout << "null"; else std::cout << object->second;
+  std::cout << ",\"type\":" << uint32_t(s.type) << ",\"address\":[" << uint32_t(s.addressU) << ',' << uint32_t(s.addressV) << ',' << uint32_t(s.addressW)
+            << "],\"compare\":" << uint32_t(s.compareFunction) << ",\"filter\":[" << uint32_t(s.filter.minify) << ',' << uint32_t(s.filter.magnify)
+            << ',' << uint32_t(s.filter.mip) << ',' << uint32_t(s.filter.filter) << "],\"srgb_border\":" << (s.srgbBorder ? "true" : "false")
+            << ",\"seamless_cubemaps\":" << (s.seamlessCubemaps ? "true" : "false") << ",\"unnormalized\":" << (s.unnormalized ? "true" : "false")
+            << ",\"max_anisotropy_bits\":" << bits(s.maxAnisotropy) << ",\"max_lod_bits\":" << bits(s.maxLOD)
+            << ",\"min_lod_bits\":" << bits(s.minLOD) << ",\"mip_bias_bits\":" << bits(s.mipBias)
+            << ",\"border_type\":" << uint32_t(s.borderColorType) << ",\"border_bits\":[" << border[0] << ',' << border[1] << ',' << border[2] << ',' << border[3]
+            << "],\"swizzle\":[" << uint32_t(s.swizzle.red) << ',' << uint32_t(s.swizzle.green) << ',' << uint32_t(s.swizzle.blue) << ',' << uint32_t(s.swizzle.alpha)
+            << "],\"ycbcr\":";
+  if(s.ycbcrSampler == ResourceId()) std::cout << "null";
+  else std::cout << "{\"model\":" << uint32_t(s.ycbcrModel) << ",\"range\":" << uint32_t(s.ycbcrRange)
+                 << ",\"chroma_offsets\":[" << uint32_t(s.xChromaOffset) << ',' << uint32_t(s.yChromaOffset)
+                 << "],\"chroma_filter\":" << uint32_t(s.chromaFilter) << ",\"force_explicit_reconstruction\":"
+                 << (s.forceExplicitReconstruction ? "true" : "false") << '}';
+  std::cout << ",\"creation_time_constant\":" << (s.creationTimeConstant ? "true" : "false") << ",\"ycbcr_sampler\":";
+  if(s.ycbcrSampler == ResourceId() || ycbcr == indices.end()) std::cout << "null"; else std::cout << ycbcr->second;
+  std::cout << '}';
+}
+
 bool decimal(const std::string &text, uint64_t &value)
 {
   value = 0;
@@ -381,6 +431,18 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
     std::cout << "],\"parents\":"; resource_links(resource.parentResources);
     std::cout << ",\"derived\":"; resource_links(resource.derivedResources);
     std::cout << '}';
+  }
+  std::cout << "],\"descriptor_stores\":[";
+  const auto &stores = controller->GetDescriptorStores();
+  for(size_t i = 0; i < stores.size(); ++i)
+  {
+    if(i) std::cout << ',';
+    const auto &store = stores[i];
+    const auto resource = resource_indices.find(store.resourceId);
+    std::cout << "{\"resource\":";
+    if(resource == resource_indices.end()) std::cout << "null"; else std::cout << resource->second;
+    std::cout << ",\"descriptor_byte_size\":" << store.descriptorByteSize << ",\"first_offset\":" << store.firstDescriptorOffset
+              << ",\"count\":" << store.descriptorCount << '}';
   }
   std::cout << "],\"textures\":[";
   for(size_t i = 0; i < textures.size(); ++i)
@@ -769,6 +831,93 @@ int run(const std::string &capture, bool structure_worker)
       if(!result.OK()) { error(result_message(result)); break; }
       std::cout << "\nRENDERDOCX/1 {\"type\":\"debug_messages\",\"messages\":[";
       for(size_t i = 0; i < messages.size(); ++i) { if(i) std::cout << ','; write_debug_message(messages[i]); }
+      std::cout << "]}" << std::endl;
+      continue;
+    }
+    if(command.compare(0, 12, "descriptors ") == 0)
+    {
+      std::istringstream arguments(command.substr(12));
+      std::string mode, index_text, offset_text, limit_text, extra;
+      uint64_t index = 0, offset = 0, limit = 0;
+      if(!(arguments >> mode >> index_text >> offset_text >> limit_text) || (arguments >> extra) ||
+         (mode != "access" && mode != "store") || !decimal(index_text, index) || !decimal(offset_text, offset) ||
+         !decimal(limit_text, limit) || limit == 0 || limit > 128 || !selected)
+      { error("Invalid descriptor request or no selected event"); continue; }
+      const auto &accesses = replay.controller->GetDescriptorAccess();
+      const auto &stores = replay.controller->GetDescriptorStores();
+      if((mode == "access" && index != 0) || (mode == "store" && index >= stores.size()))
+      { error("Invalid descriptor store"); continue; }
+      const uint64_t total = mode == "access" ? accesses.size() : stores[size_t(index)].descriptorCount;
+      if(offset > total || (mode == "store" && stores[size_t(index)].descriptorByteSize == 0))
+      { error("Descriptor range is invalid or store has variable-sized descriptors"); continue; }
+      const size_t count = size_t((std::min)(limit, total - offset));
+      if(mode == "store" && count > 0 && uint64_t(stores[size_t(index)].firstDescriptorOffset) +
+           (offset + count - 1) * uint64_t(stores[size_t(index)].descriptorByteSize) > UINT32_MAX)
+      { error("Descriptor range exceeds upstream offset limits"); continue; }
+      std::map<ResourceId, size_t> access_stores;
+      for(const auto &access : accesses)
+        if(access.descriptorStore != ResourceId() && access_stores.find(access.descriptorStore) == access_stores.end())
+          access_stores.emplace(access.descriptorStore, access_stores.size());
+      struct DescriptorRow { DescriptorAccess access; bool has_access = false; rdcarray<Descriptor> descriptors; rdcarray<SamplerDescriptor> samplers; rdcarray<DescriptorLogicalLocation> locations; uint32_t byte_offset = 0; };
+      std::vector<DescriptorRow> rows(count);
+      for(size_t i = 0; i < count; ++i)
+      {
+        DescriptorRow &row = rows[i];
+        ResourceId store;
+        DescriptorRange range;
+        if(mode == "access")
+        {
+          row.has_access = true; row.access = accesses[size_t(offset) + i];
+          store = row.access.descriptorStore; range = DescriptorRange(row.access);
+        }
+        else
+        {
+          const auto &desc = stores[size_t(index)]; store = desc.resourceId;
+          range.offset = uint32_t(uint64_t(desc.firstDescriptorOffset) + (offset + i) * desc.descriptorByteSize);
+          range.descriptorSize = desc.descriptorByteSize; range.type = DescriptorType::Unknown;
+        }
+        row.byte_offset = range.offset;
+        if(store == ResourceId() || range.descriptorSize == 0) continue;
+        rdcarray<DescriptorRange> ranges = {range};
+        row.descriptors = replay.controller->GetDescriptors(store, ranges);
+        row.locations = replay.controller->GetDescriptorLocations(store, ranges);
+        DescriptorType sampler_type = row.has_access ? row.access.type : (row.descriptors.empty() ? DescriptorType::Unknown : row.descriptors[0].type);
+        if(sampler_type == DescriptorType::Sampler || sampler_type == DescriptorType::ImageSampler)
+        { range.type = sampler_type; ranges[0] = range; row.samplers = replay.controller->GetSamplerDescriptors(store, ranges); }
+      }
+      result = replay.controller->GetFatalErrorStatus();
+      if(!result.OK()) { error(result_message(result)); break; }
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"descriptors\",\"event_id\":" << selected_event << ",\"kind\":";
+      json_string(mode.c_str(), mode.size());
+      std::cout << ",\"store_index\":"; if(mode == "store") std::cout << index; else std::cout << "null";
+      std::cout << ",\"offset\":\"" << offset << "\",\"total\":\"" << total << "\",\"entries\":[";
+      for(size_t i = 0; i < rows.size(); ++i)
+      {
+        if(i) std::cout << ',';
+        const auto &row = rows[i];
+        std::cout << "{\"byte_offset\":" << row.byte_offset << ",\"access\":";
+        if(!row.has_access) std::cout << "null";
+        else
+        {
+          const auto &a = row.access;
+          const auto store = access_stores.find(a.descriptorStore), resource = resource_indices.find(a.descriptorStore);
+          std::cout << "{\"stage\":" << uint32_t(a.stage) << ",\"type\":" << uint32_t(a.type) << ",\"binding\":" << a.index
+                    << ",\"array_element\":" << a.arrayElement << ",\"byte_size\":" << a.byteSize
+                    << ",\"statically_unused\":" << (a.staticallyUnused ? "true" : "false") << ",\"store_ordinal\":";
+          if(store == access_stores.end()) std::cout << "null"; else std::cout << store->second;
+          std::cout << ",\"store_resource\":";
+          if(resource == resource_indices.end()) std::cout << "null"; else std::cout << resource->second;
+          std::cout << '}';
+        }
+        std::cout << ",\"descriptor\":";
+        if(row.descriptors.empty()) std::cout << "null"; else write_descriptor(row.descriptors[0], resource_indices);
+        std::cout << ",\"sampler\":";
+        if(row.samplers.empty()) std::cout << "null"; else write_sampler(row.samplers[0], resource_indices);
+        std::cout << ",\"location\":";
+        if(row.locations.empty()) std::cout << "null";
+        else { const auto &loc = row.locations[0]; std::cout << "{\"stage_mask\":" << uint32_t(loc.stageMask) << ",\"category\":" << uint32_t(loc.category) << ",\"fixed_bind\":" << loc.fixedBindNumber << ",\"name\":"; json_string(loc.logicalBindName.c_str(), loc.logicalBindName.size()); std::cout << '}'; }
+        std::cout << '}';
+      }
       std::cout << "]}" << std::endl;
       continue;
     }

@@ -140,6 +140,8 @@ pub struct Snapshot {
     pub frame_statistics: Option<serde_json::Value>,
     #[serde(default)]
     pub counters: Vec<CounterDescription>,
+    #[serde(default)]
+    pub descriptor_stores: Vec<DescriptorStore>,
     pub actions: Vec<Action>,
     pub resource_count: usize,
     pub texture_count: usize,
@@ -151,6 +153,26 @@ pub struct Snapshot {
     #[serde(default)]
     pub buffers: Vec<Buffer>,
 }
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DescriptorStore {
+    pub resource: Option<usize>,
+    pub descriptor_byte_size: u32,
+    pub first_offset: u32,
+    pub count: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DescriptorPage {
+    pub event_id: u32,
+    pub kind: String,
+    pub store_index: Option<usize>,
+    pub offset: String,
+    pub total: String,
+    pub entries: Vec<serde_json::Value>,
+}
+
+pub const DESCRIPTOR_PAGE_LIMIT: u32 = 128;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CounterDescription {
@@ -818,6 +840,7 @@ pub struct Pipeline {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Reply {
     Snapshot(Snapshot),
+    Descriptors(DescriptorPage),
     DebugMessages {
         messages: Vec<DebugMessage>,
     },
@@ -1028,6 +1051,13 @@ fn validate_snapshot(snapshot: &Snapshot) -> Result<(), String> {
     if snapshot.protocol != 1 {
         return Err("Unsupported replay bridge protocol".into());
     }
+    if snapshot.descriptor_stores.iter().any(|store| {
+        store
+            .resource
+            .is_some_and(|index| index >= snapshot.resource_count)
+    }) {
+        return Err("Invalid descriptor store resource".into());
+    }
     if !snapshot.resources.is_empty() {
         if snapshot.resources.len() != snapshot.resource_count {
             return Err("Invalid resource count".into());
@@ -1063,6 +1093,15 @@ fn validate_snapshot(snapshot: &Snapshot) -> Result<(), String> {
 
 trait Transport: Send {
     fn select(&mut self, event: u32) -> Result<Pipeline, String>;
+    fn descriptors(
+        &mut self,
+        _event: u32,
+        _store: Option<usize>,
+        _offset: u64,
+        _limit: u32,
+    ) -> Result<DescriptorPage, String> {
+        Err("Descriptor inspection is not supported by this transport".into())
+    }
     fn debug_messages(&mut self) -> Result<Vec<DebugMessage>, String> {
         Err("Debug messages are not supported by this transport".into())
     }
@@ -1191,6 +1230,39 @@ trait Transport: Send {
 }
 
 impl Transport for Process {
+    fn descriptors(
+        &mut self,
+        event: u32,
+        store: Option<usize>,
+        offset: u64,
+        limit: u32,
+    ) -> Result<DescriptorPage, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        let (kind, index) = store.map_or(("access", 0), |index| ("store", index));
+        writeln!(input, "descriptors {kind} {index} {offset} {limit}")
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::Descriptors(page) => {
+                let total = page
+                    .total
+                    .parse::<u64>()
+                    .map_err(|_| "Invalid descriptor count")?;
+                if page.event_id != event
+                    || page.kind != kind
+                    || page.store_index != store
+                    || page.offset != offset.to_string()
+                    || offset > total
+                    || page.entries.len() as u64 != (total - offset).min(u64::from(limit))
+                {
+                    return Err("Invalid descriptor page".into());
+                }
+                Ok(page)
+            }
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected descriptor page response".into()),
+        }
+    }
     fn debug_messages(&mut self) -> Result<Vec<DebugMessage>, String> {
         let input = self.input.as_mut().ok_or("Replay session has closed")?;
         writeln!(input, "debug_messages")
@@ -1865,6 +1937,21 @@ pub struct Session {
 }
 
 impl Session {
+    pub fn descriptors(
+        &self,
+        event: u32,
+        store: Option<usize>,
+        offset: u64,
+        limit: u32,
+    ) -> Result<DescriptorPage, String> {
+        if limit == 0 || limit > DESCRIPTOR_PAGE_LIMIT {
+            return Err("Invalid descriptor page limit".into());
+        }
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .descriptors(event, store, offset, limit)
+    }
     /// Drain messages queued by the replay driver since the previous read.
     pub fn debug_messages(&self) -> Result<Vec<DebugMessage>, String> {
         self.process
@@ -2813,6 +2900,20 @@ mod tests {
         assert_eq!(
             debug_message_category_name(messages[0].category),
             "Performance"
+        );
+    }
+
+    #[test]
+    fn descriptor_page_preserves_64_bit_ranges_and_unmapped_resources() {
+        let json = "RENDERDOCX/1 {\"type\":\"descriptors\",\"event_id\":15,\"kind\":\"access\",\"store_index\":null,\"offset\":\"0\",\"total\":\"1\",\"entries\":[{\"byte_offset\":3,\"access\":{\"stage\":4,\"statically_unused\":false},\"descriptor\":{\"resource\":null,\"resource_present\":true,\"byte_size\":\"18446744073709551615\"},\"sampler\":null,\"location\":null}]}\n";
+        let Reply::Descriptors(page) = read_reply(&mut Cursor::new(json)).unwrap() else {
+            panic!("expected descriptors")
+        };
+        assert_eq!(page.event_id, 15);
+        assert_eq!(page.entries[0]["descriptor"]["resource_present"], true);
+        assert_eq!(
+            page.entries[0]["descriptor"]["byte_size"],
+            u64::MAX.to_string()
         );
     }
 

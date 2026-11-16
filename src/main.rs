@@ -18,13 +18,13 @@ use renderdocx::{
         LiveSession, capture_directory, capture_notice, enumerate, parse_target_pid,
     },
     replay::{
-        COUNTER_PAGE_LIMIT, ComputeDebugSelection, CounterPage, DebugState, DebugTrace,
-        HistogramRequest, MeshInfo, MeshSelection, PIXEL_HISTORY_PAGE_LIMIT, Pipeline, Pixel,
-        PixelDebugSelection, PixelHistoryPage, RESOURCE_USAGE_PAGE_LIMIT, ResourceUsagePage,
-        SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session, ShaderReport, ShaderSourceFile, Snapshot,
-        StructurePage, StructuredNode, TextureSelection, TextureStatistics,
-        debug_message_category_name, debug_message_source_name, resource_type_name,
-        resource_usage_name,
+        COUNTER_PAGE_LIMIT, ComputeDebugSelection, CounterPage, DESCRIPTOR_PAGE_LIMIT, DebugState,
+        DebugTrace, DescriptorPage, HistogramRequest, MeshInfo, MeshSelection,
+        PIXEL_HISTORY_PAGE_LIMIT, Pipeline, Pixel, PixelDebugSelection, PixelHistoryPage,
+        RESOURCE_USAGE_PAGE_LIMIT, ResourceUsagePage, SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session,
+        ShaderReport, ShaderSourceFile, Snapshot, StructurePage, StructuredNode, TextureSelection,
+        TextureStatistics, debug_message_category_name, debug_message_source_name,
+        resource_type_name, resource_usage_name,
     },
     vertex_input::{INPUT_PAGE_LIMIT, InputPage},
 };
@@ -265,6 +265,7 @@ enum CaptureTab {
     Messages,
     Statistics,
     Counters,
+    Descriptors,
 }
 #[derive(Clone, Copy)]
 enum TextureField {
@@ -330,6 +331,8 @@ struct Workspace {
     selected_message: Option<usize>,
     selected_counters: std::collections::BTreeSet<u32>,
     counter_page: Option<CounterPage>,
+    descriptor_store: Option<usize>,
+    descriptor_page: Option<DescriptorPage>,
     usage_page: Option<ResourceUsagePage>,
     open_revision: u64,
     selection_revision: u64,
@@ -1077,6 +1080,8 @@ impl Workspace {
                         this.selected_message = None;
                         this.selected_counters.clear();
                         this.counter_page = None;
+                        this.descriptor_store = None;
+                        this.descriptor_page = None;
                         this.usage_page = None;
                         this.replay_pending = false;
                         this.export_pending = false;
@@ -1151,6 +1156,7 @@ impl Workspace {
         self.input_page = None;
         self.debug_vertex_selection = None;
         self.debug_view = None;
+        self.descriptor_page = None;
         let open_revision = self.open_revision;
         self.status = Some(
             self.t(
@@ -1381,6 +1387,73 @@ impl Workspace {
         .detach();
     }
 
+    fn read_descriptors(&mut self, store: Option<usize>, offset: u64, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            return;
+        }
+        let (Some(session), Some(event)) = (
+            self.session.clone(),
+            self.pipeline.as_ref().map(|p| p.event_id),
+        ) else {
+            return;
+        };
+        if store.is_some_and(|index| {
+            self.snapshot
+                .as_ref()
+                .is_none_or(|snapshot| index >= snapshot.descriptor_stores.len())
+        }) {
+            return;
+        }
+        self.descriptor_store = store;
+        self.descriptor_page = None;
+        self.resource_pending = true;
+        let open_revision = self.open_revision;
+        let selection_revision = self.selection_revision;
+        self.status = Some(
+            self.t(
+                "Loading descriptors…",
+                "正在加载描述符…",
+                "ディスクリプターを読み込み中…",
+                "디스크립터를 불러오는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx
+            .background_executor()
+            .spawn(async move { session.descriptors(event, store, offset, DESCRIPTOR_PAGE_LIMIT) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != open_revision
+                    || this.selection_revision != selection_revision
+                {
+                    return;
+                }
+                this.resource_pending = false;
+                match result {
+                    Ok(page) => {
+                        this.descriptor_page = Some(page);
+                        this.status = None;
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Descriptor inspection failed",
+                                "描述符读取失败",
+                                "ディスクリプターの取得に失敗",
+                                "디스크립터 읽기 실패"
+                            )
+                        ));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn read_counters(&mut self, offset: u64, reuse: bool, cx: &mut Context<Self>) {
         if self.replay_pending
             || self.export_pending
@@ -1406,6 +1479,7 @@ impl Workspace {
         self.resource_pending = true;
         if !reuse {
             self.counter_page = None;
+            self.descriptor_page = None;
             self.mesh.info = None;
             self.mesh.bytes = None;
             self.pixel_history = None;
@@ -3285,6 +3359,7 @@ impl Workspace {
             _ => Vec::new(),
         };
         let count = match self.tab {
+            CaptureTab::Descriptors => snapshot.descriptor_stores.len() + 1,
             CaptureTab::Counters => snapshot.counters.len(),
             CaptureTab::Statistics => snapshot
                 .frame_statistics
@@ -3564,7 +3639,57 @@ impl Workspace {
         let status = self.status.clone();
         let preview_path = self.preview.as_ref().map(|preview| preview.path.clone());
 
-        let list = if self.tab == CaptureTab::Counters {
+        let list = if self.tab == CaptureTab::Descriptors {
+            uniform_list(
+                "descriptor-stores",
+                count,
+                cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                    range
+                        .filter_map(|row| {
+                            let store = row.checked_sub(1);
+                            let name = if let Some(index) = store {
+                                let snapshot = this.snapshot.as_ref()?;
+                                let description = snapshot.descriptor_stores.get(index)?;
+                                let name = description
+                                    .resource
+                                    .and_then(|i| snapshot.resources.get(i))
+                                    .map(|r| r.name.as_str())
+                                    .unwrap_or("");
+                                format!("#{index} {name} · {}", description.count)
+                            } else {
+                                this.t(
+                                    "Current event accesses",
+                                    "当前事件的描述符访问",
+                                    "現在のイベントのアクセス",
+                                    "현재 이벤트 접근",
+                                )
+                                .to_owned()
+                            };
+                            Some(
+                                div()
+                                    .id(("descriptor-store", row))
+                                    .test_support()
+                                    .h(px(32.))
+                                    .px_3()
+                                    .overflow_hidden()
+                                    .cursor_pointer()
+                                    .bg(rgb(if this.descriptor_store == store {
+                                        0x304c7c
+                                    } else {
+                                        0x192332
+                                    }))
+                                    .child(name)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.read_descriptors(store, 0, cx)
+                                    })),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .flex_1()
+            .into_any_element()
+        } else if self.tab == CaptureTab::Counters {
             uniform_list(
                 "capture-counters",
                 count,
@@ -4197,7 +4322,108 @@ impl Workspace {
             .into_any_element()
         };
 
-        let detail_view = if self.tab == CaptureTab::Counters {
+        let detail_view = if self.tab == CaptureTab::Descriptors {
+            let page = self.descriptor_page.as_ref();
+            let mut detail = div().p_3().flex().flex_col().gap_2().child(self.t(
+                "Descriptor inspector",
+                "描述符检查器",
+                "ディスクリプター検査",
+                "디스크립터 검사",
+            ));
+            if let Some(page) = page {
+                let offset = page.offset.parse::<u64>().unwrap_or(0);
+                let total = page.total.parse::<u64>().unwrap_or(0);
+                let next = offset.saturating_add(page.entries.len() as u64);
+                detail = detail
+                    .child(format!("E{} · {offset}–{next} / {total}", page.event_id))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(button(
+                                "descriptor-prev",
+                                self.t("Previous", "上一页", "前へ", "이전"),
+                                false,
+                                |this, cx| {
+                                    if let Some(page) = &this.descriptor_page {
+                                        if let Ok(offset) = page.offset.parse::<u64>() {
+                                            if offset > 0 {
+                                                this.read_descriptors(
+                                                    this.descriptor_store,
+                                                    offset.saturating_sub(u64::from(
+                                                        DESCRIPTOR_PAGE_LIMIT,
+                                                    )),
+                                                    cx,
+                                                );
+                                            }
+                                        }
+                                    }
+                                },
+                                cx,
+                            ))
+                            .child(button(
+                                "descriptor-next",
+                                self.t("Next", "下一页", "次へ", "다음"),
+                                false,
+                                |this, cx| {
+                                    if let Some(page) = &this.descriptor_page {
+                                        if let (Ok(offset), Ok(total)) =
+                                            (page.offset.parse::<u64>(), page.total.parse::<u64>())
+                                        {
+                                            let next =
+                                                offset.saturating_add(page.entries.len() as u64);
+                                            if next < total {
+                                                this.read_descriptors(
+                                                    this.descriptor_store,
+                                                    next,
+                                                    cx,
+                                                );
+                                            }
+                                        }
+                                    }
+                                },
+                                cx,
+                            )),
+                    );
+                for (index, entry) in page.entries.iter().enumerate() {
+                    let text = serde_json::to_string_pretty(entry).unwrap_or_default();
+                    detail = detail.child(div().text_sm().child(text));
+                    if let Some(resource) = entry
+                        .get("descriptor")
+                        .and_then(|d| d.get("resource"))
+                        .and_then(|v| v.as_u64())
+                        .and_then(|v| usize::try_from(v).ok())
+                    {
+                        detail = detail.child(
+                            div()
+                                .id(("descriptor-resource", index))
+                                .test_support()
+                                .cursor_pointer()
+                                .text_color(rgb(0x91cfff))
+                                .child(self.t(
+                                    "Inspect resource",
+                                    "检查资源",
+                                    "リソースを検査",
+                                    "리소스 검사",
+                                ))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.tab = CaptureTab::Resources;
+                                    this.refresh_resources();
+                                    this.read_resource_usage(resource, 0, cx);
+                                })),
+                        );
+                    }
+                }
+            } else {
+                detail = detail.child(self.t(
+                    "Select an event and a descriptor list.",
+                    "选择事件和描述符列表。",
+                    "イベントとディスクリプターを選択してください。",
+                    "이벤트와 디스크립터 목록을 선택하세요.",
+                ));
+            }
+            detail
+        } else if self.tab == CaptureTab::Counters {
             let page = self.counter_page.as_ref();
             let offset = page.and_then(|p| p.offset.parse::<u64>().ok()).unwrap_or(0);
             let total = page.and_then(|p| p.total.parse::<u64>().ok()).unwrap_or(0);
@@ -6075,6 +6301,8 @@ impl Workspace {
                                         },
                                         cx,
                                     ))
+                                    .child(button("descriptors-tab", self.t("Descriptors", "描述符", "ディスクリプター", "디스크립터"), self.tab == CaptureTab::Descriptors,
+                                        |this, cx| { this.tab = CaptureTab::Descriptors; if this.descriptor_page.is_none() { this.read_descriptors(this.descriptor_store, 0, cx); } cx.notify(); }, cx))
                                     .child(
                                         div()
                                             .self_center()
@@ -7314,6 +7542,8 @@ fn main() {
                         selected_message: None,
                         selected_counters: Default::default(),
                         counter_page: None,
+                        descriptor_store: None,
+                        descriptor_page: None,
                         usage_page: None,
                         open_revision: 0,
                         selection_revision: 0,
@@ -7412,6 +7642,7 @@ mod ui_tests {
                             debug_messages: Vec::new(),
                             frame_statistics: None,
                             counters: Vec::new(),
+                            descriptor_stores: Vec::new(),
                             actions: Vec::new(),
                             resource_count: 0,
                             texture_count: 0,
@@ -7478,6 +7709,8 @@ mod ui_tests {
                         selected_message: None,
                         selected_counters: Default::default(),
                         counter_page: None,
+                        descriptor_store: None,
+                        descriptor_page: None,
                         usage_page: None,
                         open_revision: 0,
                         selection_revision: 0,
@@ -7658,6 +7891,7 @@ mod ui_tests {
                             debug_messages: Vec::new(),
                             frame_statistics: None,
                             counters: Vec::new(),
+                            descriptor_stores: Vec::new(),
                             actions: vec![
                                 renderdocx::replay::Action {
                                     event_id: 42,
@@ -7826,6 +8060,8 @@ mod ui_tests {
                         selected_message: None,
                         selected_counters: Default::default(),
                         counter_page: None,
+                        descriptor_store: None,
+                        descriptor_page: None,
                         usage_page: None,
                         open_revision: 0,
                         selection_revision: 0,

@@ -312,6 +312,7 @@ fn agent_jsonl_session_has_correlated_errors_and_clean_shutdown() {
         "debug_stop",
         "debug_messages",
         "clear_debug_messages",
+        "descriptors",
     ] {
         assert_eq!(
             agent.send(&serde_json::json!({"command":command}).to_string())["error"]["code"],
@@ -1053,6 +1054,32 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let draw =
         agent.send(&serde_json::json!({"command":"select","event_id":draw_event}).to_string());
     assert_eq!(draw["ok"], true, "{draw}");
+    let descriptors = agent.send(r#"{"command":"descriptors","offset":"0","limit":1}"#);
+    assert_eq!(descriptors["ok"], true, "{descriptors}");
+    assert_eq!(descriptors["data"]["page"]["event_id"], draw_event);
+    let descriptor_total = descriptors["data"]["page"]["total"]
+        .as_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    assert_eq!(
+        descriptors["data"]["page"]["entries"]
+            .as_array()
+            .unwrap()
+            .len(),
+        descriptor_total.min(1) as usize
+    );
+    let last = agent.send(
+        &serde_json::json!({"command":"descriptors","offset":descriptor_total.to_string()})
+            .to_string(),
+    );
+    assert_eq!(last["ok"], true, "{last}");
+    assert!(
+        last["data"]["page"]["entries"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     let inputs = agent.send(r#"{"command":"vertex_input","offset":0,"limit":3}"#);
     assert_eq!(inputs["ok"], true, "{inputs}");
     assert_eq!(inputs["data"]["page"]["event_id"], draw_event);
