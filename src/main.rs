@@ -31,6 +31,7 @@ struct TexturePreview {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CaptureTab {
     Events,
+    ApiCalls,
     Textures,
     Buffers,
     Shaders,
@@ -574,6 +575,10 @@ impl Workspace {
     }
 
     fn select(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.select_event(index, None, cx);
+    }
+
+    fn select_event(&mut self, index: usize, api_index: Option<usize>, cx: &mut Context<Self>) {
         if self.export_pending || self.resource_pending {
             self.status = Some(
                 self.t(
@@ -597,7 +602,13 @@ impl Workspace {
         else {
             return;
         };
-        let event = action.event_id;
+        let event = match api_index {
+            Some(api_index) => match action.api_events.get(api_index) {
+                Some(event) => event.event_id,
+                None => return,
+            },
+            None => action.event_id,
+        };
         let revision = session.next_revision();
         self.selection_revision = revision;
         self.replay_pending = true;
@@ -757,11 +768,7 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let Some(event) = self
-            .selected
-            .and_then(|i| self.snapshot.as_ref()?.actions.get(i))
-            .map(|action| action.event_id)
-        else {
+        let Some(event) = self.pipeline.as_ref().map(|pipeline| pipeline.event_id) else {
             self.status = Some(
                 self.t(
                     "Select an event before inspecting shaders.",
@@ -1121,6 +1128,10 @@ impl Workspace {
             CaptureTab::Textures => snapshot.textures.len(),
             CaptureTab::Buffers => snapshot.buffers.len(),
             CaptureTab::Events => self.event_tree.visible.len(),
+            CaptureTab::ApiCalls => self
+                .selected
+                .and_then(|i| snapshot.actions.get(i))
+                .map_or(0, |action| action.api_events.len()),
             CaptureTab::Shaders => {
                 if self.pipeline.is_some() {
                     SHADER_STAGES.len()
@@ -1189,6 +1200,13 @@ impl Workspace {
             "RenderDoc에서 열기",
         );
         let events = self.t("EVENTS", "事件", "イベント", "이벤트");
+        let api_calls = self.t("API calls", "API 调用", "API 呼び出し", "API 호출");
+        let selected_event_label = self.t(
+            "Selected event",
+            "当前事件",
+            "選択イベント",
+            "선택한 이벤트",
+        );
         let event_filter_label = self.t(
             "Filter action names",
             "筛选操作名称",
@@ -1330,10 +1348,94 @@ impl Workspace {
         let disabled_label = self.t("disabled", "禁用", "無効", "비활성");
         let depth_label = self.t("depth", "深度", "深度", "깊이");
         let pipeline = self.pipeline.clone();
+        let selected_event = pipeline.as_ref().map(|state| state.event_id);
         let status = self.status.clone();
         let preview_path = self.preview.as_ref().map(|preview| preview.path.clone());
 
-        let list = if self.tab == CaptureTab::Shaders {
+        let list = if self.tab == CaptureTab::ApiCalls && count == 0 {
+            let message = if self.selected.is_none() {
+                self.t(
+                    "Select an action to view its API calls.",
+                    "选择操作以查看其 API 调用。",
+                    "アクションを選択して API 呼び出しを表示します。",
+                    "작업을 선택하여 API 호출을 확인하세요.",
+                )
+            } else {
+                self.t(
+                    "No API calls are available for this action.",
+                    "此操作没有可用的 API 调用。",
+                    "このアクションに利用可能な API 呼び出しはありません。",
+                    "이 작업에 사용 가능한 API 호출이 없습니다.",
+                )
+            };
+            div()
+                .p_3()
+                .flex_1()
+                .text_color(rgb(0x9eacc0))
+                .child(message)
+                .into_any_element()
+        } else if self.tab == CaptureTab::ApiCalls {
+            uniform_list(
+                "capture-api-events",
+                count,
+                cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                    range
+                        .filter_map(|index| {
+                            let action_index = this.selected?;
+                            let event = this
+                                .snapshot
+                                .as_ref()?
+                                .actions
+                                .get(action_index)?
+                                .api_events
+                                .get(index)?;
+                            let event_id = event.event_id;
+                            let name = if event.name.is_empty() {
+                                this.t(
+                                    "Unnamed API event",
+                                    "未命名 API 事件",
+                                    "名前のない API イベント",
+                                    "이름 없는 API 이벤트",
+                                )
+                                .to_owned()
+                            } else {
+                                event.name.clone()
+                            };
+                            let selected = this
+                                .pipeline
+                                .as_ref()
+                                .is_some_and(|state| state.event_id == event_id);
+                            Some(
+                                div()
+                                    .id(SharedString::from(format!("api-event-{index}")))
+                                    .test_support()
+                                    .h(px(32.))
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .cursor_pointer()
+                                    .bg(rgb(if selected { 0x304c7c } else { 0x192332 }))
+                                    .hover(|row| row.bg(rgb(0x263950)))
+                                    .child(
+                                        div()
+                                            .w(px(64.))
+                                            .flex_none()
+                                            .text_color(rgb(0x91a7c0))
+                                            .child(event_id.to_string()),
+                                    )
+                                    .child(div().overflow_hidden().child(name))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.select_event(action_index, Some(index), cx)
+                                    })),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .flex_1()
+            .into_any_element()
+        } else if self.tab == CaptureTab::Shaders {
             uniform_list(
                 "capture-shaders",
                 count,
@@ -1877,6 +1979,9 @@ impl Workspace {
                 .when_some(detail, |view, action| {
                     view.child(div().font_weight(gpui::FontWeight::BOLD).child(action.name))
                         .child(format!("{event_label}: {}", action.event_id))
+                        .when_some(selected_event, |view, event| {
+                            view.child(format!("{selected_event_label}: {event}"))
+                        })
                         .child(format!("{action_label}: {}", action.action_id))
                         .child(format!("{flags_label}: 0x{:08X}", action.flags))
                         .child(format!("{indices_label}: {}", action.indices))
@@ -2172,6 +2277,16 @@ impl Workspace {
                                         self.tab == CaptureTab::Events,
                                         |this, cx| {
                                             this.tab = CaptureTab::Events;
+                                            cx.notify();
+                                        },
+                                        cx,
+                                    ))
+                                    .child(button(
+                                        "api-calls-tab",
+                                        api_calls,
+                                        self.tab == CaptureTab::ApiCalls,
+                                        |this, cx| {
+                                            this.tab = CaptureTab::ApiCalls;
                                             cx.notify();
                                         },
                                         cx,
@@ -3300,6 +3415,20 @@ mod ui_tests {
                                     indices: 3,
                                     instances: 1,
                                     name: "Draw".into(),
+                                    api_events: vec![
+                                        renderdocx::replay::ApiEvent {
+                                            event_id: 41,
+                                            chunk_index: Some(3),
+                                            file_offset: "18446744073709551615".into(),
+                                            name: "IASetPrimitiveTopology()".into(),
+                                        },
+                                        renderdocx::replay::ApiEvent {
+                                            event_id: 42,
+                                            chunk_index: Some(4),
+                                            file_offset: "100".into(),
+                                            name: "DrawIndexed()".into(),
+                                        },
+                                    ],
                                 },
                                 renderdocx::replay::Action {
                                     event_id: 43,
@@ -3310,6 +3439,7 @@ mod ui_tests {
                                     indices: 3,
                                     instances: 1,
                                     name: "Child".into(),
+                                    api_events: Vec::new(),
                                 },
                                 renderdocx::replay::Action {
                                     event_id: 77,
@@ -3320,6 +3450,7 @@ mod ui_tests {
                                     indices: 3,
                                     instances: 1,
                                     name: "Next".into(),
+                                    api_events: Vec::new(),
                                 },
                             ],
                             resource_count: 1,
@@ -3621,5 +3752,26 @@ mod ui_tests {
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(view.read(cx).event_tree.visible, [0, 1, 2]));
         assert_eq!(*events.lock().unwrap(), vec![42, 77, 43]);
+        cx.update_window(handle.into(), |_, window, cx| window.click(0usize, cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("api-calls-tab", cx);
+            window.click("api-event-0", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(view.read(cx).selected, Some(0));
+            assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 41);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("shaders-tab", cx);
+            window.click("shader-0", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).shader_data.as_ref().unwrap().event_id, 41));
+        assert_eq!(*events.lock().unwrap(), vec![42, 77, 43, 42, 41]);
     }
 }

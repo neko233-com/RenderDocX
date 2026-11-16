@@ -445,6 +445,42 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         })["event_id"]
         .as_u64()
         .unwrap();
+    let api_event = result["capture"]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|action| {
+            let action_event = action["event_id"].as_u64().unwrap();
+            action["api_events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(move |event| event["event_id"].as_u64() != Some(action_event))
+        })
+        .find(|event| {
+            event["name"]
+                .as_str()
+                .is_some_and(|name| name.contains("IASetPrimitiveTopology"))
+        })
+        .expect("capture must expose its non-action D3D11 topology API event");
+    assert!(api_event["chunk_index"].as_u64().is_some(), "{api_event}");
+    assert!(
+        api_event["file_offset"]
+            .as_str()
+            .unwrap()
+            .parse::<u64>()
+            .is_ok()
+    );
+    let api_event_id = api_event["event_id"].as_u64().unwrap();
+    let (success, api_selected) = invoke(&[
+        "--bridge",
+        bridge,
+        "select",
+        capture,
+        &api_event_id.to_string(),
+    ]);
+    assert!(success, "API event replay failed: {api_selected}");
+    assert_eq!(api_selected["event_id"], api_event_id);
     let (success, result) = invoke(&["--bridge", bridge, "select", capture, &event]);
     assert!(success, "event replay failed: {result}");
     assert_eq!(result["event_id"].as_u64().unwrap().to_string(), event);
@@ -484,6 +520,13 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         agent.send(r#"{"id":10,"command":"open","path":"missing-renderdocx-capture.rdc"}"#);
     assert_eq!(failed_open["error"]["code"], "replay_open_failed");
     assert_eq!(agent.send(r#"{"id":11,"command":"snapshot"}"#)["ok"], true);
+    let api_select = agent
+        .send(&serde_json::json!({"id":13,"command":"select","event_id":api_event_id}).to_string());
+    assert_eq!(api_select["data"]["event_id"], api_event_id, "{api_select}");
+    assert_eq!(
+        api_select["data"]["pipeline"]["event_id"], api_event_id,
+        "{api_select}"
+    );
     assert_eq!(
         agent.send(r#"{"id":12,"command":"select","event_id":4294967295}"#)["error"]["code"],
         "replay_select_failed"

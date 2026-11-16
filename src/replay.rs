@@ -20,6 +20,19 @@ pub struct Action {
     pub indices: u32,
     pub instances: u32,
     pub name: String,
+    #[serde(default)]
+    pub api_events: Vec<ApiEvent>,
+}
+
+/// An API event belonging to an action, in upstream capture order.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ApiEvent {
+    pub event_id: u32,
+    pub chunk_index: Option<u32>,
+    /// Relative capture-stream offset, encoded as a decimal string to preserve u64 precision.
+    pub file_offset: String,
+    /// Structured chunk name; empty when no chunk is available.
+    pub name: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -775,7 +788,26 @@ mod tests {
         validate_snapshot(&snapshot).unwrap();
         assert_eq!(snapshot.actions[1].event_id, 11);
         assert_eq!(snapshot.actions[1].parent, 0);
+        assert!(snapshot.actions[1].api_events.is_empty());
         assert_eq!(snapshot.texture_count, 2);
+    }
+
+    #[test]
+    fn api_events_preserve_chunk_absence_and_large_offsets() {
+        let mut value: serde_json::Value = serde_json::from_str(SNAPSHOT).unwrap();
+        value["actions"][1]["api_events"] = serde_json::json!([
+            {"event_id": 9, "chunk_index": null, "file_offset": "18446744073709551615", "name": ""},
+            {"event_id": 11, "chunk_index": 23, "file_offset": "42", "name": "Draw()"}
+        ]);
+        let snapshot: Snapshot = serde_json::from_value(value).unwrap();
+        validate_snapshot(&snapshot).unwrap();
+        assert_eq!(snapshot.actions[1].api_events[0].chunk_index, None);
+        assert_eq!(
+            snapshot.actions[1].api_events[0].file_offset,
+            u64::MAX.to_string()
+        );
+        assert_eq!(snapshot.actions[1].api_events[1].event_id, 11);
+        assert_eq!(snapshot.actions[1].api_events[1].name, "Draw()");
     }
 
     #[test]

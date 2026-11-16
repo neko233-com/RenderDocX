@@ -91,6 +91,7 @@ mod tests {
             indices: 0,
             instances: 0,
             name: String::new(),
+            api_events: Vec::new(),
         }
     }
 

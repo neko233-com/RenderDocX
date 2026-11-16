@@ -133,7 +133,26 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
               << ",\"flags\":" << uint32_t(action.flags) << ",\"indices\":" << action.numIndices
               << ",\"instances\":" << action.numInstances << ",\"name\":";
     json_string(action.GetName(structured));
-    std::cout << '}';
+    std::cout << ",\"api_events\":[";
+    for(size_t i = 0; i < action.events.size(); ++i)
+    {
+      const APIEvent &event = action.events[i];
+      if(i) std::cout << ',';
+      std::cout << "{\"event_id\":" << event.eventId << ",\"chunk_index\":";
+      if(event.chunkIndex == APIEvent::NoChunk) std::cout << "null";
+      else std::cout << event.chunkIndex;
+      std::cout << ",\"file_offset\":\"" << event.fileOffset << "\",\"name\":";
+      if(event.chunkIndex < structured.chunks.size() && structured.chunks[event.chunkIndex])
+      {
+        rdcstr name = structured.chunks[event.chunkIndex]->name;
+        name += "()";
+        json_string(name);
+      }
+      else json_string("", 0);
+      std::cout << '}';
+      event_ids.insert(event.eventId);
+    }
+    std::cout << "]}";
     event_ids.insert(action.eventId);
     for(size_t i = action.children.size(); i > 0; --i)
       pending.push_back({&action.children[i - 1], node.depth + 1, static_cast<int64_t>(index)});
@@ -477,7 +496,7 @@ int run(const std::string &capture)
       event = event * 10 + uint64_t(c - '0');
       if(event > (std::numeric_limits<uint32_t>::max)()) { valid = false; break; }
     }
-    if(!valid || event_ids.count(uint32_t(event)) == 0) { error("Unknown action event"); continue; }
+    if(!valid || event_ids.count(uint32_t(event)) == 0) { error("Unknown capture event"); continue; }
     replay.controller->SetFrameEvent(uint32_t(event), false);
     result = replay.controller->GetFatalErrorStatus();
     if(!result.OK()) { error(result_message(result)); break; }

@@ -6,6 +6,8 @@ RenderDocX is an in-progress Rust + GPUI desktop frontend for [RenderDoc](https:
 
 The event browser can filter action names using case-insensitive literal text, retaining matching actions' ancestors and existing expansion state. RenderDoc's full event-filter expression language is not implemented yet.
 
+Select an action and open **API calls** to inspect and replay its associated API events. The list currently shows structured chunk names rather than fully formatted call parameters; displaying API events directly in the main hierarchy remains work in progress.
+
 The interface detects the system language on startup and supports English, Simplified Chinese, Japanese, and Korean, with a manual language override. Its settings are stored in the operating system's user configuration directory.
 
 ## Build and run
