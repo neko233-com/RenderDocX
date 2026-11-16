@@ -17935,6 +17935,24 @@ mod ui_tests {
                     window.click("event-filter", cx);
                     window.input("IASetPrimitiveTopology", cx);
                     window.render_frame(cx);
+                    view.update(cx, |view, cx| {
+                        let row = view
+                            .event_tree
+                            .visible
+                            .iter()
+                            .position(|node| {
+                                view.event_tree.row(*node)
+                                    == Some(EventRow::Api {
+                                        action: action_index,
+                                        event: api_index,
+                                    })
+                            })
+                            .expect("filtered API event row");
+                        view.event_scroll
+                            .scroll_to_item(row, gpui::ScrollStrategy::Center);
+                        cx.notify();
+                    });
+                    window.render_frame(cx);
                     window.click(SharedString::from(api_row), cx);
                 })
                 .unwrap();
@@ -18384,16 +18402,7 @@ mod ui_tests {
                 cx.update_window(handle.into(), |_, window, cx| {
                     window.click("textures-tab", cx);
                     window.click(SharedString::from(format!("texture-{color_index}")), cx);
-                    window.scroll(
-                        "capture-details-scroll",
-                        ScrollDelta::Pixels(point(px(0.), px(2000.))),
-                        cx,
-                    );
-                    window.scroll(
-                        "capture-details-scroll",
-                        ScrollDelta::Pixels(point(px(0.), px(-550.))),
-                        cx,
-                    );
+                    reveal_details(window, "pixel-history", cx);
                     window.click("pixel-history", cx);
                 })
                 .unwrap();
