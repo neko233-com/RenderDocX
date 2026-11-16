@@ -1323,6 +1323,43 @@ fn real_d3d11_capture_is_inspected_and_selected() {
             .is_empty()
     );
     let counters = capture_data["counters"].as_array().unwrap();
+    if counters.iter().any(|c| {
+        c["id"] == 1 && c["result_type"] == 1 && c["result_byte_width"] == 8 && c["unit"] == 1
+    }) {
+        let timing = agent.send(r#"{"command":"event_times"}"#);
+        assert_eq!(timing["ok"], true, "{timing}");
+        assert!(
+            timing["data"]["event_times"]["count"]
+                .as_str()
+                .unwrap()
+                .parse::<usize>()
+                .unwrap()
+                > 0,
+            "{timing}"
+        );
+        let filtered = agent.send(
+            r#"{"command":"filter_events","expression":"$action(duration >= 0ns)","limit":128}"#,
+        );
+        assert_eq!(filtered["ok"], true, "{filtered}");
+        assert!(
+            filtered["data"]["events"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["direct_match"] == true),
+            "{filtered}"
+        );
+        for row in filtered["data"]["events"]["items"].as_array().unwrap() {
+            if row["direct_match"] == true {
+                assert!(
+                    row["duration_seconds"]
+                        .as_f64()
+                        .is_some_and(|value| value >= 0.0),
+                    "{row}"
+                );
+            }
+        }
+    }
     if let Some(counter) = counters.first() {
         let id = counter["id"].as_u64().unwrap();
         let fetched =

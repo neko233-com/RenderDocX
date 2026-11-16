@@ -52,6 +52,10 @@ fn usage() -> Value {
         .as_array_mut()
         .expect("capabilities commands")
         .push(json!("filter_events"));
+    capabilities["serve_commands"]
+        .as_array_mut()
+        .expect("capabilities commands")
+        .push(json!("event_times"));
     capabilities
 }
 
@@ -135,6 +139,7 @@ fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
 
 fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io::Result<()> {
     let mut opened: Option<(Session, Snapshot)> = None;
+    let mut event_times: Option<std::collections::HashMap<u32, f64>> = None;
     let mut selected_event: Option<u32> = None;
     let mut pipeline: Option<Pipeline> = None;
     let mut mesh_selection: Option<(u32, MeshSelection, MeshInfo)> = None;
@@ -517,6 +522,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         &options,
                     ) {
                         Ok((session, snapshot)) => {
+                            event_times = None;
                             let value = json!({"capture": &snapshot});
                             opened = Some((session, snapshot));
                             selected_event = None;
@@ -532,6 +538,30 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
             "snapshot" => match &opened {
                 Some((_, snapshot)) => Ok(json!({"capture": snapshot})),
                 None => Err(("no_capture", "No capture is open".into())),
+            },
+            "event_times" => match &opened {
+                None => Err(("no_capture", "No capture is open".into())),
+                Some((_, snapshot)) if !renderdocx::event_timing::available(&snapshot.counters) => {
+                    Err((
+                        "counter_unavailable",
+                        "GPU event duration is not available".into(),
+                    ))
+                }
+                Some((session, snapshot)) => {
+                    event_times = None;
+                    mesh_selection = None;
+                    session
+                        .counter_all(renderdocx::event_timing::GPU_DURATION_COUNTER)
+                        .and_then(|entries| {
+                            renderdocx::event_timing::aggregate(&snapshot.actions, &entries)
+                        })
+                        .map(|times| {
+                            let count = times.len();
+                            event_times = Some(times);
+                            json!({"event_times":{"count":count.to_string()}})
+                        })
+                        .map_err(|error| ("replay_counter_failed", error))
+                }
             },
             "filter_events" => {
                 let expression = request.get("expression").and_then(Value::as_str);
@@ -556,6 +586,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         let mut tree = EventTree::default();
                         tree.reset(&snapshot.actions);
                         tree.set_show_api(show_api);
+                        if let Some(times) = &event_times { tree.set_durations(times.clone()); }
                         tree.set_filter(expression);
                         if tree.filter_error() {
                             Err(("invalid_filter", "Invalid or unsupported event filter".into()))
@@ -574,7 +605,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                                 }).unwrap_or((action.event_id, &action.name));
                                 json!({"action_index":action_index,"api_index":api_index,"event_id":event_id,
                                     "parent_action_index": if action.parent < 0 { None } else { Some(action.parent) },
-                                    "name":name,"direct_match":tree.directly_matches(row)})
+                                    "name":name,"direct_match":tree.directly_matches(row),"duration_seconds":tree.duration(event_id)})
                             }).collect();
                             Ok(json!({"events":{"expression":expression,"show_api":show_api,"offset":offset.to_string(),
                                 "total":tree.visible.len().to_string(),"items":items}}))
@@ -1603,6 +1634,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                             .map(|edit| {
                                 pipeline = Some(edit.pipeline.clone());
                                 mesh_selection = None;
+                                event_times = None;
                                 json!({"edit":edit})
                             })
                             .map_err(|error| ("shader_edit_failed", error))
@@ -1631,6 +1663,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                                     .map(|edit| {
                                         pipeline = Some(edit.pipeline.clone());
                                         mesh_selection = None;
+                                        event_times = None;
                                         json!({"edit":edit,"processor_diagnostics":processor_diagnostics})
                                     })
                                     .map_err(|error| ("shader_edit_failed", error))
@@ -2267,6 +2300,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                 }
             }
             "close" | "quit" => {
+                event_times = None;
                 selected_event = None;
                 pipeline = None;
                 mesh_selection = None;

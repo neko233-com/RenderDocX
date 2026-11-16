@@ -3229,6 +3229,39 @@ impl Session {
             .counter_fetch(ids)
     }
 
+    /// Fetch and read one complete counter generation under the same transport lock.
+    pub fn counter_all(&self, id: u32) -> Result<Vec<CounterEntry>, String> {
+        let mut process = self.process.lock().map_err(|e| e.to_string())?;
+        let fetch = process.counter_fetch(&[id])?;
+        let generation = fetch
+            .generation
+            .parse::<u64>()
+            .map_err(|_| "Invalid counter generation")?;
+        let total = fetch
+            .total
+            .parse::<u64>()
+            .map_err(|_| "Invalid counter total")?;
+        let mut offset = 0u64;
+        let mut entries = Vec::new();
+        while offset < total {
+            let page = process.counter_page(generation, offset, COUNTER_PAGE_LIMIT)?;
+            if page.generation != fetch.generation
+                || page.total != fetch.total
+                || page.offset != offset.to_string()
+                || page.entries.len() as u64 != (total - offset).min(u64::from(COUNTER_PAGE_LIMIT))
+                || page
+                    .entries
+                    .iter()
+                    .any(|entry| entry.counter != id || entry.bits.parse::<u64>().is_err())
+            {
+                return Err("Invalid GPU counter page".into());
+            }
+            offset += page.entries.len() as u64;
+            entries.extend(page.entries);
+        }
+        Ok(entries)
+    }
+
     pub fn counter_page(
         &self,
         generation: u64,
@@ -3892,6 +3925,41 @@ pub mod test_support {
         Option<TimelineHistory>,
     );
     impl Transport for RecordingTransport {
+        fn counter_fetch(&mut self, ids: &[u32]) -> Result<CounterFetch, String> {
+            if ids != [1] {
+                return Err("Unexpected counter".into());
+            }
+            Ok(CounterFetch {
+                generation: "1".into(),
+                total: "2".into(),
+            })
+        }
+        fn counter_page(
+            &mut self,
+            generation: u64,
+            offset: u64,
+            limit: u32,
+        ) -> Result<CounterPage, String> {
+            if generation != 1 || offset > 2 {
+                return Err("Invalid counter page".into());
+            }
+            let entries = [(43, 0.002f64), (77, 0.004f64)]
+                .into_iter()
+                .map(|(event_id, seconds)| CounterEntry {
+                    event_id,
+                    counter: 1,
+                    bits: seconds.to_bits().to_string(),
+                })
+                .skip(offset as usize)
+                .take(limit as usize)
+                .collect();
+            Ok(CounterPage {
+                generation: "1".into(),
+                offset: offset.to_string(),
+                total: "2".into(),
+                entries,
+            })
+        }
         fn pixel_history(
             &mut self,
             event: u32,
@@ -4672,6 +4740,48 @@ mod tests {
             .is_err()
         );
         assert!(serde_json::from_str::<ReplayOptions>(r#"{"unknown":true}"#).is_err());
+    }
+
+    #[test]
+    fn counter_all_reads_complete_generation_and_rejects_inconsistent_pages() {
+        struct Fake(bool);
+        impl Transport for Fake {
+            fn select(&mut self, _: u32) -> Result<Pipeline, String> {
+                Err("Unexpected selection".into())
+            }
+            fn counter_fetch(&mut self, _: &[u32]) -> Result<CounterFetch, String> {
+                Ok(CounterFetch {
+                    generation: "7".into(),
+                    total: "129".into(),
+                })
+            }
+            fn counter_page(
+                &mut self,
+                _: u64,
+                offset: u64,
+                limit: u32,
+            ) -> Result<CounterPage, String> {
+                Ok(CounterPage {
+                    generation: "7".into(),
+                    offset: offset.to_string(),
+                    total: if self.0 && offset > 0 { "130" } else { "129" }.into(),
+                    entries: (offset..(offset + u64::from(limit)).min(129))
+                        .map(|event_id| CounterEntry {
+                            event_id: event_id as u32,
+                            counter: 1,
+                            bits: "0".into(),
+                        })
+                        .collect(),
+                })
+            }
+        }
+        let make = |bad| Session {
+            process: Arc::new(Mutex::new(Box::new(Fake(bad)))),
+            revision: Arc::new(AtomicU64::new(0)),
+            remote_url: None,
+        };
+        assert_eq!(make(false).counter_all(1).unwrap().len(), 129);
+        assert!(make(true).counter_all(1).is_err());
     }
 
     #[test]

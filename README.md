@@ -1,5 +1,7 @@
 # RenderDocX
 
+
+The event browser can collect the upstream GPU duration counter, show milliseconds alongside events, and filter using `$action(duration >= 1ms)` or `$dispatch(duration < 100us)`. Marker durations sum descendant actions as in RenderDoc. This replays the capture and depends on counter availability; unsupported events have no duration. The Agent CLI shares the same duration model.
 RenderDocX is an in-progress Rust + GPUI desktop frontend for [RenderDoc](https://github.com/baldurk/renderdoc). Its goal is a clearer, more usable graphics-debugging experience while retaining RenderDoc's capture, replay, and file semantics.
 
 **Status: early prototype, not a replacement for RenderDoc.** The Rust workspace can launch an application, connect to a local RenderDoc target, trigger a capture and open reported local captures. It can open an `.rdc` with its version-matched replay helper, expand or collapse the action hierarchy, browse resource metadata, request event replay, inspect common pipeline state, bound shader disassembly and buffer bytes, select a texture mip, slice, sample and channel for preview, and export it to PNG without overwriting existing files. Preview and export use RenderDoc's 8-bit PNG mapping. Some detailed inspection and `.cap` files still use `qrenderdoc`. A submitted capture request is not proof that a capture was produced.

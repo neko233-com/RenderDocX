@@ -9,6 +9,7 @@ pub mod buffer_layout;
 pub mod buffer_search;
 pub mod debug_navigation;
 pub mod event_filter;
+pub mod event_timing;
 pub mod event_tree;
 pub mod i18n;
 pub mod live;

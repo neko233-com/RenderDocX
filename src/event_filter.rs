@@ -36,6 +36,11 @@ enum Expr {
     Dispatch(Option<(String, Op, i64)>),
     Regex(pcre2::bytes::Regex),
     Parent(String),
+    Duration {
+        dispatch_only: bool,
+        op: Op,
+        nanos: i64,
+    },
 }
 struct Term {
     mode: Mode,
@@ -66,6 +71,7 @@ pub struct EventContext<'a> {
     pub parent: Option<usize>,
     pub parents: &'a [Option<usize>],
     pub marker_names: &'a [String],
+    pub duration: Option<f64>,
 }
 fn evaluate(terms: &[Term], context: &EventContext<'_>) -> bool {
     if terms.is_empty() {
@@ -113,6 +119,18 @@ fn evaluate(terms: &[Term], context: &EventContext<'_>) -> bool {
                     parent = next;
                 }
                 found
+            }
+            Expr::Duration {
+                dispatch_only,
+                op,
+                nanos,
+            } => {
+                (!dispatch_only || context.action.is_some_and(|a| a.flags & 0x4 != 0))
+                    && context.duration.is_some_and(|seconds| {
+                        seconds.is_finite()
+                            && seconds >= 0.0
+                            && op.test((seconds * 1_000_000_000.0) as i64, *nanos)
+                    })
             }
         };
         match term.mode {
@@ -251,6 +269,19 @@ impl Parser<'_> {
                             if params
                                 .trim_start()
                                 .to_ascii_lowercase()
+                                .starts_with("duration") =>
+                        {
+                            let (op, nanos) = duration_comparison(&params)?;
+                            Expr::Duration {
+                                dispatch_only: false,
+                                op,
+                                nanos,
+                            }
+                        }
+                        "action"
+                            if params
+                                .trim_start()
+                                .to_ascii_lowercase()
                                 .starts_with("flags") =>
                         {
                             Expr::ActionFlags(parse_flags(&params)?)
@@ -284,6 +315,19 @@ impl Parser<'_> {
                             Expr::Action(Some((prop, op, n)))
                         }
                         "dispatch" if params.trim().is_empty() => Expr::Dispatch(None),
+                        "dispatch"
+                            if params
+                                .trim_start()
+                                .to_ascii_lowercase()
+                                .starts_with("duration") =>
+                        {
+                            let (op, nanos) = duration_comparison(&params)?;
+                            Expr::Duration {
+                                dispatch_only: true,
+                                op,
+                                nanos,
+                            }
+                        }
                         "dispatch" => {
                             let (prop, op, n) = comparison(&params)?;
                             let prop = match prop.as_str() {
@@ -406,6 +450,33 @@ fn parse_regex(input: &str) -> Result<pcre2::bytes::Regex, ()> {
     }
     builder.build(&body[..end]).map_err(|_| ())
 }
+fn duration_comparison(input: &str) -> Result<(Op, i64), ()> {
+    let pos = input.find(['=', '!', '<', '>']).ok_or(())?;
+    if !input[..pos].trim().eq_ignore_ascii_case("duration") {
+        return Err(());
+    }
+    let rest = &input[pos..];
+    let (op, rest) = [("<=", Op::Le), (">=", Op::Ge), ("<", Op::Lt), (">", Op::Gt)]
+        .into_iter()
+        .find_map(|(prefix, op)| rest.strip_prefix(prefix).map(|r| (op, r)))
+        .ok_or(())?;
+    let value = rest.trim();
+    let (number, scale) = [
+        ("ms", 1_000_000.0),
+        ("us", 1_000.0),
+        ("ns", 1.0),
+        ("s", 1_000_000_000.0),
+    ]
+    .into_iter()
+    .find_map(|(suffix, scale)| value.strip_suffix(suffix).map(|v| (v, scale)))
+    .ok_or(())?;
+    let nanos = number.parse::<f64>().map_err(|_| ())? * scale;
+    if !nanos.is_finite() || nanos < i64::MIN as f64 || nanos >= -(i64::MIN as f64) {
+        return Err(());
+    }
+    Ok((op, nanos as i64))
+}
+
 fn comparison(input: &str) -> Result<(String, Op, i64), ()> {
     let pos = input.find(['=', '!', '<', '>']).ok_or(())?;
     let property = input[..pos].trim().to_lowercase();

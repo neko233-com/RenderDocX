@@ -22,6 +22,7 @@ pub struct EventTree {
     filter_error: bool,
     actions: Vec<Action>,
     event_ids: Vec<u32>,
+    durations: Option<std::collections::HashMap<u32, f64>>,
     matching_children: Vec<bool>,
     direct_matching: Vec<bool>,
     collapsed: Vec<bool>,
@@ -30,6 +31,7 @@ pub struct EventTree {
 
 impl EventTree {
     pub fn reset(&mut self, actions: &[Action]) {
+        self.durations = None;
         self.action_count = actions.len();
         self.actions = actions.to_vec();
         self.marker_names = actions
@@ -81,6 +83,24 @@ impl EventTree {
 
     pub fn directly_matches(&self, index: usize) -> bool {
         self.direct_matching.get(index).copied().unwrap_or(false)
+    }
+
+    pub fn set_durations(&mut self, durations: std::collections::HashMap<u32, f64>) {
+        self.durations = Some(durations);
+        self.rebuild();
+    }
+
+    pub fn duration(&self, event_id: u32) -> Option<f64> {
+        self.durations.as_ref()?.get(&event_id).copied()
+    }
+
+    pub fn has_durations(&self) -> bool {
+        self.durations.is_some()
+    }
+
+    pub fn clear_durations(&mut self) {
+        self.durations = None;
+        self.rebuild();
     }
 
     pub fn show_api(&self) -> bool {
@@ -166,6 +186,7 @@ impl EventTree {
                         parent: self.parents[index],
                         parents: &self.parents,
                         marker_names: &self.marker_names,
+                        duration: self.duration(self.event_ids[index]),
                     })
             })
             .collect();
@@ -435,5 +456,30 @@ mod tests {
         assert!(tree.visible.is_empty());
         tree.set_filter("$parent()");
         assert_eq!(tree.visible, [0, 1, 4, 2]);
+    }
+
+    #[test]
+    fn duration_filters_require_collected_results_and_respect_dispatch() {
+        let mut parent = action(-1);
+        parent.event_id = 1;
+        let mut draw = action(0);
+        draw.event_id = 2;
+        draw.flags = 2;
+        let mut dispatch = action(0);
+        dispatch.event_id = 3;
+        dispatch.flags = 4;
+        let mut tree = EventTree::default();
+        tree.reset(&[parent, draw, dispatch]);
+        tree.set_filter("$action(duration >= 1.5ms)");
+        assert!(tree.visible.is_empty());
+        tree.set_durations([(1, 0.003), (2, 0.001), (3, 0.002)].into());
+        assert_eq!(tree.visible, [0, 2]);
+        tree.set_filter("$dispatch(duration > 1000us)");
+        assert_eq!(tree.visible, [0, 2]);
+        tree.set_filter("$dispatch(duration == 2ms)");
+        assert!(tree.filter_error());
+        assert_eq!(tree.visible, [0, 2]);
+        tree.clear_durations();
+        assert!(tree.visible.is_empty());
     }
 }

@@ -3921,6 +3921,7 @@ impl Workspace {
                 this.resource_pending = false;
                 match result {
                     Ok((edit, replacement, processor_diagnostics)) => {
+                        this.event_tree.clear_durations();
                         this.pipeline = Some(edit.pipeline);
                         this.shader_report_stale = true;
                         this.mesh = MeshView::default();
@@ -4172,6 +4173,81 @@ impl Workspace {
                                 "描述符读取失败",
                                 "ディスクリプターの取得に失敗",
                                 "디스크립터 읽기 실패"
+                            )
+                        ));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn collect_event_times(&mut self, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            return;
+        }
+        let (Some(session), Some(snapshot)) = (self.session.clone(), self.snapshot.as_ref()) else {
+            return;
+        };
+        if !renderdocx::event_timing::available(&snapshot.counters) {
+            self.status = Some(
+                self.t(
+                    "GPU event duration is not available on this replay device.",
+                    "当前回放设备不支持 GPU 事件耗时。",
+                    "このリプレイデバイスでは GPU イベント時間を取得できません。",
+                    "이 재생 장치에서는 GPU 이벤트 시간을 사용할 수 없습니다.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let actions = snapshot.actions.clone();
+        let revision = self.open_revision;
+        self.resource_pending = true;
+        self.event_tree.clear_durations();
+        self.counter_page = None;
+        self.descriptor_page = None;
+        self.mesh.info = None;
+        self.mesh.bytes = None;
+        self.mesh.draw = None;
+        self.pixel_history = None;
+        self.history_selected = None;
+        self.status = Some(
+            self.t(
+                "Collecting GPU event durations…",
+                "正在采集 GPU 事件耗时…",
+                "GPU イベント時間を収集中…",
+                "GPU 이벤트 시간 수집 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            let entries = session.counter_all(renderdocx::event_timing::GPU_DURATION_COUNTER)?;
+            renderdocx::event_timing::aggregate(&actions, &entries)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision {
+                    return;
+                }
+                this.resource_pending = false;
+                match result {
+                    Ok(times) => {
+                        this.event_tree.set_durations(times);
+                        this.status = None;
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "GPU event duration collection failed",
+                                "GPU 事件耗时采集失败",
+                                "GPU イベント時間の収集に失敗",
+                                "GPU 이벤트 시간 수집 실패"
                             )
                         ));
                     }
@@ -8922,6 +8998,24 @@ impl Workspace {
                                                     .child(event.to_string()),
                                             )
                                             .child(div().overflow_hidden().child(name))
+                                            .when(this.event_tree.has_durations(), |row| {
+                                                row.child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(rgb(0x9eacc0))
+                                                        .child(
+                                                            this.event_tree
+                                                                .duration(event)
+                                                                .map(|seconds| {
+                                                                    format!(
+                                                                        "{:.3} ms",
+                                                                        seconds * 1000.0
+                                                                    )
+                                                                })
+                                                                .unwrap_or_else(|| "—".into()),
+                                                        ),
+                                                )
+                                            })
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.select_event(index, api_index, cx)
                                             })),
@@ -12559,6 +12653,13 @@ impl Workspace {
                                         }),
                                 )
                                 .child(button(
+                                    "event-collect-times",
+                                    self.t("Collect GPU durations", "采集 GPU 耗时", "GPU 時間を収集", "GPU 시간 수집"),
+                                    false,
+                                    |this, cx| this.collect_event_times(cx),
+                                    cx,
+                                ))
+                                .child(button(
                                     "toggle-api-events",
                                     show_api_events,
                                     self.event_tree.show_api(),
@@ -14291,7 +14392,16 @@ mod ui_tests {
                             frame_info: None,
                             debug_messages: Vec::new(),
                             frame_statistics: None,
-                            counters: Vec::new(),
+                            counters: vec![renderdocx::replay::CounterDescription {
+                                id: 1,
+                                name: "GPU Duration".into(),
+                                category: String::new(),
+                                description: String::new(),
+                                result_type: 1,
+                                result_byte_width: 8,
+                                unit: 1,
+                                uuid: [0; 4],
+                            }],
                             descriptor_stores: Vec::new(),
                             actions: vec![
                                 renderdocx::replay::Action {
@@ -15712,6 +15822,27 @@ mod ui_tests {
         .unwrap();
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(view.read(cx).event_tree.visible, [0, 1, 2]));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("event-collect-times", cx);
+        })
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            if cx.update(|cx| view.read(cx).event_tree.has_durations()) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "GPU timings did not load"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        cx.update(|cx| {
+            assert_eq!(view.read(cx).event_tree.duration(42), Some(0.002));
+            assert_eq!(view.read(cx).event_tree.duration(77), Some(0.004));
+        });
         assert_eq!(*events.lock().unwrap(), vec![42, 77, 43]);
         cx.update_window(handle.into(), |_, window, cx| window.click(0usize, cx))
             .unwrap();
