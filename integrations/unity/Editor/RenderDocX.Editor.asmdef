@@ -1,5 +1,6 @@
 {
   "name": "RenderDocX.Editor",
   "rootNamespace": "RenderDocX.Editor",
+  "references": ["RenderDocX.Runtime"],
   "includePlatforms": ["Editor"]
 }

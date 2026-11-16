@@ -8,6 +8,7 @@ namespace RenderDocX
     {
         private bool active;
         private static bool captureActive;
+        internal static bool IsActive => captureActive;
 
         private GpuCapture() { active = true; }
 

@@ -12,10 +12,16 @@
       "key": "tests",
       "path": "tests",
       "role": "test"
+    },
+    {
+      "key": "unity",
+      "path": "integrations/unity",
+      "role": "integration"
     }
   ],
   "languages": [
-    "rust"
+    "rust",
+    "csharp"
   ],
   "exclude": [],
   "config_dirs": [],

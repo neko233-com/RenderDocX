@@ -29,6 +29,10 @@ public static class RenderDocXSmoke
             Require(workspace.EnvironmentVariables["RENDERDOCX_OPEN_CAPTURE"] == null && workspace.EnvironmentVariables["RENDERDOCX_CONNECT_PID"] == null, "Workspace clears handoff");
             Require(editorType.GetMethod("ConnectCurrentEditor", BindingFlags.Static | BindingFlags.NonPublic) != null, "Connection menu");
             Require(editorType.GetMethod("ConnectPlayer", BindingFlags.Static | BindingFlags.NonPublic) != null, "Player connection menu");
+            Require(editorType.GetMethod("CaptureNextFrame", BindingFlags.Static | BindingFlags.NonPublic) != null, "Frame capture menu");
+            Require(editorType.GetMethod("CancelCapture", BindingFlags.Static | BindingFlags.NonPublic) != null, "Cancel capture menu");
+            Require(RenderDocX.FrameCapture.Schedule() == RenderDocX.FrameCaptureStart.NotPlaying, "Capture rejects Edit mode");
+            Require(!RenderDocX.FrameCapture.Cancel(), "No capture to cancel");
             Type windowType = editorType.Assembly.GetType("RenderDocX.Editor.RenderDocXConnectWindow");
             Require(windowType != null, "Player connection window");
             var parse = windowType.GetMethod("TryParsePid", BindingFlags.Static | BindingFlags.NonPublic);

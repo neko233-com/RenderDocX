@@ -12,6 +12,7 @@ public sealed class RenderDocXPlayerFixture : MonoBehaviour
     private Camera fixtureCamera;
     private RenderTexture target;
     private float deadline;
+    private bool scheduledRendering;
 
     private void Start()
     {
@@ -39,17 +40,56 @@ public sealed class RenderDocXPlayerFixture : MonoBehaviour
     private void Update()
     {
         if (string.IsNullOrEmpty(stop)) return;
+        if (scheduledRendering) fixtureCamera.Render();
         if (File.Exists(stop) || Time.realtimeSinceStartup >= deadline)
         {
             Application.Quit(File.Exists(stop) ? 0 : 1);
             return;
         }
         if (!File.Exists(request)) return;
+        var mode = File.ReadAllText(request).Trim();
         File.Delete(request);
+        if (mode == "cancel")
+        {
+            var callbacks = 0;
+            var outcome = RenderDocX.FrameCaptureResult.Failed;
+            var started = RenderDocX.FrameCapture.Schedule(value => { callbacks++; outcome = value; });
+            var duplicate = RenderDocX.FrameCapture.Schedule();
+            var cancelled = RenderDocX.FrameCapture.Cancel();
+            var cancelledAgain = RenderDocX.FrameCapture.Cancel();
+            WriteResult(
+                started == RenderDocX.FrameCaptureStart.Scheduled &&
+                duplicate == RenderDocX.FrameCaptureStart.Busy && cancelled && !cancelledAgain &&
+                callbacks == 1 && outcome == RenderDocX.FrameCaptureResult.Cancelled
+                    ? "cancel-passed" : "cancel-failed");
+            return;
+        }
+        if (mode == "scheduled")
+        {
+            scheduledRendering = true;
+            var scheduled = RenderDocX.FrameCapture.Schedule(result =>
+            {
+                var report = scheduledRendering;
+                scheduledRendering = false;
+                if (report) WriteResult("scheduled-" + result);
+            });
+            if (scheduled != RenderDocX.FrameCaptureStart.Scheduled)
+            {
+                scheduledRendering = false;
+                WriteResult("schedule-" + scheduled);
+            }
+            else if (RenderDocX.FrameCapture.Schedule() != RenderDocX.FrameCaptureStart.Busy)
+            {
+                scheduledRendering = false;
+                RenderDocX.FrameCapture.Cancel();
+                WriteResult("duplicate-accepted");
+            }
+            return;
+        }
         RenderDocX.GpuCapture capture;
         if (!RenderDocX.GpuCapture.TryBegin(out capture))
         {
-            File.WriteAllText(request + ".result", "not-attached");
+            WriteResult("not-attached");
             return;
         }
         try
@@ -58,7 +98,7 @@ public sealed class RenderDocXPlayerFixture : MonoBehaviour
             if (RenderDocX.GpuCapture.TryBegin(out nested))
             {
                 nested.Dispose();
-                File.WriteAllText(request + ".result", "nested-capture-accepted");
+                WriteResult("nested-capture-accepted");
                 return;
             }
             fixtureCamera.Render();
@@ -67,7 +107,15 @@ public sealed class RenderDocXPlayerFixture : MonoBehaviour
         {
             capture.Dispose();
         }
-        File.WriteAllText(request + ".result", "capture-ended");
+        WriteResult("capture-ended");
+    }
+
+    private void WriteResult(string value)
+    {
+        var result = request + ".result";
+        var temporary = result + ".tmp";
+        File.WriteAllText(temporary, value);
+        File.Move(temporary, result);
     }
 
     private void OnDestroy()

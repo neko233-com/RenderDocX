@@ -56,6 +56,11 @@ function Send-Agent($request) {
     if (-not $line.Wait(35000) -or [string]::IsNullOrEmpty($line.Result)) { throw 'Agent response timed out or closed.' }
     return $line.Result | ConvertFrom-Json
 }
+function Send-PlayerRequest([string]$value) {
+    $temporary = $env:RENDERDOCX_PLAYER_CAPTURE + '.tmp'
+    Set-Content -LiteralPath $temporary -Value $value
+    Move-Item -LiteralPath $temporary -Destination $env:RENDERDOCX_PLAYER_CAPTURE
+}
 try {
     # This start mode was verified with Unity 2022.3.51f1c1; other versions may not load RenderDoc here.
     $playerArgs = @('-force-d3d11', '-load-renderdoc', '-screen-width', '320', '-screen-height', '240', '-logFile', "`"$playerLog`"")
@@ -74,7 +79,7 @@ try {
     $agentProcess = [Diagnostics.Process]::Start($info)
     $connected = Send-Agent @{ command = 'target_connect_pid'; pid = $playerProcess.Id }
     if (-not $connected.ok -or $connected.data.target.pid -ne $playerProcess.Id) { throw "Player target connection failed: $($connected | ConvertTo-Json -Compress -Depth 8)" }
-    Set-Content -LiteralPath $env:RENDERDOCX_PLAYER_CAPTURE -Value 'capture'
+    Send-PlayerRequest 'capture'
     $deadline = [DateTime]::UtcNow.AddSeconds(45)
     $captured = $null
     while ($null -eq $captured -and -not $playerProcess.HasExited -and [DateTime]::UtcNow -lt $deadline) {
@@ -100,6 +105,38 @@ try {
     if ($null -eq $draw -or $null -eq $texture) { throw 'Capture is missing the fixture draw or render target.' }
     $selected = Send-Agent @{ command = 'select'; event_id = $draw.event_id }
     if (-not $selected.ok -or $selected.data.event_id -ne $draw.event_id -or -not $selected.data.pipeline.available) { throw 'Unity draw event replay failed.' }
+    Remove-Item -LiteralPath $resultPath
+    Send-PlayerRequest 'cancel'
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    while (-not (Test-Path -LiteralPath $resultPath) -and -not $playerProcess.HasExited -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
+    if (-not (Test-Path -LiteralPath $resultPath) -or (Get-Content -LiteralPath $resultPath -Raw).Trim() -ne 'cancel-passed') {
+        throw "Unity scheduled capture cancellation failed; see $playerLog"
+    }
+    Remove-Item -LiteralPath $resultPath
+    Send-PlayerRequest 'scheduled'
+    $scheduledCapture = $null
+    $deadline = [DateTime]::UtcNow.AddSeconds(45)
+    while ($null -eq $scheduledCapture -and -not $playerProcess.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+        $events = Send-Agent @{ command = 'target_events' }
+        if (-not $events.ok -or -not $events.data.connected) { throw 'Player target disconnected during scheduled capture.' }
+        $scheduledCapture = $events.data.events | Where-Object { $_.type -eq 'capture' -and $_.local -and $_.path -ne $captured.path } | Select-Object -First 1
+        if ($null -eq $scheduledCapture) { Start-Sleep -Milliseconds 200 }
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    while (-not (Test-Path -LiteralPath $resultPath) -and -not $playerProcess.HasExited -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
+    if ($null -eq $scheduledCapture -or -not (Test-Path -LiteralPath $scheduledCapture.path) -or
+        -not (Test-Path -LiteralPath $resultPath) -or (Get-Content -LiteralPath $resultPath -Raw).Trim() -ne 'scheduled-Ended') {
+        throw "Unity did not finish the scheduled frame capture; see $playerLog"
+    }
+    $scheduledPath = [IO.Path]::GetFullPath($scheduledCapture.path)
+    if (-not $scheduledPath.StartsWith($runPrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Scheduled capture path is outside the isolated test directory.' }
+    $scheduledOpen = Send-Agent @{ command = 'open'; path = $scheduledPath }
+    if (-not $scheduledOpen.ok -or $scheduledOpen.data.capture.api -ne 0) { throw 'Scheduled capture did not replay.' }
+    $scheduledDraw = $scheduledOpen.data.capture.actions | Where-Object { $_.name -like '*DrawIndexed*' -and $_.indices -eq 36 } | Select-Object -First 1
+    if ($null -eq $scheduledDraw) { throw 'Scheduled capture did not include the fixture draw.' }
+    $scheduledSelection = Send-Agent @{ command = 'select'; event_id = $scheduledDraw.event_id }
+    if (-not $scheduledSelection.ok -or $scheduledSelection.data.event_id -ne $scheduledDraw.event_id -or
+        -not $scheduledSelection.data.pipeline.available) { throw 'Scheduled capture draw replay failed.' }
     $closed = Send-Agent @{ command = 'target_close' }
     if (-not $closed.ok) { throw 'Target close failed.' }
     $closed = Send-Agent @{ command = 'quit' }
