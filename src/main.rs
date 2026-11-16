@@ -96,6 +96,7 @@ struct ShaderEditor {
     baseline_entry: String,
     baseline_encoding: String,
     baseline_command_line: String,
+    baseline_tool: String,
     input: Entity<TextareaState>,
 }
 
@@ -584,6 +585,7 @@ impl Workspace {
                 || self.shader_edit_encoding.read(cx).value().as_ref() != editor.baseline_encoding
                 || self.shader_edit_command.read(cx).value().as_ref()
                     != editor.baseline_command_line
+                || editor.tool != editor.baseline_tool
         })
     }
 
@@ -1474,6 +1476,119 @@ impl Workspace {
         }
     }
 
+    fn import_shader_processor(&mut self, cx: &mut Context<Self>) {
+        if self.resource_pending || self.replay_pending || self.export_pending {
+            return;
+        }
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("JSON", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+        let parsed = std::fs::read(&path)
+            .map_err(|error| error.to_string())
+            .and_then(|data| {
+                serde_json::from_slice::<renderdocx::shader_processor::NamedShaderProcessor>(&data)
+                    .map_err(|error| error.to_string())
+            })
+            .and_then(|config| {
+                config.validate()?;
+                Ok(config)
+            });
+        let config = match parsed {
+            Ok(config) => config,
+            Err(error) => {
+                self.status = Some(format!(
+                    "{}: {error}",
+                    self.t(
+                        "Could not import shader processor",
+                        "无法导入着色器处理器",
+                        "シェーダープロセッサーを読み込めません",
+                        "셰이더 처리기를 가져올 수 없습니다"
+                    )
+                ));
+                cx.notify();
+                return;
+            }
+        };
+        if self
+            .settings
+            .shader_processors
+            .iter()
+            .any(|existing| existing.name == config.name)
+        {
+            self.status = Some(self.t("A processor with this name already exists; remove it before importing another.", "已存在同名处理器；请先移除再导入。", "同名のプロセッサーが既にあります。削除してから読み込んでください。", "같은 이름의 처리기가 있습니다. 삭제한 후 가져오세요.").to_owned());
+            cx.notify();
+            return;
+        }
+        self.settings.shader_processors.push(config);
+        match self.settings.save() {
+            Ok(()) => {
+                self.status = Some(
+                    self.t(
+                        "Shader processor imported.",
+                        "着色器处理器已导入。",
+                        "シェーダープロセッサーを読み込みました。",
+                        "셰이더 처리기를 가져왔습니다.",
+                    )
+                    .to_owned(),
+                )
+            }
+            Err(error) => {
+                self.settings.shader_processors.pop();
+                self.status = Some(format!(
+                    "{}: {error}",
+                    self.t(
+                        "Could not save settings",
+                        "无法保存设置",
+                        "設定を保存できません",
+                        "설정을 저장할 수 없습니다"
+                    )
+                ));
+            }
+        }
+        cx.notify();
+    }
+
+    fn remove_shader_processor(&mut self, name: &str, cx: &mut Context<Self>) {
+        if self.resource_pending || self.replay_pending || self.export_pending {
+            return;
+        }
+        let Some(index) = self
+            .settings
+            .shader_processors
+            .iter()
+            .position(|config| config.name == name)
+        else {
+            return;
+        };
+        let removed = self.settings.shader_processors.remove(index);
+        if let Err(error) = self.settings.save() {
+            self.settings.shader_processors.insert(index, removed);
+            self.status = Some(format!(
+                "{}: {error}",
+                self.t(
+                    "Could not save settings",
+                    "无法保存设置",
+                    "設定を保存できません",
+                    "설정을 저장할 수 없습니다"
+                )
+            ));
+        } else {
+            self.status = Some(
+                self.t(
+                    "Shader processor removed.",
+                    "着色器处理器已移除。",
+                    "シェーダープロセッサーを削除しました。",
+                    "셰이더 처리기를 삭제했습니다.",
+                )
+                .to_owned(),
+            );
+        }
+        cx.notify();
+    }
+
     fn open(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if self.protect_shader_draft(cx) {
             return;
@@ -2162,7 +2277,8 @@ impl Workspace {
             file_index,
             flags,
             command_line: command_line.clone(),
-            tool,
+            tool: tool.clone(),
+            baseline_tool: tool.clone(),
             baseline,
             baseline_entry: entry,
             baseline_encoding: encoding.to_string(),
@@ -2235,11 +2351,6 @@ impl Workspace {
             else {
                 return;
             };
-            if editor.tool != "Builtin" {
-                self.status = Some(self.t("This saved draft uses an external compiler; compile it in RenderDoc or use a built-in draft.", "此草稿使用外部编译器；请在 RenderDoc 中编译，或使用内置编译器草稿。", "この下書きは外部コンパイラーを使用します。RenderDoc でコンパイルするか、組み込みコンパイラーの下書きを使用してください。", "이 초안은 외부 컴파일러를 사용합니다. RenderDoc에서 컴파일하거나 기본 컴파일러 초안을 사용하세요.").to_owned());
-                cx.notify();
-                return;
-            }
             let Ok(encoding) = self.shader_edit_encoding.read(cx).value().parse::<u32>() else {
                 self.status = Some(
                     self.t(
@@ -2252,6 +2363,49 @@ impl Workspace {
                 );
                 cx.notify();
                 return;
+            };
+            let processor = if editor.tool == "Builtin" {
+                None
+            } else {
+                let Some(config) = self
+                    .settings
+                    .shader_processors
+                    .iter()
+                    .find(|config| config.name == editor.tool)
+                else {
+                    self.status = Some(
+                        self.t(
+                            "Import a matching external processor configuration first.",
+                            "请先导入匹配的外部处理器配置。",
+                            "一致する外部プロセッサーの設定を先に読み込んでください。",
+                            "일치하는 외부 처리기 설정을 먼저 가져오세요.",
+                        )
+                        .to_owned(),
+                    );
+                    cx.notify();
+                    return;
+                };
+                if config.validate().is_err()
+                    || config.processor.input_encoding != encoding
+                    || !self.shader_data.as_ref().is_some_and(|report| {
+                        report
+                            .target_encodings
+                            .contains(&config.processor.output_encoding)
+                    })
+                {
+                    self.status = Some(
+                        self.t(
+                            "Processor input or output encoding is incompatible.",
+                            "处理器输入或输出编码不兼容。",
+                            "プロセッサーの入出力エンコーディングが互換ではありません。",
+                            "처리기의 입력 또는 출력 인코딩이 호환되지 않습니다.",
+                        )
+                        .to_owned(),
+                    );
+                    cx.notify();
+                    return;
+                }
+                Some(config.processor.clone())
             };
             let mut files = editor.files.clone();
             if let Some(file) = files
@@ -2313,6 +2467,8 @@ impl Workspace {
                 files,
                 flags,
                 command_line,
+                processor,
+                editor.tool.clone(),
             ))
         };
         self.resource_pending = true;
@@ -2328,17 +2484,40 @@ impl Workspace {
         );
         cx.notify();
         let task = cx.background_executor().spawn(async move {
+            let mut processor_diagnostics = String::new();
+            let mut output = None;
+            if let Some((_, entry, source, _, flags, _, Some(processor), _)) = replacement.as_ref()
+            {
+                let spirv = flags
+                    .iter()
+                    .find(|flag| flag.name == "@spirver")
+                    .map(|flag| flag.value.as_str())
+                    .unwrap_or("");
+                let processed = renderdocx::shader_processor::run(
+                    processor,
+                    source.as_bytes(),
+                    stage,
+                    entry,
+                    spirv,
+                )?;
+                processor_diagnostics = processed.diagnostics;
+                output = Some((processor.output_encoding, processed.bytes));
+            }
             let request = replacement
                 .as_ref()
-                .map(|(encoding, entry, source, _, _, _)| {
-                    (*encoding, entry.as_str(), source.as_bytes())
+                .map(|(encoding, entry, source, _, _, _, _, _)| {
+                    if let Some((output_encoding, bytes)) = output.as_ref() {
+                        (*output_encoding, entry.as_str(), bytes.as_slice())
+                    } else {
+                        (*encoding, entry.as_str(), source.as_bytes())
+                    }
                 });
             let flags = replacement
                 .as_ref()
-                .map(|(_, _, _, _, flags, _)| flags.as_slice());
+                .map(|(_, _, _, _, flags, _, _, _)| flags.as_slice());
             session
                 .shader_edit_with_flags(event, stage as u32, request, flags)
-                .map(|edit| (edit, replacement))
+                .map(|edit| (edit, replacement, processor_diagnostics))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -2348,7 +2527,7 @@ impl Workspace {
                 }
                 this.resource_pending = false;
                 match result {
-                    Ok((edit, replacement)) => {
+                    Ok((edit, replacement, processor_diagnostics)) => {
                         this.pipeline = Some(edit.pipeline);
                         this.shader_report_stale = true;
                         this.mesh = MeshView::default();
@@ -2364,7 +2543,16 @@ impl Workspace {
                         if edit.applied {
                             if let (
                                 Some(editor),
-                                Some((encoding, entry, _source, files, _flags, command_line)),
+                                Some((
+                                    encoding,
+                                    entry,
+                                    _source,
+                                    files,
+                                    _flags,
+                                    command_line,
+                                    _processor,
+                                    tool,
+                                )),
                             ) = (this.shader_editor.as_mut(), replacement)
                             {
                                 editor.baseline = files[editor.file_index]["contents"]
@@ -2377,6 +2565,7 @@ impl Workspace {
                                 editor.baseline_encoding = encoding.to_string();
                                 editor.baseline_command_line = command_line.clone();
                                 editor.command_line = command_line;
+                                editor.baseline_tool = tool;
                             }
                         }
                         let label = if revert {
@@ -2401,10 +2590,16 @@ impl Workspace {
                                 "셰이더 컴파일 실패",
                             )
                         };
-                        this.status = Some(if edit.diagnostics.is_empty() {
+                        let diagnostics =
+                            [processor_diagnostics.as_str(), edit.diagnostics.as_str()]
+                                .into_iter()
+                                .filter(|text| !text.is_empty())
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                        this.status = Some(if diagnostics.is_empty() {
                             label.to_owned()
                         } else {
-                            format!("{label}: {}", edit.diagnostics)
+                            format!("{label}: {diagnostics}")
                         });
                     }
                     Err(error) => {
@@ -2461,6 +2656,7 @@ impl Workspace {
         };
         let entry = self.shader_edit_entry.read(cx).value().to_string();
         let command_line = self.shader_edit_command.read(cx).value().to_string();
+        let tool = editor.tool.clone();
         let source = editor.input.read(cx).value().to_string();
         let stage = editor.stage;
         let file_index = editor.file_index;
@@ -2472,7 +2668,7 @@ impl Workspace {
             return;
         };
         file.insert("contents".into(), serde_json::Value::String(source.clone()));
-        let data = serde_json::json!({"id":resource_key,"stage":stage,"entryPoint":entry,"encoding":encoding,"commandLine":command_line,"tool":editor.tool,"flags":editor.flags,"files":files});
+        let data = serde_json::json!({"id":resource_key,"stage":stage,"entryPoint":entry,"encoding":encoding,"commandLine":command_line,"tool":tool,"flags":editor.flags,"files":files});
         self.resource_pending = true;
         let revision = self.open_revision;
         self.status = Some(
@@ -2499,6 +2695,7 @@ impl Workspace {
                 encoding,
                 files,
                 command_line,
+                tool,
             ))
         });
         cx.spawn(async move |this, cx| {
@@ -2507,11 +2704,11 @@ impl Workspace {
                 if this.open_revision != revision { return; }
                 this.resource_pending = false;
                 match result {
-                    Ok((document, resource_key, stage, file_index, source, entry, encoding, files, command_line)) => {
+                    Ok((document, resource_key, stage, file_index, source, entry, encoding, files, command_line, tool)) => {
                         this.annotations.edits = Some(document);
                         if let Some(editor) = this.shader_editor.as_mut().filter(|editor| editor.stage == stage && editor.resource_key.as_deref() == Some(&resource_key) && editor.file_index == file_index) {
                             editor.files = files.clone(); editor.baseline_files = files;
-                            editor.baseline = source; editor.baseline_entry = entry; editor.baseline_encoding = encoding.to_string(); editor.command_line = command_line.clone(); editor.baseline_command_line = command_line;
+                            editor.baseline = source; editor.baseline_entry = entry; editor.baseline_encoding = encoding.to_string(); editor.command_line = command_line.clone(); editor.baseline_command_line = command_line; editor.baseline_tool = tool;
                         }
                         this.status = Some(this.t("Shader draft saved to capture; it was not applied.", "着色器草稿已保存到捕获文件；尚未应用。", "シェーダーの下書きをキャプチャに保存しました。適用はされていません。", "셰이더 초안을 캡처에 저장했습니다. 적용되지는 않았습니다.").to_owned());
                     }
@@ -6950,8 +7147,21 @@ impl Workspace {
                             let name = file.get("name").and_then(serde_json::Value::as_str).unwrap_or("").to_owned();
                             editor_files = editor_files.child(div().id(("shader-edit-file", index)).test_support().cursor_pointer().px_3().py_2().rounded_md().bg(rgb(if editor.file_index == index { 0x4169e1 } else { 0x252f40 })).child(name).on_click(cx.listener(move |this, _, window, cx| this.switch_shader_editor_file(index, window, cx))));
                         }
+                        let mut processor_buttons = div().flex().flex_wrap().gap_2()
+                            .child(button("shader-processor-builtin", self.t("Built-in compiler", "内置编译器", "組み込みコンパイラー", "기본 컴파일러"), editor.tool == "Builtin", |this, cx| { if !this.resource_pending { if let Some(editor) = &mut this.shader_editor { editor.tool = "Builtin".into(); cx.notify(); } } }, cx))
+                            .child(button("shader-processor-import", self.t("Import processor", "导入处理器", "プロセッサーを読み込む", "처리기 가져오기"), false, |this, cx| this.import_shader_processor(cx), cx));
+                        for (index, config) in self.settings.shader_processors.iter().enumerate() {
+                            let name = config.name.clone();
+                            let remove_name = name.clone();
+                            processor_buttons = processor_buttons.child(div().flex().gap_1()
+                                .child(div().id(("shader-processor-select", index)).test_support().cursor_pointer().px_3().py_2().rounded_md().bg(rgb(if editor.tool == name { 0x4169e1 } else { 0x252f40 })).child(name.clone()).on_click(cx.listener(move |this, _, _, cx| { if !this.resource_pending { if let Some(editor) = &mut this.shader_editor { editor.tool = name.clone(); cx.notify(); } } })))
+                                .child(div().id(("shader-processor-remove", index)).test_support().cursor_pointer().px_2().py_2().child("×").on_click(cx.listener(move |this, _, _, cx| this.remove_shader_processor(&remove_name, cx)))));
+                        }
                         view = view.child(format!("{}: {}", edit_label, editor.filename))
-                            .child(self.t("Replacements affect this replay session only. Captured source files are used to resolve includes; external compilers are not supported.", "替换仅作用于当前回放会话。include 从捕获的源码文件中解析；暂不支持外部编译器。", "置換はこのリプレイセッションにのみ適用されます。include はキャプチャされたソースファイルから解決されます。外部コンパイラーには未対応です。", "교체는 현재 리플레이 세션에만 적용됩니다. include는 캡처된 소스 파일에서 찾습니다. 외부 컴파일러는 지원되지 않습니다."))
+                            .child(self.t("Replacements affect this replay session only. External processor arguments come from the imported configuration; the command-line field is passed to RenderDoc as a compile flag.", "替换仅作用于当前回放会话。外部处理器参数来自导入的配置；命令行字段作为编译参数传给 RenderDoc。", "置換はこのリプレイセッションにのみ適用されます。外部プロセッサーの引数は読み込んだ設定を使用し、コマンドライン欄は RenderDoc のコンパイルフラグとして渡されます。", "교체는 현재 리플레이 세션에만 적용됩니다. 외부 처리기 인수는 가져온 설정에서 사용하며 명령줄 필드는 RenderDoc 컴파일 플래그로 전달됩니다."))
+                            .child(format!("{}: {}", self.t("Processor", "处理器", "プロセッサー", "처리기"), editor.tool))
+                            .child(processor_buttons)
+                            .child(self.t("Import a JSON object with name, executable, input_encoding, output_encoding and arguments.", "导入包含 name、executable、input_encoding、output_encoding、arguments 的 JSON 对象。", "name、executable、input_encoding、output_encoding、arguments を含む JSON オブジェクトを読み込みます。", "name, executable, input_encoding, output_encoding, arguments가 포함된 JSON 객체를 가져옵니다."))
                             .child(format!("{}: {:?}", self.t("Supported encoding IDs", "支持的编码 ID", "対応エンコーディング ID", "지원 인코딩 ID"), shader.target_encodings))
                             .child(div().flex().flex_wrap().gap_2().child(entry_label).child(Input::new(&self.shader_edit_entry).id("shader-edit-entry").aria_label(entry_label).w(px(150.)))
                                 .child(encoding_label).child(Input::new(&self.shader_edit_encoding).id("shader-edit-encoding").aria_label(encoding_label).w(px(80.)))

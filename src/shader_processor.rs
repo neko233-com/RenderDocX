@@ -14,6 +14,33 @@ pub struct ShaderProcessor {
     pub arguments: Vec<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct NamedShaderProcessor {
+    pub name: String,
+    #[serde(flatten)]
+    pub processor: ShaderProcessor,
+}
+
+impl NamedShaderProcessor {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.name.trim().is_empty()
+            || self.name == "Builtin"
+            || self.name.contains('\0')
+            || self.processor.executable.as_os_str().is_empty()
+            || self.processor.input_encoding >= 10
+            || self.processor.output_encoding >= 10
+            || self
+                .processor
+                .arguments
+                .iter()
+                .any(|arg| arg.contains('\0'))
+        {
+            return Err("Invalid shader processor configuration".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub struct ProcessorOutput {
     pub bytes: Vec<u8>,
@@ -164,5 +191,18 @@ mod tests {
             arguments: vec![],
         };
         assert!(run(&tool, b"source", 8, "main", "").is_err());
+    }
+
+    #[test]
+    fn imported_configuration_validates_and_roundtrips() {
+        let json = serde_json::json!({"name":"My compiler","executable":"compiler","input_encoding":5,"output_encoding":3,"arguments":["-o","{output_file}","{input_file}"]});
+        let mut config: NamedShaderProcessor = serde_json::from_value(json.clone()).unwrap();
+        config.validate().unwrap();
+        assert_eq!(serde_json::to_value(&config).unwrap(), json);
+        config.name = "Builtin".into();
+        assert!(config.validate().is_err());
+        config.name = "external".into();
+        config.processor.arguments.push("bad\0argument".into());
+        assert!(config.validate().is_err());
     }
 }

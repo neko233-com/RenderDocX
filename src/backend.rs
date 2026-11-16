@@ -14,6 +14,7 @@ pub struct Settings {
     pub qrenderdoc: Option<PathBuf>,
     pub renderdoccmd: Option<PathBuf>,
     pub replay_bridge: Option<PathBuf>,
+    pub shader_processors: Vec<crate::shader_processor::NamedShaderProcessor>,
 }
 
 impl Settings {
@@ -85,4 +86,15 @@ pub fn open_upstream(settings: &Settings) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Settings;
+
+    #[test]
+    fn older_settings_default_to_no_external_processors() {
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert!(settings.shader_processors.is_empty());
+    }
 }

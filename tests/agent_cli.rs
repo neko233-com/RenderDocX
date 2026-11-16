@@ -593,7 +593,7 @@ fn incompatible_core_is_rejected_before_capture_open() {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "requires a built D3D11 fixture and matching RenderDoc replay bridge"]
+#[ignore = "requires built D3D11 and shader processor fixtures and matching RenderDoc replay bridge"]
 fn real_d3d11_capture_is_inspected_and_selected() {
     use std::{os::windows::process::CommandExt, path::PathBuf};
     let bridge = PathBuf::from(
@@ -1703,6 +1703,20 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     assert_eq!(
         agent.send(&replacement_request)["data"]["edit"]["applied"],
         true
+    );
+    let external = std::env::var_os("RENDERDOCX_TEST_SHADER_PROCESSOR")
+        .expect("set RENDERDOCX_TEST_SHADER_PROCESSOR");
+    let processed = agent.send(&serde_json::json!({"command":"shader_apply","stage":"fragment","encoding":5,"entry":"main","source":"float4 main() : SV_Target { return float4(1,0,0,1); }","flags":fragment_report["data"]["shader"]["compile_flags"],"processor":{"executable":std::path::PathBuf::from(external),"input_encoding":5,"output_encoding":5,"arguments":["{stdin}"]}}).to_string());
+    assert_eq!(processed["data"]["edit"]["applied"], true, "{processed}");
+    assert!(
+        processed["data"]["processor_diagnostics"]
+            .as_str()
+            .unwrap()
+            .contains("fixture compiler diagnostics")
+    );
+    assert_eq!(
+        agent.send(&pick)["data"]["pixel"]["bits"],
+        changed["data"]["pixel"]["bits"]
     );
     let restored = agent.send(r#"{"command":"shader_revert","stage":"fragment"}"#);
     assert_eq!(restored["ok"], true, "{restored}");

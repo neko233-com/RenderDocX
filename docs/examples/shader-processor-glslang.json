@@ -1,0 +1,7 @@
+{
+  "name": "glslangValidator GLSL to SPIR-V",
+  "executable": "glslangValidator",
+  "input_encoding": 2,
+  "output_encoding": 3,
+  "arguments": ["-g", "-V", "-S", "{glsl_stage4}", "--target-env", "{spirv_ver}", "-o", "{output_file}", "{input_file}"]
+}
