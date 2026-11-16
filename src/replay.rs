@@ -864,7 +864,7 @@ pub struct Texture {
     pub component_byte_width: u32,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct TextureSelection {
     pub mip: u32,
@@ -875,6 +875,8 @@ pub struct TextureSelection {
     pub preview_type_cast: u32,
     /// RenderDoc CompType for picking, statistics and pixel history.
     pub analysis_type_cast: u32,
+    /// Optional black/white mapping for preview and 8-bit exports.
+    pub display_range: Option<[f32; 2]>,
 }
 
 /// Raw data is a whole subresource; a 3D mip contains its complete depth.
@@ -1112,6 +1114,9 @@ impl TextureSelection {
         if self.mip >= texture.mips
             || self.preview_type_cast > 9
             || self.analysis_type_cast > 9
+            || self
+                .display_range
+                .is_some_and(|[min, max]| !min.is_finite() || !max.is_finite() || min >= max)
             || self.mip > i32::MAX as u32
             || self.slice >= slices
             || self.slice > i32::MAX as u32
@@ -2770,7 +2775,28 @@ impl Transport for Process {
             encoded.push(HEX[(byte & 15) as usize] as char);
         }
         let input = self.input.as_mut().ok_or("Replay session has closed")?;
-        let command = if format != TextureExportFormat::Png {
+        let command = if let Some([black, white]) = selection.display_range {
+            if !black.is_finite() || !white.is_finite() || black >= white {
+                return Err("Invalid texture display range".into());
+            }
+            let sample = selection
+                .sample
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "resolve".into());
+            let channel = selection
+                .channel
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "all".into());
+            format!(
+                "save4 {index} {} {} {sample} {channel} {encoded} {} {} {} {}",
+                selection.mip,
+                selection.slice,
+                selection.preview_type_cast,
+                format.wire(),
+                black.to_bits(),
+                white.to_bits()
+            )
+        } else if format != TextureExportFormat::Png {
             let sample = selection
                 .sample
                 .map(|v| v.to_string())
@@ -4020,6 +4046,9 @@ impl Session {
         if selection.mip > i32::MAX as u32
             || selection.slice > i32::MAX as u32
             || selection.channel.is_some_and(|v| v > i32::MAX as u32)
+            || selection
+                .display_range
+                .is_some_and(|[min, max]| !min.is_finite() || !max.is_finite() || min >= max)
         {
             return Err("Texture selection is out of range".into());
         }
@@ -5102,6 +5131,7 @@ mod tests {
             channel: Some(3),
             preview_type_cast: 0,
             analysis_type_cast: 0,
+            display_range: None,
         };
         let raw = RawTextureSelection {
             mip: 2,
@@ -5125,6 +5155,13 @@ mod tests {
                 .is_err()
         );
         assert!(selection.validate(&texture).is_ok());
+        selection.display_range = Some([1.0, 1.0]);
+        assert!(selection.validate(&texture).is_err());
+        selection.display_range = Some([f32::NAN, 1.0]);
+        assert!(selection.validate(&texture).is_err());
+        selection.display_range = Some([-1.0, 2.0]);
+        assert!(selection.validate(&texture).is_ok());
+        selection.display_range = None;
         selection.preview_type_cast = 10;
         assert!(selection.validate(&texture).is_err());
         selection.preview_type_cast = 0;

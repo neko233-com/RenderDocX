@@ -819,6 +819,32 @@ fn real_d3d11_mesh_draw_order() {
             .unwrap()
             .starts_with(b"\x89PNG\r\n\x1a\n")
     );
+    let float_index = opened["data"]["capture"]["textures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|texture| texture["format_name"] == "R32G32B32A32_FLOAT")
+        .unwrap();
+    let mapped_path = dir.path().join("mapped.png");
+    let mapped = agent.send(&serde_json::json!({"command":"export_texture","index":float_index,"path":mapped_path,"display_range":[0.25,0.75]}).to_string());
+    assert_eq!(mapped["ok"], true, "{mapped}");
+    let mut reader = png::Decoder::new(std::io::BufReader::new(
+        std::fs::File::open(&mapped_path).unwrap(),
+    ))
+    .read_info()
+    .unwrap();
+    let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+    reader.next_frame(&mut pixels).unwrap();
+    assert!(
+        pixels[0] <= 2 && (126..=129).contains(&pixels[1]) && pixels[2] >= 253,
+        "mapped pixel: {:?}",
+        &pixels[..3]
+    );
+    let invalid_range = agent.send(&serde_json::json!({"command":"export_texture","index":float_index,"path":dir.path().join("invalid-range.png"),"display_range":[1.0,1.0]}).to_string());
+    assert_eq!(
+        invalid_range["error"]["code"], "invalid_arguments",
+        "{invalid_range}"
+    );
     for command in ["pick_pixel", "texture_statistics", "pixel_history"] {
         let result = agent.send(&serde_json::json!({"command":command,"index":texture_index,"x":0,"y":0,"analysis_type_cast":2}).to_string());
         assert_eq!(result["ok"], true, "{command}: {result}");

@@ -606,6 +606,8 @@ struct Workspace {
     tab: CaptureTab,
     selected_texture: Option<usize>,
     texture_selection: TextureSelection,
+    texture_black_point: Entity<InputState>,
+    texture_white_point: Entity<InputState>,
     texture_raw_page: Option<renderdocx::replay::RawTexturePage>,
     texture_raw_seek: Entity<InputState>,
     texture_raw_search: Entity<InputState>,
@@ -5768,6 +5770,54 @@ impl Workspace {
         cx.notify();
     }
 
+    fn apply_texture_range(&mut self, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            self.status = Some(
+                self.t(
+                    "Wait for the current operation.",
+                    "请等待当前操作完成。",
+                    "現在の処理が完了するまでお待ちください。",
+                    "현재 작업이 끝날 때까지 기다려 주세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let values = self
+            .texture_black_point
+            .read(cx)
+            .value()
+            .parse::<f32>()
+            .ok()
+            .zip(
+                self.texture_white_point
+                    .read(cx)
+                    .value()
+                    .parse::<f32>()
+                    .ok(),
+            );
+        let Some((black, white)) =
+            values.filter(|(black, white)| black.is_finite() && white.is_finite() && black < white)
+        else {
+            self.status = Some(
+                self.t(
+                    "Enter finite black and white points with black below white.",
+                    "请输入有限黑白点，且黑点小于白点。",
+                    "黒点と白点に有限値を入力し、黒点を白点より小さくしてください。",
+                    "유한한 흑점과 백점을 입력하고 흑점이 백점보다 작아야 합니다.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        self.texture_selection.display_range = Some([black, white]);
+        self.preview = None;
+        self.status = None;
+        cx.notify();
+    }
+
     fn export_buffer(&mut self, cx: &mut Context<Self>) {
         if self.replay_pending
             || self.export_pending
@@ -8459,6 +8509,16 @@ impl Workspace {
                             .children(lines.into_iter().enumerate().map(|(index, line)| div().id(("texture-raw-line", index)).test_support().text_sm().child(line)))
                     })
             .into_any_element()
+    }
+
+    fn texture_range_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div().flex().flex_col().gap_2()
+            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(format!("{}: {:?}", self.t("Preview/export black and white points", "预览与导出黑白点", "プレビュー・書き出しの黒点と白点", "미리보기·내보내기 흑점과 백점"), self.texture_selection.display_range.unwrap_or([0.0, 1.0]))))
+            .child(div().flex().flex_wrap().gap_2()
+                .child(Input::new(&self.texture_black_point).id("texture-black-point").aria_label(self.t("Black point", "黑点", "黒点", "흑점")).w(px(90.)))
+                .child(Input::new(&self.texture_white_point).id("texture-white-point").aria_label(self.t("White point", "白点", "白点", "백점")).w(px(90.)))
+                .child(button("texture-apply-range", self.t("Apply range", "应用范围", "範囲を適用", "범위 적용"), false, |this, cx| this.apply_texture_range(cx), cx)))
+            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t("The range applies when RenderDoc converts texture data for export; already compatible formats may bypass conversion.", "仅在 RenderDoc 导出时转换纹理数据才应用范围；已兼容的格式可能跳过转换。", "範囲は RenderDoc が書き出し用に変換する場合に適用され、互換形式では変換を省くことがあります。", "범위는 RenderDoc이 내보내기용으로 변환할 때 적용되며 호환 형식은 변환을 건너뛸 수 있습니다.")))
     }
 
     fn capture_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -12001,6 +12061,7 @@ impl Workspace {
                         texture.component_count,
                         texture.component_byte_width
                     ))
+                    .child(self.texture_range_controls(cx))
                     .child(
                         div()
                             .flex()
@@ -14444,6 +14505,10 @@ fn main() {
                     let message_search = cx.new(|cx| InputState::new(window, cx));
                     let bookmark_text = cx.new(|cx| InputState::new(window, cx));
                     let stats_min = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let texture_black_point =
+                        cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let texture_white_point =
+                        cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_debug_primitive = cx.new(|cx| InputState::new(window, cx));
                     let pixel_debug_view = cx.new(|cx| InputState::new(window, cx));
@@ -14505,6 +14570,8 @@ fn main() {
                         tab: CaptureTab::Events,
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
+                        texture_black_point,
+                        texture_white_point,
                         texture_raw_page: None,
                         texture_raw_seek,
                         texture_raw_search,
@@ -14764,6 +14831,10 @@ mod ui_tests {
                     let message_search = cx.new(|cx| InputState::new(window, cx));
                     let bookmark_text = cx.new(|cx| InputState::new(window, cx));
                     let stats_min = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let texture_black_point =
+                        cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let texture_white_point =
+                        cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_debug_primitive = cx.new(|cx| InputState::new(window, cx));
                     let pixel_debug_view = cx.new(|cx| InputState::new(window, cx));
@@ -14843,6 +14914,8 @@ mod ui_tests {
                         tab: CaptureTab::Events,
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
+                        texture_black_point,
+                        texture_white_point,
                         texture_raw_page: None,
                         texture_raw_seek,
                         texture_raw_search,
@@ -15177,6 +15250,10 @@ mod ui_tests {
                     let message_search = cx.new(|cx| InputState::new(window, cx));
                     let bookmark_text = cx.new(|cx| InputState::new(window, cx));
                     let stats_min = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let texture_black_point =
+                        cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let texture_white_point =
+                        cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_debug_primitive = cx.new(|cx| InputState::new(window, cx));
                     let pixel_debug_view = cx.new(|cx| InputState::new(window, cx));
@@ -15376,6 +15453,8 @@ mod ui_tests {
                         tab: CaptureTab::Events,
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
+                        texture_black_point,
+                        texture_white_point,
                         texture_raw_page: None,
                         texture_raw_seek,
                         texture_raw_search,
@@ -15855,7 +15934,8 @@ mod ui_tests {
                 sample: Some(0),
                 channel: Some(0),
                 preview_type_cast: 0,
-                analysis_type_cast: 0
+                analysis_type_cast: 0,
+                display_range: None,
             }]
         );
         cx.update(|cx| {
@@ -15881,6 +15961,48 @@ mod ui_tests {
         })
         .unwrap();
         cx.update(|cx| assert!(view.read(cx).preview.is_none()));
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.texture_black_point
+                    .update(cx, |input, cx| input.set_value("2", window, cx));
+                view.texture_white_point
+                    .update(cx, |input, cx| input.set_value("1", window, cx));
+            });
+            window.render_frame(cx);
+            reveal_details(window, "texture-apply-range", cx);
+            window.click("texture-apply-range", cx);
+        })
+        .unwrap();
+        cx.update(|cx| {
+            assert_eq!(view.read(cx).texture_selection.display_range, None);
+            assert!(view.read(cx).status.is_some());
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.texture_black_point
+                    .update(cx, |input, cx| input.set_value("0.25", window, cx))
+            });
+            window.render_frame(cx);
+            window.click("texture-apply-range", cx);
+        })
+        .unwrap();
+        cx.update(|cx| {
+            assert_eq!(
+                view.read(cx).texture_selection.display_range,
+                Some([0.25, 1.0])
+            )
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            reveal_details(window, "texture-preview", cx);
+            window.click("texture-preview", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            selections.lock().unwrap().last().unwrap().display_range,
+            Some([0.25, 1.0])
+        );
         cx.update(|cx| view.update(cx, |view, cx| view.read_texture_raw_page(0, cx)));
         cx.run_until_parked();
         cx.update(|cx| {

@@ -71,6 +71,13 @@ int wmain(int argc, wchar_t **argv)
   hr = device->CreateTexture2D(&integer_desc, nullptr, &integer_texture);
   if(SUCCEEDED(hr)) hr = device->CreateRenderTargetView(integer_texture, nullptr, &integer_view);
   if(FAILED(hr)) { std::cerr << "Could not create integer texture"; return 18; }
+  D3D11_TEXTURE2D_DESC float_desc = integer_desc;
+  float_desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+  ID3D11Texture2D *float_texture = nullptr;
+  ID3D11RenderTargetView *float_view = nullptr;
+  hr = device->CreateTexture2D(&float_desc, nullptr, &float_texture);
+  if(SUCCEEDED(hr)) hr = device->CreateRenderTargetView(float_texture, nullptr, &float_view);
+  if(FAILED(hr)) { std::cerr << "Could not create float texture"; return 25; }
   D3D11_TEXTURE3D_DESC volume_desc = {};
   volume_desc.Width = 4; volume_desc.Height = 4; volume_desc.Depth = 2; volume_desc.MipLevels = 1;
   volume_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; volume_desc.Usage = D3D11_USAGE_DEFAULT; volume_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
@@ -183,6 +190,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint3 id : 
   context->ClearRenderTargetView(view, color);
   const float integer_color[4] = {1, 2, 3, 4};
   context->ClearRenderTargetView(integer_view, integer_color);
+  context->ClearRenderTargetView(float_view, color);
   if(msaa_view) context->ClearRenderTargetView(msaa_view, color);
   const float volume_colors[2][4] = {{1,0,0,1}, {0,0,1,1}};
   for(unsigned i = 0; i < 2; ++i) context->ClearRenderTargetView(volume_views[i], volume_colors[i]);
@@ -232,6 +240,6 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint3 id : 
   for(auto *volume_view : volume_views) volume_view->Release();
   if(msaa_view) msaa_view->Release(); if(msaa_texture) msaa_texture->Release();
   constant_buffer->Release(); compute_uav->Release(); compute_buffer->Release(); compute_shader->Release();
-  scissor_rasterizer->Release(); history_rasterizer->Release(); history_shader->Release(); volume->Release(); integer_view->Release(); integer_texture->Release(); layered->Release(); index_buffer->Release(); vertex_buffer->Release(); layout->Release(); vertex->Release(); pixel->Release(); view->Release(); texture->Release(); context->Release(); device->Release();
+  scissor_rasterizer->Release(); history_rasterizer->Release(); history_shader->Release(); volume->Release(); float_view->Release(); float_texture->Release(); integer_view->Release(); integer_texture->Release(); layered->Release(); index_buffer->Release(); vertex_buffer->Release(); layout->Release(); vertex->Release(); pixel->Release(); view->Release(); texture->Release(); context->Release(); device->Release();
   return 0;
 }

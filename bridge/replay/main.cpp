@@ -2397,13 +2397,15 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       std::cout << "\nRENDERDOCX/1 {\"type\":\"texture_saved\",\"index\":" << index << "}" << std::endl;
       continue;
     }
-    if(command.compare(0, 6, "save2 ") == 0 || command.compare(0, 6, "save3 ") == 0)
+    if(command.compare(0, 6, "save2 ") == 0 || command.compare(0, 6, "save3 ") == 0 || command.compare(0, 6, "save4 ") == 0)
     {
-      const bool extended = command.compare(0, 6, "save3 ") == 0;
+      const bool ranged = command.compare(0, 6, "save4 ") == 0;
+      const bool extended = ranged || command.compare(0, 6, "save3 ") == 0;
       if(!selected) { error("Select an event before saving textures"); continue; }
       std::istringstream arguments(command.substr(6));
-      std::string index_text, mip_text, slice_text, sample_text, channel_text, encoded, cast_text, format_text, extra;
+      std::string index_text, mip_text, slice_text, sample_text, channel_text, encoded, cast_text, format_text, black_text, white_text, extra;
       uint64_t index = 0, mip = 0, slice = 0, sample = 0, channel = 0, cast = 0, file_type = uint64_t(FileType::PNG);
+      float black = 0.0f, white = 1.0f;
       if(!(arguments >> index_text >> mip_text >> slice_text >> sample_text >> channel_text >> encoded) ||
          !decimal(index_text, index) || !decimal(mip_text, mip) || !decimal(slice_text, slice) ||
          (sample_text != "resolve" && !decimal(sample_text, sample)) ||
@@ -2412,8 +2414,19 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       if(extended)
       {
         if(!(arguments >> cast_text >> format_text) || !decimal(cast_text, cast) || cast > 9 ||
-           !decimal(format_text, file_type) || file_type >= uint64_t(FileType::Raw) || (arguments >> extra))
+           !decimal(format_text, file_type) || file_type >= uint64_t(FileType::Raw))
         { error("Invalid texture cast or file type"); continue; }
+        if(ranged)
+        {
+          uint64_t black_bits = 0, white_bits = 0;
+          if(!(arguments >> black_text >> white_text) || !decimal(black_text, black_bits) || !decimal(white_text, white_bits) || black_bits > UINT32_MAX || white_bits > UINT32_MAX)
+          { error("Invalid texture display range"); continue; }
+          const uint32_t b = uint32_t(black_bits), w = uint32_t(white_bits);
+          std::memcpy(&black, &b, sizeof(black)); std::memcpy(&white, &w, sizeof(white));
+          if(!std::isfinite(black) || !std::isfinite(white) || black >= white)
+          { error("Invalid texture display range"); continue; }
+        }
+        if(arguments >> extra) { error("Invalid texture cast or file type"); continue; }
       }
       else if((arguments >> cast_text) && (!decimal(cast_text, cast) || cast > 9 || (arguments >> extra)))
       { error("Invalid texture cast"); continue; }
@@ -2441,6 +2454,8 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       save.slice.sliceIndex = int32_t(slice);
       save.sample.sampleIndex = sample_text == "resolve" ? TextureSampleMapping::ResolveSamples : uint32_t(sample);
       save.channelExtract = channel_text == "all" ? -1 : int(channel);
+      save.comp.blackPoint = black;
+      save.comp.whitePoint = white;
       ResultDetails saved = replay.controller->SaveTexture(save, path.c_str());
       if(!saved.OK()) { error(result_message(saved)); continue; }
       std::cout << "\nRENDERDOCX/1 {\"type\":\"texture_saved\",\"index\":" << index << "}" << std::endl;
