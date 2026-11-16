@@ -25,7 +25,7 @@ fn usage() -> Value {
         {"name":"select","arguments":["capture.rdc","event_id"],"description":"Replay a capture to an event."},
         {"name":"serve","arguments":[],"description":"Serve sequential JSONL requests using a persistent replay session."},
         {"name":"capabilities","arguments":[],"description":"Describe the commands currently implemented."}
-    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","structure","read_buffer","export_texture","close","target_list","target_launch","target_connect","target_connect_pid","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
+    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","structure","structure_buffer","read_buffer","export_texture","close","target_list","target_launch","target_connect","target_connect_pid","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
 }
 
 fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
@@ -333,6 +333,39 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         .map(|page| json!({"structure":page}))
                         .map_err(|error| ("replay_structure_failed", error)),
                     _ => Err(("invalid_arguments", "structure requires event_id, an optional decimal-string path and offset, and a valid page limit".into())),
+                }
+            }
+            "structure_buffer" => {
+                let event = request
+                    .get("event_id")
+                    .and_then(Value::as_u64)
+                    .and_then(|v| u32::try_from(v).ok());
+                let offset = request
+                    .get("offset")
+                    .and_then(Value::as_str)
+                    .and_then(|v| v.parse::<u64>().ok());
+                let length = request
+                    .get("length")
+                    .and_then(Value::as_u64)
+                    .and_then(|v| u32::try_from(v).ok())
+                    .filter(|v| *v <= BUFFER_PAGE_LIMIT);
+                let path = match request.get("path") {
+                    None => Some(Vec::new()),
+                    Some(value) => value.as_array().and_then(|items| {
+                        items
+                            .iter()
+                            .map(|item| item.as_str()?.parse::<u64>().ok())
+                            .collect()
+                    }),
+                };
+                match (&opened, event, path, offset, length) {
+                    (None, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some((session, _)), Some(event), Some(path), Some(offset), Some(length)) if offset.checked_add(u64::from(length)).is_some() =>
+                        session.structure_buffer(event, &path, offset, length).map(|bytes| {
+                            let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+                            json!({"event_id":event,"path":path.iter().map(u64::to_string).collect::<Vec<_>>(),"offset":offset.to_string(),"hex":hex})
+                        }).map_err(|error| ("replay_structure_buffer_failed", error)),
+                    _ => Err(("invalid_arguments", "structure_buffer requires event_id, decimal-string path and offset, and a valid length".into())),
                 }
             }
             "select" => match (

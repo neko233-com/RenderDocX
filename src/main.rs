@@ -36,6 +36,8 @@ struct StructureView {
     page: Option<StructurePage>,
     path: Vec<u64>,
     offset: u64,
+    bytes: Option<Vec<u8>>,
+    bytes_offset: u64,
 }
 
 fn structured_value(node: &StructuredNode) -> String {
@@ -934,6 +936,8 @@ impl Workspace {
                             page: Some(page),
                             path,
                             offset,
+                            bytes: None,
+                            bytes_offset: 0,
                         };
                         this.status = None;
                     }
@@ -945,6 +949,74 @@ impl Workspace {
                                 "无法查看事件参数",
                                 "イベントパラメーターを表示できません",
                                 "이벤트 매개변수를 확인할 수 없습니다"
+                            )
+                        ));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn read_structure_buffer(&mut self, offset: u64, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            return;
+        }
+        let Some(event) = self.pipeline.as_ref().map(|state| state.event_id) else {
+            return;
+        };
+        let Some(node) = self.structure.page.as_ref().map(|page| &page.node) else {
+            return;
+        };
+        if node.basic_type != 4 {
+            return;
+        } // upstream SDBasic::Buffer
+        let Some(size) = node.byte_size.parse::<u64>().ok() else {
+            return;
+        };
+        if offset > size {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let length = (size - offset).min(BUFFER_VIEW_PAGE) as u32;
+        let path = self.structure.path.clone();
+        let revision = self.open_revision;
+        let selection_revision = self.selection_revision;
+        self.resource_pending = true;
+        self.status = Some(self.t(
+            "Loading bytes in an isolated worker; full capture export can use substantial memory…",
+            "正在隔离进程中读取字节；完整捕获导出可能占用较多内存…",
+            "分離プロセスでバイトを読み込み中。完全なキャプチャーの出力には多くのメモリが必要な場合があります…",
+            "분리된 프로세스에서 바이트를 불러오는 중입니다. 전체 캡처 내보내기에 많은 메모리가 필요할 수 있습니다…",
+        ).to_owned());
+        cx.notify();
+        let task = cx
+            .background_executor()
+            .spawn(async move { session.structure_buffer(event, &path, offset, length) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision || this.selection_revision != selection_revision {
+                    return;
+                }
+                this.resource_pending = false;
+                match result {
+                    Ok(bytes) => {
+                        this.structure.bytes = Some(bytes);
+                        this.structure.bytes_offset = offset;
+                        this.status = None;
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Could not read structured bytes",
+                                "无法读取结构化字节",
+                                "構造化バイトを読み込めません",
+                                "구조화된 바이트를 읽을 수 없습니다"
                             )
                         ));
                     }
@@ -1320,6 +1392,19 @@ impl Workspace {
         let parent_label = self.t("Parent", "上一级", "親", "상위");
         let previous_label = self.t("Previous", "上一页", "前へ", "이전");
         let next_label = self.t("Next", "下一页", "次へ", "다음");
+        let load_structure_bytes = self.t(
+            "Load bytes (full capture export)",
+            "读取字节（完整导出捕获）",
+            "バイトを読み込む（キャプチャー全体を出力）",
+            "바이트 읽기 (전체 캡처 내보내기)",
+        );
+        let previous_bytes = self.t("Previous bytes", "上一段字节", "前のバイト", "이전 바이트");
+        let next_bytes = self.t("Next bytes", "下一段字节", "次のバイト", "다음 바이트");
+        let is_structured_buffer = self
+            .structure
+            .page
+            .as_ref()
+            .is_some_and(|page| page.node.basic_type == 4);
         let selected_event_label = self.t(
             "Selected event",
             "当前事件",
@@ -1862,6 +1947,25 @@ impl Workspace {
 
         let detail_view = if self.tab == CaptureTab::Parameters {
             let page = self.structure.page.clone();
+            let bytes_lines = self
+                .structure
+                .bytes
+                .as_ref()
+                .map(|bytes| {
+                    bytes
+                        .chunks(16)
+                        .enumerate()
+                        .map(|(index, chunk)| {
+                            let hex: String =
+                                chunk.iter().map(|byte| format!("{byte:02x} ")).collect();
+                            format!(
+                                "{:08X}: {hex}",
+                                self.structure.bytes_offset + (index as u64) * 16
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             let heading = self.t(
                 "STRUCTURED DATA",
                 "结构化数据",
@@ -1916,6 +2020,13 @@ impl Workspace {
                 .when(self.structure.page.is_none(), |view| {
                     view.child(pending_label)
                 })
+                .children(bytes_lines.into_iter().enumerate().map(|(index, line)| {
+                    div()
+                        .id(("structure-bytes-line", index))
+                        .test_support()
+                        .text_sm()
+                        .child(line)
+                }))
         } else if self.tab == CaptureTab::Shaders {
             let report = self.shader_data.clone();
             let target_button = button(
@@ -2708,6 +2819,77 @@ impl Workspace {
                                         )),
                                 )
                             })
+                            .when(
+                                self.tab == CaptureTab::Parameters && is_structured_buffer,
+                                |view| {
+                                    view.child(
+                                        div()
+                                            .flex()
+                                            .flex_wrap()
+                                            .gap_2()
+                                            .px_3()
+                                            .pb_2()
+                                            .child(button(
+                                                "structure-load-bytes",
+                                                load_structure_bytes,
+                                                false,
+                                                |this, cx| this.read_structure_buffer(0, cx),
+                                                cx,
+                                            ))
+                                            .when(self.structure.bytes.is_some(), |row| {
+                                                row.child(button(
+                                                    "structure-bytes-previous",
+                                                    previous_bytes,
+                                                    false,
+                                                    |this, cx| {
+                                                        if this.structure.bytes_offset > 0 {
+                                                            this.read_structure_buffer(
+                                                                this.structure
+                                                                    .bytes_offset
+                                                                    .saturating_sub(
+                                                                        BUFFER_VIEW_PAGE,
+                                                                    ),
+                                                                cx,
+                                                            );
+                                                        }
+                                                    },
+                                                    cx,
+                                                ))
+                                                .child(button(
+                                                    "structure-bytes-next",
+                                                    next_bytes,
+                                                    false,
+                                                    |this, cx| {
+                                                        if let (Some(page), Some(bytes)) = (
+                                                            &this.structure.page,
+                                                            &this.structure.bytes,
+                                                        ) {
+                                                            let next = this
+                                                                .structure
+                                                                .bytes_offset
+                                                                .checked_add(bytes.len() as u64);
+                                                            let total = page
+                                                                .node
+                                                                .byte_size
+                                                                .parse::<u64>()
+                                                                .ok();
+                                                            if let (Some(next), Some(total)) =
+                                                                (next, total)
+                                                            {
+                                                                if next < total {
+                                                                    this.read_structure_buffer(
+                                                                        next, cx,
+                                                                    );
+                                                                }
+                                                            }
+                                                        }
+                                                    },
+                                                    cx,
+                                                ))
+                                            }),
+                                    )
+                                },
+                            )
                             .child(list),
                     )
                     .child(
@@ -4206,6 +4388,40 @@ mod ui_tests {
         cx.run_until_parked();
         cx.update(|cx| assert!(view.read(cx).structure.path.is_empty()));
         cx.update_window(handle.into(), |_, window, cx| {
+            window.click("structure-child-1", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("structure-load-bytes", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(view.read(cx).structure.bytes.as_ref().unwrap().len(), 256);
+            assert_eq!(view.read(cx).structure.bytes_offset, 0);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("structure-bytes-next", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(view.read(cx).structure.bytes.as_ref().unwrap().len(), 44);
+            assert_eq!(view.read(cx).structure.bytes_offset, 256);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("structure-bytes-previous", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).structure.bytes_offset, 0));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("structure-parent", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
             window.click("shaders-tab", cx);
             window.click("shader-0", cx);
         })
@@ -4302,6 +4518,29 @@ mod ui_tests {
                             .map(|(api_index, event)| (action_index, api_index, event.event_id))
                     })
                     .expect("captured non-action topology event");
+                let (update_row, update_event) = real_snapshot
+                    .actions
+                    .iter()
+                    .enumerate()
+                    .find_map(|(action_index, action)| {
+                        action
+                            .api_events
+                            .iter()
+                            .enumerate()
+                            .find(|(_, event)| event.name.contains("UpdateSubresource"))
+                            .map(|(api_index, event)| {
+                                let row: gpui::ElementId = if event.event_id == action.event_id {
+                                    action_index.into()
+                                } else {
+                                    SharedString::from(format!(
+                                        "event-api-{action_index}-{api_index}"
+                                    ))
+                                    .into()
+                                };
+                                (row, event.event_id)
+                            })
+                    })
+                    .expect("captured buffer update event");
                 cx.update(|cx| {
                     view.update(cx, |view, cx| {
                         view.open_revision += 1;
@@ -4342,38 +4581,95 @@ mod ui_tests {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
                 cx.update_window(handle.into(), |_, window, cx| {
-                    window.click("parameters-tab", cx)
+                    window.click("events-tab", cx);
+                    window.click("event-filter", cx);
+                    window.press("ctrl-a", cx);
+                    window.input("UpdateSubresource", cx);
+                })
+                .unwrap();
+                cx.run_until_parked();
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    window.click(update_row, cx);
                 })
                 .unwrap();
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
                 loop {
                     cx.run_until_parked();
                     if cx.update(|cx| {
-                        view.read(cx).structure.page.as_ref().is_some_and(|page| {
-                            page.event_id == event_id && !page.children.is_empty()
-                        })
+                        view.read(cx)
+                            .pipeline
+                            .as_ref()
+                            .is_some_and(|state| state.event_id == update_event)
                     }) {
                         break;
                     }
                     assert!(
                         std::time::Instant::now() < deadline,
-                        "real structured event did not load"
+                        "real upload event selection did not complete"
                     );
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
                 cx.update_window(handle.into(), |_, window, cx| {
-                    window.click("structure-child-0", cx)
+                    window.click("parameters-tab", cx)
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                let source_index = loop {
+                    cx.run_until_parked();
+                    if let Some(index) = cx.update(|cx| {
+                        view.read(cx).structure.page.as_ref().and_then(|page| {
+                            page.children
+                                .iter()
+                                .position(|node| node.name == "pSrcData" && node.basic_type == 4)
+                        })
+                    }) {
+                        break index;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real upload buffer parameter did not load"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                };
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.click(
+                        SharedString::from(format!("structure-child-{source_index}")),
+                        cx,
+                    );
                 })
                 .unwrap();
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
                 loop {
                     cx.run_until_parked();
-                    if cx.update(|cx| view.read(cx).structure.path == [0]) {
+                    if cx.update(|cx| view.read(cx).structure.path == [source_index as u64]) {
                         break;
                     }
                     assert!(
                         std::time::Instant::now() < deadline,
-                        "real structured child did not load"
+                        "real upload buffer node did not load"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.click("structure-load-bytes", cx)
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx)
+                            .structure
+                            .bytes
+                            .as_ref()
+                            .is_some_and(|bytes| bytes.starts_with(&[0, 0, 0, 0, 0, 0, 0x40, 0x40]))
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real structured buffer bytes did not load"
                     );
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }

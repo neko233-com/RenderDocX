@@ -493,6 +493,19 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         .expect("pixel shader API event")["event_id"]
         .as_u64()
         .unwrap();
+    let update_api_id = result["capture"]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|action| action["api_events"].as_array().unwrap())
+        .find(|event| {
+            event["name"]
+                .as_str()
+                .is_some_and(|name| name.contains("UpdateSubresource"))
+        })
+        .expect("buffer update API event")["event_id"]
+        .as_u64()
+        .unwrap();
     let (success, api_selected) = invoke(&[
         "--bridge",
         bridge,
@@ -543,6 +556,32 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         .expect("shader parameter");
     assert_eq!(shader_resource["basic_type"], 12); // upstream SDBasic::Resource
     assert_eq!(shader_resource["resource_non_null"], true);
+    let update_structure = agent
+        .send(&serde_json::json!({"command":"structure","event_id":update_api_id}).to_string());
+    let update_children = update_structure["data"]["structure"]["children"]
+        .as_array()
+        .unwrap();
+    let source_index = update_children
+        .iter()
+        .position(|node| node["name"] == "pSrcData" && node["basic_type"] == 4)
+        .expect("structured upload buffer");
+    assert_eq!(update_children[source_index]["byte_size"], "28");
+    let source_path = source_index.to_string();
+    let invalid_range = agent.send(&serde_json::json!({"command":"structure_buffer","event_id":update_api_id,"path":[source_path],"offset":"27","length":2}).to_string());
+    assert_eq!(
+        invalid_range["error"]["code"],
+        "replay_structure_buffer_failed"
+    );
+    let first = agent.send(&serde_json::json!({"command":"structure_buffer","event_id":update_api_id,"path":[source_path],"offset":"0","length":8}).to_string());
+    assert_eq!(first["ok"], true, "{first}");
+    assert_eq!(first["data"]["hex"], "0000000000004040");
+    let rest = agent.send(&serde_json::json!({"command":"structure_buffer","event_id":update_api_id,"path":[source_path],"offset":"8","length":20}).to_string());
+    assert_eq!(
+        rest["data"]["hex"],
+        "0000404000004040000040400000404000004040"
+    );
+    let empty = agent.send(&serde_json::json!({"command":"structure_buffer","event_id":update_api_id,"path":[source_path],"offset":"28","length":0}).to_string());
+    assert_eq!(empty["data"]["hex"], "");
     let child = agent.send(
         &serde_json::json!({"command":"structure","event_id":api_event_id,"path":["0"]})
             .to_string(),

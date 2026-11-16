@@ -6,7 +6,7 @@ RenderDocX is an in-progress Rust + GPUI desktop frontend for [RenderDoc](https:
 
 The event browser can filter visible event names using case-insensitive literal text, retaining matching events' ancestors and existing expansion state. It defaults to action rows; **Show API events** also displays preceding API calls as siblings of their associated actions. RenderDoc's full event-filter expression language is not implemented yet.
 
-Select an action and open **API calls** to inspect its associated API events, or select those events in the main hierarchy after enabling them. Both views can replay the selected event. **Parameters** browses structured capture data on demand, including nested children and pages. Event names still use structured chunk names rather than RenderDoc's fully formatted call summaries.
+Select an action and open **API calls** to inspect its associated API events, or select those events in the main hierarchy after enabling them. Both views can replay the selected event. **Parameters** browses structured capture data on demand, including nested children and pages. Buffer nodes offer a paged byte view; the first read creates an isolated worker and exports the full structured capture, which can require substantial extra memory and time. Event names still use structured chunk names rather than RenderDoc's fully formatted call summaries.
 
 The interface detects the system language on startup and supports English, Simplified Chinese, Japanese, and Korean, with a manual language override. Its settings are stored in the operating system's user configuration directory.
 

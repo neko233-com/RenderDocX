@@ -1,8 +1,9 @@
 use crate::backend::{Settings, find_tool};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     io::{BufRead, BufReader, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
         Arc, Mutex,
@@ -25,7 +26,7 @@ pub struct Action {
 }
 
 /// An API event belonging to an action, in upstream capture order.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ApiEvent {
     pub event_id: u32,
     pub chunk_index: Option<u32>,
@@ -259,6 +260,12 @@ enum Reply {
     },
     Shader(ShaderReport),
     Structure(StructurePage),
+    StructuredBuffer {
+        event_id: u32,
+        path: Vec<String>,
+        offset: String,
+        hex: String,
+    },
     Error {
         message: String,
     },
@@ -268,11 +275,127 @@ struct Process {
     child: Option<Child>,
     input: Option<ChildStdin>,
     output: Option<BufReader<ChildStdout>>,
+    executable: PathBuf,
+    capture: PathBuf,
+    capture_stamp: Option<CaptureStamp>,
+    events: HashMap<u32, ApiEvent>,
+    structure_worker: Option<Box<Process>>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct CaptureStamp {
+    length: u64,
+    modified: std::time::SystemTime,
+    created: Option<std::time::SystemTime>,
+}
+
+fn capture_stamp(path: &Path) -> Option<CaptureStamp> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(CaptureStamp {
+        length: metadata.len(),
+        modified: metadata.modified().ok()?,
+        created: metadata.created().ok(),
+    })
 }
 
 impl Process {
     fn read(&mut self) -> Result<Reply, String> {
         read_reply(self.output.as_mut().ok_or("Replay session has closed")?)
+    }
+
+    fn open(executable: &Path, capture: &Path, worker: bool) -> Result<(Self, Snapshot), String> {
+        let capture = std::fs::canonicalize(capture).unwrap_or_else(|_| capture.to_path_buf());
+        let before = capture_stamp(&capture);
+        let mut command = Command::new(executable);
+        if worker {
+            command.arg("--structure-worker");
+        }
+        command
+            .arg(&capture)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .env_remove("RENDERDOCX_CONNECT_PID")
+            .env_remove("RENDERDOCX_OPEN_CAPTURE");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000);
+        }
+        let mut child = command.spawn().map_err(|e| e.to_string())?;
+        let input = child.stdin.take().ok_or("Missing replay bridge input")?;
+        let output = child.stdout.take().ok_or("Missing replay bridge output")?;
+        let mut process = Self {
+            child: Some(child),
+            input: Some(input),
+            output: Some(BufReader::new(output)),
+            executable: executable.to_path_buf(),
+            capture: capture.clone(),
+            capture_stamp: None,
+            events: HashMap::new(),
+            structure_worker: None,
+        };
+        let snapshot = match process.read()? {
+            Reply::Snapshot(snapshot) => {
+                validate_snapshot(&snapshot)?;
+                snapshot
+            }
+            Reply::Error { message } => return Err(message),
+            _ => return Err("Unexpected replay bridge response".into()),
+        };
+        let after = capture_stamp(&capture);
+        if before.is_some() && before == after {
+            process.capture_stamp = before;
+        }
+        for event in snapshot
+            .actions
+            .iter()
+            .flat_map(|action| &action.api_events)
+        {
+            process
+                .events
+                .entry(event.event_id)
+                .or_insert_with(|| event.clone());
+        }
+        Ok((process, snapshot))
+    }
+
+    fn read_structure_buffer_raw(
+        &mut self,
+        event: u32,
+        path: &[u64],
+        offset: u64,
+        length: u32,
+    ) -> Result<Vec<u8>, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        write!(input, "structure_buffer {event} {offset} {length}").map_err(|e| e.to_string())?;
+        for index in path {
+            write!(input, " {index}").map_err(|e| e.to_string())?;
+        }
+        writeln!(input)
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::StructuredBuffer {
+                event_id,
+                path: actual_path,
+                offset: actual_offset,
+                hex,
+            } if event_id == event
+                && actual_offset.parse::<u64>().ok() == Some(offset)
+                && actual_path
+                    .iter()
+                    .map(|item| item.parse::<u64>())
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()
+                    .as_deref()
+                    == Some(path) =>
+            {
+                decode_buffer_hex(&hex, length)
+            }
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected structured buffer response".into()),
+        }
     }
 }
 
@@ -335,12 +458,62 @@ trait Transport: Send {
     ) -> Result<StructurePage, String> {
         Err("Structured event inspection is not supported by this transport".into())
     }
+    fn structure_buffer(
+        &mut self,
+        _event: u32,
+        _path: &[u64],
+        _offset: u64,
+        _length: u32,
+    ) -> Result<Vec<u8>, String> {
+        Err("Structured buffer reading is not supported by this transport".into())
+    }
     fn close(&mut self) -> Result<(), String> {
         Ok(())
     }
 }
 
 impl Transport for Process {
+    fn structure_buffer(
+        &mut self,
+        event: u32,
+        path: &[u64],
+        offset: u64,
+        length: u32,
+    ) -> Result<Vec<u8>, String> {
+        let stamp = self
+            .capture_stamp
+            .as_ref()
+            .ok_or("Capture identity is unavailable")?;
+        if capture_stamp(&self.capture).as_ref() != Some(stamp) {
+            return Err("Capture changed since it was opened".into());
+        }
+        let original_event = self
+            .events
+            .get(&event)
+            .ok_or("Structured data is unavailable for this event")?
+            .clone();
+        if self.structure_worker.is_none() {
+            let (worker, _) = Process::open(&self.executable, &self.capture, true)?;
+            if worker.capture_stamp.as_ref() != Some(stamp) {
+                return Err("Capture changed while opening structured data".into());
+            }
+            self.structure_worker = Some(Box::new(worker));
+        }
+        let worker = self
+            .structure_worker
+            .as_mut()
+            .ok_or("Structured worker is unavailable")?;
+        if worker.events.get(&event) != Some(&original_event) {
+            return Err("Structured worker event does not match the open capture".into());
+        }
+        let bytes = worker.read_structure_buffer_raw(event, path, offset, length)?;
+        if capture_stamp(&self.capture).as_ref() != Some(stamp) {
+            self.structure_worker = None;
+            return Err("Capture changed while reading structured data".into());
+        }
+        Ok(bytes)
+    }
+
     fn structure(
         &mut self,
         event: u32,
@@ -458,6 +631,11 @@ impl Transport for Process {
     }
 
     fn close(&mut self) -> Result<(), String> {
+        let worker_result = self
+            .structure_worker
+            .take()
+            .map(|mut worker| worker.close())
+            .transpose();
         if let Some(mut input) = self.input.take() {
             let _ = writeln!(input, "quit");
         }
@@ -472,6 +650,7 @@ impl Transport for Process {
                 return Err(format!("Replay bridge exited: {status}"));
             }
         }
+        worker_result?;
         Ok(())
     }
 }
@@ -553,35 +732,8 @@ pub struct Session {
 impl Session {
     pub fn open(settings: &Settings, capture: &Path) -> Result<(Self, Snapshot), String> {
         let executable = find_tool(&settings.replay_bridge, "renderdocx-replay")?;
-        let mut command = Command::new(executable);
-        command
-            .arg(capture)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .env_remove("RENDERDOCX_CONNECT_PID")
-            .env_remove("RENDERDOCX_OPEN_CAPTURE");
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        }
-        let mut child = command.spawn().map_err(|e| e.to_string())?;
-        let input = child.stdin.take().ok_or("Missing replay bridge input")?;
-        let output = child.stdout.take().ok_or("Missing replay bridge output")?;
-        let mut process = Process {
-            child: Some(child),
-            input: Some(input),
-            output: Some(BufReader::new(output)),
-        };
-        let snapshot = match process.read()? {
-            Reply::Snapshot(snapshot) => {
-                validate_snapshot(&snapshot)?;
-                snapshot
-            }
-            Reply::Error { message } => return Err(message),
-            _ => return Err("Unexpected replay bridge response".into()),
-        };
+        let executable = std::fs::canonicalize(&executable).unwrap_or(executable);
+        let (process, snapshot) = Process::open(&executable, capture, false)?;
         Ok((
             Self {
                 process: Arc::new(Mutex::new(Box::new(process))),
@@ -629,6 +781,22 @@ impl Session {
             .lock()
             .map_err(|e| e.to_string())?
             .structure(event, path, offset, limit)
+    }
+
+    pub fn structure_buffer(
+        &self,
+        event: u32,
+        path: &[u64],
+        offset: u64,
+        length: u32,
+    ) -> Result<Vec<u8>, String> {
+        if length > BUFFER_PAGE_LIMIT || offset.checked_add(u64::from(length)).is_none() {
+            return Err("Invalid structured buffer range".into());
+        }
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .structure_buffer(event, path, offset, length)
     }
 
     pub fn close(&self) -> Result<(), String> {
@@ -722,6 +890,10 @@ pub mod test_support {
                         .map(|index| {
                             if index == 0 {
                                 make("Topology", 6, "0", Some("4"))
+                            } else if index == 1 {
+                                let mut buffer = make("Upload", 4, "0", None);
+                                buffer.byte_size = "300".into();
+                                buffer
                             } else {
                                 make(&format!("Param{index}"), 7, "0", Some("1"))
                             }
@@ -729,6 +901,11 @@ pub mod test_support {
                         .collect(),
                 ),
                 [0] => (make("Topology", 6, "0", Some("4")), vec![]),
+                [1] => {
+                    let mut buffer = make("Upload", 4, "0", None);
+                    buffer.byte_size = "300".into();
+                    (buffer, vec![])
+                }
                 [index] if *index < 130 => {
                     (make(&format!("Param{index}"), 7, "0", Some("1")), vec![])
                 }
@@ -749,6 +926,21 @@ pub mod test_support {
                 node,
                 children,
             })
+        }
+
+        fn structure_buffer(
+            &mut self,
+            _event: u32,
+            path: &[u64],
+            offset: u64,
+            length: u32,
+        ) -> Result<Vec<u8>, String> {
+            if path != [1] || offset > 300 || u64::from(length) > 300 - offset {
+                return Err("Invalid structured buffer".into());
+            }
+            Ok((0..length)
+                .map(|index| (offset + u64::from(index)) as u8)
+                .collect())
         }
 
         fn select(&mut self, event: u32) -> Result<Pipeline, String> {
@@ -970,6 +1162,16 @@ mod tests {
         );
         assert_eq!(snapshot.actions[1].api_events[1].event_id, 11);
         assert_eq!(snapshot.actions[1].api_events[1].name, "Draw()");
+    }
+
+    #[test]
+    fn capture_stamp_detects_file_changes() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(temp.path(), b"one").unwrap();
+        let original = capture_stamp(temp.path()).expect("file timestamp");
+        assert!(capture_stamp(temp.path()).as_ref() == Some(&original));
+        std::fs::write(temp.path(), b"changed").unwrap();
+        assert!(capture_stamp(temp.path()).as_ref() != Some(&original));
     }
 
     #[test]

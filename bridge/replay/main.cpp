@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <algorithm>
 #include <cstring>
+#include <cwchar>
 #include <cmath>
 #include <iomanip>
 #include <iostream>
@@ -360,7 +361,7 @@ void write_pipeline(IReplayController *controller, uint32_t event)
   std::cout << "]}";
 }
 
-int run(const std::string &capture)
+int run(const std::string &capture, bool structure_worker)
 {
   const char *version = RENDERDOC_GetVersionString();
   const char *commit = RENDERDOC_GetCommitHash();
@@ -383,8 +384,7 @@ int run(const std::string &capture)
   if(!opened.first.OK()) { error(result_message(opened.first)); return 1; }
   replay.controller = opened.second;
   if(!replay.controller) { error("RenderDoc returned no replay controller"); return 1; }
-  replay.file->Shutdown();
-  replay.file = nullptr;
+  if(!structure_worker) { replay.file->Shutdown(); replay.file = nullptr; }
   std::set<uint32_t> event_ids;
   std::vector<TextureRef> texture_ids;
   std::vector<BufferRef> buffer_ids;
@@ -400,6 +400,73 @@ int run(const std::string &capture)
   while(std::getline(std::cin, command))
   {
     if(command == "quit") break;
+    if(command.compare(0, 17, "structure_buffer ") == 0)
+    {
+      if(!structure_worker || !replay.file) { error("Structured buffer export requires an isolated worker"); continue; }
+      std::istringstream arguments(command.substr(17));
+      std::string event_text, offset_text, length_text, item;
+      uint64_t event = 0, offset = 0, length = 0;
+      if(!(arguments >> event_text >> offset_text >> length_text) || !decimal(event_text, event) ||
+         !decimal(offset_text, offset) || !decimal(length_text, length) || event > UINT32_MAX || length > 65536)
+      { error("Invalid structured buffer request"); continue; }
+      auto found = event_chunks.find(uint32_t(event));
+      if(found == event_chunks.end()) { error("Structured data is unavailable for this event"); continue; }
+      const SDFile &replay_data = replay.controller->GetStructuredFile();
+      const SDChunk *replay_chunk = replay_data.chunks[found->second];
+      const SDObject *replay_object = replay_chunk;
+      std::vector<uint64_t> path;
+      bool valid = true;
+      while(arguments >> item)
+      {
+        uint64_t index = 0;
+        if(!decimal(item, index) || index >= replay_object->NumChildren()) { valid = false; break; }
+        replay_object = replay_object->GetChild(size_t(index));
+        if(!replay_object) { valid = false; break; }
+        path.push_back(index);
+      }
+      if(!valid || replay_object->type.basetype != SDBasic::Buffer || offset > replay_object->type.byteSize ||
+         length > replay_object->type.byteSize - offset)
+      { error("Invalid structured buffer path or range"); continue; }
+
+      // The replay export normally omits buffers. This explicit request asks the capture
+      // handle for its complete structured export and may use substantial memory.
+      const SDFile &full = replay.file->GetStructuredData();
+      if(found->second >= full.chunks.size() || !full.chunks[found->second])
+      { error("Full structured capture data is unavailable"); continue; }
+      const SDChunk *full_chunk = full.chunks[found->second];
+      if(full.chunks.size() != replay_data.chunks.size() || full_chunk->name != replay_chunk->name ||
+         full_chunk->metadata.chunkID != replay_chunk->metadata.chunkID ||
+         full_chunk->metadata.length != replay_chunk->metadata.length ||
+         full_chunk->metadata.threadID != replay_chunk->metadata.threadID)
+      { error("Structured capture data does not match the replay event"); continue; }
+      const SDObject *full_object = full_chunk;
+      const SDObject *replay_compare = replay_chunk;
+      for(uint64_t index : path)
+      {
+        if(index >= full_object->NumChildren() || index >= replay_compare->NumChildren()) { valid = false; break; }
+        full_object = full_object->GetChild(size_t(index));
+        replay_compare = replay_compare->GetChild(size_t(index));
+        if(!full_object || !replay_compare || full_object->name != replay_compare->name ||
+           full_object->type.name != replay_compare->type.name ||
+           full_object->type.basetype != replay_compare->type.basetype ||
+           full_object->type.byteSize != replay_compare->type.byteSize ||
+           full_object->NumChildren() != replay_compare->NumChildren()) { valid = false; break; }
+      }
+      if(!valid || full_object->type.basetype != SDBasic::Buffer || full_object->data.basic.u >= full.buffers.size() ||
+         !full.buffers[size_t(full_object->data.basic.u)] ||
+         full.buffers[size_t(full_object->data.basic.u)]->size() != replay_object->type.byteSize)
+      { error("Structured buffer data is unavailable or does not match the replay event"); continue; }
+      const bytebuf &bytes = *full.buffers[size_t(full_object->data.basic.u)];
+      static const char hex[] = "0123456789abcdef";
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"structured_buffer\",\"event_id\":" << event
+                << ",\"offset\":\"" << offset << "\",\"path\":[";
+      for(size_t i = 0; i < path.size(); ++i) { if(i) std::cout << ','; std::cout << '"' << path[i] << '"'; }
+      std::cout << "],\"hex\":\"";
+      for(size_t i = size_t(offset); i < size_t(offset + length); ++i)
+        std::cout << hex[bytes[i] >> 4] << hex[bytes[i] & 15];
+      std::cout << "\"}" << std::endl;
+      continue;
+    }
     if(command.compare(0, 10, "structure ") == 0)
     {
       std::istringstream arguments(command.substr(10));
@@ -611,18 +678,21 @@ int run(const std::string &capture)
 #ifdef _WIN32
 int wmain(int argc, wchar_t **argv)
 {
-  if(argc != 2) { error("Expected one capture file path"); return 2; }
-  const int size = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, argv[1], -1, nullptr, 0, nullptr, nullptr);
+  const bool worker = argc == 3 && std::wcscmp(argv[1], L"--structure-worker") == 0;
+  if(argc != 2 && !worker) { error("Expected one capture file path"); return 2; }
+  const wchar_t *capture = argv[worker ? 2 : 1];
+  const int size = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, capture, -1, nullptr, 0, nullptr, nullptr);
   if(size <= 0) { error("Capture path is not valid Unicode"); return 2; }
   std::vector<char> path(size_t(size), 0);
-  if(WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, argv[1], -1, path.data(), size, nullptr, nullptr) != size)
+  if(WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, capture, -1, path.data(), size, nullptr, nullptr) != size)
   { error("Could not convert capture path"); return 2; }
-  return run(path.data());
+  return run(path.data(), worker);
 }
 #else
 int main(int argc, char **argv)
 {
-  if(argc != 2) { error("Expected one capture file path"); return 2; }
-  return run(argv[1]);
+  const bool worker = argc == 3 && std::strcmp(argv[1], "--structure-worker") == 0;
+  if(argc != 2 && !worker) { error("Expected one capture file path"); return 2; }
+  return run(argv[worker ? 2 : 1], worker);
 }
 #endif
