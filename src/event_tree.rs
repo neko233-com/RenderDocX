@@ -25,6 +25,7 @@ pub struct EventTree {
     durations: Option<std::collections::HashMap<u32, f64>>,
     matching_children: Vec<bool>,
     direct_matching: Vec<bool>,
+    eligible: Vec<bool>,
     collapsed: Vec<bool>,
     pub visible: Vec<usize>,
 }
@@ -142,6 +143,91 @@ impl EventTree {
         self.filter_error
     }
 
+    /// Find among rows admitted by the current filter, including collapsed rows.
+    pub fn find(&self, query: &str, current: Option<u32>, forward: bool) -> Option<usize> {
+        if query.is_empty() {
+            return None;
+        }
+        let explicit_eid = query.starts_with('@');
+        let number = query.strip_prefix('@').unwrap_or(query).trim();
+        let numeric = number
+            .parse::<u32>()
+            .ok()
+            .filter(|id| *id > 0 && number == id.to_string());
+        let known_eid = numeric.filter(|id| self.event_ids.contains(id));
+        if let Some(id) = known_eid {
+            // Upstream advances by EID when an exact EID is filtered out.
+            return self
+                .order
+                .iter()
+                .copied()
+                .filter(|&row| self.eligible[row] && self.event_ids[row] >= id)
+                .min_by_key(|&row| self.event_ids[row]);
+        }
+        if explicit_eid {
+            return None;
+        }
+        let text = query.to_lowercase();
+        let matches: Vec<usize> = self
+            .order
+            .iter()
+            .copied()
+            .filter(|&row| self.eligible[row] && self.lower_names[row].contains(&text))
+            .collect();
+        if matches.is_empty() {
+            return None;
+        }
+        if let Some(current) = current {
+            if let Some(index) = matches
+                .iter()
+                .position(|&row| self.event_ids[row] == current)
+            {
+                return Some(
+                    matches[if forward {
+                        (index + 1) % matches.len()
+                    } else {
+                        (index + matches.len() - 1) % matches.len()
+                    }],
+                );
+            }
+            if forward {
+                return matches
+                    .iter()
+                    .copied()
+                    .find(|&row| self.event_ids[row] >= current)
+                    .or_else(|| matches.first().copied());
+            }
+            return matches
+                .iter()
+                .rev()
+                .copied()
+                .find(|&row| self.event_ids[row] <= current)
+                .or_else(|| matches.last().copied());
+        }
+        if forward {
+            matches.first().copied()
+        } else {
+            matches.last().copied()
+        }
+    }
+
+    pub fn reveal_filtered(&mut self, row: usize) -> Option<usize> {
+        if !self.eligible.get(row).copied().unwrap_or(false) {
+            return None;
+        }
+        let mut parent = self.parents[row];
+        while let Some(index) = parent {
+            self.collapsed[index] = false;
+            parent = self.parents[index];
+        }
+        self.rebuild();
+        self.visible.iter().position(|&index| index == row)
+    }
+
+    pub fn event_id(&self, row: usize) -> Option<u32> {
+        self.event_ids.get(row).copied()
+    }
+
     pub fn reveal(&mut self, action: usize, api: Option<usize>) -> Option<usize> {
         let row = match api {
             Some(event) => {
@@ -200,6 +286,7 @@ impl EventTree {
                 }
             }
         }
+        self.eligible = matching.clone();
         let mut shown = vec![false; self.parents.len()];
         for (index, parent) in self.parents.iter().enumerate() {
             shown[index] = matching[index]
@@ -481,5 +568,49 @@ mod tests {
         assert_eq!(tree.visible, [0, 2]);
         tree.clear_durations();
         assert!(tree.visible.is_empty());
+    }
+
+    #[test]
+    fn find_wraps_reveals_collapsed_rows_and_obeys_filter() {
+        use crate::replay::ApiEvent;
+        let mut parent = action(-1);
+        parent.event_id = 1;
+        parent.name = "Frame".into();
+        let mut first = action(0);
+        first.event_id = 4;
+        first.name = "Draw first".into();
+        first.api_events.push(ApiEvent {
+            event_id: 3,
+            chunk_index: None,
+            file_offset: "0".into(),
+            name: "Bind texture".into(),
+        });
+        let mut second = action(0);
+        second.event_id = 5;
+        second.name = "DRAW second".into();
+        let mut tree = EventTree::default();
+        tree.reset(&[parent, first, second]);
+        tree.toggle(0);
+        let row = tree.find("draw", None, true).unwrap();
+        assert_eq!(tree.event_id(row), Some(4));
+        assert_eq!(tree.reveal_filtered(row), Some(1));
+        assert_eq!(
+            tree.event_id(tree.find("draw", Some(4), true).unwrap()),
+            Some(5)
+        );
+        assert_eq!(
+            tree.event_id(tree.find("draw", Some(4), false).unwrap()),
+            Some(5)
+        );
+        assert_eq!(tree.event_id(tree.find("@3", None, true).unwrap()), Some(4));
+        tree.set_show_api(true);
+        assert_eq!(tree.event_id(tree.find("@3", None, true).unwrap()), Some(3));
+        tree.set_filter("second");
+        assert_eq!(
+            tree.event_id(tree.find("draw", None, true).unwrap()),
+            Some(5)
+        );
+        assert_eq!(tree.event_id(tree.find("@3", None, true).unwrap()), Some(5));
+        assert!(tree.find("absent", None, true).is_none());
     }
 }

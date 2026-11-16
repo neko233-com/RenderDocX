@@ -56,6 +56,10 @@ fn usage() -> Value {
         .as_array_mut()
         .expect("capabilities commands")
         .push(json!("event_times"));
+    capabilities["serve_commands"]
+        .as_array_mut()
+        .expect("capabilities commands")
+        .push(json!("find_event"));
     capabilities
 }
 
@@ -563,6 +567,52 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         .map_err(|error| ("replay_counter_failed", error))
                 }
             },
+            "find_event" => {
+                let query = request
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty());
+                let filter = match request.get("filter") {
+                    None => Some(""),
+                    Some(v) => v.as_str(),
+                };
+                let show_api = match request.get("show_api") {
+                    None => Some(false),
+                    Some(v) => v.as_bool(),
+                };
+                let current = match request.get("current_event") {
+                    None | Some(Value::Null) => Some(None),
+                    Some(v) => v.as_u64().and_then(|n| u32::try_from(n).ok()).map(Some),
+                };
+                let forward = match request.get("direction") {
+                    None => Some(true),
+                    Some(Value::String(s)) if s == "next" => Some(true),
+                    Some(Value::String(s)) if s == "previous" => Some(false),
+                    _ => None,
+                };
+                match (&opened, query, filter, show_api, current, forward) {
+                    (None, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some((_, snapshot)), Some(query), Some(filter), Some(show_api), Some(current), Some(forward)) => {
+                        let mut tree = EventTree::default();
+                        tree.reset(&snapshot.actions);
+                        tree.set_show_api(show_api);
+                        if let Some(times) = &event_times { tree.set_durations(times.clone()); }
+                        tree.set_filter(filter);
+                        if tree.filter_error() { Err(("invalid_filter", "Invalid or unsupported event filter".into())) }
+                        else {
+                            let found = tree.find(query, current, forward).and_then(|row| {
+                                let (action_index, api_index) = match tree.row(row)? {
+                                    EventRow::Action(action) => (action, None),
+                                    EventRow::Api { action, event } => (action, Some(event)),
+                                };
+                                Some(json!({"event_id":tree.event_id(row)?,"action_index":action_index,"api_index":api_index}))
+                            });
+                            Ok(json!({"match":found}))
+                        }
+                    }
+                    _ => Err(("invalid_arguments", "find_event requires a nonempty query and valid optional filter, show_api, current_event and direction".into())),
+                }
+            }
             "filter_events" => {
                 let expression = request.get("expression").and_then(Value::as_str);
                 let show_api = match request.get("show_api") {

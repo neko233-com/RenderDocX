@@ -190,6 +190,13 @@ fn real_d3d11_mesh_draw_order() {
     );
     let invalid_filter = agent.send(r#"{"command":"filter_events","expression":"$unknown()"}"#);
     assert_eq!(invalid_filter["error"]["code"], "invalid_filter");
+    let found = agent.send(
+        &serde_json::json!({"command":"find_event","query":format!("@{draw}"),"show_api":true})
+            .to_string(),
+    );
+    assert_eq!(found["data"]["match"]["event_id"], draw, "{found}");
+    let missing = agent.send(r#"{"command":"find_event","query":"surely no matching event name"}"#);
+    assert!(missing["data"]["match"].is_null(), "{missing}");
     let invalid_page =
         agent.send(r#"{"command":"filter_events","expression":"","offset":"99999999"}"#);
     assert_eq!(invalid_page["error"]["code"], "invalid_arguments");

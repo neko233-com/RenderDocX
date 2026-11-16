@@ -559,6 +559,7 @@ struct Workspace {
     event_tree: EventTree,
     event_scroll: UniformListScrollHandle,
     event_search: Entity<InputState>,
+    event_find: Entity<InputState>,
     _event_search_subscription: gpui::Subscription,
     resource_search: Entity<InputState>,
     resource_rename: Entity<InputState>,
@@ -4442,6 +4443,46 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    fn find_event(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if self.replay_pending
+            || self.export_pending
+            || self.resource_pending
+            || self.protect_shader_draft(cx)
+        {
+            return;
+        }
+        let query = self.event_find.read(cx).value().to_string();
+        let current = self.pipeline.as_ref().map(|pipeline| pipeline.event_id);
+        let Some(row) = self.event_tree.find(&query, current, forward) else {
+            if !query.is_empty() {
+                self.status = Some(
+                    self.t(
+                        "No matching visible event.",
+                        "没有匹配的可见事件。",
+                        "一致する表示イベントがありません。",
+                        "일치하는 표시 이벤트가 없습니다.",
+                    )
+                    .to_owned(),
+                );
+                cx.notify();
+            }
+            return;
+        };
+        let Some(target) = self.event_tree.row(row) else {
+            return;
+        };
+        let Some(position) = self.event_tree.reveal_filtered(row) else {
+            return;
+        };
+        self.event_scroll
+            .scroll_to_item(position, gpui::ScrollStrategy::Nearest);
+        let (action, api) = match target {
+            EventRow::Action(action) => (action, None),
+            EventRow::Api { action, event } => (action, Some(event)),
+        };
+        self.select_event(action, api, cx);
     }
 
     fn jump_to_usage(&mut self, event: u32, window: &mut Window, cx: &mut Context<Self>) {
@@ -12623,6 +12664,15 @@ impl Workspace {
                                     div()
                                         .px_3()
                                         .pb_2()
+                                        .child(div().text_sm().text_color(rgb(0x9eacc0)).child(
+                                            self.t("Find name or @EID", "查找名称或 @事件 ID", "名前または @EID を検索", "이름 또는 @EID 찾기")
+                                        ))
+                                        .child(Input::new(&self.event_find).id("event-find").aria_label(
+                                            self.t("Find name or @EID", "查找名称或 @事件 ID", "名前または @EID を検索", "이름 또는 @EID 찾기")
+                                        ).w_full())
+                                        .child(div().flex().gap_2()
+                                            .child(button("event-find-prev", self.t("Previous match", "上一个匹配", "前の一致", "이전 일치"), false, |this, cx| this.find_event(false, cx), cx))
+                                            .child(button("event-find-next", self.t("Next match", "下一个匹配", "次の一致", "다음 일치"), false, |this, cx| this.find_event(true, cx), cx)))
                                         .child(
                                             div()
                                                 .text_sm()
@@ -13650,6 +13700,7 @@ fn main() {
                     let shader_edit_encoding = cx.new(|cx| InputState::new(window, cx));
                     let shader_edit_command = cx.new(|cx| InputState::new(window, cx));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
+                    let event_find = cx.new(|cx| InputState::new(window, cx));
                     let buffer_seek = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let buffer_layout_input = cx.new(|cx| {
                         TextareaState::new(window, cx)
@@ -13710,6 +13761,7 @@ fn main() {
                             cx,
                         ),
                         event_search,
+                        event_find,
                         selected: None,
                         pipeline: None,
                         tab: CaptureTab::Events,
@@ -13955,6 +14007,7 @@ mod ui_tests {
                     let shader_edit_encoding = cx.new(|cx| InputState::new(window, cx));
                     let shader_edit_command = cx.new(|cx| InputState::new(window, cx));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
+                    let event_find = cx.new(|cx| InputState::new(window, cx));
                     let buffer_seek = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let buffer_layout_input = cx.new(|cx| {
                         TextareaState::new(window, cx)
@@ -14033,6 +14086,7 @@ mod ui_tests {
                             cx,
                         ),
                         event_search,
+                        event_find,
                         selected: None,
                         pipeline: None,
                         tab: CaptureTab::Events,
@@ -14353,6 +14407,7 @@ mod ui_tests {
                     let shader_edit_encoding = cx.new(|cx| InputState::new(window, cx));
                     let shader_edit_command = cx.new(|cx| InputState::new(window, cx));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
+                    let event_find = cx.new(|cx| InputState::new(window, cx));
                     let buffer_seek = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let buffer_layout_input = cx.new(|cx| {
                         TextareaState::new(window, cx)
@@ -14551,6 +14606,7 @@ mod ui_tests {
                             cx,
                         ),
                         event_search,
+                        event_find,
                         selected: None,
                         pipeline: None,
                         tab: CaptureTab::Events,
@@ -15844,9 +15900,15 @@ mod ui_tests {
             assert_eq!(view.read(cx).event_tree.duration(77), Some(0.004));
         });
         assert_eq!(*events.lock().unwrap(), vec![42, 77, 43]);
-        cx.update_window(handle.into(), |_, window, cx| window.click(0usize, cx))
-            .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("event-find", cx);
+            window.input("@42", cx);
+            window.click("event-find-next", cx);
+        })
+        .unwrap();
         cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 42));
         cx.update_window(handle.into(), |_, window, cx| {
             window.click("api-calls-tab", cx);
             window.click("api-event-0", cx);
