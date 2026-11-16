@@ -694,6 +694,7 @@ void write_pipeline(IReplayController *controller, uint32_t event)
     std::cout << "},\"view\":{"; resource(value.view);
     std::cout << "},\"type\":" << uint32_t(value.type) << ",\"flags\":" << uint32_t(value.flags) << ",\"format\":";
     json_string(value.format.Name());
+    std::cout << ",\"format_component_type\":" << uint32_t(value.format.compType);
     std::cout << ",\"texture_type\":" << uint32_t(value.textureType)
               << ",\"first_mip\":" << uint32_t(value.firstMip) << ",\"mip_count\":" << uint32_t(value.numMips)
               << ",\"first_slice\":" << uint32_t(value.firstSlice) << ",\"slice_count\":" << uint32_t(value.numSlices)
@@ -1784,13 +1785,15 @@ int run(const std::string &capture, bool structure_worker)
     {
       if(!selected) { error("Select an event before saving textures"); continue; }
       std::istringstream arguments(command.substr(6));
-      std::string index_text, mip_text, slice_text, sample_text, channel_text, encoded, extra;
-      uint64_t index = 0, mip = 0, slice = 0, sample = 0, channel = 0;
-      if(!(arguments >> index_text >> mip_text >> slice_text >> sample_text >> channel_text >> encoded) || (arguments >> extra) ||
+      std::string index_text, mip_text, slice_text, sample_text, channel_text, encoded, cast_text, extra;
+      uint64_t index = 0, mip = 0, slice = 0, sample = 0, channel = 0, cast = 0;
+      if(!(arguments >> index_text >> mip_text >> slice_text >> sample_text >> channel_text >> encoded) ||
          !decimal(index_text, index) || !decimal(mip_text, mip) || !decimal(slice_text, slice) ||
          (sample_text != "resolve" && !decimal(sample_text, sample)) ||
          (channel_text != "all" && !decimal(channel_text, channel)) || index >= texture_ids.size())
       { error("Invalid texture selection"); continue; }
+      if((arguments >> cast_text) && (!decimal(cast_text, cast) || cast > 9 || (arguments >> extra)))
+      { error("Invalid texture cast"); continue; }
       const TextureRef &texture = texture_ids[size_t(index)];
       const uint64_t depth = texture.dimension == 3 ? (mip < 32 ? (std::max)(1U, texture.depth >> uint32_t(mip)) : 1U) : texture.arraysize;
       if(mip >= texture.mips || mip > INT32_MAX || slice >= depth || slice > INT32_MAX ||
@@ -1809,6 +1812,7 @@ int run(const std::string &capture, bool structure_worker)
       if(!valid) { error("Invalid output path"); continue; }
       TextureSave save;
       save.resourceId = texture.id;
+      save.typeCast = CompType(cast);
       save.destType = FileType::PNG;
       save.mip = int32_t(mip);
       save.slice.sliceIndex = int32_t(slice);

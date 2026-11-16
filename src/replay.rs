@@ -644,6 +644,8 @@ pub struct TextureSelection {
     pub slice: u32,
     pub sample: Option<u32>,
     pub channel: Option<u32>,
+    /// RenderDoc CompType for PNG preview/export; pixel analysis remains typeless.
+    pub preview_type_cast: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -785,6 +787,7 @@ impl TextureSelection {
             texture.array_size
         };
         if self.mip >= texture.mips
+            || self.preview_type_cast > 9
             || self.mip > i32::MAX as u32
             || self.slice >= slices
             || self.slice > i32::MAX as u32
@@ -825,6 +828,8 @@ pub struct PipelineAttachment {
     pub descriptor_type: u32,
     pub flags: u32,
     pub format: String,
+    #[serde(default)]
+    pub format_component_type: Option<u32>,
     pub texture_type: u32,
     pub first_mip: u32,
     pub mip_count: u32,
@@ -1969,8 +1974,13 @@ impl Transport for Process {
                 .channel
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "all".into());
+            let suffix = if selection.preview_type_cast == 0 {
+                String::new()
+            } else {
+                format!(" {}", selection.preview_type_cast)
+            };
             format!(
-                "save2 {index} {} {} {sample} {channel} {encoded}",
+                "save2 {index} {} {} {sample} {channel} {encoded}{suffix}",
                 selection.mip, selection.slice
             )
         };
@@ -3207,8 +3217,12 @@ mod tests {
             slice: 1,
             sample: Some(0),
             channel: Some(3),
+            preview_type_cast: 0,
         };
         assert!(selection.validate(&texture).is_ok());
+        selection.preview_type_cast = 10;
+        assert!(selection.validate(&texture).is_err());
+        selection.preview_type_cast = 0;
         assert!(selection.validate_pixel(&texture, 1, 1).is_ok());
         assert!(selection.validate_pixel(&texture, 2, 1).is_err());
         assert!(selection.validate_pixel(&texture, 1, 2).is_err());

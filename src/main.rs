@@ -530,11 +530,13 @@ impl Workspace {
         index: usize,
         mip: u32,
         slice: u32,
+        preview_type_cast: u32,
         cx: &mut Context<Self>,
     ) {
         let selection = TextureSelection {
             mip,
             slice,
+            preview_type_cast,
             ..TextureSelection::default()
         };
         let Some(texture) = self
@@ -7735,6 +7737,14 @@ impl Workspace {
                             .map(|v| v.to_string())
                             .unwrap_or_else(|| all_label.to_owned())
                     ))
+                    .when(selection.preview_type_cast != 0, |view| view
+                        .child(format!("{}: {} · {}", self.t("Preview/export type cast", "预览与导出类型转换", "プレビュー・書き出しの型変換", "미리보기·내보내기 형식 변환"), selection.preview_type_cast,
+                            self.t("Pixel analysis uses the original type", "像素分析使用原始类型", "ピクセル解析には元の型を使用", "픽셀 분석은 원래 형식을 사용")))
+                        .child(button("texture-clear-preview-cast", self.t("Clear preview cast", "清除预览类型转换", "プレビューの型変換を解除", "미리보기 형식 변환 지우기"), false, |this, cx| {
+                            this.texture_selection.preview_type_cast = 0;
+                            this.preview = None;
+                            cx.notify();
+                        }, cx)))
                     .child(
                         div()
                             .flex()
@@ -8116,6 +8126,7 @@ impl Workspace {
                                     attachment_target(item),
                                     item.first_mip,
                                     item.first_slice,
+                                    item.format_component_type.unwrap_or(0),
                                 )
                             })
                             .collect::<Vec<_>>()
@@ -8126,6 +8137,7 @@ impl Workspace {
                             attachment_target(item),
                             item.first_mip,
                             item.first_slice,
+                            item.format_component_type.unwrap_or(0),
                         )
                     });
                     let depth_resolve = state
@@ -8138,6 +8150,7 @@ impl Workspace {
                                 attachment_target(item),
                                 item.first_mip,
                                 item.first_slice,
+                                item.format_component_type.unwrap_or(0),
                             )
                         });
                     let index = state
@@ -8415,7 +8428,7 @@ impl Workspace {
                             "색상 첨부 뷰",
                         ))
                         .children(lines.into_iter().map(
-                            |(slot, line, target, mip, slice)| {
+                            |(slot, line, target, mip, slice, cast)| {
                                 div()
                                     .id(("pipeline-color-attachment", slot))
                                     .test_support()
@@ -8424,38 +8437,45 @@ impl Workspace {
                                     .when_some(target, |row, index| {
                                         row.cursor_pointer().text_color(rgb(0x91cfff)).on_click(
                                             cx.listener(move |this, _, _, cx| {
-                                                this.open_attachment_texture(index, mip, slice, cx)
+                                                this.open_attachment_texture(
+                                                    index, mip, slice, cast, cx,
+                                                )
                                             }),
                                         )
                                     })
                             },
                         ))
                     })
-                    .when_some(depth_attachment, |view, (text, target, mip, slice)| {
-                        view.child(
-                            div()
-                                .id("pipeline-depth-attachment")
-                                .test_support()
-                                .text_sm()
-                                .child(format!(
-                                    "{}: {text}",
-                                    self.t(
-                                        "Depth attachment",
-                                        "深度附件",
-                                        "深度アタッチメント",
-                                        "깊이 첨부"
-                                    )
-                                ))
-                                .when_some(target, |row, index| {
-                                    row.cursor_pointer().text_color(rgb(0x91cfff)).on_click(
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.open_attachment_texture(index, mip, slice, cx)
-                                        }),
-                                    )
-                                }),
-                        )
-                    })
-                    .when_some(depth_resolve, |view, (text, target, mip, slice)| {
+                    .when_some(
+                        depth_attachment,
+                        |view, (text, target, mip, slice, cast)| {
+                            view.child(
+                                div()
+                                    .id("pipeline-depth-attachment")
+                                    .test_support()
+                                    .text_sm()
+                                    .child(format!(
+                                        "{}: {text}",
+                                        self.t(
+                                            "Depth attachment",
+                                            "深度附件",
+                                            "深度アタッチメント",
+                                            "깊이 첨부"
+                                        )
+                                    ))
+                                    .when_some(target, |row, index| {
+                                        row.cursor_pointer().text_color(rgb(0x91cfff)).on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.open_attachment_texture(
+                                                    index, mip, slice, cast, cx,
+                                                )
+                                            }),
+                                        )
+                                    }),
+                            )
+                        },
+                    )
+                    .when_some(depth_resolve, |view, (text, target, mip, slice, cast)| {
                         view.child(
                             div()
                                 .id("pipeline-depth-resolve")
@@ -8473,7 +8493,9 @@ impl Workspace {
                                 .when_some(target, |row, index| {
                                     row.cursor_pointer().text_color(rgb(0x91cfff)).on_click(
                                         cx.listener(move |this, _, _, cx| {
-                                            this.open_attachment_texture(index, mip, slice, cx)
+                                            this.open_attachment_texture(
+                                                index, mip, slice, cast, cx,
+                                            )
                                         }),
                                     )
                                 }),
@@ -10799,7 +10821,7 @@ mod ui_tests {
                 let attachment = serde_json::from_value(serde_json::json!({
                     "resource":{"bound":true,"resource_index":0,"name":"Color"},
                     "view":{"bound":false,"resource_index":null,"name":""},
-                    "type":0,"flags":0,"format":"R8G8B8A8_UNORM","texture_type":0,
+                    "type":0,"flags":0,"format":"R8G8B8A8_UNORM","format_component_type":2,"texture_type":0,
                     "first_mip":1,"mip_count":1,"first_slice":1,"slice_count":1,
                     "min_lod_clamp":0.0,"swizzle":[0,1,2,3]
                 }))
@@ -10818,6 +10840,7 @@ mod ui_tests {
             assert_eq!(view.read(cx).selected_texture, Some(0));
             assert_eq!(view.read(cx).texture_selection.mip, 1);
             assert_eq!(view.read(cx).texture_selection.slice, 1);
+            assert_eq!(view.read(cx).texture_selection.preview_type_cast, 2);
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.click("events-tab", cx);
@@ -10949,7 +10972,8 @@ mod ui_tests {
                 mip: 1,
                 slice: 1,
                 sample: Some(0),
-                channel: Some(0)
+                channel: Some(0),
+                preview_type_cast: 0
             }]
         );
         cx.update(|cx| {

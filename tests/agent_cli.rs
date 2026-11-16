@@ -175,6 +175,21 @@ fn real_d3d11_mesh_draw_order() {
     assert_eq!(color["first_slice"], 0);
     assert_eq!(color["swizzle"].as_array().unwrap().len(), 4);
     assert_eq!(pipeline["depth_attachment"]["resource"]["bound"], false);
+    let texture_index = opened["data"]["capture"]["textures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|texture| texture["width"] == 16 && texture["height"] == 16)
+        .unwrap();
+    let png_path = dir.path().join("typed.png");
+    let png = agent.send(&serde_json::json!({"command":"export_texture","index":texture_index,"path":png_path,"preview_type_cast":2}).to_string());
+    assert_eq!(png["ok"], true, "{png}");
+    assert_eq!(png["data"]["selection"]["preview_type_cast"], 2);
+    assert!(
+        std::fs::read(png_path)
+            .unwrap()
+            .starts_with(b"\x89PNG\r\n\x1a\n")
+    );
     agent.quit();
 }
 
