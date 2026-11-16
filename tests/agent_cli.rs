@@ -212,6 +212,23 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         })
         .expect("capture should contain the D3D11 clear action");
     let event = clear["event_id"].as_u64().unwrap().to_string();
+    let draw_event = result["capture"]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|action| {
+            action["name"]
+                .as_str()
+                .is_some_and(|name| name.contains("Draw"))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "capture should contain D3D11 draw: {}",
+                result["capture"]["actions"]
+            )
+        })["event_id"]
+        .as_u64()
+        .unwrap();
     let (success, result) = invoke(&["--bridge", bridge, "select", capture, &event]);
     assert!(success, "event replay failed: {result}");
     assert_eq!(result["event_id"].as_u64().unwrap().to_string(), event);
@@ -220,6 +237,10 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let request = serde_json::json!({"id":1,"command":"open","path":capture}).to_string();
     let opened = agent.send(&request);
     assert_eq!(opened["ok"], true, "{opened}");
+    assert_eq!(
+        agent.send(r#"{"command":"pipeline"}"#)["error"]["code"],
+        "no_event"
+    );
     let texture_index = opened["data"]["capture"]["textures"]
         .as_array()
         .unwrap()
@@ -272,6 +293,31 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     );
     assert_eq!(agent.send(&export)["error"]["code"], "replay_export_failed");
     assert_eq!(std::fs::read(&png_path).unwrap(), bytes);
+    let draw =
+        agent.send(&serde_json::json!({"command":"select","event_id":draw_event}).to_string());
+    assert_eq!(draw["ok"], true, "{draw}");
+    let state = agent.send(r#"{"command":"pipeline"}"#);
+    let pipeline = &state["data"]["pipeline"];
+    assert_eq!(pipeline["event_id"], draw_event);
+    assert_eq!(pipeline["available"], true);
+    assert_eq!(pipeline["topology"], 5);
+    let shaders = pipeline["shaders"].as_array().unwrap();
+    for stage in ["vertex", "fragment"] {
+        assert!(
+            shaders
+                .iter()
+                .any(|shader| shader["stage"] == stage && shader["bound"] == true),
+            "{pipeline}"
+        );
+    }
+    assert!(
+        pipeline["outputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|output| output["bound"] == true),
+        "{pipeline}"
+    );
     assert_eq!(agent.send(r#"{"id":3,"command":"close"}"#)["ok"], true);
     assert_eq!(
         agent.send(r#"{"id":4,"command":"snapshot"}"#)["error"]["code"],

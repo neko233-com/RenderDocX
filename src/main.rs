@@ -11,7 +11,7 @@ use gpui_kit::{
 use renderdocx::{
     backend::{self, Settings},
     i18n::Language,
-    replay::{Session, Snapshot},
+    replay::{Pipeline, Session, Snapshot},
 };
 use std::path::PathBuf;
 
@@ -27,6 +27,7 @@ struct Workspace {
     session: Option<Session>,
     snapshot: Option<Snapshot>,
     selected: Option<usize>,
+    pipeline: Option<Pipeline>,
     show_textures: bool,
     selected_texture: Option<usize>,
     open_revision: u64,
@@ -120,6 +121,7 @@ impl Workspace {
                         this.snapshot = Some(snapshot);
                         this.session = Some(session);
                         this.selected = None;
+                        this.pipeline = None;
                         this.selected_texture = None;
                         this.show_textures = false;
                         this.replay_pending = false;
@@ -187,7 +189,7 @@ impl Workspace {
         cx.notify();
         let task = cx
             .background_executor()
-            .spawn(async move { session.select(event, revision) });
+            .spawn(async move { session.select_pipeline(event, revision) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -196,11 +198,12 @@ impl Workspace {
                 }
                 this.replay_pending = false;
                 match result {
-                    Ok(true) => {
+                    Ok(Some(pipeline)) => {
                         this.selected = Some(index);
+                        this.pipeline = Some(pipeline);
                         this.status = None;
                     }
-                    Ok(false) => return,
+                    Ok(None) => return,
                     Err(error) => {
                         this.status = Some(format!(
                             "{}: {error}",
@@ -487,6 +490,27 @@ impl Workspace {
             "인덱스 / 정점",
         );
         let instances_label = self.t("Instances", "实例", "インスタンス", "인스턴스");
+        let pipeline_label = self.t("PIPELINE", "管线", "パイプライン", "파이프라인");
+        let topology_label = self.t("Topology", "拓扑", "トポロジー", "토폴로지");
+        let shaders_label = self.t(
+            "Bound shaders",
+            "已绑定着色器",
+            "バインド済みシェーダー",
+            "바인딩된 셰이더",
+        );
+        let outputs_label = self.t(
+            "Bound outputs",
+            "已绑定输出",
+            "バインド済み出力",
+            "바인딩된 출력",
+        );
+        let pipeline_unavailable = self.t(
+            "Pipeline state unavailable",
+            "管线状态不可用",
+            "パイプライン状態を取得できません",
+            "파이프라인 상태를 사용할 수 없습니다",
+        );
+        let pipeline = self.pipeline.clone();
         let status = self.status.clone();
         let preview_path = self.preview.as_ref().map(|preview| preview.path.clone());
 
@@ -676,6 +700,78 @@ impl Workspace {
                         .child(format!("{flags_label}: 0x{:08X}", action.flags))
                         .child(format!("{indices_label}: {}", action.indices))
                         .child(format!("{instances_label}: {}", action.instances))
+                })
+                .when_some(pipeline, |view, state| {
+                    if !state.available {
+                        return view.child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0x82aaff))
+                                .child(pipeline_unavailable),
+                        );
+                    }
+                    let names = [
+                        "Unknown",
+                        "PointList",
+                        "LineList",
+                        "LineStrip",
+                        "LineLoop",
+                        "TriangleList",
+                        "TriangleStrip",
+                        "TriangleFan",
+                        "LineList_Adj",
+                        "LineStrip_Adj",
+                        "TriangleList_Adj",
+                        "TriangleStrip_Adj",
+                    ];
+                    let topology = names
+                        .get(state.topology as usize)
+                        .map(|name| name.to_string())
+                        .unwrap_or_else(|| format!("{}", state.topology));
+                    let shaders = state
+                        .shaders
+                        .iter()
+                        .filter(|shader| shader.resource.bound)
+                        .map(|shader| {
+                            format!(
+                                "{}: {}",
+                                shader.stage,
+                                if shader.resource.name.is_empty() {
+                                    "—"
+                                } else {
+                                    &shader.resource.name
+                                }
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let outputs = state
+                        .outputs
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, output)| output.bound)
+                        .map(|(index, output)| {
+                            format!(
+                                "{}: {}",
+                                index,
+                                if output.name.is_empty() {
+                                    "—"
+                                } else {
+                                    &output.name
+                                }
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    view.child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0x82aaff))
+                            .child(pipeline_label),
+                    )
+                    .child(format!("{topology_label}: {topology}"))
+                    .child(format!("{shaders_label}: {}", shaders.len()))
+                    .children(shaders.into_iter().map(|line| div().text_sm().child(line)))
+                    .child(format!("{outputs_label}: {}", outputs.len()))
+                    .children(outputs.into_iter().map(|line| div().text_sm().child(line)))
                 })
                 .when(self.selected.is_none(), |view| {
                     view.child(div().text_color(rgb(0x9eacc0)).child(empty))
@@ -1085,6 +1181,7 @@ fn main() {
                         session: None,
                         snapshot: None,
                         selected: None,
+                        pipeline: None,
                         show_textures: false,
                         selected_texture: None,
                         open_revision: 0,
@@ -1138,6 +1235,7 @@ mod ui_tests {
                             textures: Vec::new(),
                         }),
                         selected: None,
+                        pipeline: None,
                         show_textures: false,
                         selected_texture: None,
                         open_revision: 0,
@@ -1216,6 +1314,7 @@ mod ui_tests {
                             }],
                         }),
                         selected: None,
+                        pipeline: None,
                         show_textures: false,
                         selected_texture: None,
                         open_revision: 0,
@@ -1247,7 +1346,12 @@ mod ui_tests {
         })
         .unwrap();
         cx.run_until_parked();
-        cx.update(|cx| assert_eq!(view.read(cx).selected, Some(0)));
+        cx.update(|cx| {
+            assert_eq!(view.read(cx).selected, Some(0));
+            let pipeline = view.read(cx).pipeline.as_ref().expect("selected pipeline");
+            assert_eq!(pipeline.event_id, 42);
+            assert_eq!(pipeline.topology, 5);
+        });
         assert_eq!(*events.lock().unwrap(), vec![42]);
         cx.update_window(handle.into(), |_, window, cx| {
             window.click("textures-tab", cx);

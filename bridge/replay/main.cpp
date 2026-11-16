@@ -10,6 +10,13 @@
 #include <string>
 #include <vector>
 
+// pipestate.inl uses this non-exported stringiser for vertex attribute names.
+template <> rdcstr DoStringise<uint32_t>(const uint32_t &value)
+{
+  return std::to_string(value).c_str();
+}
+#include "api/replay/pipestate.inl"
+
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -142,6 +149,46 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
   std::cout << "]}" << std::endl;
 }
 
+// ResourceId is opaque. Indices refer to GetResources() in this replay session only.
+void write_pipeline(IReplayController *controller, uint32_t event)
+{
+  const PipeState &state = controller->GetPipelineState();
+  const auto &resources = controller->GetResources();
+  std::map<ResourceId, size_t> indices;
+  for(size_t i = 0; i < resources.size(); ++i) indices.emplace(resources[i].resourceId, i);
+  auto resource = [&](ResourceId id) {
+    const auto found = indices.find(id);
+    std::cout << "\"bound\":" << (id != ResourceId() ? "true" : "false") << ",\"resource_index\":";
+    if(found == indices.end() || id == ResourceId()) std::cout << "null";
+    else std::cout << found->second;
+    std::cout << ",\"name\":";
+    if(found == indices.end() || id == ResourceId()) json_string("", 0);
+    else json_string(resources[found->second].name);
+  };
+  static const char *names[] = {"vertex", "tess_control", "tess_eval", "geometry", "fragment", "compute", "task", "mesh"};
+  std::cout << "{\"event_id\":" << event << ",\"available\":" << (state.IsCaptureLoaded() ? "true" : "false")
+            << ",\"topology\":" << uint32_t(state.GetPrimitiveTopology()) << ",\"shaders\":[";
+  for(unsigned i = 0; i < 8; ++i)
+  {
+    if(i) std::cout << ',';
+    std::cout << "{\"stage\":";
+    json_string(names[i], std::strlen(names[i]));
+    std::cout << ',';
+    resource(state.GetShader(ShaderStage(i)));
+    std::cout << '}';
+  }
+  std::cout << "],\"outputs\":[";
+  const auto outputs = state.GetOutputTargets();
+  for(size_t i = 0; i < outputs.size(); ++i)
+  {
+    if(i) std::cout << ',';
+    std::cout << '{';
+    resource(outputs[i].resource);
+    std::cout << '}';
+  }
+  std::cout << "]}";
+}
+
 int run(const std::string &capture)
 {
   const char *version = RENDERDOC_GetVersionString();
@@ -221,7 +268,9 @@ int run(const std::string &capture)
     replay.controller->SetFrameEvent(uint32_t(event), false);
     result = replay.controller->GetFatalErrorStatus();
     if(!result.OK()) { error(result_message(result)); break; }
-    std::cout << "\nRENDERDOCX/1 {\"type\":\"selected\",\"event_id\":" << event << "}" << std::endl;
+    std::cout << "\nRENDERDOCX/1 {\"type\":\"selected\",\"event_id\":" << event << ",\"pipeline\":";
+    write_pipeline(replay.controller, uint32_t(event));
+    std::cout << "}" << std::endl;
   }
   return 0;
 }

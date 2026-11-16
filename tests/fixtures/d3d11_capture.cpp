@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <d3d11.h>
+#include <d3dcompiler.h>
 #include "api/app/renderdoc_app.h"
 #include <iostream>
 #include <string>
@@ -48,10 +49,32 @@ int wmain(int argc, wchar_t **argv)
   if(SUCCEEDED(hr)) hr = device->CreateRenderTargetView(texture, nullptr, &view);
   if(FAILED(hr)) { std::cerr << "Could not create render target"; return 8; }
 
+  HMODULE compiler = LoadLibraryW(L"d3dcompiler_47.dll");
+  auto compile = compiler ? reinterpret_cast<decltype(&D3DCompile)>(GetProcAddress(compiler, "D3DCompile")) : nullptr;
+  if(!compile) { std::cerr << "Could not load D3D compiler"; return 14; }
+  const char *vertex_source = "float4 main(uint id : SV_VertexID) : SV_Position { return float4(2,2,0,1); }";
+  const char *pixel_source = "float4 main() : SV_Target { return float4(0.25,0.5,0.75,1); }";
+  ID3DBlob *vertex_code = nullptr, *pixel_code = nullptr;
+  hr = compile(vertex_source, strlen(vertex_source), nullptr, nullptr, nullptr, "main", "vs_4_0", 0, 0, &vertex_code, nullptr);
+  if(SUCCEEDED(hr)) hr = compile(pixel_source, strlen(pixel_source), nullptr, nullptr, nullptr, "main", "ps_4_0", 0, 0, &pixel_code, nullptr);
+  ID3D11VertexShader *vertex = nullptr;
+  ID3D11PixelShader *pixel = nullptr;
+  if(SUCCEEDED(hr)) hr = device->CreateVertexShader(vertex_code->GetBufferPointer(), vertex_code->GetBufferSize(), nullptr, &vertex);
+  if(SUCCEEDED(hr)) hr = device->CreatePixelShader(pixel_code->GetBufferPointer(), pixel_code->GetBufferSize(), nullptr, &pixel);
+  if(FAILED(hr)) { std::cerr << "Could not create fixture shaders"; return 15; }
+  vertex_code->Release(); pixel_code->Release();
+
   api->StartFrameCapture(device, nullptr);
   if(!api->IsFrameCapturing()) { std::cerr << "Capture did not start"; return 9; }
   const float color[4] = {0.25f, 0.5f, 0.75f, 1.0f};
   context->ClearRenderTargetView(view, color);
+  context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  context->VSSetShader(vertex, nullptr, 0);
+  context->PSSetShader(pixel, nullptr, 0);
+  context->OMSetRenderTargets(1, &view, nullptr);
+  D3D11_VIEWPORT viewport = {0, 0, 16, 16, 0, 1};
+  context->RSSetViewports(1, &viewport);
+  context->Draw(3, 0);
   context->Flush();
   if(!api->EndFrameCapture(device, nullptr)) { std::cerr << "Capture did not complete"; return 10; }
   if(api->GetNumCaptures() == 0) { std::cerr << "No capture was recorded"; return 11; }
@@ -60,6 +83,6 @@ int wmain(int argc, wchar_t **argv)
   std::vector<char> output(length, 0);
   if(!api->GetCapture(0, output.data(), &length, nullptr)) { std::cerr << "Could not read capture path"; return 13; }
   std::cout << "RENDERDOCX_CAPTURE=" << output.data() << std::endl;
-  view->Release(); texture->Release(); context->Release(); device->Release();
+  vertex->Release(); pixel->Release(); view->Release(); texture->Release(); context->Release(); device->Release();
   return 0;
 }

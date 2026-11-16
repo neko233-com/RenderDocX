@@ -56,11 +56,34 @@ pub struct Texture {
     pub component_byte_width: u32,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct PipelineResource {
+    pub bound: bool,
+    pub resource_index: Option<usize>,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct PipelineShader {
+    pub stage: String,
+    #[serde(flatten)]
+    pub resource: PipelineResource,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct Pipeline {
+    pub event_id: u32,
+    pub available: bool,
+    pub topology: u32,
+    pub shaders: Vec<PipelineShader>,
+    pub outputs: Vec<PipelineResource>,
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Reply {
     Snapshot(Snapshot),
-    Selected { event_id: u32 },
+    Selected { event_id: u32, pipeline: Pipeline },
     TextureSaved { index: u32 },
     Error { message: String },
 }
@@ -112,7 +135,7 @@ fn validate_snapshot(snapshot: &Snapshot) -> Result<(), String> {
 }
 
 trait Transport: Send {
-    fn select(&mut self, event: u32) -> Result<(), String>;
+    fn select(&mut self, event: u32) -> Result<Pipeline, String>;
     fn save_texture(&mut self, _index: u32, _path: &Path) -> Result<(), String> {
         Err("Texture export is not supported by this transport".into())
     }
@@ -122,13 +145,17 @@ trait Transport: Send {
 }
 
 impl Transport for Process {
-    fn select(&mut self, event: u32) -> Result<(), String> {
+    fn select(&mut self, event: u32) -> Result<Pipeline, String> {
         let input = self.input.as_mut().ok_or("Replay session has closed")?;
         writeln!(input, "select {event}")
             .and_then(|_| input.flush())
             .map_err(|e| e.to_string())?;
         match self.read()? {
-            Reply::Selected { event_id } if event_id == event => Ok(()),
+            Reply::Selected { event_id, pipeline }
+                if event_id == event && pipeline.event_id == event =>
+            {
+                Ok(pipeline)
+            }
             Reply::Error { message } => Err(message),
             _ => Err("Unexpected replay selection response".into()),
         }
@@ -269,12 +296,19 @@ impl Session {
     }
 
     pub fn select(&self, event: u32, revision: u64) -> Result<bool, String> {
+        Ok(self.select_pipeline(event, revision)?.is_some())
+    }
+
+    pub fn select_pipeline(&self, event: u32, revision: u64) -> Result<Option<Pipeline>, String> {
         let mut process = self.process.lock().map_err(|e| e.to_string())?;
         if self.revision.load(Ordering::SeqCst) != revision {
-            return Ok(false);
+            return Ok(None);
         }
-        process.select(event)?;
-        Ok(true)
+        let pipeline = process.select(event)?;
+        if self.revision.load(Ordering::SeqCst) != revision {
+            return Ok(None);
+        }
+        Ok(Some(pipeline))
     }
 }
 
@@ -284,9 +318,14 @@ pub mod test_support {
     use super::*;
     struct RecordingTransport(Arc<Mutex<Vec<u32>>>);
     impl Transport for RecordingTransport {
-        fn select(&mut self, event: u32) -> Result<(), String> {
+        fn select(&mut self, event: u32) -> Result<Pipeline, String> {
             self.0.lock().map_err(|e| e.to_string())?.push(event);
-            Ok(())
+            Ok(Pipeline {
+                event_id: event,
+                available: true,
+                topology: 5,
+                ..Default::default()
+            })
         }
 
         fn save_texture(&mut self, _index: u32, path: &Path) -> Result<(), String> {
@@ -352,12 +391,15 @@ mod tests {
         fails: bool,
     }
     impl Transport for FakeTransport {
-        fn select(&mut self, event: u32) -> Result<(), String> {
+        fn select(&mut self, event: u32) -> Result<Pipeline, String> {
             self.calls.lock().unwrap().push(event);
             if self.fails {
                 Err("replay failed".into())
             } else {
-                Ok(())
+                Ok(Pipeline {
+                    event_id: event,
+                    ..Default::default()
+                })
             }
         }
     }
@@ -377,6 +419,50 @@ mod tests {
         assert!(!session.select(10, old).unwrap());
         assert!(session.select(11, current).unwrap());
         assert_eq!(*calls.lock().unwrap(), vec![11]);
+    }
+
+    #[test]
+    fn selection_superseded_during_replay_does_not_publish_stale_pipeline() {
+        struct BlockingTransport {
+            started: std::sync::mpsc::Sender<()>,
+            resume: std::sync::mpsc::Receiver<()>,
+        }
+        impl Transport for BlockingTransport {
+            fn select(&mut self, event: u32) -> Result<Pipeline, String> {
+                if event == 10 {
+                    self.started.send(()).unwrap();
+                    self.resume.recv().unwrap();
+                }
+                Ok(Pipeline {
+                    event_id: event,
+                    ..Default::default()
+                })
+            }
+        }
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let session = Session {
+            process: Arc::new(Mutex::new(Box::new(BlockingTransport {
+                started: started_tx,
+                resume: resume_rx,
+            }))),
+            revision: Arc::new(AtomicU64::new(0)),
+        };
+        let revision = session.next_revision();
+        let old_session = session.clone();
+        let old = std::thread::spawn(move || old_session.select_pipeline(10, revision).unwrap());
+        started_rx.recv().unwrap();
+        let current = session.next_revision();
+        resume_tx.send(()).unwrap();
+        assert!(old.join().unwrap().is_none());
+        assert_eq!(
+            session
+                .select_pipeline(11, current)
+                .unwrap()
+                .unwrap()
+                .event_id,
+            11
+        );
     }
 
     #[test]

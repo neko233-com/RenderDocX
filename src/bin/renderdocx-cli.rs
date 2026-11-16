@@ -1,6 +1,6 @@
 use renderdocx::{
     backend::Settings,
-    replay::{Session, Snapshot},
+    replay::{Pipeline, Session, Snapshot},
 };
 use serde_json::{Value, json};
 use std::{
@@ -21,7 +21,7 @@ fn usage() -> Value {
         {"name":"select","arguments":["capture.rdc","event_id"],"description":"Replay a capture to an action event."},
         {"name":"serve","arguments":[],"description":"Serve sequential JSONL requests using a persistent replay session."},
         {"name":"capabilities","arguments":[],"description":"Describe the commands currently implemented."}
-    ],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
+    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","export_texture","close","quit"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
 }
 
 fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
@@ -80,16 +80,16 @@ fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
     if let Some(event_id) = event {
         let revision = session.next_revision();
         match session
-            .select(event_id, revision)
+            .select_pipeline(event_id, revision)
             .map_err(|e| ("replay_select_failed", e))?
         {
-            true => {
+            Some(pipeline) => {
                 session.close().map_err(|e| ("replay_close_failed", e))?;
                 Ok(Invocation::Output(
-                    json!({"schema":"renderdocx.cli.v1","ok":true,"command":"select","event_id":event_id}),
+                    json!({"schema":"renderdocx.cli.v1","ok":true,"command":"select","event_id":event_id,"pipeline":pipeline}),
                 ))
             }
-            false => Err((
+            None => Err((
                 "replay_select_superseded",
                 "Selection was superseded".into(),
             )),
@@ -105,6 +105,7 @@ fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
 fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io::Result<()> {
     let mut opened: Option<(Session, Snapshot)> = None;
     let mut selected_event: Option<u32> = None;
+    let mut pipeline: Option<Pipeline> = None;
     for line in input.lines() {
         let line = line?;
         let parsed: Result<Value, _> = serde_json::from_str(&line);
@@ -134,6 +135,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         let value = json!({"capture": &snapshot});
                         opened = Some((session, snapshot));
                         selected_event = None;
+                        pipeline = None;
                         Ok(value)
                     }
                     Err(message) => Err(("replay_open_failed", message)),
@@ -143,6 +145,14 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
             "snapshot" => match &opened {
                 Some((_, snapshot)) => Ok(json!({"capture": snapshot})),
                 None => Err(("no_capture", "No capture is open".into())),
+            },
+            "pipeline" => match (&opened, &pipeline) {
+                (None, _) => Err(("no_capture", "No capture is open".into())),
+                (Some(_), None) => Err((
+                    "no_event",
+                    "Select an event before inspecting pipeline state".into(),
+                )),
+                (Some(_), Some(state)) => Ok(json!({"pipeline": state})),
             },
             "select" => match (
                 &opened,
@@ -158,12 +168,14 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                 )),
                 (Some((session, _)), Some(event)) => {
                     let revision = session.next_revision();
-                    match session.select(event, revision) {
-                        Ok(true) => {
+                    match session.select_pipeline(event, revision) {
+                        Ok(Some(state)) => {
                             selected_event = Some(event);
-                            Ok(json!({"event_id":event}))
+                            let value = json!({"event_id":event, "pipeline": &state});
+                            pipeline = Some(state);
+                            Ok(value)
                         }
-                        Ok(false) => Err((
+                        Ok(None) => Err((
                             "replay_select_superseded",
                             "Selection was superseded".into(),
                         )),
@@ -203,6 +215,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
             }
             "close" | "quit" => {
                 selected_event = None;
+                pipeline = None;
                 match opened.take() {
                     Some((session, _)) => session
                         .close()
