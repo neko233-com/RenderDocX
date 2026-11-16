@@ -128,6 +128,16 @@ fn usage() -> Value {
         .as_array_mut()
         .expect("capabilities commands")
         .extend([
+            json!("custom_shader_library_list"),
+            json!("custom_shader_library_get"),
+            json!("custom_shader_library_save"),
+            json!("custom_shader_library_delete"),
+            json!("custom_shader_library_build"),
+        ]);
+    capabilities["serve_commands"]
+        .as_array_mut()
+        .expect("capabilities commands")
+        .extend([
             json!("custom_shader_info"),
             json!("custom_shader_build"),
             json!("custom_shader_clear"),
@@ -333,6 +343,68 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     .map_err(|error| ("event_filter_store_failed", error)),
                 None => Err(("invalid_arguments", "name must be a string".into())),
             },
+            "custom_shader_library_list" => renderdocx::custom_shaders::ShaderStore::new()
+                .and_then(|store| store.list())
+                .map(|shaders| json!({"shaders":shaders}))
+                .map_err(|error| ("custom_shader_store_failed", error)),
+            "custom_shader_library_get" => match request.get("name").and_then(Value::as_str) {
+                Some(name) => renderdocx::custom_shaders::ShaderStore::new()
+                    .and_then(|store| store.get(name))
+                    .map(|shader| json!({"shader":shader}))
+                    .map_err(|error| ("custom_shader_store_failed", error)),
+                None => Err(("invalid_arguments", "name must be a string".into())),
+            },
+            "custom_shader_library_save" => {
+                let shader = request.get("shader").cloned().and_then(|value| {
+                    serde_json::from_value::<renderdocx::custom_shaders::SavedCustomShader>(value)
+                        .ok()
+                });
+                let replace = match request.get("replace") {
+                    None => Some(false),
+                    Some(Value::Bool(value)) => Some(*value),
+                    _ => None,
+                };
+                match (shader, replace) {
+                    (Some(shader), Some(replace)) => renderdocx::custom_shaders::ShaderStore::new()
+                        .and_then(|store| store.save(&shader, replace))
+                        .map(|shader| json!({"shader":shader}))
+                        .map_err(|error| ("custom_shader_store_failed", error)),
+                    _ => Err((
+                        "invalid_arguments",
+                        "shader must be a valid saved shader and replace must be boolean".into(),
+                    )),
+                }
+            }
+            "custom_shader_library_delete" => match request.get("name").and_then(Value::as_str) {
+                Some(name) => renderdocx::custom_shaders::ShaderStore::new()
+                    .and_then(|store| store.delete(name))
+                    .map(|()| json!({"deleted":name}))
+                    .map_err(|error| ("custom_shader_store_failed", error)),
+                None => Err(("invalid_arguments", "name must be a string".into())),
+            },
+            "custom_shader_library_build" => {
+                match (&opened, request.get("name").and_then(Value::as_str)) {
+                    (None, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some((session, _)), Some(name)) => {
+                        renderdocx::custom_shaders::ShaderStore::new()
+                            .and_then(|store| store.get(name))
+                            .and_then(|shader| {
+                                shader.source().and_then(|source| {
+                                    session.custom_shader_build(
+                                        shader.encoding,
+                                        &shader.entry,
+                                        &source,
+                                        shader.apply_prefix,
+                                        &shader.flags,
+                                    )
+                                })
+                            })
+                            .map(|result| json!({"result":result}))
+                            .map_err(|error| ("custom_shader_failed", error))
+                    }
+                    _ => Err(("invalid_arguments", "name must be a string".into())),
+                }
+            }
             "buffer_formats_list" => renderdocx::buffer_formats::FormatStore::new()
                 .and_then(|store| store.list())
                 .map(|formats| json!({"formats":formats}))

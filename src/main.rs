@@ -613,6 +613,11 @@ struct Workspace {
     texture_export_grid: Entity<InputState>,
     texture_export_quality: Entity<InputState>,
     texture_export_color: Entity<InputState>,
+    texture_custom_name: Entity<InputState>,
+    texture_custom_flags: Vec<renderdocx::replay::ShaderCompileFlag>,
+    texture_custom_prefix: Option<bool>,
+    saved_custom_shaders: Vec<renderdocx::custom_shaders::SavedCustomShader>,
+    pending_custom_delete: Option<String>,
     texture_custom_entry: Entity<InputState>,
     texture_custom_encoding: Entity<InputState>,
     texture_custom_source: Entity<TextareaState>,
@@ -5946,6 +5951,135 @@ impl Workspace {
         cx.notify();
     }
 
+    fn custom_shader_store(&self) -> Result<renderdocx::custom_shaders::ShaderStore, String> {
+        #[cfg(test)]
+        if let Some(path) = &self.buffer_store_override {
+            return Ok(renderdocx::custom_shaders::ShaderStore::at(
+                path.join("custom-shaders"),
+            ));
+        }
+        renderdocx::custom_shaders::ShaderStore::new()
+    }
+
+    fn refresh_custom_shaders(&mut self) {
+        match self.custom_shader_store().and_then(|store| store.list()) {
+            Ok(shaders) => self.saved_custom_shaders = shaders,
+            Err(error) => self.texture_custom_diagnostics = error,
+        }
+    }
+
+    fn custom_shader_source(&self, encoding: u32, cx: &App) -> Result<Vec<u8>, String> {
+        let source = self.texture_custom_source.read(cx).value().to_string();
+        if matches!(encoding, 1 | 3 | 6 | 7) {
+            renderdocx::custom_shaders::decode_hex(source.trim())
+        } else if source.is_empty() {
+            Err("Shader source is empty".into())
+        } else {
+            Ok(source.into_bytes())
+        }
+    }
+
+    fn save_custom_shader(&mut self, replace: bool, cx: &mut Context<Self>) {
+        let result = (|| {
+            let encoding = self
+                .texture_custom_encoding
+                .read(cx)
+                .value()
+                .parse::<u32>()
+                .map_err(|e| e.to_string())?;
+            let source = self.custom_shader_source(encoding, cx)?;
+            let shader = renderdocx::custom_shaders::SavedCustomShader {
+                name: self.texture_custom_name.read(cx).value().trim().to_owned(),
+                encoding,
+                entry: self.texture_custom_entry.read(cx).value().to_string(),
+                source_hex: renderdocx::custom_shaders::encode_hex(&source),
+                flags: self.texture_custom_flags.clone(),
+                apply_prefix: self
+                    .texture_custom_prefix
+                    .unwrap_or(matches!(encoding, 2 | 5 | 9)),
+            };
+            self.custom_shader_store()?.save(&shader, replace)?;
+            Ok::<(), String>(())
+        })();
+        match result {
+            Ok(()) => {
+                self.refresh_custom_shaders();
+                self.texture_custom_diagnostics = self
+                    .t(
+                        "Shader saved.",
+                        "着色器已保存。",
+                        "シェーダーを保存しました。",
+                        "셰이더를 저장했습니다.",
+                    )
+                    .to_owned();
+            }
+            Err(error) => self.texture_custom_diagnostics = error,
+        }
+        cx.notify();
+    }
+
+    fn delete_custom_shader(&mut self, cx: &mut Context<Self>) {
+        let name = self.texture_custom_name.read(cx).value().trim().to_owned();
+        if self.pending_custom_delete.as_deref() != Some(&name) {
+            self.pending_custom_delete = Some(name);
+            cx.notify();
+            return;
+        }
+        self.pending_custom_delete = None;
+        match self
+            .custom_shader_store()
+            .and_then(|store| store.delete(&name))
+        {
+            Ok(()) => {
+                self.refresh_custom_shaders();
+                self.texture_custom_diagnostics = self
+                    .t(
+                        "Shader deleted.",
+                        "着色器已删除。",
+                        "シェーダーを削除しました。",
+                        "셰이더를 삭제했습니다.",
+                    )
+                    .to_owned();
+            }
+            Err(error) => self.texture_custom_diagnostics = error,
+        }
+        cx.notify();
+    }
+
+    fn load_custom_shader(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let result = self
+            .custom_shader_store()
+            .and_then(|store| store.get(name))
+            .and_then(|shader| {
+                let bytes = shader.source()?;
+                let source = if matches!(shader.encoding, 1 | 3 | 6 | 7) {
+                    shader.source_hex.clone()
+                } else {
+                    String::from_utf8(bytes).map_err(|e| e.to_string())?
+                };
+                Ok((shader, source))
+            });
+        match result {
+            Ok((shader, source)) => {
+                self.texture_custom_name
+                    .update(cx, |input, cx| input.set_value(shader.name, window, cx));
+                self.texture_custom_entry
+                    .update(cx, |input, cx| input.set_value(shader.entry, window, cx));
+                self.texture_custom_encoding.update(cx, |input, cx| {
+                    input.set_value(shader.encoding.to_string(), window, cx)
+                });
+                self.texture_custom_source
+                    .update(cx, |input, cx| input.replace_all(source, window, cx));
+                self.texture_custom_flags = shader.flags;
+                self.texture_custom_prefix = Some(shader.apply_prefix);
+                self.pending_custom_delete = None;
+                self.texture_custom_diagnostics.clear();
+            }
+            Err(error) => self.texture_custom_diagnostics = error,
+        }
+        cx.notify();
+    }
+
     fn custom_shader_info(&mut self, cx: &mut Context<Self>) {
         if !self.preview_edit_ready(cx) {
             return;
@@ -5958,6 +6092,7 @@ impl Workspace {
             cx.notify();
             return;
         }
+        self.refresh_custom_shaders();
         self.resource_pending = true;
         let revision = self.open_revision;
         let task = cx
@@ -5999,11 +6134,15 @@ impl Workspace {
             .value()
             .parse::<u32>()
             .ok();
-        let source = self.texture_custom_source.read(cx).value().to_string();
+        let source = if clear {
+            Ok(Vec::new())
+        } else {
+            self.custom_shader_source(encoding.unwrap_or(0), cx)
+        };
         if !clear
             && (entry.is_empty()
                 || entry.contains('\0')
-                || source.is_empty()
+                || source.is_err()
                 || !encoding.is_some_and(|v| (1..=9).contains(&v)))
         {
             self.texture_custom_diagnostics = self
@@ -6017,6 +6156,9 @@ impl Workspace {
             cx.notify();
             return;
         }
+        let source = source.unwrap_or_default();
+        let flags = self.texture_custom_flags.clone();
+        let prefix = self.texture_custom_prefix;
         self.resource_pending = true;
         let revision = self.open_revision;
         let task = cx.background_executor().spawn(async move {
@@ -6027,9 +6169,9 @@ impl Workspace {
                 session.custom_shader_build(
                     encoding,
                     &entry,
-                    source.as_bytes(),
-                    matches!(encoding, 2 | 5 | 9),
-                    &[],
+                    &source,
+                    prefix.unwrap_or(matches!(encoding, 2 | 5 | 9)),
+                    &flags,
                 )
             }
         });
@@ -9364,6 +9506,16 @@ impl Workspace {
                     self.texture_custom_encodings
                 ))
                 .child(div().text_sm().text_color(rgb(0x9eacc0)).child("1 DXBC · 2 GLSL · 3 SPIR-V · 4 SPIR-V ASM · 5 HLSL · 6 DXIL · 7 OpenGL SPIR-V · 8 OpenGL SPIR-V ASM · 9 Slang"))
+                .child(div().text_sm().child(self.t("Binary encodings use hexadecimal bytes.", "二进制编码使用十六进制字节。", "バイナリ形式は16進数で入力します。", "바이너리 인코딩은 16진수로 입력합니다.")))
+                .child(div().flex().flex_wrap().gap_2()
+                    .child(Input::new(&self.texture_custom_name).id("texture-custom-name").aria_label(self.t("Shader name", "着色器名称", "シェーダー名", "셰이더 이름")).w(px(160.)))
+                    .child(button("texture-custom-save", self.t("Save new", "新建保存", "新規保存", "새로 저장"), false, |this, cx| this.save_custom_shader(false, cx), cx))
+                    .child(button("texture-custom-replace", self.t("Replace saved", "覆盖已保存", "保存内容を上書き", "저장 항목 덮어쓰기"), false, |this, cx| this.save_custom_shader(true, cx), cx))
+                    .child(button("texture-custom-delete", if self.pending_custom_delete.as_deref() == Some(self.texture_custom_name.read(cx).value().trim()) { self.t("Confirm delete", "确认删除", "削除を確認", "삭제 확인") } else { self.t("Delete", "删除", "削除", "삭제") }, false, |this, cx| this.delete_custom_shader(cx), cx)))
+                .children(self.saved_custom_shaders.iter().enumerate().map(|(index, shader)| {
+                    let name = shader.name.clone();
+                    Button::new(("texture-saved-shader", index)).label(name.clone()).secondary().on_click(cx.listener(move |this, _, window, cx| this.load_custom_shader(&name, window, cx)))
+                }))
                 .child(
                     div()
                         .flex()
@@ -15724,6 +15876,7 @@ fn main() {
                         cx.new(|cx| InputState::new(window, cx).default_value("90"));
                     let texture_export_color =
                         cx.new(|cx| InputState::new(window, cx).default_value("#000000"));
+                    let texture_custom_name = cx.new(|cx| InputState::new(window, cx));
                     let texture_custom_entry = cx.new(|cx| InputState::new(window, cx).default_value("main"));
                     let texture_custom_encoding = cx.new(|cx| InputState::new(window, cx).default_value("5"));
                     let texture_custom_source = cx.new(|cx| TextareaState::new(window, cx).default_value("float4 main(float4 pos : SV_Position, float4 uv : TEXCOORD0) : SV_Target0 { return float4(1, 0, 1, 1); }").auto_grow(4, 12));
@@ -15795,6 +15948,11 @@ fn main() {
                         texture_export_grid,
                         texture_export_quality,
                         texture_export_color,
+                        texture_custom_name,
+                        texture_custom_flags: Vec::new(),
+                        texture_custom_prefix: None,
+                        saved_custom_shaders: Vec::new(),
+                        pending_custom_delete: None,
                         texture_custom_entry,
                         texture_custom_encoding,
                         texture_custom_source,
@@ -16066,6 +16224,33 @@ mod ui_tests {
         .unwrap();
         cx.run_until_parked();
         cx.update(|cx| assert!(view.read(cx).texture_custom_encodings.contains(&5)));
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.texture_custom_name
+                    .update(cx, |input, cx| input.set_value("test shader", window, cx))
+            });
+            reveal_details(window, "texture-custom-save", cx);
+            window.click("texture-custom-save", cx);
+        })
+        .unwrap();
+        cx.update(|cx| assert_eq!(view.read(cx).saved_custom_shaders.len(), 1));
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.texture_custom_entry
+                    .update(cx, |input, cx| input.set_value("changed", window, cx));
+                view.load_custom_shader("test shader", window, cx);
+            });
+        })
+        .unwrap();
+        cx.update(|cx| assert_eq!(view.read(cx).texture_custom_entry.read(cx).value(), "main"));
+        cx.update_window(handle.into(), |_, window, cx| {
+            reveal_details(window, "texture-custom-delete", cx);
+            window.click("texture-custom-delete", cx);
+            assert_eq!(view.read(cx).saved_custom_shaders.len(), 1);
+            window.click("texture-custom-delete", cx);
+        })
+        .unwrap();
+        cx.update(|cx| assert!(view.read(cx).saved_custom_shaders.is_empty()));
         cx.update_window(handle.into(), |_, window, cx| {
             reveal_details(window, "texture-custom-build", cx);
             window.click("texture-custom-build", cx);
@@ -16352,6 +16537,7 @@ mod ui_tests {
                         cx.new(|cx| InputState::new(window, cx).default_value("90"));
                     let texture_export_color =
                         cx.new(|cx| InputState::new(window, cx).default_value("#000000"));
+                    let texture_custom_name = cx.new(|cx| InputState::new(window, cx));
                     let texture_custom_entry = cx.new(|cx| InputState::new(window, cx).default_value("main"));
                     let texture_custom_encoding = cx.new(|cx| InputState::new(window, cx).default_value("5"));
                     let texture_custom_source = cx.new(|cx| TextareaState::new(window, cx).default_value("float4 main(float4 pos : SV_Position, float4 uv : TEXCOORD0) : SV_Target0 { return float4(1, 0, 1, 1); }").auto_grow(4, 12));
@@ -16442,6 +16628,11 @@ mod ui_tests {
                         texture_export_grid,
                         texture_export_quality,
                         texture_export_color,
+                        texture_custom_name,
+                        texture_custom_flags: Vec::new(),
+                        texture_custom_prefix: None,
+                        saved_custom_shaders: Vec::new(),
+                        pending_custom_delete: None,
                         texture_custom_entry,
                         texture_custom_encoding,
                         texture_custom_source,
@@ -16798,6 +16989,7 @@ mod ui_tests {
                         cx.new(|cx| InputState::new(window, cx).default_value("90"));
                     let texture_export_color =
                         cx.new(|cx| InputState::new(window, cx).default_value("#000000"));
+                    let texture_custom_name = cx.new(|cx| InputState::new(window, cx));
                     let texture_custom_entry = cx.new(|cx| InputState::new(window, cx).default_value("main"));
                     let texture_custom_encoding = cx.new(|cx| InputState::new(window, cx).default_value("5"));
                     let texture_custom_source = cx.new(|cx| TextareaState::new(window, cx).default_value("float4 main(float4 pos : SV_Position, float4 uv : TEXCOORD0) : SV_Target0 { return float4(1, 0, 1, 1); }").auto_grow(4, 12));
@@ -17008,6 +17200,11 @@ mod ui_tests {
                         texture_export_grid,
                         texture_export_quality,
                         texture_export_color,
+                        texture_custom_name,
+                        texture_custom_flags: Vec::new(),
+                        texture_custom_prefix: None,
+                        saved_custom_shaders: Vec::new(),
+                        pending_custom_delete: None,
                         texture_custom_entry,
                         texture_custom_encoding,
                         texture_custom_source,
@@ -17546,6 +17743,11 @@ mod ui_tests {
             selections.lock().unwrap().last().unwrap().preview_overlay,
             renderdocx::texture_overlay::TextureOverlay::Drawcall
         );
+        cx.update(|cx| {
+            view.update(cx, |view, _| {
+                view.buffer_store_override = Some(format_dir.path().to_path_buf())
+            })
+        });
         exercise_custom_shader_editor(cx, &view, handle);
         exercise_overlay_pixel(cx, &view, handle);
         cx.update(|cx| view.update(cx, |view, cx| view.read_texture_raw_page(0, cx)));

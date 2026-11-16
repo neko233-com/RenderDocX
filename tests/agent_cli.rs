@@ -53,6 +53,49 @@ fn saved_event_filters_survive_restart_and_stay_separate_from_formats() {
     restarted.quit();
 }
 
+#[test]
+fn custom_shader_library_round_trips_and_requires_explicit_replacement() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut agent = Agent::with_config(None, false, Some(dir.path()));
+    let mut shader = serde_json::json!({"name":"../着色器", "encoding":3, "entry":"main", "source_hex":"00ff12", "flags":[{"name":"opt","value":"1"}], "apply_prefix":false});
+    let request = |shader: &Value, replace: bool| {
+        serde_json::json!({"command":"custom_shader_library_save","shader":shader,"replace":replace}).to_string()
+    };
+    assert_eq!(agent.send(&request(&shader, false))["ok"], true);
+    shader["entry"] = "changed".into();
+    assert_eq!(
+        agent.send(&request(&shader, false))["error"]["code"],
+        "custom_shader_store_failed"
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"custom_shader_library_get","name":"../着色器"}"#)["data"]["shader"]
+            ["entry"],
+        "main"
+    );
+    assert_eq!(agent.send(&request(&shader, true))["ok"], true);
+    assert_eq!(
+        agent.send(r#"{"command":"custom_shader_library_build","name":"../着色器"}"#)["error"]["code"],
+        "no_capture"
+    );
+    agent.quit();
+    let mut agent = Agent::with_config(None, false, Some(dir.path()));
+    assert_eq!(
+        agent.send(r#"{"command":"custom_shader_library_list"}"#)["data"]["shaders"][0],
+        shader
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"custom_shader_library_delete","name":"../着色器"}"#)["ok"],
+        true
+    );
+    assert!(
+        agent.send(r#"{"command":"custom_shader_library_list"}"#)["data"]["shaders"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    agent.quit();
+}
+
 impl Agent {
     fn new(bridge: Option<&str>) -> Self {
         Self::with_handoff_environment(bridge, false)
@@ -451,7 +494,7 @@ fn real_d3d11_mesh_draw_order() {
         .lines()
         .find_map(|line| line.strip_prefix("RENDERDOCX_CAPTURE="))
         .unwrap();
-    let mut agent = Agent::new(bridge.to_str());
+    let mut agent = Agent::with_config(bridge.to_str(), false, Some(dir.path()));
     let opened = agent.send(&serde_json::json!({"command":"open","path":capture}).to_string());
     assert_eq!(opened["ok"], true, "{opened}");
     let topology_event = opened["data"]["capture"]["actions"]
@@ -1003,6 +1046,14 @@ fn real_d3d11_mesh_draw_order() {
             .any(|value| value == 5)
     );
     let shader = "float4 main(float4 pos : SV_Position, float4 uv : TEXCOORD0) : SV_Target0 { return float4(1, 0, 1, 1); }";
+    let saved = agent.send(&serde_json::json!({"command":"custom_shader_library_save","shader":{"name":"fixture shader","encoding":5,"entry":"main","source_hex":renderdocx::custom_shaders::encode_hex(shader.as_bytes()),"flags":[],"apply_prefix":true}}).to_string());
+    assert_eq!(saved["ok"], true, "{saved}");
+    let library_build =
+        agent.send(r#"{"command":"custom_shader_library_build","name":"fixture shader"}"#);
+    assert_eq!(
+        library_build["data"]["result"]["compiled"], true,
+        "{library_build}"
+    );
     let build = agent.send(&serde_json::json!({"command":"custom_shader_build","encoding":5,"entry":"main","source":shader}).to_string());
     assert_eq!(build["ok"], true, "{build}");
     assert_eq!(build["data"]["result"]["compiled"], true, "{build}");
@@ -1599,6 +1650,11 @@ fn capabilities_advertises_versioned_machine_readable_contract() {
         "event_filter_get",
         "event_filter_save",
         "event_filter_delete",
+        "custom_shader_library_list",
+        "custom_shader_library_get",
+        "custom_shader_library_save",
+        "custom_shader_library_delete",
+        "custom_shader_library_build",
     ] {
         assert!(
             value["serve_commands"]

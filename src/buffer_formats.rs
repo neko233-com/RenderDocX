@@ -47,6 +47,12 @@ impl FormatStore {
         Ok(self.directory.join(format!("{encoded}.json")))
     }
     pub fn save(&self, name: &str, layout: &str) -> Result<SavedFormat, String> {
+        self.save_inner(name, layout, true)
+    }
+    pub fn save_new(&self, name: &str, layout: &str) -> Result<SavedFormat, String> {
+        self.save_inner(name, layout, false)
+    }
+    fn save_inner(&self, name: &str, layout: &str, replace: bool) -> Result<SavedFormat, String> {
         let path = self.path(name)?;
         if layout.trim().is_empty() {
             return Err("Format layout cannot be empty".into());
@@ -62,7 +68,11 @@ impl FormatStore {
         tmp.write_all(&data)
             .and_then(|_| tmp.flush())
             .map_err(|e| e.to_string())?;
-        tmp.persist(&path).map_err(|e| e.to_string())?;
+        if replace {
+            tmp.persist(&path).map_err(|e| e.to_string())?;
+        } else {
+            tmp.persist_noclobber(&path).map_err(|e| e.to_string())?;
+        }
         Ok(entry)
     }
     pub fn get(&self, name: &str) -> Result<SavedFormat, String> {

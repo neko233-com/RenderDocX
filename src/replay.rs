@@ -705,7 +705,7 @@ pub struct ShaderBindings {
 
 pub const SHADER_BINDING_PAGE_LIMIT: u32 = 128;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ShaderCompileFlag {
     pub name: String,
     pub value: String,
