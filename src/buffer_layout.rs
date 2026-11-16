@@ -15,15 +15,34 @@ struct Field {
     row_major: bool,
     packed: Option<PackedFormat>,
     nested: Option<Arc<Layout>>,
+    array_stride: usize,
+    matrix_stride: usize,
     count: usize,
     offset: usize,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Packing {
+    Scalar,
+    Structured,
+    Std430,
+}
+impl Packing {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Scalar => "scalar",
+            Self::Structured => "structured",
+            Self::Std430 => "std430",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Layout {
     fields: Vec<Field>,
     stride: usize,
     alignment: usize,
     used: usize,
+    packing: Packing,
 }
 #[derive(Serialize)]
 pub struct FieldValue {
@@ -46,6 +65,7 @@ pub struct Row {
 }
 #[derive(Serialize)]
 pub struct Page {
+    pub packing: &'static str,
     pub stride: String,
     pub rows: Vec<Row>,
     pub trailing_hex: String,
@@ -128,10 +148,20 @@ impl Layout {
     pub fn parse(source: &str) -> Result<Self, String> {
         let tokens = tokens(source)?;
         let mut i = 0;
+        let mut packing = Packing::Scalar;
         if tokens.first() == Some(&"#") {
-            if tokens.get(..5) != Some(&["#", "pack", "(", "scalar", ")"][..]) {
-                return Err("Only #pack(scalar) is supported".into());
+            if tokens.get(1) != Some(&"pack")
+                || tokens.get(2) != Some(&"(")
+                || tokens.get(4) != Some(&")")
+            {
+                return Err("Invalid packing directive".into());
             }
+            packing = match tokens.get(3).map(|v| v.to_ascii_lowercase()).as_deref() {
+                Some("scalar") => Packing::Scalar,
+                Some("structured" | "d3duav" | "uav" | "c") => Packing::Structured,
+                Some("std430" | "ssbo") => Packing::Std430,
+                _ => return Err("Unsupported packing directive".into()),
+            };
             i = 5;
         }
         let mut definitions: HashMap<&str, Arc<Layout>> = HashMap::new();
@@ -156,7 +186,7 @@ impl Layout {
             if tokens.get(end + 1) != Some(&";") {
                 return Err("Expected semicolon after struct".into());
             }
-            let layout = Arc::new(Self::parse_body(&tokens[body..end], &definitions)?);
+            let layout = Arc::new(Self::parse_body(&tokens[body..end], &definitions, packing)?);
             definitions.insert(name, layout.clone());
             last = Some(layout);
             i = end + 2;
@@ -166,10 +196,14 @@ impl Layout {
                 .map(|layout| (*layout).clone())
                 .ok_or_else(|| "Layout must contain fields".into());
         }
-        Self::parse_body(&tokens[i..], &definitions)
+        Self::parse_body(&tokens[i..], &definitions, packing)
     }
 
-    fn parse_body(t: &[&str], definitions: &HashMap<&str, Arc<Layout>>) -> Result<Self, String> {
+    fn parse_body(
+        t: &[&str],
+        definitions: &HashMap<&str, Arc<Layout>>,
+        packing: Packing,
+    ) -> Result<Self, String> {
         let mut i = 0;
         let mut fields = Vec::new();
         let mut names = HashSet::new();
@@ -277,11 +311,15 @@ impl Layout {
                     }
                     cursor = offset;
                 }
-                let size = nested
+                let mut size = nested
                     .stride
                     .checked_mul(count)
-                    .and_then(|v| v.checked_sub(nested.stride - nested.used))
                     .ok_or("Layout size overflow")?;
+                if packing == Packing::Scalar {
+                    size = size
+                        .checked_sub(nested.stride - nested.used)
+                        .ok_or("Layout size overflow")?;
+                }
                 if !padding {
                     fields.push(Field {
                         name: name.to_owned(),
@@ -291,6 +329,8 @@ impl Layout {
                         row_major: false,
                         packed: None,
                         nested: Some(nested.clone()),
+                        array_stride: nested.stride,
+                        matrix_stride: 0,
                         count,
                         offset: cursor,
                     });
@@ -406,23 +446,75 @@ impl Layout {
             }
             i += 1;
             let width = if packed.is_some() { 4 } else { format.width() };
+            let vector_size = if matrix_rows > 1 && !row_major {
+                matrix_rows
+            } else {
+                components
+            };
+            let vector_alignment = if packing == Packing::Std430 {
+                width
+                    .checked_mul(if vector_size >= 3 {
+                        4
+                    } else if vector_size == 2 {
+                        2
+                    } else {
+                        1
+                    })
+                    .ok_or("Layout size overflow")?
+            } else {
+                width
+            };
+            // RenderDoc uses four-byte placement for packed elements but computes enclosing
+            // structure alignment from the underlying vector type.
+            let element_alignment = if packed.is_some() {
+                4
+            } else {
+                vector_alignment
+            };
             if !padding {
-                alignment = alignment.max(width);
+                alignment = alignment.max(vector_alignment);
             }
-            cursor = align(cursor, width).ok_or("Layout size overflow")?;
+            cursor = align(cursor, element_alignment).ok_or("Layout size overflow")?;
+            let vector_stride = if packed.is_some() {
+                4
+            } else if packing == Packing::Std430 {
+                vector_alignment
+            } else {
+                width
+                    .checked_mul(vector_size)
+                    .ok_or("Layout size overflow")?
+            };
+            if packing == Packing::Std430
+                && cursor / 16
+                    != cursor
+                        .checked_add(vector_stride - 1)
+                        .ok_or("Layout size overflow")?
+                        / 16
+            {
+                cursor = align(cursor, 16).ok_or("Layout size overflow")?;
+            }
             if let Some(offset) = specified_offset {
                 if offset < cursor {
                     return Err("Explicit offset overlaps earlier data".into());
                 }
                 cursor = offset;
             }
-            let size = if packed.is_some() {
-                width.checked_mul(count)
+            let array_stride = if packed.is_some() {
+                4
+            } else if matrix_rows > 1 {
+                vector_stride
+                    .checked_mul(if row_major { matrix_rows } else { components })
+                    .ok_or("Layout size overflow")?
+            } else if components > 1 {
+                vector_stride
             } else {
-                width
-                    .checked_mul(components)
-                    .and_then(|v| v.checked_mul(matrix_rows))
-                    .and_then(|v| v.checked_mul(count))
+                element_alignment
+            };
+            let matrix_stride = if matrix_rows > 1 { vector_stride } else { 0 };
+            let size = if count > 1 || matrix_rows > 1 || packed.is_some() {
+                array_stride.checked_mul(count)
+            } else {
+                width.checked_mul(components)
             }
             .ok_or("Layout size overflow")?;
             if !padding {
@@ -434,6 +526,8 @@ impl Layout {
                     row_major,
                     packed,
                     nested: None,
+                    array_stride,
+                    matrix_stride,
                     count,
                     offset: cursor,
                 });
@@ -449,6 +543,7 @@ impl Layout {
             stride,
             alignment,
             used: cursor,
+            packing,
         })
     }
     pub fn decode(&self, offset: u64, bytes: &[u8]) -> Result<Page, String> {
@@ -495,16 +590,17 @@ impl Layout {
                         )));
                         continue;
                     }
-                    let base = field_start + item * field.matrix_rows * field.components * width;
+                    let base = field_start + item * field.array_stride;
                     let mut components = Vec::new();
                     for row in 0..field.matrix_rows {
                         for column in 0..field.components {
-                            let component = if field.matrix_rows == 1 || field.row_major {
-                                row * field.components + column
+                            let start = if field.matrix_rows == 1 {
+                                base + column * width
+                            } else if field.row_major {
+                                base + row * field.matrix_stride + column * width
                             } else {
-                                column * field.matrix_rows + row
+                                base + column * field.matrix_stride + row * width
                             };
-                            let start = base + component * width;
                             components.push(field.format.value(&bytes[start..start + width]));
                         }
                     }
@@ -526,6 +622,7 @@ impl Layout {
             });
         }
         Ok(Page {
+            packing: self.packing.name(),
             stride: self.stride.to_string(),
             rows,
             trailing_hex: chunks
@@ -540,6 +637,50 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn structured_and_std430_packing_follow_upstream_layouts() {
+        let scalar = Layout::parse("struct A { ushort x; ubyte y; }; A a; ubyte b;").unwrap();
+        let structured =
+            Layout::parse("#pack(structured) struct A { ushort x; ubyte y; }; A a; ubyte b;")
+                .unwrap();
+        assert_eq!((scalar.stride(), structured.stride()), (4, 6));
+        assert_eq!(structured.fields[1].offset, 4);
+        let layout =
+            Layout::parse("#pack(std430) float3 pos; float w; float2 uv[2]; mat2x3 transform;")
+                .unwrap();
+        assert_eq!(
+            layout.fields.iter().map(|f| f.offset).collect::<Vec<_>>(),
+            [0, 12, 16, 32]
+        );
+        assert_eq!(layout.stride(), 64);
+        let mut bytes = vec![0; 64];
+        for (at, value) in [(32, 1f32), (36, 2.), (40, 3.), (48, 4.), (52, 5.), (56, 6.)] {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        let page = layout.decode(0, &bytes).unwrap();
+        assert_eq!(
+            page.rows[0].fields[3].values[0],
+            ["1", "4", "2", "5", "3", "6"]
+        );
+        let layout = Layout::parse("#pack(ssbo) float3 a[2]; float b;").unwrap();
+        assert_eq!(layout.fields[1].offset, 32);
+        assert_eq!(layout.stride(), 48);
+        let nested =
+            Layout::parse("#pack(std430) struct A { float3 p; float w; }; A a[2]; float tail;")
+                .unwrap();
+        assert_eq!(nested.fields[1].offset, 32);
+        assert_eq!(nested.stride(), 48);
+        let page = nested.decode(0, &[0; 48]).unwrap();
+        assert_eq!(
+            page.rows[0]
+                .fields
+                .iter()
+                .map(|f| f.offset.as_str())
+                .collect::<Vec<_>>(),
+            ["0", "12", "16", "28", "32"]
+        );
+    }
+
     #[test]
     fn nested_struct_arrays_follow_scalar_trailing_overlap() {
         let source =

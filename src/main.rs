@@ -9852,8 +9852,8 @@ impl Workspace {
                     .child(format!("{flags_label}: 0x{:08X}", buffer.creation_flags))
                     .child(formats)
                     .child(div().flex().flex_wrap().gap_2()
-                        .child(self.t("Scalar-packed layout", "Scalar 打包布局", "スカラー配置レイアウト", "스칼라 패킹 레이아웃"))
-                        .child(Input::new(&self.buffer_layout_input).id("buffer-layout-input").aria_label(self.t("Scalar-packed layout", "Scalar 打包布局", "スカラー配置レイアウト", "스칼라 패킹 레이아웃")).w(px(300.)))
+                        .child(self.t("Buffer layout (#pack)", "缓冲区布局（#pack）", "バッファ配置（#pack）", "버퍼 레이아웃 (#pack)"))
+                        .child(Input::new(&self.buffer_layout_input).id("buffer-layout-input").aria_label(self.t("Buffer layout (#pack)", "缓冲区布局（#pack）", "バッファ配置（#pack）", "버퍼 레이아웃 (#pack)")).w(px(300.)))
                         .child(button("buffer-layout-apply", self.t("Apply layout", "应用布局", "レイアウト適用", "레이아웃 적용"), false, |this, cx| this.apply_buffer_layout(cx), cx)))
                     .when(self.buffer_format.is_some() || self.buffer_layout.is_some(), |view| view.child(self.t("Typed offsets are decimal; values start at the current byte offset.", "类型视图的偏移为十进制；值从当前字节偏移开始解码。", "型付き表示のオフセットは 10 進数で、現在のバイト位置からデコードします。", "형식 보기의 오프셋은 10진수이며 현재 바이트 위치부터 디코딩합니다.")))
                     .child(
@@ -13880,7 +13880,7 @@ mod ui_tests {
             window.click("buffer-layout-input", cx);
             window.press("ctrl-a", cx);
             window.input(
-                "struct V { float2 p; uint id; }; V v; ushort q[2]; uint end;",
+                "#pack(std430) struct V { float2 p; uint id; }; V v; ushort q[2]; uint end;",
                 cx,
             );
             window.click("buffer-layout-apply", cx);
@@ -13889,7 +13889,7 @@ mod ui_tests {
         cx.run_until_parked();
         cx.update(|cx| {
             let view = view.read(cx);
-            assert_eq!(view.buffer_layout.as_ref().unwrap().stride(), 20);
+            assert_eq!(view.buffer_layout.as_ref().unwrap().stride(), 24);
             assert_eq!(view.buffer_page_size(), 240);
             assert_eq!(view.buffer_data.as_ref().unwrap().len(), 240);
         });
