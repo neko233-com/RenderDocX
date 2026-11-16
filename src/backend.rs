@@ -14,6 +14,7 @@ pub struct Settings {
     pub language: Language,
     pub qrenderdoc: Option<PathBuf>,
     pub renderdoccmd: Option<PathBuf>,
+    pub replay_bridge: Option<PathBuf>,
 }
 
 impl Settings {
@@ -38,7 +39,7 @@ impl Settings {
     }
 }
 
-fn find_tool(configured: &Option<PathBuf>, name: &str) -> Result<PathBuf, String> {
+pub(crate) fn find_tool(configured: &Option<PathBuf>, name: &str) -> Result<PathBuf, String> {
     if let Some(path) = configured {
         return if path.is_file() {
             Ok(path.clone())

@@ -22,6 +22,7 @@ qrenderdoc/Makefile*
 *.manifest
 *.user
 bin
+!/src/bin/
 obj/
 .obj/
 *.opensdf
@@ -49,3 +50,5 @@ qrenderdoc/3rdparty/pyside
 plugins-*/
 __pycache__
 /target/
+/x64/
+/Win32/

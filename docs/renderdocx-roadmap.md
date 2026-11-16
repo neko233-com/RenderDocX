@@ -1,14 +1,14 @@
 # RenderDocX migration boundaries
 
-The supplied upstream snapshot has version macros for RenderDoc 1.48 but no Git metadata. Its upstream files have been compared by Git blob ID to `v1.x` commit `5ad608809c9028da9f5c5082397cb6afe9c8dd17`; see the root README for the scope and exceptions. Establish a reproducible build of that baseline. Keep capture and replay in the matching RenderDoc core; the public replay API includes C++ types, so use a version-matched C ABI bridge with explicit ownership, thread affinity, and error handling rather than guessing the ABI from Rust. The application API in `renderdoc/api/app/renderdoc_app.h` is a separate, versioned in-process capture interface.
+The supplied upstream snapshot has version macros for RenderDoc 1.48 but no Git metadata. Its upstream files have been compared by Git blob ID to `v1.x` commit `5ad608809c9028da9f5c5082397cb6afe9c8dd17`; see the root README for the scope and exceptions. Capture and replay remain in the matching RenderDoc core. A separate C++ helper owns the replay lifetime and exposes a versioned process protocol to Rust, avoiding a guessed C++ ABI in Rust. The application API in `renderdoc/api/app/renderdoc_app.h` is a separate, versioned in-process capture interface.
 
-The current workspace invokes upstream executables. For launch it passes the ident printed by `renderdoccmd capture` to `qrenderdoc --targetcontrol`, but does not itself own the target-control session, progress, or list of saved captures. `qrenderdoc` remains necessary to inspect a capture and for full capture options. There is no native `.rdc` parser, live session, or capture/replay implementation in the Rust frontend.
+The current workspace can open a capture in its helper, show a flattened action hierarchy, and select events. The agent CLI shares that session implementation. For launch it passes the ident printed by `renderdoccmd capture` to `qrenderdoc --targetcontrol`, but does not itself own the target-control session, progress, or list of saved captures. `qrenderdoc` remains necessary for detailed inspection and full capture options. There is no independent Rust `.rdc` parser or Rust implementation of the graphics replay core.
 
 Remaining work includes:
 
-1. Establish a reproducible RenderDoc core build; implement a small, version-checked bridge and lifecycle management.
+1. Harden the version-checked replay helper, lifecycle, packaging and reproducible core builds across supported platforms.
 2. Integrate target enumeration/control, launch configuration, capture progress, saved captures, remote servers, and errors using the corresponding upstream contracts.
-3. Port capture inspection incrementally: event browser, texture and mesh views, API pipeline state, resources, shader debugging, and the remaining upstream windows and workflows.
+3. Complete the event browser and port texture and mesh views, API pipeline state, resources, shader debugging, and all remaining upstream windows and workflows.
 4. Integrate Unity/Tuanjie Editor and standalone workflows against the applicable documented engine APIs, graphics APIs, and versions, including capture handoff to the new frontend.
 5. Extend translation resources, keyboard navigation, accessibility, settings, packaging, and platform support alongside each implemented feature.
-6. Establish compatibility with real captures and supported GPU/engine combinations before claiming parity. Compilation alone does not establish these properties.
+6. Complete automated tests across protocol, UI interactions, actual captures, replay, supported GPUs, platforms, and Unity/Tuanjie before claiming parity. Compilation and mock tests alone do not establish these properties.
