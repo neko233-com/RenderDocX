@@ -1929,6 +1929,13 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     };
     let content = agent.send(&read("4", 8));
     assert_eq!(content["data"]["hex"], "0000404000004040", "{content}");
+    let matrix = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"4", "length":16, "layout":"[[row_major]] float2x2 m;"}).to_string());
+    let field = &matrix["data"]["page"]["rows"][0]["fields"][0];
+    assert_eq!(field["matrix_rows"], 2, "{matrix}");
+    assert_eq!(field["matrix_columns"], 2, "{matrix}");
+    assert_eq!(field["row_major"], true, "{matrix}");
+    assert_eq!(field["values"][0][0], "3", "{matrix}");
+    assert_eq!(field["values"][0][1], "3", "{matrix}");
     let annotated = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"0", "length":8, "layout":"[[byte_offset(4)]] float value;"}).to_string());
     assert_eq!(
         annotated["data"]["page"]["rows"][0]["fields"][0]["offset"], "4",

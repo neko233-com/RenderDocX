@@ -9628,7 +9628,31 @@ impl Workspace {
                             let fields = row
                                 .fields
                                 .into_iter()
-                                .map(|field| format!("{}={:?}", field.name, field.values))
+                                .map(|field| {
+                                    let value = if let Some(columns) = field.matrix_columns {
+                                        field
+                                            .values
+                                            .iter()
+                                            .map(|matrix| {
+                                                let rows = matrix
+                                                    .chunks(columns)
+                                                    .map(|row| format!("[{}]", row.join(", ")))
+                                                    .collect::<Vec<_>>()
+                                                    .join(", ");
+                                                format!("[{rows}]")
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
+                                    } else {
+                                        field
+                                            .values
+                                            .iter()
+                                            .map(|value| format!("[{}]", value.join(", ")))
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
+                                    };
+                                    format!("{}={value}", field.name)
+                                })
                                 .collect::<Vec<_>>()
                                 .join("  ");
                             result.push(format!("{}  {fields}", row.offset));
@@ -13855,7 +13879,7 @@ mod ui_tests {
             window.render_frame(cx);
             window.click("buffer-layout-input", cx);
             window.press("ctrl-a", cx);
-            window.input("[[pad]] uint skip; vec2 pos; ushort tail[2]; uint id;", cx);
+            window.input("[[row_major]] float2x2 transform; ushort tail[2];", cx);
             window.click("buffer-layout-apply", cx);
         })
         .unwrap();

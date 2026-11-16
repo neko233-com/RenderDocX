@@ -8,6 +8,8 @@ struct Field {
     name: String,
     format: ScalarFormat,
     components: usize,
+    matrix_rows: usize,
+    row_major: bool,
     count: usize,
     offset: usize,
 }
@@ -20,6 +22,12 @@ pub struct Layout {
 pub struct FieldValue {
     pub name: String,
     pub offset: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matrix_rows: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matrix_columns: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_major: Option<bool>,
     pub values: Vec<Vec<String>>,
 }
 #[derive(Serialize)]
@@ -95,9 +103,10 @@ fn base_type(name: &str) -> Option<ScalarFormat> {
             "float16_t" => ScalarFormat::F16,
             "float32_t" => ScalarFormat::F32,
             "float64_t" | "dvec" => ScalarFormat::F64,
-            "vec" => ScalarFormat::F32,
-            "ivec" => ScalarFormat::I32,
-            "uvec" => ScalarFormat::U32,
+            "vec" | "mat" => ScalarFormat::F32,
+            "ivec" | "imat" => ScalarFormat::I32,
+            "uvec" | "umat" => ScalarFormat::U32,
+            "dmat" => ScalarFormat::F64,
             _ => return None,
         })
     })
@@ -124,6 +133,7 @@ impl Layout {
             let mut specified_offset = None;
             let mut padding = false;
             let mut normalization = None;
+            let mut major = None;
             while t.get(i) == Some(&"[") && t.get(i + 1) == Some(&"[") {
                 let annotation = *t.get(i + 2).ok_or("Invalid annotation")?;
                 i += 3;
@@ -144,6 +154,9 @@ impl Layout {
                         i += 3;
                     }
                     "pad" | "padding" if !padding => padding = true,
+                    "row_major" | "col_major" if major.is_none() => {
+                        major = Some(annotation == "row_major")
+                    }
                     "unorm" | "snorm" if normalization.is_none() => {
                         normalization = Some(annotation)
                     }
@@ -156,25 +169,63 @@ impl Layout {
             }
             let mut typename = *t.get(i).ok_or("Missing field type")?;
             i += 1;
+            if typename == "row_major" || typename == "column_major" {
+                if major.is_some() {
+                    return Err("Duplicate matrix order".into());
+                }
+                major = Some(typename == "row_major");
+                typename = *t.get(i).ok_or("Missing field type")?;
+                i += 1;
+            }
             let unsigned = typename == "unsigned";
             if unsigned {
                 typename = *t.get(i).ok_or("Missing unsigned type")?;
                 i += 1;
             }
-            let (mut format, components) = if matches!(typename, "vec" | "ivec" | "uvec" | "dvec") {
-                return Err("Vector width required".into());
-            } else if let Some(f) = base_type(typename) {
-                (f, 1)
-            } else {
-                let (base, suffix) = typename.split_at(typename.len().saturating_sub(1));
-                let n = match suffix {
-                    "2" => 2,
-                    "3" => 3,
-                    "4" => 4,
-                    _ => return Err("Unsupported field type".into()),
+            let (mut format, matrix_rows, components) =
+                if let Some((left, right)) = typename.split_once('x') {
+                    let (base, first) = left.split_at(left.len().saturating_sub(1));
+                    let dimension = |text: &str| match text {
+                        "2" => Some(2),
+                        "3" => Some(3),
+                        "4" => Some(4),
+                        _ => None,
+                    };
+                    let first = dimension(first).ok_or("Unsupported matrix dimension")?;
+                    let second = dimension(right).ok_or("Unsupported matrix dimension")?;
+                    let gl = matches!(base, "mat" | "imat" | "umat" | "dmat");
+                    let format = base_type(base).ok_or("Unsupported matrix type")?;
+                    if matches!(base, "vec" | "ivec" | "uvec" | "dvec") {
+                        return Err("Unsupported matrix type".into());
+                    }
+                    let (rows, cols) = if gl { (second, first) } else { (first, second) };
+                    (format, rows, cols)
+                } else if matches!(
+                    typename,
+                    "vec" | "ivec" | "uvec" | "dvec" | "mat" | "imat" | "umat" | "dmat"
+                ) {
+                    return Err("Vector or matrix width required".into());
+                } else if let Some(f) = base_type(typename) {
+                    (f, 1, 1)
+                } else {
+                    let (base, suffix) = typename.split_at(typename.len().saturating_sub(1));
+                    let n = match suffix {
+                        "2" => 2,
+                        "3" => 3,
+                        "4" => 4,
+                        _ => return Err("Unsupported field type".into()),
+                    };
+                    let f = base_type(base).ok_or("Unsupported field type")?;
+                    if matches!(base, "mat" | "imat" | "umat" | "dmat") {
+                        (f, n, n)
+                    } else {
+                        (f, 1, n)
+                    }
                 };
-                (base_type(base).ok_or("Unsupported field type")?, n)
-            };
+            if matrix_rows == 1 && major.is_some() {
+                return Err("Matrix order requires a matrix".into());
+            }
+            let row_major = major.unwrap_or(false);
             if unsigned {
                 format = match format {
                     ScalarFormat::I8 => ScalarFormat::U8,
@@ -233,6 +284,7 @@ impl Layout {
             }
             let size = width
                 .checked_mul(components)
+                .and_then(|v| v.checked_mul(matrix_rows))
                 .and_then(|v| v.checked_mul(count))
                 .ok_or("Layout size overflow")?;
             if !padding {
@@ -240,6 +292,8 @@ impl Layout {
                     name: name.to_owned(),
                     format,
                     components,
+                    matrix_rows,
+                    row_major,
                     count,
                     offset: cursor,
                 });
@@ -265,17 +319,27 @@ impl Layout {
                 let width = field.format.width();
                 let mut values = Vec::new();
                 for item in 0..field.count {
-                    let base = field.offset + item * field.components * width;
+                    let base = field.offset + item * field.matrix_rows * field.components * width;
                     let mut components = Vec::new();
-                    for component in 0..field.components {
-                        let start = base + component * width;
-                        components.push(field.format.value(&bytes[start..start + width]));
+                    for row in 0..field.matrix_rows {
+                        for column in 0..field.components {
+                            let component = if field.matrix_rows == 1 || field.row_major {
+                                row * field.components + column
+                            } else {
+                                column * field.matrix_rows + row
+                            };
+                            let start = base + component * width;
+                            components.push(field.format.value(&bytes[start..start + width]));
+                        }
                     }
                     values.push(components);
                 }
                 fields.push(FieldValue {
                     name: field.name.clone(),
                     offset: (row_offset + field.offset as u64).to_string(),
+                    matrix_rows: (field.matrix_rows > 1).then_some(field.matrix_rows),
+                    matrix_columns: (field.matrix_rows > 1).then_some(field.components),
+                    row_major: (field.matrix_rows > 1).then_some(field.row_major),
                     values,
                 });
             }
@@ -299,6 +363,37 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn matrices_follow_hlsl_glsl_dimensions_and_storage_order() {
+        let bytes: Vec<u8> = (1..=6).flat_map(|n| (n as f32).to_le_bytes()).collect();
+        for text in ["float3x2 m;", "mat2x3 m;", "[[col_major]] float3x2 m;"] {
+            let layout = Layout::parse(text).unwrap();
+            assert_eq!(layout.stride(), 24);
+            let page = layout.decode(0, &bytes).unwrap();
+            let field = &page.rows[0].fields[0];
+            assert_eq!(
+                (field.matrix_rows, field.matrix_columns, field.row_major),
+                (Some(3), Some(2), Some(false))
+            );
+            assert_eq!(field.values[0], ["1", "4", "2", "5", "3", "6"]);
+        }
+        for text in ["[[row_major]] float3x2 m;", "row_major mat2x3 m;"] {
+            let page = Layout::parse(text).unwrap().decode(0, &bytes).unwrap();
+            assert_eq!(
+                page.rows[0].fields[0].values[0],
+                ["1", "2", "3", "4", "5", "6"]
+            );
+        }
+        assert_eq!(Layout::parse("mat3 m[2];").unwrap().stride(), 72);
+        for bad in [
+            "[[row_major]] float2 v;",
+            "float5x2 m;",
+            "row_major [[col_major]] float2x2 m;",
+        ] {
+            assert!(Layout::parse(bad).is_err(), "{bad}");
+        }
+    }
+
     #[test]
     fn explicit_offsets_padding_glsl_and_normalization_follow_scalar_rules() {
         let layout = Layout::parse("[[pad]] uint reserved; [[offset(8)]] vec2 pos; [[snorm]] byte4 normal; unsigned short id; bool visible;").unwrap();
@@ -352,7 +447,6 @@ mod tests {
             "",
             "float x",
             "float x[];",
-            "float3x4 x;",
             "#pack(std140) float x;",
             "float x; float x;",
             "struct S {float x;};",
