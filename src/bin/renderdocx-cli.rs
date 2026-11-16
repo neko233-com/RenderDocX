@@ -72,6 +72,11 @@ fn usage() -> Value {
         .as_array_mut()
         .expect("capabilities commands")
         .push(json!("debug_mesh"));
+    capabilities["serve_commands"]
+        .as_array_mut()
+        .expect("capabilities commands")
+        .push(json!("task_payload"));
+    capabilities["task_payload_page_limit"] = json!(renderdocx::task_payload::PAGE_LIMIT);
     capabilities
 }
 
@@ -1065,6 +1070,34 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                             json!({"event_id":event,"selection":selection,"kind":kind,"offset":offset.to_string(),"length":bytes.len(),"hex":hex,"indices":indices,"positions":positions})
                         }).map_err(|error| ("replay_mesh_read_failed", error)),
                     _ => Err(("invalid_arguments", "mesh_read requires kind, decimal-string offset and valid length".into())),
+                }
+            }
+            "task_payload" => {
+                let offset = request
+                    .get("offset")
+                    .and_then(Value::as_u64)
+                    .and_then(|v| u32::try_from(v).ok());
+                let count = request
+                    .get("count")
+                    .and_then(Value::as_u64)
+                    .and_then(|v| u32::try_from(v).ok());
+                match (&opened, mesh_selection.as_ref(), offset, count) {
+                    (None, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some(_), None, _, _) => Err(("no_mesh", "Query task output first".into())),
+                    (
+                        Some((session, _)),
+                        Some((event, selection, info)),
+                        Some(offset),
+                        Some(count),
+                    ) => renderdocx::task_payload::page(info, offset, count, |offset, length| {
+                        session.mesh_read(*event, *selection, "vertex", offset, length)
+                    })
+                    .map(|page| json!({"event_id":event,"selection":selection,"page":page}))
+                    .map_err(|error| ("replay_task_payload_failed", error)),
+                    _ => Err((
+                        "invalid_arguments",
+                        "task_payload requires integer offset and count".into(),
+                    )),
                 }
             }
             "mesh_draw" => {

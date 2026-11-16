@@ -337,7 +337,16 @@ fn mesh_position_format(info: &MeshInfo) -> bool {
 }
 
 fn mesh_page_size(info: &MeshInfo) -> u64 {
-    if mesh_position_format(info) {
+    if info.stage == 3
+        && info.vertex_stride > 0
+        && info.vertex_stride <= renderdocx::replay::BUFFER_PAGE_LIMIT
+    {
+        let stride = u64::from(info.vertex_stride);
+        (BUFFER_VIEW_PAGE / stride)
+            .max(1)
+            .min(u64::from(renderdocx::task_payload::PAGE_LIMIT))
+            * stride
+    } else if mesh_position_format(info) {
         BUFFER_VIEW_PAGE / u64::from(info.vertex_stride) * u64::from(info.vertex_stride)
     } else {
         BUFFER_VIEW_PAGE
@@ -8098,7 +8107,63 @@ impl Workspace {
         } else {
             match (&self.mesh.info, &self.mesh.bytes) {
                 (Some(info), Some(bytes)) => {
-                    if self.mesh.kind == MeshBufferKind::Index
+                    if self.mesh.kind == MeshBufferKind::Vertex
+                        && info.stage == 3
+                        && info.vertex_stride > 0
+                        && self.mesh.offset % u64::from(info.vertex_stride) == 0
+                        && let Ok(offset) =
+                            u32::try_from(self.mesh.offset / u64::from(info.vertex_stride))
+                    {
+                        match renderdocx::task_payload::page(
+                            info,
+                            offset,
+                            (bytes.len().div_ceil(info.vertex_stride as usize) as u32)
+                                .min(renderdocx::task_payload::PAGE_LIMIT),
+                            |_, _| Ok(bytes.clone()),
+                        ) {
+                            Ok(page) => page
+                                .rows
+                                .into_iter()
+                                .map(|row| {
+                                    let fields = row
+                                        .fields
+                                        .iter()
+                                        .map(|field| {
+                                            format!("{}={}", field.name, field.values.join(", "))
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join(" · ");
+                                    let dispatch = row
+                                        .dispatch
+                                        .map(|v| format!(" [{}, {}, {}]", v[0], v[1], v[2]))
+                                        .unwrap_or_default();
+                                    let error = if row.error.is_some() {
+                                        format!(
+                                            " · {}",
+                                            self.t(
+                                                "Some fields could not be decoded",
+                                                "部分字段无法解码",
+                                                "一部のフィールドを解釈できません",
+                                                "일부 필드를 해석할 수 없습니다"
+                                            )
+                                        )
+                                    } else {
+                                        String::new()
+                                    };
+                                    format!("{}{dispatch}: {fields}{error}", row.row)
+                                })
+                                .collect(),
+                            Err(_) => vec![
+                                self.t(
+                                    "Task payload could not be decoded",
+                                    "无法解码任务载荷",
+                                    "タスクペイロードを解釈できません",
+                                    "태스크 페이로드를 해석할 수 없습니다",
+                                )
+                                .to_owned(),
+                            ],
+                        }
+                    } else if self.mesh.kind == MeshBufferKind::Index
                         && let Some(indices) =
                             renderdocx::mesh_indices::decode(info, bytes, self.mesh.offset)
                     {
@@ -10044,7 +10109,10 @@ impl Workspace {
                 "描画またはメッシュイベントを選択してください。",
                 "그리기 또는 메시 이벤트를 선택하세요.",
             );
-            let note = if self.mesh.kind == MeshBufferKind::Vertex {
+            let note = if self.mesh.kind == MeshBufferKind::Vertex && self.mesh.selection.stage == 3
+            {
+                self.t("Task payload fields follow shader reflection; unsupported fields report an error.", "任务载荷字段按着色器反射解码；不支持的字段会显示错误。", "タスクペイロードはシェーダーのリフレクションに従って解釈し、未対応のフィールドはエラーを表示します。", "태스크 페이로드는 셰이더 리플렉션에 따라 해석하며 지원하지 않는 필드는 오류로 표시합니다.")
+            } else if self.mesh.kind == MeshBufferKind::Vertex {
                 self.t("Positions are shown in buffer order, not draw index order. Other formats are shown as bytes.", "位置按缓冲区顺序显示，非绘制索引顺序；其他格式显示为字节。", "位置は描画インデックス順ではなくバッファ順です。他の形式はバイトで表示します。", "위치는 그리기 인덱스 순서가 아닌 버퍼 순서입니다. 다른 형식은 바이트로 표시합니다.")
             } else if self.mesh.kind == MeshBufferKind::Index {
                 self.t(

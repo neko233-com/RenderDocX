@@ -568,7 +568,7 @@ void write_snapshot(IReplayController *controller, const ReplayOptions &options,
   std::cout << "]}" << std::endl;
 }
 
-void write_mesh(const MeshFormat &mesh, uint32_t event, uint32_t instance, uint32_t view, uint32_t stage, bool restart_enabled, uint32_t restart_index)
+void write_mesh(const MeshFormat &mesh, uint32_t event, uint32_t instance, uint32_t view, uint32_t stage, bool restart_enabled, uint32_t restart_index, const ShaderReflection *task_shader, bool vulkan_task_layout)
 {
   auto number = [](float value) {
     if(std::isfinite(value)) std::cout << std::setprecision(std::numeric_limits<float>::max_digits10) << value;
@@ -611,6 +611,10 @@ void write_mesh(const MeshFormat &mesh, uint32_t event, uint32_t instance, uint3
     if(i) std::cout << ',';
     std::cout << '[' << mesh.taskSizes[i].x << ',' << mesh.taskSizes[i].y << ',' << mesh.taskSizes[i].z << ']';
   }
+  std::cout << "],\"task_payload_scalar_layout\":" << (vulkan_task_layout ? "true" : "false") << ",\"task_payload\":[";
+  if(stage == uint32_t(MeshDataStage::TaskOut) && task_shader)
+    for(size_t i = 0; i < task_shader->taskPayload.variables.size(); ++i)
+    { if(i) std::cout << ','; write_reflected_constant(task_shader->taskPayload.variables[i]); }
   std::cout << "],\"status\":"; json_string(mesh.status); std::cout << '}' << std::endl;
 }
 
@@ -1709,7 +1713,9 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       else if(pipeline.GetIBuffer().byteStride == 2) restart_index &= 0xffff;
       const bool restart_enabled = stage == uint32_t(MeshDataStage::VSOut) &&
                                    indexed_draws.count(selected_event) && pipeline.IsRestartEnabled();
-      write_mesh(selected_mesh, selected_event, uint32_t(instance), uint32_t(view), uint32_t(stage), restart_enabled, restart_index);
+      const ShaderReflection *task_shader = stage == uint32_t(MeshDataStage::TaskOut)
+                                                ? pipeline.GetShaderReflection(ShaderStage::Task) : nullptr;
+      write_mesh(selected_mesh, selected_event, uint32_t(instance), uint32_t(view), uint32_t(stage), restart_enabled, restart_index, task_shader, stage == uint32_t(MeshDataStage::TaskOut) && api == GraphicsAPI::Vulkan);
       continue;
     }
     if(command.compare(0, 10, "mesh_read ") == 0)

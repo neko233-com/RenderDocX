@@ -9,7 +9,8 @@ pub struct MeshPosition {
 }
 
 pub fn supported(info: &MeshInfo) -> bool {
-    info.format_type == 0
+    info.stage != 3
+        && info.format_type == 0
         && info.component_type == 1
         && matches!(info.component_byte_width, 2 | 4)
         && (1..=4).contains(&info.component_count)
@@ -52,6 +53,21 @@ pub fn decode(info: &MeshInfo, bytes: &[u8], offset: u64) -> Option<Vec<MeshPosi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_payload_is_never_interpreted_as_a_position() {
+        let info = MeshInfo {
+            stage: 3,
+            format_type: 0,
+            component_type: 1,
+            component_byte_width: 4,
+            component_count: 4,
+            vertex_stride: 16,
+            ..Default::default()
+        };
+        assert!(!supported(&info));
+        assert!(decode(&info, &[0; 16], 0).is_none());
+    }
 
     #[test]
     fn decodes_unprojected_and_projected_positions_at_page_boundaries() {

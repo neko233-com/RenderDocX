@@ -188,6 +188,10 @@ pub struct MeshInfo {
     pub dispatch_size: Option<[u32; 3]>,
     pub meshlets: Vec<MeshletInfo>,
     pub tasks: Vec<[u32; 3]>,
+    #[serde(default)]
+    pub task_payload: Vec<ReflectedConstant>,
+    #[serde(default)]
+    pub task_payload_scalar_layout: bool,
     pub status: String,
 }
 

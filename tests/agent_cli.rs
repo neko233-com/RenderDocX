@@ -292,6 +292,43 @@ fn real_vulkan_mesh_shader_debug_trace() {
     );
     let stopped = agent.send(r#"{"command":"debug_stop"}"#);
     assert_eq!(stopped["ok"], true, "{stopped}");
+    let task_event = actions
+        .iter()
+        .filter(|a| a["flags"].as_u64().is_some_and(|f| f & 8 != 0))
+        .nth(1)
+        .unwrap()["event_id"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(
+        agent.send(&serde_json::json!({"command":"select","event_id":task_event}).to_string())["ok"],
+        true
+    );
+    let task_mesh = agent.send(r#"{"command":"mesh","stage":"task_out","instance":0,"view":0}"#);
+    assert_eq!(task_mesh["ok"], true, "{task_mesh}");
+    let raw = agent.send(r#"{"command":"mesh_read","kind":"vertex","offset":"0","length":112}"#);
+    assert!(
+        raw["data"]["positions"].is_null(),
+        "task payload must not be interpreted as positions: {raw}"
+    );
+    let payload = agent.send(r#"{"command":"task_payload","offset":0,"count":1}"#);
+    assert_eq!(payload["ok"], true, "{payload}");
+    let row = &payload["data"]["page"]["rows"][0];
+    assert!(row["error"].is_null(), "{row}");
+    assert_eq!(row["dispatch"], serde_json::json!([4, 1, 1]));
+    let fields = row["fields"].as_array().unwrap();
+    for (name, value) in [
+        ("padArr[0]", "1000"),
+        ("pad", "123"),
+        ("inner.a", "500"),
+        ("innerArr[3].c", "32"),
+        ("tri[3]", "3"),
+    ] {
+        let field = fields
+            .iter()
+            .find(|field| field["name"] == name)
+            .unwrap_or_else(|| panic!("missing {name}: {row}"));
+        assert_eq!(field["values"][0], value, "{field}");
+    }
     agent.quit();
 }
 
@@ -787,6 +824,14 @@ fn capabilities_advertises_versioned_machine_readable_contract() {
     assert_eq!(value["capture_options_default"]["soft_memory_limit"], 0);
     assert_eq!(value["structure_page_limit"], 128);
     assert_eq!(value["vertex_input_page_limit"], 64);
+    assert_eq!(value["task_payload_page_limit"], 32);
+    assert!(
+        value["serve_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|name| name == "task_payload")
+    );
     assert!(
         value["serve_commands"]
             .as_array()
@@ -875,6 +920,7 @@ fn agent_jsonl_session_has_correlated_errors_and_clean_shutdown() {
         "debug_pixel",
         "debug_compute",
         "debug_mesh",
+        "task_payload",
         "debug_next",
         "debug_stop",
         "debug_messages",
