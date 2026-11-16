@@ -6,8 +6,8 @@ use gpui_kit::component::{
     theme::{Theme, ThemeMode},
 };
 use gpui_kit::{
-    App, Bounds, Context, Entity, SharedString, Window, WindowBounds, WindowOptions, div, img,
-    prelude::*, px, rgb, size, uniform_list,
+    App, Bounds, Context, Entity, SharedString, UniformListScrollHandle, Window, WindowBounds,
+    WindowOptions, div, img, prelude::*, px, rgb, size, uniform_list,
 };
 use renderdocx::{
     backend::{self, Settings},
@@ -17,8 +17,9 @@ use renderdocx::{
         LiveSession, capture_directory, capture_notice, enumerate, parse_target_pid,
     },
     replay::{
-        MeshInfo, MeshSelection, Pipeline, Pixel, SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session,
-        ShaderReport, Snapshot, StructurePage, StructuredNode, TextureSelection,
+        MeshInfo, MeshSelection, Pipeline, Pixel, RESOURCE_USAGE_PAGE_LIMIT, ResourceUsagePage,
+        SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session, ShaderReport, Snapshot, StructurePage,
+        StructuredNode, TextureSelection, resource_type_name, resource_usage_name,
     },
     vertex_input::{INPUT_PAGE_LIMIT, InputPage},
 };
@@ -170,6 +171,7 @@ enum CaptureTab {
     Shaders,
     Mesh,
     VertexInput,
+    Resources,
 }
 #[derive(Clone, Copy)]
 enum TextureField {
@@ -187,8 +189,13 @@ struct Workspace {
     session: Option<Session>,
     snapshot: Option<Snapshot>,
     event_tree: EventTree,
+    event_scroll: UniformListScrollHandle,
     event_search: Entity<InputState>,
     _event_search_subscription: gpui::Subscription,
+    resource_search: Entity<InputState>,
+    _resource_search_subscription: gpui::Subscription,
+    resource_query: String,
+    resource_visible: Vec<usize>,
     selected: Option<usize>,
     pipeline: Option<Pipeline>,
     tab: CaptureTab,
@@ -206,6 +213,8 @@ struct Workspace {
     structure: StructureView,
     mesh: MeshView,
     input_page: Option<InputPage>,
+    selected_resource: Option<usize>,
+    usage_page: Option<ResourceUsagePage>,
     open_revision: u64,
     selection_revision: u64,
     replay_pending: bool,
@@ -231,6 +240,48 @@ struct Workspace {
 }
 
 impl Workspace {
+    fn watch_resource_search(
+        input: &Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Subscription {
+        cx.subscribe(input, |this, input, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.resource_query = input.read(cx).value().to_lowercase();
+                this.refresh_resources();
+                cx.notify();
+            }
+        })
+    }
+
+    fn refresh_resources(&mut self) {
+        let query = &self.resource_query;
+        let exact_index = query
+            .strip_prefix('#')
+            .and_then(|value| value.parse::<usize>().ok());
+        self.resource_visible = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .resources
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, resource)| {
+                        let matches = if let Some(exact) = exact_index {
+                            index == exact
+                        } else {
+                            resource.name.to_lowercase().contains(query)
+                                || resource_type_name(resource.resource_type)
+                                    .to_lowercase()
+                                    .contains(query)
+                        };
+                        matches.then_some(index)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+
     fn watch_event_search(
         input: &Entity<InputState>,
         cx: &mut Context<Self>,
@@ -695,6 +746,8 @@ impl Workspace {
                         this.structure = StructureView::default();
                         this.mesh = MeshView::default();
                         this.input_page = None;
+                        this.selected_resource = None;
+                        this.usage_page = None;
                         this.replay_pending = false;
                         this.export_pending = false;
                         this.preview = None;
@@ -988,6 +1041,144 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    fn read_resource_usage(&mut self, index: usize, offset: u64, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            self.status = Some(
+                self.t(
+                    "Wait for the current operation.",
+                    "请等待当前操作完成。",
+                    "現在の処理が完了するまでお待ちください。",
+                    "현재 작업이 끝날 때까지 기다려 주세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        if self
+            .snapshot
+            .as_ref()
+            .is_none_or(|snapshot| index >= snapshot.resources.len())
+        {
+            return;
+        }
+        let (Some(session), Ok(resource_index)) = (self.session.clone(), u32::try_from(index))
+        else {
+            return;
+        };
+        if self.selected_resource != Some(index) {
+            self.usage_page = None;
+        }
+        self.selected_resource = Some(index);
+        self.resource_pending = true;
+        let revision = self.open_revision;
+        self.status = Some(
+            self.t(
+                "Loading resource usage…",
+                "正在加载资源使用记录…",
+                "リソース使用履歴を読み込み中…",
+                "리소스 사용 기록을 불러오는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            session.resource_usage(resource_index, offset, RESOURCE_USAGE_PAGE_LIMIT)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision {
+                    return;
+                }
+                this.resource_pending = false;
+                if this.selected_resource != Some(index) {
+                    this.status = None;
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok(page) => {
+                        this.usage_page = Some(page);
+                        this.status = None;
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Could not load resource usage",
+                                "无法加载资源使用记录",
+                                "リソース使用履歴を取得できません",
+                                "리소스 사용 기록을 불러올 수 없습니다"
+                            )
+                        ));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn jump_to_usage(&mut self, event: u32, window: &mut Window, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            self.status = Some(
+                self.t(
+                    "Wait for the current operation.",
+                    "请等待当前操作完成。",
+                    "現在の処理が完了するまでお待ちください。",
+                    "현재 작업이 끝날 때까지 기다려 주세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let target = snapshot
+            .actions
+            .iter()
+            .enumerate()
+            .find(|(_, action)| action.event_id == event)
+            .map(|(index, _)| (index, None))
+            .or_else(|| {
+                snapshot
+                    .actions
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, action)| {
+                        action
+                            .api_events
+                            .iter()
+                            .position(|api| api.event_id == event)
+                            .map(|api| (index, Some(api)))
+                    })
+            });
+        let Some((action, api)) = target else {
+            self.status = Some(
+                self.t(
+                    "This usage has no navigable event.",
+                    "该使用记录没有可跳转的事件。",
+                    "この使用履歴には移動可能なイベントがありません。",
+                    "이 사용 기록에는 이동할 수 있는 이벤트가 없습니다.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        self.event_search
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        if let Some(row) = self.event_tree.reveal(action, api) {
+            self.event_scroll
+                .scroll_to_item(row, gpui::ScrollStrategy::Nearest);
+        }
+        self.tab = CaptureTab::Events;
+        self.select_event(action, api, cx);
     }
 
     fn read_vertex_input(&mut self, offset: u32, cx: &mut Context<Self>) {
@@ -1739,6 +1930,7 @@ impl Workspace {
             _ => Vec::new(),
         };
         let count = match self.tab {
+            CaptureTab::Resources => self.resource_visible.len(),
             CaptureTab::VertexInput => self.input_page.as_ref().map_or(0, |page| page.rows.len()),
             CaptureTab::Mesh => mesh_lines.len(),
             CaptureTab::Textures => snapshot.textures.len(),
@@ -2005,7 +2197,51 @@ impl Workspace {
         let status = self.status.clone();
         let preview_path = self.preview.as_ref().map(|preview| preview.path.clone());
 
-        let list = if self.tab == CaptureTab::VertexInput {
+        let list = if self.tab == CaptureTab::Resources {
+            let visible = std::sync::Arc::new(self.resource_visible.clone());
+            uniform_list(
+                "capture-resources",
+                count,
+                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                    range
+                        .filter_map(|row| {
+                            let index = *visible.get(row)?;
+                            let resource = this.snapshot.as_ref()?.resources.get(index)?;
+                            let name = resource.name.clone();
+                            let kind = resource_type_name(resource.resource_type);
+                            Some(
+                                div()
+                                    .id(("resource", index))
+                                    .test_support()
+                                    .h(px(32.))
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .cursor_pointer()
+                                    .bg(rgb(if this.selected_resource == Some(index) {
+                                        0x304c7c
+                                    } else {
+                                        0x192332
+                                    }))
+                                    .hover(|row| row.bg(rgb(0x263950)))
+                                    .child(
+                                        div()
+                                            .text_color(rgb(0x91a7c0))
+                                            .child(format!("#{index} · {kind}")),
+                                    )
+                                    .child(div().overflow_hidden().child(name))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.read_resource_usage(index, 0, cx)
+                                    })),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .flex_1()
+            .into_any_element()
+        } else if self.tab == CaptureTab::VertexInput {
             uniform_list(
                 "capture-vertex-input",
                 count,
@@ -2446,11 +2682,206 @@ impl Workspace {
                         .collect::<Vec<_>>()
                 }),
             )
+            .track_scroll(&self.event_scroll)
             .flex_1()
             .into_any_element()
         };
 
-        let detail_view = if self.tab == CaptureTab::VertexInput {
+        let detail_view = if self.tab == CaptureTab::Resources {
+            let heading = self.t(
+                "RESOURCE INSPECTOR",
+                "资源检查器",
+                "リソースインスペクター",
+                "리소스 검사기",
+            );
+            let empty = self.t(
+                "Select a resource to inspect its relationships and usage.",
+                "选择资源以查看关联关系和使用记录。",
+                "リソースを選択して関連情報と使用履歴を表示します。",
+                "리소스를 선택하여 관계와 사용 기록을 확인하세요.",
+            );
+            let parents = self.t("Parents", "父资源", "親リソース", "상위 리소스");
+            let derived = self.t(
+                "Derived resources",
+                "派生资源",
+                "派生リソース",
+                "파생 리소스",
+            );
+            let chunks = self.t(
+                "Initialisation chunks",
+                "初始化数据块",
+                "初期化チャンク",
+                "초기화 청크",
+            );
+            let usage_label = self.t("Usage", "使用记录", "使用履歴", "사용 기록");
+            let untracked = self.t(
+                "Usage is not tracked for this resource type.",
+                "此类资源未跟踪使用记录。",
+                "この種類のリソースでは使用履歴を追跡しません。",
+                "이 리소스 유형의 사용 기록은 추적되지 않습니다.",
+            );
+            let no_usage = self.t(
+                "No static usage observed.",
+                "未观察到静态使用记录。",
+                "静的な使用履歴はありません。",
+                "관찰된 정적 사용 기록이 없습니다.",
+            );
+            let generated_name = self.t(
+                "Automatically generated name",
+                "自动生成的名称",
+                "自動生成された名前",
+                "자동 생성된 이름",
+            );
+            let application_name = self.t(
+                "Application-provided name",
+                "应用提供的名称",
+                "アプリによる名前",
+                "애플리케이션에서 지정한 이름",
+            );
+            let mut view = div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(div().text_sm().text_color(rgb(0x82aaff)).child(heading));
+            if let Some((index, resource)) = self.selected_resource.and_then(|index| {
+                snapshot
+                    .resources
+                    .get(index)
+                    .map(|resource| (index, resource))
+            }) {
+                view = view
+                    .child(format!(
+                        "#{index} · {} ({}) · {}",
+                        resource_type_name(resource.resource_type),
+                        resource.resource_type,
+                        resource.name
+                    ))
+                    .child(if resource.autogenerated_name {
+                        generated_name
+                    } else {
+                        application_name
+                    })
+                    .child(format!("{chunks}: {:?}", resource.initialisation_chunks));
+                for (label, links) in [(parents, &resource.parents), (derived, &resource.derived)] {
+                    view = view.child(format!("{label}: {}", links.len()));
+                    for (ordinal, link) in links.iter().enumerate() {
+                        if let Some(target) = *link {
+                            let name = snapshot
+                                .resources
+                                .get(target)
+                                .map(|resource| resource.name.clone())
+                                .unwrap_or_default();
+                            view = view.child(
+                                div()
+                                    .id((
+                                        if label == parents {
+                                            "resource-parent"
+                                        } else {
+                                            "resource-derived"
+                                        },
+                                        ordinal,
+                                    ))
+                                    .test_support()
+                                    .text_color(rgb(0x82aaff))
+                                    .cursor_pointer()
+                                    .child(format!("#{target} · {name}"))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.read_resource_usage(target, 0, cx)
+                                    })),
+                            );
+                        } else {
+                            view = view.child("—");
+                        }
+                    }
+                }
+                view = view.child(div().text_sm().text_color(rgb(0x82aaff)).child(usage_label));
+                if let Some(page) = &self.usage_page {
+                    if !page.tracked {
+                        view = view.child(untracked);
+                    } else if page.total == "0" {
+                        view = view.child(no_usage);
+                    } else {
+                        view = view
+                            .child(format!("{} / {}", page.offset, page.total))
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .child(button(
+                                        "usage-previous",
+                                        previous_label,
+                                        false,
+                                        |this, cx| {
+                                            if let (Some(index), Some(page)) =
+                                                (this.selected_resource, &this.usage_page)
+                                            {
+                                                if let Ok(offset) = page.offset.parse::<u64>() {
+                                                    if offset > 0 {
+                                                        this.read_resource_usage(
+                                                            index,
+                                                            offset.saturating_sub(u64::from(
+                                                                RESOURCE_USAGE_PAGE_LIMIT,
+                                                            )),
+                                                            cx,
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        cx,
+                                    ))
+                                    .child(button(
+                                        "usage-next",
+                                        next_label,
+                                        false,
+                                        |this, cx| {
+                                            if let (Some(index), Some(page)) =
+                                                (this.selected_resource, &this.usage_page)
+                                            {
+                                                if let (Ok(offset), Ok(total)) = (
+                                                    page.offset.parse::<u64>(),
+                                                    page.total.parse::<u64>(),
+                                                ) {
+                                                    if let Some(next) = offset
+                                                        .checked_add(page.entries.len() as u64)
+                                                    {
+                                                        if next < total {
+                                                            this.read_resource_usage(
+                                                                index, next, cx,
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        cx,
+                                    )),
+                            );
+                        for (ordinal, entry) in page.entries.iter().enumerate() {
+                            let event = entry.event_id;
+                            view = view.child(
+                                div()
+                                    .id(("resource-usage", ordinal))
+                                    .test_support()
+                                    .cursor_pointer()
+                                    .text_color(rgb(0x82aaff))
+                                    .child(format!(
+                                        "{event_label} {event} · {} ({})",
+                                        resource_usage_name(entry.usage),
+                                        entry.usage
+                                    ))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.jump_to_usage(event, window, cx)
+                                    })),
+                            );
+                        }
+                    }
+                }
+            } else {
+                view = view.child(empty);
+            }
+            view
+        } else if self.tab == CaptureTab::VertexInput {
             let heading = self.t("VERTEX INPUT", "顶点输入", "頂点入力", "정점 입력");
             let note = self.t("Rows follow draw order. Unsupported formats are shown as raw bytes; unavailable attributes use —.", "行按绘制顺序排列；尚未解码的格式显示原始字节，不可用的属性显示 —。", "行は描画順です。未対応形式はバイトで、利用できない属性は — で表示します。", "행은 그리기 순서입니다. 지원하지 않는 형식은 바이트로, 사용할 수 없는 속성은 —로 표시합니다.");
             let mut view = div()
@@ -3228,6 +3659,8 @@ impl Workspace {
                             this.structure = StructureView::default();
                             this.mesh = MeshView::default();
                             this.input_page = None;
+                            this.selected_resource = None;
+                            this.usage_page = None;
                             this.preview = None;
                             this.pixel = None;
                             this.status = None;
@@ -3384,6 +3817,17 @@ impl Workspace {
                                         },
                                         cx,
                                     ))
+                                    .child(button(
+                                        "resources-tab",
+                                        self.t("Resources", "资源", "リソース", "리소스"),
+                                        self.tab == CaptureTab::Resources,
+                                        |this, cx| {
+                                            this.tab = CaptureTab::Resources;
+                                            this.refresh_resources();
+                                            cx.notify();
+                                        },
+                                        cx,
+                                    ))
                                     .child(
                                         div()
                                             .self_center()
@@ -3392,6 +3836,28 @@ impl Workspace {
                                             .child(count.to_string()),
                                     ),
                             )
+                            .when(self.tab == CaptureTab::Resources, |view| {
+                                let label = self.t(
+                                    "Filter resources by name, type or #index",
+                                    "按名称、类型或 #序号筛选资源",
+                                    "名前・種類・#番号でリソースを絞り込み",
+                                    "이름, 유형 또는 #번호로 리소스 필터링",
+                                );
+                                view.child(
+                                    div()
+                                        .px_3()
+                                        .pb_2()
+                                        .child(
+                                            div().text_sm().text_color(rgb(0x9eacc0)).child(label),
+                                        )
+                                        .child(
+                                            Input::new(&self.resource_search)
+                                                .id("resource-filter")
+                                                .aria_label(label)
+                                                .w_full(),
+                                        ),
+                                )
+                            })
                             .when(self.tab == CaptureTab::VertexInput, |view| {
                                 view.child(
                                     div()
@@ -4437,6 +4903,7 @@ fn main() {
                     let launch_env_name = cx.new(|cx| InputState::new(window, cx));
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
+                    let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let pixel_x = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let pixel_y = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let entity = cx.new(|cx| Workspace {
@@ -4446,6 +4913,14 @@ fn main() {
                         session: None,
                         snapshot: None,
                         event_tree: EventTree::default(),
+                        event_scroll: UniformListScrollHandle::new(),
+                        _resource_search_subscription: Workspace::watch_resource_search(
+                            &resource_search,
+                            cx,
+                        ),
+                        resource_search,
+                        resource_query: String::new(),
+                        resource_visible: Vec::new(),
                         _event_search_subscription: Workspace::watch_event_search(
                             &event_search,
                             cx,
@@ -4468,6 +4943,8 @@ fn main() {
                         structure: StructureView::default(),
                         mesh: MeshView::default(),
                         input_page: None,
+                        selected_resource: None,
+                        usage_page: None,
                         open_revision: 0,
                         selection_revision: 0,
                         replay_pending: false,
@@ -4541,6 +5018,7 @@ mod ui_tests {
                     let launch_env_name = cx.new(|cx| InputState::new(window, cx));
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
+                    let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let pixel_x = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let pixel_y = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     cx.new(|cx| Workspace {
@@ -4557,10 +5035,19 @@ mod ui_tests {
                             resource_count: 0,
                             texture_count: 0,
                             buffer_count: 0,
+                            resources: Vec::new(),
                             textures: Vec::new(),
                             buffers: Vec::new(),
                         }),
                         event_tree: EventTree::default(),
+                        event_scroll: UniformListScrollHandle::new(),
+                        _resource_search_subscription: Workspace::watch_resource_search(
+                            &resource_search,
+                            cx,
+                        ),
+                        resource_search,
+                        resource_query: String::new(),
+                        resource_visible: Vec::new(),
                         _event_search_subscription: Workspace::watch_event_search(
                             &event_search,
                             cx,
@@ -4583,6 +5070,8 @@ mod ui_tests {
                         structure: StructureView::default(),
                         mesh: MeshView::default(),
                         input_page: None,
+                        selected_resource: None,
+                        usage_page: None,
                         open_revision: 0,
                         selection_revision: 0,
                         replay_pending: false,
@@ -4738,6 +5227,7 @@ mod ui_tests {
                     let launch_env_name = cx.new(|cx| InputState::new(window, cx));
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
+                    let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let pixel_x = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let pixel_y = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     cx.new(|cx| Workspace {
@@ -4810,9 +5300,27 @@ mod ui_tests {
                                     api_events: Vec::new(),
                                 },
                             ],
-                            resource_count: 1,
+                            resource_count: 2,
                             texture_count: 1,
                             buffer_count: 1,
+                            resources: vec![
+                                renderdocx::replay::ResourceInfo {
+                                    name: "Fixture".into(),
+                                    resource_type: 5,
+                                    autogenerated_name: false,
+                                    initialisation_chunks: vec![2],
+                                    parents: vec![],
+                                    derived: vec![Some(1)],
+                                },
+                                renderdocx::replay::ResourceInfo {
+                                    name: "View".into(),
+                                    resource_type: 6,
+                                    autogenerated_name: false,
+                                    initialisation_chunks: vec![],
+                                    parents: vec![Some(0)],
+                                    derived: vec![],
+                                },
+                            ],
                             textures: vec![renderdocx::replay::Texture {
                                 name: "Color".into(),
                                 width: 16,
@@ -4837,6 +5345,14 @@ mod ui_tests {
                             }],
                         }),
                         event_tree: EventTree::default(),
+                        event_scroll: UniformListScrollHandle::new(),
+                        _resource_search_subscription: Workspace::watch_resource_search(
+                            &resource_search,
+                            cx,
+                        ),
+                        resource_search,
+                        resource_query: String::new(),
+                        resource_visible: Vec::new(),
                         _event_search_subscription: Workspace::watch_event_search(
                             &event_search,
                             cx,
@@ -4859,6 +5375,8 @@ mod ui_tests {
                         structure: StructureView::default(),
                         mesh: MeshView::default(),
                         input_page: None,
+                        selected_resource: None,
+                        usage_page: None,
                         open_revision: 0,
                         selection_revision: 0,
                         replay_pending: false,
@@ -5305,6 +5823,58 @@ mod ui_tests {
         cx.update(|cx| assert_eq!(view.read(cx).event_tree.visible, [0, 1, 2]));
         assert_eq!(*events.lock().unwrap(), vec![42, 77, 43, 42, 41, 41]);
 
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("resources-tab", cx);
+            window.click("resource-filter", cx);
+            window.input("view", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).resource_visible, [1]));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.press("ctrl-a", cx);
+            window.press("backspace", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("resource", 0usize), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).usage_page.as_ref().unwrap().entries.len(), 2));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("resource-derived", 0usize), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).selected_resource, Some(1)));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("resource-parent", 0usize), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).selected_resource, Some(0)));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("resource-usage", 1usize), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(view.read(cx).tab == CaptureTab::Events);
+            assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 41);
+            assert!(view.read(cx).event_tree.show_api());
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("event-api-0-0").visible());
+        })
+        .unwrap();
+
         // When the local D3D11 fixtures are configured, repeat the interaction against
         // a real capture and replay session, not the recording transport above.
         #[cfg(windows)]
@@ -5343,6 +5913,12 @@ mod ui_tests {
                     ..Settings::default()
                 };
                 let (real_session, real_snapshot) = Session::open(&settings, &capture).unwrap();
+                let vertex_resource = real_snapshot
+                    .buffers
+                    .iter()
+                    .find(|buffer| buffer.length == "28")
+                    .and_then(|buffer| buffer.resource_index)
+                    .expect("vertex resource");
                 let color_index = real_snapshot
                     .textures
                     .iter()
@@ -5398,14 +5974,77 @@ mod ui_tests {
                     view.update(cx, |view, cx| {
                         view.open_revision += 1;
                         view.event_tree.reset(&real_snapshot.actions);
+                        view.event_tree.set_show_api(false);
                         view.snapshot = Some(real_snapshot);
                         view.session = Some(real_session);
                         view.selected = None;
                         view.pipeline = None;
                         view.tab = CaptureTab::Events;
+                        view.selected_resource = None;
+                        view.usage_page = None;
                         cx.notify();
                     })
                 });
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    window.click("resources-tab", cx);
+                    window.click("resource-filter", cx);
+                    window.press("ctrl-a", cx);
+                    window.input(&format!("#{vertex_resource}"), cx);
+                })
+                .unwrap();
+                cx.run_until_parked();
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    window.click(("resource", vertex_resource), cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                let usage_row = loop {
+                    cx.run_until_parked();
+                    if let Some(row) = cx.update(|cx| {
+                        view.read(cx).usage_page.as_ref().and_then(|page| {
+                            page.entries
+                                .iter()
+                                .position(|entry| entry.event_id == draw_event && entry.usage == 1)
+                        })
+                    }) {
+                        break row;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real resource usage did not load: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                };
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    window.click(("resource-usage", usage_row), cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx)
+                            .pipeline
+                            .as_ref()
+                            .is_some_and(|state| state.event_id == draw_event)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real resource usage event was not replayed"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    assert!(window.find(draw_index).visible());
+                })
+                .unwrap();
                 let api_row = format!("event-api-{action_index}-{api_index}");
                 cx.update_window(handle.into(), |_, window, cx| {
                     window.render_frame(cx);

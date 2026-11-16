@@ -109,6 +109,25 @@ fn real_opengl_vertex_inputs_include_generic_and_normalized_values() {
         .expect("OpenGL draw")["event_id"]
         .as_u64()
         .unwrap();
+    let vertex_resource = opened["data"]["capture"]["buffers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|buffer| buffer["length"] == "12")
+        .expect("OpenGL vertex buffer")["resource_index"]
+        .as_u64()
+        .unwrap();
+    let usage = agent
+        .send(&serde_json::json!({"command":"resource_usage","index":vertex_resource}).to_string());
+    assert_eq!(usage["ok"], true, "{usage}");
+    assert!(
+        usage["data"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["event_id"] == draw && entry["usage_name"] == "VertexBuffer"),
+        "{usage}"
+    );
     let selected = agent.send(&serde_json::json!({"command":"select","event_id":draw}).to_string());
     assert_eq!(selected["ok"], true, "{selected}");
     let attributes = selected["data"]["pipeline"]["vertex_inputs"]
@@ -180,6 +199,14 @@ fn capabilities_advertises_versioned_machine_readable_contract() {
     assert_eq!(value["capture_options_default"]["soft_memory_limit"], 0);
     assert_eq!(value["structure_page_limit"], 128);
     assert_eq!(value["vertex_input_page_limit"], 64);
+    assert_eq!(value["resource_usage_page_limit"], 128);
+    assert!(
+        value["serve_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|name| name == "resource_usage")
+    );
     assert!(
         value["serve_commands"]
             .as_array()
@@ -233,6 +260,10 @@ fn agent_jsonl_session_has_correlated_errors_and_clean_shutdown() {
     assert_eq!(reply["schema"], "renderdocx.agent.v1");
     assert_eq!(reply["id"], 17);
     assert_eq!(reply["error"]["code"], "no_capture");
+    assert_eq!(
+        agent.send(r#"{"command":"resource_usage","index":0}"#)["error"]["code"],
+        "no_capture"
+    );
     assert_eq!(
         agent.send(r#"{"command":"pick_pixel","index":0,"x":0,"y":0}"#)["error"]["code"],
         "no_capture"
@@ -646,6 +677,61 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let request = serde_json::json!({"id":1,"command":"open","path":capture}).to_string();
     let opened = agent.send(&request);
     assert_eq!(opened["ok"], true, "{opened}");
+    let capture_data = &opened["data"]["capture"];
+    assert_eq!(
+        capture_data["resources"].as_array().unwrap().len(),
+        capture_data["resource_count"].as_u64().unwrap() as usize
+    );
+    let vertex_resource = capture_data["buffers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|buffer| buffer["length"] == "28")
+        .unwrap()["resource_index"]
+        .as_u64()
+        .unwrap();
+    let usage = agent
+        .send(&serde_json::json!({"command":"resource_usage","index":vertex_resource}).to_string());
+    assert_eq!(usage["ok"], true, "{usage}");
+    assert_eq!(usage["data"]["tracked"], true);
+    assert!(
+        usage["data"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["event_id"] == draw_event && entry["usage_name"] == "VertexBuffer"),
+        "{usage}"
+    );
+    let first = agent.send(
+        &serde_json::json!({"command":"resource_usage","index":vertex_resource,"limit":1})
+            .to_string(),
+    );
+    assert_eq!(first["data"]["entries"].as_array().unwrap().len(), 1);
+    let total = usage["data"]["total"]
+        .as_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    let end = agent.send(&serde_json::json!({"command":"resource_usage","index":vertex_resource,"offset":total.to_string()}).to_string());
+    assert!(end["data"]["entries"].as_array().unwrap().is_empty());
+    let invalid = agent.send(&serde_json::json!({"command":"resource_usage","index":vertex_resource,"offset":(total + 1).to_string()}).to_string());
+    assert_eq!(invalid["error"]["code"], "replay_usage_failed");
+    let shader_index = capture_data["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|resource| resource["type"] == 10)
+        .expect("shader resource");
+    let shader_usage = agent
+        .send(&serde_json::json!({"command":"resource_usage","index":shader_index}).to_string());
+    assert_eq!(shader_usage["data"]["tracked"], false, "{shader_usage}");
+    assert_eq!(shader_usage["data"]["entries"][0]["usage_name"], "Unused");
+    let shader_end = agent.send(
+        &serde_json::json!({"command":"resource_usage","index":shader_index,"offset":"1"})
+            .to_string(),
+    );
+    assert_eq!(shader_end["data"]["tracked"], false);
+    assert!(shader_end["data"]["entries"].as_array().unwrap().is_empty());
     let root_request = serde_json::json!({"command":"structure","event_id":api_event_id,"limit":1});
     let root = agent.send(&root_request.to_string());
     assert_eq!(root["ok"], true, "{root}");

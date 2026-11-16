@@ -92,6 +92,29 @@ impl EventTree {
         self.rebuild();
     }
 
+    pub fn reveal(&mut self, action: usize, api: Option<usize>) -> Option<usize> {
+        let row = match api {
+            Some(event) => {
+                self.show_api = true;
+                self.rows
+                    .iter()
+                    .position(|row| *row == (EventRow::Api { action, event }))?
+            }
+            None => action,
+        };
+        if row >= self.parents.len() {
+            return None;
+        }
+        self.filter.clear();
+        let mut parent = self.parents[row];
+        while let Some(index) = parent {
+            self.collapsed[index] = false;
+            parent = self.parents[index];
+        }
+        self.rebuild();
+        self.visible.iter().position(|index| *index == row)
+    }
+
     fn rebuild(&mut self) {
         self.visible.clear();
         let mut matching: Vec<bool> = self
@@ -141,6 +164,17 @@ mod tests {
             name: String::new(),
             api_events: Vec::new(),
         }
+    }
+
+    #[test]
+    fn reveal_clears_filter_and_expands_collapsed_ancestors() {
+        let mut tree = EventTree::default();
+        tree.reset(&[action(-1), action(0), action(1)]);
+        tree.toggle(0);
+        tree.set_filter("does not match");
+        assert!(tree.visible.is_empty());
+        assert_eq!(tree.reveal(2, None), Some(2));
+        assert_eq!(tree.visible, [0, 1, 2]);
     }
 
     #[test]
