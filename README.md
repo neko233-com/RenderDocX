@@ -24,7 +24,7 @@ On Windows, build the RenderDoc core and its matching replay helper from a commi
 
 Select `target/renderdocx-runtime/renderdocx-replay.exe` in the workspace. The helper checks the loaded core's version and build commit before using the C++ replay API. This build path currently targets Windows x64; the source-level CMake bridge can also be built against a matching Linux core, but that path has not yet been verified. The application and helper are not yet packaged together.
 
-The machine-readable [Agent CLI](docs/agent-cli.md) can be built without the GUI dependencies using `cargo build --no-default-features --bin renderdocx-cli`.
+The machine-readable [Agent CLI](docs/agent-cli.md) supports one-shot commands and a persistent JSONL replay session. It can be built without the GUI dependencies using `cargo build --no-default-features --bin renderdocx-cli`.
 
 Install or build a compatible RenderDoc distribution separately. RenderDocX looks for `qrenderdoc` and `renderdoccmd` next to its executable, in the standard Windows RenderDoc installation directory, or on `PATH`. The workspace also offers buttons to select each executable explicitly. Those binaries and their matching RenderDoc libraries must come from the same distribution; this prototype does not bundle them or check their version.
 

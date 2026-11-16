@@ -65,12 +65,12 @@ enum Reply {
 struct Process {
     child: Option<Child>,
     input: Option<ChildStdin>,
-    output: BufReader<ChildStdout>,
+    output: Option<BufReader<ChildStdout>>,
 }
 
 impl Process {
     fn read(&mut self) -> Result<Reply, String> {
-        read_reply(&mut self.output)
+        read_reply(self.output.as_mut().ok_or("Replay session has closed")?)
     }
 }
 
@@ -110,6 +110,9 @@ fn validate_snapshot(snapshot: &Snapshot) -> Result<(), String> {
 
 trait Transport: Send {
     fn select(&mut self, event: u32) -> Result<(), String>;
+    fn close(&mut self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 impl Transport for Process {
@@ -124,12 +127,35 @@ impl Transport for Process {
             _ => Err("Unexpected replay selection response".into()),
         }
     }
+
+    fn close(&mut self) -> Result<(), String> {
+        if let Some(mut input) = self.input.take() {
+            let _ = writeln!(input, "quit");
+        }
+        if let Some(mut output) = self.output.take() {
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut output, &mut std::io::sink());
+            });
+        }
+        if let Some(mut child) = self.child.take() {
+            let status = child.wait().map_err(|e| e.to_string())?;
+            if !status.success() {
+                return Err(format!("Replay bridge exited: {status}"));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Drop for Process {
     fn drop(&mut self) {
         if let Some(mut input) = self.input.take() {
             let _ = writeln!(input, "quit");
+        }
+        if let Some(mut output) = self.output.take() {
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut output, &mut std::io::sink());
+            });
         }
         if let Some(mut child) = self.child.take() {
             // Replay shutdown can involve GPU driver work; never block the UI thread.
@@ -166,7 +192,7 @@ impl Session {
         let mut process = Process {
             child: Some(child),
             input: Some(input),
-            output: BufReader::new(output),
+            output: Some(BufReader::new(output)),
         };
         let snapshot = match process.read()? {
             Reply::Snapshot(snapshot) => {
@@ -187,6 +213,10 @@ impl Session {
 
     pub fn next_revision(&self) -> u64 {
         self.revision.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    pub fn close(&self) -> Result<(), String> {
+        self.process.lock().map_err(|e| e.to_string())?.close()
     }
 
     pub fn select(&self, event: u32, revision: u64) -> Result<bool, String> {

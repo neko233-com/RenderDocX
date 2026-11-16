@@ -1,5 +1,49 @@
 use serde_json::Value;
-use std::process::Command;
+use std::{
+    io::{BufRead, BufReader, Write},
+    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+};
+
+struct Agent {
+    child: Child,
+    input: ChildStdin,
+    output: BufReader<ChildStdout>,
+}
+
+impl Agent {
+    fn new(bridge: Option<&str>) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_renderdocx-cli"));
+        if let Some(bridge) = bridge {
+            command.args(["--bridge", bridge]);
+        }
+        let mut child = command
+            .arg("serve")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let input = child.stdin.take().unwrap();
+        let output = BufReader::new(child.stdout.take().unwrap());
+        Self {
+            child,
+            input,
+            output,
+        }
+    }
+
+    fn send(&mut self, request: &str) -> Value {
+        writeln!(self.input, "{request}").unwrap();
+        self.input.flush().unwrap();
+        let mut response = String::new();
+        assert!(self.output.read_line(&mut response).unwrap() > 0);
+        serde_json::from_str(&response).unwrap()
+    }
+
+    fn quit(mut self) {
+        assert_eq!(self.send(r#"{"id":"done","command":"quit"}"#)["ok"], true);
+        assert!(self.child.wait().unwrap().success());
+    }
+}
 
 fn invoke(args: &[&str]) -> (bool, Value) {
     let output = Command::new(env!("CARGO_BIN_EXE_renderdocx-cli"))
@@ -45,6 +89,18 @@ fn malformed_arguments_and_missing_bridge_return_structured_errors() {
     ]);
     assert!(!success);
     assert_eq!(value["error"]["code"], "replay_open_failed");
+}
+
+#[test]
+fn agent_jsonl_session_has_correlated_errors_and_clean_shutdown() {
+    let mut agent = Agent::new(None);
+    assert_eq!(agent.send("not json")["error"]["code"], "invalid_request");
+    let reply = agent.send(r#"{"id":17,"command":"snapshot"}"#);
+    assert_eq!(reply["schema"], "renderdocx.agent.v1");
+    assert_eq!(reply["id"], 17);
+    assert_eq!(reply["error"]["code"], "no_capture");
+    assert_eq!(agent.send(r#"{"id":"c","command":"close"}"#)["ok"], true);
+    agent.quit();
 }
 
 #[test]
@@ -159,4 +215,34 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let (success, result) = invoke(&["--bridge", bridge, "select", capture, &event]);
     assert!(success, "event replay failed: {result}");
     assert_eq!(result["event_id"].as_u64().unwrap().to_string(), event);
+
+    let mut agent = Agent::new(Some(bridge));
+    let request = serde_json::json!({"id":1,"command":"open","path":capture}).to_string();
+    let opened = agent.send(&request);
+    assert_eq!(opened["ok"], true, "{opened}");
+    let failed_open =
+        agent.send(r#"{"id":10,"command":"open","path":"missing-renderdocx-capture.rdc"}"#);
+    assert_eq!(failed_open["error"]["code"], "replay_open_failed");
+    assert_eq!(agent.send(r#"{"id":11,"command":"snapshot"}"#)["ok"], true);
+    assert_eq!(
+        agent.send(r#"{"id":12,"command":"select","event_id":4294967295}"#)["error"]["code"],
+        "replay_select_failed"
+    );
+    let request =
+        serde_json::json!({"id":2,"command":"select","event_id":event.parse::<u32>().unwrap()})
+            .to_string();
+    let selected = agent.send(&request);
+    assert_eq!(
+        selected["data"]["event_id"].as_u64().unwrap().to_string(),
+        event
+    );
+    assert_eq!(agent.send(r#"{"id":3,"command":"close"}"#)["ok"], true);
+    assert_eq!(
+        agent.send(r#"{"id":4,"command":"snapshot"}"#)["error"]["code"],
+        "no_capture"
+    );
+    let reopened =
+        agent.send(&serde_json::json!({"id":5,"command":"open","path":capture}).to_string());
+    assert_eq!(reopened["ok"], true, "{reopened}");
+    agent.quit();
 }
