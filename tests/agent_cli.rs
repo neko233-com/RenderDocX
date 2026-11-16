@@ -1235,6 +1235,13 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     assert_eq!(mesh_indices["data"]["indices"][1]["raw"], 1);
     assert_eq!(mesh_indices["data"]["indices"][1]["vertex"], 1);
     assert_eq!(mesh_indices["data"]["indices"][1]["restart"], false);
+    let draw_rows = agent.send(r#"{"command":"mesh_draw","offset":0,"count":3}"#);
+    assert_eq!(draw_rows["ok"], true, "{draw_rows}");
+    assert_eq!(draw_rows["data"]["page"]["rows"][0]["vertex"], 0);
+    assert_eq!(
+        draw_rows["data"]["page"]["rows"][0]["position"],
+        serde_json::json!([3.0, 3.0, 0.0, 1.0])
+    );
     let mesh_bytes =
         agent.send(r#"{"command":"mesh_read","kind":"vertex","offset":"0","length":16}"#);
     assert_eq!(mesh_bytes["ok"], true, "{mesh_bytes}");

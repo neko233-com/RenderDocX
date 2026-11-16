@@ -206,6 +206,7 @@ struct StructureView {
 enum MeshBufferKind {
     Vertex,
     Index,
+    Draw,
 }
 
 struct MeshView {
@@ -213,6 +214,7 @@ struct MeshView {
     kind: MeshBufferKind,
     info: Option<MeshInfo>,
     bytes: Option<Vec<u8>>,
+    draw: Option<renderdocx::mesh_draw::DrawPage>,
     offset: u64,
 }
 
@@ -227,6 +229,7 @@ impl Default for MeshView {
             kind: MeshBufferKind::Vertex,
             info: None,
             bytes: None,
+            draw: None,
             offset: 0,
         }
     }
@@ -2789,6 +2792,7 @@ impl Workspace {
             self.descriptor_page = None;
             self.mesh.info = None;
             self.mesh.bytes = None;
+            self.mesh.draw = None;
             self.pixel_history = None;
             self.history_selected = None;
         }
@@ -3306,6 +3310,18 @@ impl Workspace {
         cx.notify();
         let task = cx.background_executor().spawn(async move {
             let info = session.mesh(event, selection)?;
+            if kind == MeshBufferKind::Draw {
+                let offset = u32::try_from(offset).map_err(|_| "Invalid mesh draw offset")?;
+                let page = renderdocx::mesh_draw::page(
+                    &info,
+                    offset,
+                    renderdocx::mesh_draw::PAGE_LIMIT,
+                    |kind, offset, length| {
+                        session.mesh_read(event, selection, kind, offset, length)
+                    },
+                )?;
+                return Ok::<_, String>((info, None, Some(page)));
+            }
             let (bound, buffer, length) = match kind {
                 MeshBufferKind::Vertex => (info.vertex_bound, "vertex", mesh_page_size(&info)),
                 MeshBufferKind::Index => (
@@ -3313,13 +3329,14 @@ impl Workspace {
                     "index",
                     mesh_index_page_len(&info, offset),
                 ),
+                MeshBufferKind::Draw => unreachable!(),
             };
             let bytes = if bound {
                 Some(session.mesh_read(event, selection, buffer, offset, length as u32)?)
             } else {
                 None
             };
-            Ok::<_, String>((info, bytes))
+            Ok::<_, String>((info, bytes, None))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -3329,12 +3346,13 @@ impl Workspace {
                 }
                 this.resource_pending = false;
                 match result {
-                    Ok((info, bytes)) => {
+                    Ok((info, bytes, draw)) => {
                         this.mesh = MeshView {
                             selection,
                             kind,
                             info: Some(info),
                             bytes,
+                            draw,
                             offset,
                         };
                         this.status = None;
@@ -4831,44 +4849,73 @@ impl Workspace {
             .snapshot
             .as_ref()
             .expect("capture view requires a snapshot");
-        let mesh_lines = match (&self.mesh.info, &self.mesh.bytes) {
-            (Some(info), Some(bytes)) => {
-                if self.mesh.kind == MeshBufferKind::Index
-                    && let Some(indices) =
-                        renderdocx::mesh_indices::decode(info, bytes, self.mesh.offset)
-                {
-                    indices
-                        .into_iter()
-                        .map(|index| match index.vertex {
-                            Some(vertex) => format!("{}: {} → {}", index.row, index.raw, vertex),
-                            None => format!(
-                                "{}: {} ({})",
-                                index.row,
-                                index.raw,
-                                self.t("Restart", "重启", "リスタート", "재시작")
-                            ),
-                        })
-                        .collect()
-                } else if self.mesh.kind == MeshBufferKind::Vertex
-                    && let Some(positions) = mesh_positions(info, bytes, self.mesh.offset)
-                {
-                    positions
-                        .into_iter()
-                        .map(|(index, values)| format!("{index}: {values:?}"))
-                        .collect::<Vec<_>>()
-                } else {
-                    bytes
-                        .chunks(16)
-                        .enumerate()
-                        .map(|(index, chunk)| {
-                            let hex: String =
-                                chunk.iter().map(|byte| format!("{byte:02x} ")).collect();
-                            format!("{:08X}: {hex}", self.mesh.offset + (index as u64) * 16)
-                        })
-                        .collect()
+        let mesh_lines = if let Some(page) = &self.mesh.draw {
+            page.rows
+                .iter()
+                .map(|row| {
+                    if row.restart {
+                        format!(
+                            "{}: {}",
+                            row.row,
+                            self.t("Restart", "重启", "リスタート", "재시작")
+                        )
+                    } else if let Some(position) = &row.position {
+                        format!(
+                            "{}: {} → {position:?}",
+                            row.row,
+                            row.vertex.unwrap_or_default()
+                        )
+                    } else {
+                        format!(
+                            "{}: {}",
+                            row.row,
+                            self.t("Unavailable", "不可用", "利用不可", "사용 불가")
+                        )
+                    }
+                })
+                .collect()
+        } else {
+            match (&self.mesh.info, &self.mesh.bytes) {
+                (Some(info), Some(bytes)) => {
+                    if self.mesh.kind == MeshBufferKind::Index
+                        && let Some(indices) =
+                            renderdocx::mesh_indices::decode(info, bytes, self.mesh.offset)
+                    {
+                        indices
+                            .into_iter()
+                            .map(|index| match index.vertex {
+                                Some(vertex) => {
+                                    format!("{}: {} → {}", index.row, index.raw, vertex)
+                                }
+                                None => format!(
+                                    "{}: {} ({})",
+                                    index.row,
+                                    index.raw,
+                                    self.t("Restart", "重启", "リスタート", "재시작")
+                                ),
+                            })
+                            .collect()
+                    } else if self.mesh.kind == MeshBufferKind::Vertex
+                        && let Some(positions) = mesh_positions(info, bytes, self.mesh.offset)
+                    {
+                        positions
+                            .into_iter()
+                            .map(|(index, values)| format!("{index}: {values:?}"))
+                            .collect::<Vec<_>>()
+                    } else {
+                        bytes
+                            .chunks(16)
+                            .enumerate()
+                            .map(|(index, chunk)| {
+                                let hex: String =
+                                    chunk.iter().map(|byte| format!("{byte:02x} ")).collect();
+                                format!("{:08X}: {hex}", self.mesh.offset + (index as u64) * 16)
+                            })
+                            .collect()
+                    }
                 }
+                _ => Vec::new(),
             }
-            _ => Vec::new(),
         };
         let count = match self.tab {
             CaptureTab::Annotations => self
@@ -6731,12 +6778,19 @@ impl Workspace {
             );
             let note = if self.mesh.kind == MeshBufferKind::Vertex {
                 self.t("Positions are shown in buffer order, not draw index order. Other formats are shown as bytes.", "位置按缓冲区顺序显示，非绘制索引顺序；其他格式显示为字节。", "位置は描画インデックス順ではなくバッファ順です。他の形式はバイトで表示します。", "위치는 그리기 인덱스 순서가 아닌 버퍼 순서입니다. 다른 형식은 바이트로 표시합니다.")
-            } else {
+            } else if self.mesh.kind == MeshBufferKind::Index {
                 self.t(
                     "Indices show raw and base-adjusted values; restart indices are marked.",
                     "索引显示原始值和基础顶点调整后的值，并标记重启索引。",
                     "インデックスの生値とベース頂点調整後の値、リスタートを表示します。",
                     "원시 인덱스와 기본 정점 적용 값 및 재시작 인덱스를 표시합니다.",
+                )
+            } else {
+                self.t(
+                    "Positions follow draw index order. Only regular float formats are decoded.",
+                    "位置按绘制索引顺序显示；当前仅解码常规浮点格式。",
+                    "位置は描画インデックス順です。通常の浮動小数点形式のみデコードします。",
+                    "위치는 그리기 인덱스 순서입니다. 일반 부동 소수점 형식만 해석합니다.",
                 )
             };
             let mut view = div()
@@ -6791,7 +6845,15 @@ impl Workspace {
                         info.format_name, info.vertex_stride
                     ))
                     .child(format!("{topology_label}: {}", info.topology))
-                    .child(format!("{offset_label}: {}", self.mesh.offset))
+                    .child(format!(
+                        "{}: {}",
+                        if self.mesh.kind == MeshBufferKind::Draw {
+                            self.t("First row", "起始行", "開始行", "시작 행")
+                        } else {
+                            offset_label
+                        },
+                        self.mesh.offset
+                    ))
                     .when(!info.status.is_empty(), |view| {
                         view.child(info.status.clone())
                     })
@@ -8469,6 +8531,7 @@ impl Workspace {
                                         .child(button("mesh-selection-apply", self.t("Load selection", "加载选择", "選択を読み込む", "선택 불러오기"), false, |this, cx| this.load_mesh_selection(cx), cx))
                                         .child(button("mesh-buffer-vertex", self.t("Vertices", "顶点", "頂点", "정점"), self.mesh.kind == MeshBufferKind::Vertex, |this, cx| this.read_mesh(this.mesh.selection, MeshBufferKind::Vertex, 0, cx), cx))
                                         .child(button("mesh-buffer-index", self.t("Indices", "索引", "インデックス", "인덱스"), self.mesh.kind == MeshBufferKind::Index, |this, cx| this.read_mesh(this.mesh.selection, MeshBufferKind::Index, 0, cx), cx))
+                                        .child(button("mesh-buffer-draw", self.t("Draw order", "绘制顺序", "描画順", "그리기 순서"), self.mesh.kind == MeshBufferKind::Draw, |this, cx| this.read_mesh(this.mesh.selection, MeshBufferKind::Draw, 0, cx), cx))
                                         .child(button(
                                             "mesh-stage",
                                             self.t(
@@ -8495,7 +8558,7 @@ impl Workspace {
                                                         .mesh
                                                         .info
                                                         .as_ref()
-                                                        .map(|info| if this.mesh.kind == MeshBufferKind::Vertex { mesh_page_size(info) } else { BUFFER_VIEW_PAGE })
+                                                        .map(|info| if this.mesh.kind == MeshBufferKind::Vertex { mesh_page_size(info) } else if this.mesh.kind == MeshBufferKind::Draw { u64::from(renderdocx::mesh_draw::PAGE_LIMIT) } else { BUFFER_VIEW_PAGE })
                                                         .unwrap_or(BUFFER_VIEW_PAGE);
                                                     this.read_mesh(
                                                         this.mesh.selection,
@@ -8516,9 +8579,9 @@ impl Workspace {
                                                     .mesh
                                                     .info
                                                     .as_ref()
-                                                    .map(|info| if this.mesh.kind == MeshBufferKind::Vertex { mesh_page_size(info) } else { BUFFER_VIEW_PAGE })
+                                                    .map(|info| if this.mesh.kind == MeshBufferKind::Vertex { mesh_page_size(info) } else if this.mesh.kind == MeshBufferKind::Draw { u64::from(renderdocx::mesh_draw::PAGE_LIMIT) } else { BUFFER_VIEW_PAGE })
                                                     .unwrap_or(BUFFER_VIEW_PAGE);
-                                                if this.mesh.bytes.as_ref().is_some_and(|bytes| {
+                                                if this.mesh.draw.as_ref().is_some_and(|page| u64::from(page.offset) + (page.rows.len() as u64) < u64::from(page.total)) || this.mesh.bytes.as_ref().is_some_and(|bytes| {
                                                     bytes.len() == step as usize
                                                 }) {
                                                     if let Some(offset) =

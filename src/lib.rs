@@ -3,6 +3,7 @@ pub mod backend;
 pub mod debug_navigation;
 pub mod i18n;
 pub mod live;
+pub mod mesh_draw;
 pub mod mesh_indices;
 pub mod mesh_positions;
 pub mod replay;
