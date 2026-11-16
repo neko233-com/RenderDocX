@@ -575,6 +575,7 @@ struct Workspace {
     statistics: Option<TextureStatistics>,
     selected_buffer: Option<usize>,
     buffer_offset: u64,
+    buffer_seek: Entity<InputState>,
     buffer_data: Option<Vec<u8>>,
     buffer_binding_range: Option<renderdocx::buffer_binding::BufferBindingRange>,
     resource_pending: bool,
@@ -2729,6 +2730,34 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    fn seek_buffer(&mut self, cx: &mut Context<Self>) {
+        let Some(index) = self.selected_buffer else {
+            return;
+        };
+        let Some(size) = self
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.buffers.get(index))
+            .and_then(|b| b.length.parse::<u64>().ok())
+        else {
+            return;
+        };
+        let range = self
+            .buffer_binding_range
+            .filter(|range| range.index == index);
+        let start = range.map_or(0, |range| range.start);
+        let end = range.map_or(size, |range| range.end.min(size));
+        let offset =
+            renderdocx::buffer_binding::parse_offset(self.buffer_seek.read(cx).value().as_ref());
+        match offset {
+            Some(offset) if offset >= start && offset <= end => self.read_buffer(index, offset, cx),
+            _ => {
+                self.status = Some(self.t("Enter a byte offset within the current range (decimal or 0x hexadecimal).", "请输入当前范围内的字节偏移（十进制或 0x 十六进制）。", "現在の範囲内のバイトオフセットを入力してください（10 進数または 0x 付き 16 進数）。", "현재 범위의 바이트 오프셋을 입력하세요 (10진수 또는 0x 16진수).").to_owned());
+                cx.notify();
+            }
+        }
     }
 
     fn read_buffer(&mut self, index: usize, offset: u64, cx: &mut Context<Self>) {
@@ -9502,6 +9531,36 @@ impl Workspace {
                             .flex()
                             .flex_wrap()
                             .gap_2()
+                            .child(self.t(
+                                "Byte offset (decimal or 0x)",
+                                "字节偏移（十进制或 0x）",
+                                "バイトオフセット（10 進数または 0x）",
+                                "바이트 오프셋 (10진수 또는 0x)",
+                            ))
+                            .child(
+                                Input::new(&self.buffer_seek)
+                                    .id("buffer-seek-input")
+                                    .aria_label(self.t(
+                                        "Byte offset",
+                                        "字节偏移",
+                                        "バイトオフセット",
+                                        "바이트 오프셋",
+                                    ))
+                                    .w(px(220.)),
+                            )
+                            .child(button(
+                                "buffer-seek",
+                                self.t("Go", "跳转", "移動", "이동"),
+                                false,
+                                |this, cx| this.seek_buffer(cx),
+                                cx,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
                             .child(prev)
                             .child(read_button)
                             .child(next_button)
@@ -12120,6 +12179,7 @@ fn main() {
                     let shader_edit_encoding = cx.new(|cx| InputState::new(window, cx));
                     let shader_edit_command = cx.new(|cx| InputState::new(window, cx));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
+                    let buffer_seek = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
                     let message_search = cx.new(|cx| InputState::new(window, cx));
@@ -12186,6 +12246,7 @@ fn main() {
                         statistics: None,
                         selected_buffer: None,
                         buffer_offset: 0,
+                        buffer_seek,
                         buffer_data: None,
                         buffer_binding_range: None,
                         resource_pending: false,
@@ -12363,6 +12424,7 @@ mod ui_tests {
                     let shader_edit_encoding = cx.new(|cx| InputState::new(window, cx));
                     let shader_edit_command = cx.new(|cx| InputState::new(window, cx));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
+                    let buffer_seek = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
                     let message_search = cx.new(|cx| InputState::new(window, cx));
@@ -12447,6 +12509,7 @@ mod ui_tests {
                         statistics: None,
                         selected_buffer: None,
                         buffer_offset: 0,
+                        buffer_seek,
                         buffer_data: None,
                         buffer_binding_range: None,
                         resource_pending: false,
@@ -12733,6 +12796,7 @@ mod ui_tests {
                     let shader_edit_encoding = cx.new(|cx| InputState::new(window, cx));
                     let shader_edit_command = cx.new(|cx| InputState::new(window, cx));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
+                    let buffer_seek = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
                     let message_search = cx.new(|cx| InputState::new(window, cx));
@@ -12928,6 +12992,7 @@ mod ui_tests {
                         statistics: None,
                         selected_buffer: None,
                         buffer_offset: 0,
+                        buffer_seek,
                         buffer_data: None,
                         buffer_binding_range: None,
                         resource_pending: false,
@@ -13434,6 +13499,32 @@ mod ui_tests {
             assert_eq!(view.buffer_data.as_ref().unwrap().len(), 44);
         });
         cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("buffer-seek-input", cx);
+            window.press("ctrl-a", cx);
+            window.input("0x10", cx);
+            window.click("buffer-seek", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let view = view.read(cx);
+            assert_eq!(view.buffer_offset, 16);
+            assert_eq!(view.buffer_data.as_ref().unwrap()[0], 16);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("buffer-seek-input", cx);
+            window.press("ctrl-a", cx);
+            window.input("0x1000", cx);
+            window.click("buffer-seek", cx);
+        })
+        .unwrap();
+        cx.update(|cx| {
+            assert_eq!(view.read(cx).buffer_offset, 16);
+            assert!(view.read(cx).status.is_some());
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
             window.click("shaders-tab", cx);
             window.click("shader-0", cx);
         })
@@ -13508,6 +13599,31 @@ mod ui_tests {
         .unwrap();
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(view.read(cx).buffer_offset, 4));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("buffer-seek-input", cx);
+            window.press("ctrl-a", cx);
+            window.input("3", cx);
+            window.click("buffer-seek", cx);
+        })
+        .unwrap();
+        cx.update(|cx| {
+            assert_eq!(view.read(cx).buffer_offset, 4);
+            assert!(view.read(cx).status.is_some());
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("buffer-seek-input", cx);
+            window.press("ctrl-a", cx);
+            window.input("0x8", cx);
+            window.click("buffer-seek", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(view.read(cx).buffer_offset, 8);
+            assert_eq!(view.read(cx).buffer_data.as_ref().unwrap().len(), 8);
+        });
         cx.update_window(handle.into(), |_, window, cx| {
             window.click("buffer-full-resource", cx);
         })

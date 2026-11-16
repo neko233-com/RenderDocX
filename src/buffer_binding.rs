@@ -9,6 +9,25 @@ pub struct BufferBindingRange {
     pub end: u64,
 }
 
+/// Parse an absolute byte offset, accepting decimal or a 0x-prefixed hexadecimal value.
+pub fn parse_offset(value: &str) -> Option<u64> {
+    let value = value.trim();
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        if hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        u64::from_str_radix(hex, 16).ok()
+    } else {
+        if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        value.parse().ok()
+    }
+}
+
 pub fn resolve(descriptor: &Value, buffers: &[Buffer]) -> Result<BufferBindingRange, String> {
     let resource = descriptor
         .get("resource")
@@ -47,6 +66,25 @@ pub fn resolve(descriptor: &Value, buffers: &[Buffer]) -> Result<BufferBindingRa
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn parses_decimal_and_hex_offsets_without_overflow() {
+        assert_eq!(parse_offset(" 255 "), Some(255));
+        assert_eq!(parse_offset("0xFf"), Some(255));
+        assert_eq!(parse_offset("0Xffffffffffffffff"), Some(u64::MAX));
+        for value in [
+            "",
+            "0x",
+            "-1",
+            "+1",
+            "0x-1",
+            "1 2",
+            "18446744073709551616",
+            "0x10000000000000000",
+        ] {
+            assert_eq!(parse_offset(value), None, "{value}");
+        }
+    }
+
     #[test]
     fn clips_unbounded_sizes_and_rejects_invalid_offsets() {
         let buffers = [Buffer {
