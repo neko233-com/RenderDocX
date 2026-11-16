@@ -17,6 +17,8 @@ The agent CLI exposes RenderDoc vertex, pixel and compute shader debug trace bat
 
 The frame information, replay debug messages and recorded frame statistics are available in the snapshot and have initial GPUI views. The GUI polls for later debug messages and provides basic filters; the CLI supports explicit polling and paging. GPU counters can be selected, sampled and paged in GPUI and the agent CLI; broader driver and vendor-counter validation and the complete upstream counter workflow remain outstanding. Message filtering parity and formatted statistical visualizations still need migration and validation.
 
+The initial mesh output viewer can page vertex bytes or index bytes and decode 8-, 16- and 32-bit raw indices; it shows base vertex separately and does not yet reconstruct the complete draw-ordered geometry viewer. Its GPU-backed index-switch UI test is present but has not been run for this change.
+
 An initial descriptor inspector pages the selected event's descriptor accesses or fixed-size stores through RenderDoc, including logical locations, resource references and sampler fields. Variable-sized store enumeration, richer typed presentation and cross-API descriptor validation remain outstanding.
 
 Version-one capture notes and bookmarks can be read and explicitly saved through RenderDoc sections from GPUI and the agent CLI. Concurrent-writer checks are best-effort rather than an atomic lock; ordinary window-close requests are blocked for unsaved drafts and in-flight operations. Forced termination, external-editor interoperability and broader platform validation remain outstanding.
