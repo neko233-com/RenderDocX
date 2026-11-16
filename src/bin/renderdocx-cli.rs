@@ -980,10 +980,14 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     Some(value) => value.as_str().and_then(|value| value.parse::<u64>().ok()),
                 };
                 let layout = request.get("layout").and_then(Value::as_str);
-                match (&opened, selected_event, index, offset, length, layout, origin) {
-                    (None, _, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
-                    (Some(_), None, _, _, _, _, _) => Err(("no_event", "Select an event before reading buffers".into())),
-                    (Some((session, snapshot)), Some(event), Some(index), Some(offset), Some(length), Some(text), Some(origin)) => {
+                let include_fixed = match request.get("include_fixed") {
+                    None => Some(false),
+                    Some(value) => value.as_bool(),
+                };
+                match (&opened, selected_event, index, offset, length, layout, origin, include_fixed) {
+                    (None, _, _, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some(_), None, _, _, _, _, _, _) => Err(("no_event", "Select an event before reading buffers".into())),
+                    (Some((session, snapshot)), Some(event), Some(index), Some(offset), Some(length), Some(text), Some(origin), Some(include_fixed)) => {
                         let size = snapshot.buffers.get(index as usize).and_then(|b| b.length.parse::<u64>().ok());
                         if length > BUFFER_PAGE_LIMIT || size.is_none_or(|size| offset > size || u64::from(length) > size - offset) {
                             Err(("invalid_arguments", "Buffer range is out of bounds or exceeds the page limit".into()))
@@ -991,10 +995,23 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                             renderdocx::buffer_layout::Layout::parse(text)
                                 .map_err(|error| ("invalid_layout", error))
                                 .and_then(|layout| { layout.validate_graphics_api(snapshot.api).map_err(|error| ("invalid_layout", error))?; Ok(layout) })
-                                .and_then(|layout| session.read_buffer(index, offset, length)
-                                    .and_then(|bytes| layout.decode_at(origin, offset, &bytes))
-                                    .map(|page| json!({"event_id":event,"index":index,"page":page}))
-                                    .map_err(|error| ("buffer_decode_failed", error)))
+                                .and_then(|layout| {
+                                    let decode = || -> Result<_, String> {
+                                        let bytes = session.read_buffer(index, offset, length)?;
+                                        let page = layout.decode_at(origin, offset, &bytes)?;
+                                        if include_fixed && offset != origin {
+                                            if let Some(prefix) = layout.repeat_offset() {
+                                                let prefix = u32::try_from(prefix).map_err(|_| "Fixed prefix exceeds page limit")?;
+                                                let total = size.ok_or("Invalid buffer size")?;
+                                                if prefix > BUFFER_PAGE_LIMIT || origin > total || u64::from(prefix) > total - origin { return Err("Fixed prefix is out of bounds or exceeds the page limit".into()); }
+                                                let data = if prefix == 0 { Vec::new() } else { session.read_buffer(index, origin, prefix)? };
+                                                return layout.decode_with_prefix(origin, offset, &bytes, &data);
+                                            }
+                                        }
+                                        Ok(page)
+                                    };
+                                    decode().map(|page| json!({"event_id":event,"index":index,"page":page})).map_err(|error| ("buffer_decode_failed", error))
+                                })
                         }
                     }
                     _ => Err(("invalid_arguments", "decode_buffer_layout requires index, decimal-string offset, length and layout".into())),

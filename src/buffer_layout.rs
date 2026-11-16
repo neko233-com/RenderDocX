@@ -1407,6 +1407,26 @@ impl Layout {
         self.decode_at(offset, offset, bytes)
     }
 
+    /// Include fixed fields on a later page using bytes read at the same layout origin.
+    pub fn decode_with_prefix(
+        &self,
+        origin: u64,
+        offset: u64,
+        bytes: &[u8],
+        prefix: &[u8],
+    ) -> Result<Page, String> {
+        let mut page = self.decode_at(origin, offset, bytes)?;
+        if offset != origin {
+            if let Some(repeat) = &self.repeat {
+                let data = prefix
+                    .get(..repeat.offset)
+                    .ok_or("Incomplete fixed prefix")?;
+                page.fixed = Some(Self::decode_fields(&repeat.fixed_fields, origin, data)?);
+            }
+        }
+        Ok(page)
+    }
+
     /// `origin` is the beginning of the complete layout, even for later pages.
     pub fn decode_at(&self, origin: u64, offset: u64, bytes: &[u8]) -> Result<Page, String> {
         offset
@@ -1658,6 +1678,16 @@ mod tests {
         assert!(next.fixed.is_none());
         assert_eq!(next.rows[0].offset, "16");
         assert_eq!(next.rows[0].fields[0].values[0], ["3", "4"]);
+        let with_prefix = layout
+            .decode_with_prefix(0, 16, &bytes[16..], &bytes[..8])
+            .unwrap();
+        assert_eq!(with_prefix.fixed.unwrap()[0].values[0][0], "7");
+        assert_eq!(with_prefix.rows[0].offset, "16");
+        assert!(
+            layout
+                .decode_with_prefix(0, 16, &bytes[16..], &bytes[..4])
+                .is_err()
+        );
         assert!(layout.decode_at(0, 9, &bytes[..8]).is_err());
         assert!(layout.decode_at(0, 0, &bytes[..4]).is_err());
         assert!(Layout::parse("struct S { float v[]; }; S value;").is_err());

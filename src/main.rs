@@ -597,6 +597,7 @@ struct Workspace {
     buffer_search: Entity<InputState>,
     buffer_search_last: Option<BufferSearchHit>,
     buffer_data: Option<Vec<u8>>,
+    buffer_fixed_data: Option<Vec<u8>>,
     buffer_binding_range: Option<renderdocx::buffer_binding::BufferBindingRange>,
     resource_pending: bool,
     selected_shader: Option<usize>,
@@ -2556,6 +2557,7 @@ impl Workspace {
                         this.selected_buffer = None;
                         this.buffer_binding_range = None;
                         this.buffer_data = None;
+                        this.buffer_fixed_data = None;
                         this.resource_pending = false;
                         this.selected_shader = None;
                         this.shader_data = None;
@@ -2690,6 +2692,7 @@ impl Workspace {
         self.history_selected = None;
         self.statistics = None;
         self.buffer_data = None;
+        self.buffer_fixed_data = None;
         self.buffer_binding_range = None;
         self.shader_data = None;
         self.shader_constants = None;
@@ -3173,6 +3176,7 @@ impl Workspace {
         self.selected_buffer = Some(index);
         self.buffer_offset = offset;
         self.buffer_data = None;
+        self.buffer_fixed_data = None;
         if self.selected.is_none() {
             self.status = Some(
                 self.t(
@@ -3208,6 +3212,27 @@ impl Workspace {
         let Ok(buffer_index) = u32::try_from(index) else {
             return;
         };
+        let prefix = self
+            .buffer_layout
+            .as_ref()
+            .and_then(|layout| layout.repeat_offset())
+            .filter(|prefix| *prefix > 0 && offset != self.buffer_layout_origin)
+            .map(|prefix| (self.buffer_layout_origin, prefix as u64));
+        if prefix
+            .is_some_and(|(origin, length)| origin < start || origin > end || length > end - origin)
+        {
+            self.status = Some(
+                self.t(
+                    "The fixed prefix is outside the current buffer range.",
+                    "固定前缀位于当前缓冲区范围之外。",
+                    "固定プレフィックスが現在のバッファ範囲外です。",
+                    "고정 접두부가 현재 버퍼 범위 밖입니다.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
         let length = (end - offset).min(self.buffer_page_size_at(offset)) as u32;
         self.resource_pending = true;
         self.status = Some(
@@ -3220,20 +3245,29 @@ impl Workspace {
             .to_owned(),
         );
         let revision = self.open_revision;
+        let selection_revision = self.selection_revision;
         cx.notify();
-        let task = cx
-            .background_executor()
-            .spawn(async move { session.read_buffer(buffer_index, offset, length) });
+        let task = cx.background_executor().spawn(async move {
+            let bytes = session.read_buffer(buffer_index, offset, length)?;
+            let fixed = match prefix {
+                Some((origin, size)) => {
+                    Some(session.read_buffer(buffer_index, origin, size as u32)?)
+                }
+                None => None,
+            };
+            Ok::<_, String>((bytes, fixed))
+        });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                if this.open_revision != revision {
+                if this.open_revision != revision || this.selection_revision != selection_revision {
                     return;
                 }
                 this.resource_pending = false;
                 match result {
-                    Ok(bytes) => {
+                    Ok((bytes, fixed)) => {
                         this.buffer_data = Some(bytes);
+                        this.buffer_fixed_data = fixed;
                         this.status = None;
                     }
                     Err(error) => {
@@ -3881,6 +3915,7 @@ impl Workspace {
                         this.descriptor_page = None;
                         this.counter_page = None;
                         this.buffer_data = None;
+                        this.buffer_fixed_data = None;
                         if edit.applied {
                             if let (
                                 Some(editor),
@@ -9835,7 +9870,18 @@ impl Workspace {
                             None,
                         )]);
                     }
-                    match layout.decode_at(self.buffer_layout_origin, self.buffer_offset, data) {
+                    let decoded = match &self.buffer_fixed_data {
+                        Some(prefix) => layout.decode_with_prefix(
+                            self.buffer_layout_origin,
+                            self.buffer_offset,
+                            data,
+                            prefix,
+                        ),
+                        None => {
+                            layout.decode_at(self.buffer_layout_origin, self.buffer_offset, data)
+                        }
+                    };
+                    match decoded {
                         Ok(page) => {
                             let fixed = page
                                 .fixed
@@ -11363,6 +11409,7 @@ impl Workspace {
                             this.export_pending = false;
                             this.resource_pending = false;
                             this.buffer_data = None;
+                        this.buffer_fixed_data = None;
                             this.shader_data = None; this.shader_constants = None; this.shader_bindings = None;
                             this.shader_editor = None;
                             this.structure = StructureView::default();
@@ -12951,6 +12998,7 @@ fn main() {
                         buffer_search,
                         buffer_search_last: None,
                         buffer_data: None,
+                        buffer_fixed_data: None,
                         buffer_binding_range: None,
                         resource_pending: false,
                         selected_shader: None,
@@ -13232,6 +13280,7 @@ mod ui_tests {
                         buffer_search,
                         buffer_search_last: None,
                         buffer_data: None,
+                        buffer_fixed_data: None,
                         buffer_binding_range: None,
                         resource_pending: false,
                         selected_shader: None,
@@ -13733,6 +13782,7 @@ mod ui_tests {
                         buffer_search,
                         buffer_search_last: None,
                         buffer_data: None,
+                        buffer_fixed_data: None,
                         buffer_binding_range: None,
                         resource_pending: false,
                         selected_shader: None,
@@ -14416,9 +14466,24 @@ mod ui_tests {
         })
         .unwrap();
         cx.run_until_parked();
-        cx.update(|cx| assert_eq!(view.read(cx).buffer_offset, 252));
+        cx.update(|cx| {
+            let view = view.read(cx);
+            assert_eq!(view.buffer_offset, 252);
+            let prefix = view.buffer_fixed_data.as_ref().unwrap();
+            assert_eq!(prefix.len(), 4);
+            let page = view
+                .buffer_layout
+                .as_ref()
+                .unwrap()
+                .decode_with_prefix(0, 252, view.buffer_data.as_ref().unwrap(), prefix)
+                .unwrap();
+            assert_eq!(page.fixed.unwrap()[0].name, "header");
+            assert_eq!(page.rows[0].offset, "252");
+        });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
+            assert!(window.try_find("buffer-text-0-1").is_some());
+            assert!(window.try_find("buffer-text-1-1").is_some());
             window.click("buffer-prev", cx);
         })
         .unwrap();

@@ -383,6 +383,26 @@ fn real_opengl_vertex_inputs_include_generic_and_normalized_values() {
     );
     let selected = agent.send(&serde_json::json!({"command":"select","event_id":draw}).to_string());
     assert_eq!(selected["ok"], true, "{selected}");
+    let buffer_index = opened["data"]["capture"]["buffers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|buffer| buffer["length"] == "12")
+        .unwrap();
+    let raw = agent.send(&serde_json::json!({"command":"read_buffer", "index":buffer_index, "offset":"0", "length":4}).to_string());
+    let hex = raw["data"]["hex"].as_str().unwrap();
+    let bytes: Vec<u8> = hex
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect();
+    let header = u32::from_le_bytes(bytes.try_into().unwrap()).to_string();
+    let later = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":buffer_index, "origin":"0", "offset":"4", "length":8, "include_fixed":true, "layout":"uint header; uint2 values[];"}).to_string());
+    assert_eq!(
+        later["data"]["page"]["fixed"][0]["values"][0][0], header,
+        "{later}"
+    );
+    assert_eq!(later["data"]["page"]["rows"][0]["offset"], "4", "{later}");
     let attributes = selected["data"]["pipeline"]["vertex_inputs"]
         .as_array()
         .unwrap();
@@ -2068,6 +2088,17 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         "{rejected_prefix}"
     );
     let repeat = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"4", "length":8, "layout":"float2 positions[];"}).to_string());
+    let page_with_prefix = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "origin":"0", "offset":"4", "length":8, "include_fixed":true, "layout":"[[offset(4)]] float2 positions[];"}).to_string());
+    assert_eq!(
+        page_with_prefix["data"]["page"]["fixed"],
+        serde_json::json!([]),
+        "{page_with_prefix}"
+    );
+    assert_eq!(
+        page_with_prefix["data"]["page"]["rows"][0]["fields"][0]["values"][0],
+        serde_json::json!(["3", "3"]),
+        "{page_with_prefix}"
+    );
     assert_eq!(repeat["data"]["page"]["repeat_offset"], "4", "{repeat}");
     assert_eq!(
         repeat["data"]["page"]["rows"][0]["fields"][0]["values"][0],
