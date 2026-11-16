@@ -9003,6 +9003,19 @@ impl Workspace {
     }
 
     fn capture_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The workspace view currently builds many nested panels in one frame. Grow on the
+        // same thread before constructing them when the caller's stack is nearly exhausted.
+        stacker::maybe_grow(3 * 1024 * 1024, 8 * 1024 * 1024, || {
+            self.capture_view_inner(window, cx)
+        })
+    }
+
+    #[inline(never)]
+    fn capture_view_inner(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         if self.tab == CaptureTab::Annotations && self.annotations.editor.is_none() {
             if let Some((_, doc)) = &self.annotations.notes {
                 let text = doc
