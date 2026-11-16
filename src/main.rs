@@ -22,6 +22,8 @@ struct Workspace {
     session: Option<Session>,
     snapshot: Option<Snapshot>,
     selected: Option<usize>,
+    show_textures: bool,
+    selected_texture: Option<usize>,
     open_revision: u64,
     selection_revision: u64,
 }
@@ -97,6 +99,8 @@ impl Workspace {
                         this.snapshot = Some(snapshot);
                         this.session = Some(session);
                         this.selected = None;
+                        this.selected_texture = None;
+                        this.show_textures = false;
                         this.status = None;
                     }
                     Err(error) => {
@@ -180,7 +184,11 @@ impl Workspace {
             .snapshot
             .as_ref()
             .expect("capture view requires a snapshot");
-        let count = snapshot.actions.len();
+        let count = if self.show_textures {
+            snapshot.textures.len()
+        } else {
+            snapshot.actions.len()
+        };
         let api = match snapshot.api {
             0 => "D3D11",
             1 => "D3D12",
@@ -194,6 +202,10 @@ impl Workspace {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
         let detail = self.selected.and_then(|i| snapshot.actions.get(i)).cloned();
+        let texture_detail = self
+            .selected_texture
+            .and_then(|i| snapshot.textures.get(i))
+            .cloned();
         let counts = format!(
             "{}  ·  {} {}  ·  {} {}  ·  {} {}",
             api,
@@ -233,6 +245,25 @@ impl Workspace {
             "RenderDoc에서 열기",
         );
         let events = self.t("EVENTS", "事件", "イベント", "이벤트");
+        let textures_label = self.t("Textures", "纹理", "テクスチャ", "텍스처");
+        let texture_label = self.t("Texture", "纹理", "テクスチャ", "텍스처");
+        let array_label = self.t("Array", "数组", "配列", "배열");
+        let samples_label = self.t("Samples", "采样", "サンプル", "샘플");
+        let bytes_label = self.t("Bytes", "字节", "バイト", "바이트");
+        let format_label = self.t("Format", "格式", "形式", "형식");
+        let component_label = self.t("Component", "分量", "成分", "구성 요소");
+        let texture_details = self.t(
+            "TEXTURE DETAILS",
+            "纹理详情",
+            "テクスチャの詳細",
+            "텍스처 상세",
+        );
+        let texture_empty = self.t(
+            "Select a texture to inspect its metadata.",
+            "选择纹理查看元数据。",
+            "テクスチャを選択して情報を表示します。",
+            "텍스처를 선택해 정보를 확인하세요.",
+        );
         let details = self.t("ACTION DETAILS", "操作详情", "アクション詳細", "작업 상세");
         let empty = self.t(
             "Select an action to replay its event.",
@@ -251,6 +282,154 @@ impl Workspace {
         );
         let instances_label = self.t("Instances", "实例", "インスタンス", "인스턴스");
         let status = self.status.clone();
+
+        let list = if self.show_textures {
+            uniform_list(
+                "capture-textures",
+                count,
+                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                    range
+                        .filter_map(|index| {
+                            let texture = this.snapshot.as_ref()?.textures.get(index)?;
+                            let name = if texture.name.is_empty() {
+                                format!("{texture_label} {index}")
+                            } else {
+                                texture.name.clone()
+                            };
+                            let dimensions = format!(
+                                "{} × {} × {}",
+                                texture.width, texture.height, texture.depth
+                            );
+                            Some(
+                                div()
+                                    .id(SharedString::from(format!("texture-{index}")))
+                                    .test_support()
+                                    .h(px(32.))
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_3()
+                                    .cursor_pointer()
+                                    .bg(rgb(if this.selected_texture == Some(index) {
+                                        0x304c7c
+                                    } else {
+                                        0x192332
+                                    }))
+                                    .hover(|row| row.bg(rgb(0x263950)))
+                                    .child(div().overflow_hidden().child(name))
+                                    .child(div().text_color(rgb(0x91a7c0)).child(dimensions))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.selected_texture = Some(index);
+                                        cx.notify();
+                                    })),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .flex_1()
+            .into_any_element()
+        } else {
+            uniform_list(
+                "capture-actions",
+                count,
+                cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                    range
+                        .filter_map(|index| {
+                            let action = this.snapshot.as_ref()?.actions.get(index)?;
+                            let selected = this.selected == Some(index);
+                            let name = action.name.clone();
+                            let event = action.event_id;
+                            let indent = action.depth as f32 * 14.0 + 12.0;
+                            Some(
+                                div()
+                                    .id(index)
+                                    .test_support()
+                                    .h(px(32.))
+                                    .pl(px(indent))
+                                    .pr_3()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .cursor_pointer()
+                                    .bg(rgb(if selected { 0x304c7c } else { 0x192332 }))
+                                    .hover(|row| row.bg(rgb(0x263950)))
+                                    .child(
+                                        div()
+                                            .w(px(64.))
+                                            .flex_none()
+                                            .text_color(rgb(0x91a7c0))
+                                            .child(event.to_string()),
+                                    )
+                                    .child(div().overflow_hidden().child(name))
+                                    .on_click(
+                                        cx.listener(move |this, _, _, cx| this.select(index, cx)),
+                                    ),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .flex_1()
+            .into_any_element()
+        };
+
+        let detail_view = if self.show_textures {
+            div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0x82aaff))
+                        .child(texture_details),
+                )
+                .when_some(texture_detail, |view, texture| {
+                    view.child(
+                        div()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .child(texture.name),
+                    )
+                    .child(format!(
+                        "{} × {} × {}",
+                        texture.width, texture.height, texture.depth
+                    ))
+                    .child(format!(
+                        "Mip: {}  ·  {array_label}: {}  ·  {samples_label}: {}",
+                        texture.mips, texture.array_size, texture.samples
+                    ))
+                    .child(format!("{bytes_label}: {}", texture.bytes))
+                    .child(format!(
+                        "{format_label}: {}  ·  {component_label}: {} / {} × {}",
+                        texture.format_type,
+                        texture.component_type,
+                        texture.component_count,
+                        texture.component_byte_width
+                    ))
+                })
+                .when(self.selected_texture.is_none(), |view| {
+                    view.child(div().text_color(rgb(0x9eacc0)).child(texture_empty))
+                })
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(div().text_sm().text_color(rgb(0x82aaff)).child(details))
+                .when_some(detail, |view, action| {
+                    view.child(div().font_weight(gpui::FontWeight::BOLD).child(action.name))
+                        .child(format!("{event_label}: {}", action.event_id))
+                        .child(format!("{action_label}: {}", action.action_id))
+                        .child(format!("{flags_label}: 0x{:08X}", action.flags))
+                        .child(format!("{indices_label}: {}", action.indices))
+                        .child(format!("{instances_label}: {}", action.instances))
+                })
+                .when(self.selected.is_none(), |view| {
+                    view.child(div().text_color(rgb(0x9eacc0)).child(empty))
+                })
+        };
 
         div()
             .size_full()
@@ -335,62 +514,39 @@ impl Workspace {
                             .overflow_hidden()
                             .child(
                                 div()
-                                    .px_4()
-                                    .py_3()
-                                    .text_sm()
-                                    .text_color(rgb(0x82aaff))
-                                    .child(format!("{events}  {count}")),
+                                    .flex()
+                                    .gap_2()
+                                    .px_3()
+                                    .py_2()
+                                    .child(button(
+                                        "events-tab",
+                                        events,
+                                        !self.show_textures,
+                                        |this, cx| {
+                                            this.show_textures = false;
+                                            cx.notify();
+                                        },
+                                        cx,
+                                    ))
+                                    .child(button(
+                                        "textures-tab",
+                                        textures_label,
+                                        self.show_textures,
+                                        |this, cx| {
+                                            this.show_textures = true;
+                                            cx.notify();
+                                        },
+                                        cx,
+                                    ))
+                                    .child(
+                                        div()
+                                            .self_center()
+                                            .text_sm()
+                                            .text_color(rgb(0x91a7c0))
+                                            .child(count.to_string()),
+                                    ),
                             )
-                            .child(
-                                uniform_list(
-                                    "capture-actions",
-                                    count,
-                                    cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
-                                        range
-                                            .filter_map(|index| {
-                                                let action =
-                                                    this.snapshot.as_ref()?.actions.get(index)?;
-                                                let selected = this.selected == Some(index);
-                                                let name = action.name.clone();
-                                                let event = action.event_id;
-                                                let indent = action.depth as f32 * 14.0 + 12.0;
-                                                Some(
-                                                    div()
-                                                        .id(index)
-                                                        .test_support()
-                                                        .h(px(32.))
-                                                        .pl(px(indent))
-                                                        .pr_3()
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap_3()
-                                                        .cursor_pointer()
-                                                        .bg(rgb(if selected {
-                                                            0x304c7c
-                                                        } else {
-                                                            0x192332
-                                                        }))
-                                                        .hover(|row| row.bg(rgb(0x263950)))
-                                                        .child(
-                                                            div()
-                                                                .w(px(64.))
-                                                                .flex_none()
-                                                                .text_color(rgb(0x91a7c0))
-                                                                .child(event.to_string()),
-                                                        )
-                                                        .child(div().overflow_hidden().child(name))
-                                                        .on_click(cx.listener(
-                                                            move |this, _, _, cx| {
-                                                                this.select(index, cx)
-                                                            },
-                                                        )),
-                                                )
-                                            })
-                                            .collect::<Vec<_>>()
-                                    }),
-                                )
-                                .flex_1(),
-                            ),
+                            .child(list),
                     )
                     .child(
                         div()
@@ -399,23 +555,7 @@ impl Workspace {
                             .bg(rgb(0x192332))
                             .rounded_lg()
                             .p_4()
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .child(div().text_sm().text_color(rgb(0x82aaff)).child(details))
-                            .when_some(detail, |view, action| {
-                                view.child(
-                                    div().font_weight(gpui::FontWeight::BOLD).child(action.name),
-                                )
-                                .child(format!("{event_label}: {}", action.event_id))
-                                .child(format!("{action_label}: {}", action.action_id))
-                                .child(format!("{flags_label}: 0x{:08X}", action.flags))
-                                .child(format!("{indices_label}: {}", action.indices))
-                                .child(format!("{instances_label}: {}", action.instances))
-                            })
-                            .when(self.selected.is_none(), |view| {
-                                view.child(div().text_color(rgb(0x9eacc0)).child(empty))
-                            }),
+                            .child(detail_view),
                     ),
             )
     }
@@ -691,6 +831,8 @@ fn main() {
                         session: None,
                         snapshot: None,
                         selected: None,
+                        show_textures: false,
+                        selected_texture: None,
                         open_revision: 0,
                         selection_revision: 0,
                     });
@@ -736,8 +878,11 @@ mod ui_tests {
                             resource_count: 0,
                             texture_count: 0,
                             buffer_count: 0,
+                            textures: Vec::new(),
                         }),
                         selected: None,
+                        show_textures: false,
+                        selected_texture: None,
                         open_revision: 0,
                         selection_revision: 0,
                     })
@@ -793,8 +938,25 @@ mod ui_tests {
                             resource_count: 1,
                             texture_count: 1,
                             buffer_count: 0,
+                            textures: vec![renderdocx::replay::Texture {
+                                name: "Color".into(),
+                                width: 16,
+                                height: 16,
+                                depth: 1,
+                                dimension: 2,
+                                mips: 1,
+                                array_size: 1,
+                                samples: 1,
+                                bytes: "1024".into(),
+                                format_type: 0,
+                                component_type: 0,
+                                component_count: 4,
+                                component_byte_width: 1,
+                            }],
                         }),
                         selected: None,
+                        show_textures: false,
+                        selected_texture: None,
                         open_revision: 0,
                         selection_revision: 0,
                     })
@@ -810,6 +972,16 @@ mod ui_tests {
         .unwrap();
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(view.read(cx).selected, Some(0)));
+        assert_eq!(*events.lock().unwrap(), vec![42]);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("textures-tab", cx);
+            window.click("texture-0", cx);
+        })
+        .unwrap();
+        cx.update(|cx| {
+            assert!(view.read(cx).show_textures);
+            assert_eq!(view.read(cx).selected_texture, Some(0));
+        });
         assert_eq!(*events.lock().unwrap(), vec![42]);
     }
 }

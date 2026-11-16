@@ -138,6 +138,13 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     assert!(success, "inspect failed: {result}");
     assert_eq!(result["capture"]["api"], 0);
     assert!(result["capture"]["texture_count"].as_u64().unwrap() > 0);
+    assert!(
+        result["capture"]["textures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|texture| texture["width"] == 16 && texture["height"] == 16)
+    );
     let clear = result["capture"]["actions"]
         .as_array()
         .unwrap()

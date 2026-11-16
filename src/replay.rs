@@ -32,6 +32,26 @@ pub struct Snapshot {
     pub resource_count: usize,
     pub texture_count: usize,
     pub buffer_count: usize,
+    #[serde(default)]
+    pub textures: Vec<Texture>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct Texture {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub depth: u32,
+    pub dimension: u32,
+    pub mips: u32,
+    pub array_size: u32,
+    pub samples: u32,
+    /// Decimal text preserves the full 64-bit value in JavaScript agents.
+    pub bytes: String,
+    pub format_type: u32,
+    pub component_type: u32,
+    pub component_count: u32,
+    pub component_byte_width: u32,
 }
 
 #[derive(Deserialize)]

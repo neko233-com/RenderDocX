@@ -5,6 +5,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -112,8 +113,29 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
   const auto &resources = controller->GetResources();
   const auto &textures = controller->GetTextures();
   const auto &buffers = controller->GetBuffers();
+  std::map<ResourceId, const rdcstr *> resource_names;
+  for(const ResourceDescription &resource : resources) resource_names.emplace(resource.resourceId, &resource.name);
   std::cout << "],\"resource_count\":" << resources.size() << ",\"texture_count\":"
-            << textures.size() << ",\"buffer_count\":" << buffers.size() << "}" << std::endl;
+            << textures.size() << ",\"buffer_count\":" << buffers.size() << ",\"textures\":[";
+  for(size_t i = 0; i < textures.size(); ++i)
+  {
+    const TextureDescription &texture = textures[i];
+    const auto found_name = resource_names.find(texture.resourceId);
+    const rdcstr *name = found_name == resource_names.end() ? nullptr : found_name->second;
+    if(i) std::cout << ',';
+    std::cout << "{\"name\":";
+    if(name) json_string(*name); else json_string("", 0);
+    std::cout << ",\"width\":" << texture.width << ",\"height\":" << texture.height
+              << ",\"depth\":" << texture.depth << ",\"dimension\":" << texture.dimension
+              << ",\"mips\":" << texture.mips << ",\"array_size\":" << texture.arraysize
+              << ",\"samples\":" << texture.msSamp << ",\"bytes\":\"" << texture.byteSize
+              << "\",\"format_type\":" << uint32_t(texture.format.type)
+              << ",\"component_type\":" << uint32_t(texture.format.compType)
+              << ",\"component_count\":" << uint32_t(texture.format.compCount)
+              << ",\"component_byte_width\":" << uint32_t(texture.format.compByteWidth)
+              << '}';
+  }
+  std::cout << "]}" << std::endl;
 }
 
 int run(const std::string &capture)
