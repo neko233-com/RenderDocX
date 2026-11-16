@@ -24,7 +24,7 @@ Unity's built-in RenderDoc integration can load RenderDoc in the Editor and capt
 
 ## Source and compatibility
 
-This repository includes a RenderDoc source snapshot identifying itself as version 1.48. Its exact upstream commit is not present in the supplied snapshot. The existing capture/replay core and Qt frontend are retained for reference and compatibility; they have not been translated to Rust. The upstream README is preserved at [docs/README.renderdoc-upstream.md](docs/README.renderdoc-upstream.md). Upstream GitHub workflows are preserved as inactive reference files under `docs/upstream-github-workflows/`.
+This repository includes a RenderDoc source snapshot identifying itself as version 1.48. The supplied snapshot had no Git history. Its files were compared to upstream `v1.x` commit [`5ad608809c9028da9f5c5082397cb6afe9c8dd17`](https://github.com/baldurk/renderdoc/commit/5ad608809c9028da9f5c5082397cb6afe9c8dd17): 5,979 initially tracked files and 50 initially ignored upstream binary files matched their upstream Git blob IDs. The project README and `.gitignore` differ; upstream GitHub metadata was moved to inactive reference locations. This is file-level evidence, not recovered Git ancestry. The existing capture/replay core and Qt frontend are retained; they have not been translated to Rust. The upstream README is preserved at [docs/README.renderdoc-upstream.md](docs/README.renderdoc-upstream.md), and upstream GitHub workflows under `docs/upstream-github-workflows/`.
 
 Native event browsing, resource and pipeline inspection, replay, target control, remote capture, extensions, accessibility, and complete platform parity are not implemented in the GPUI frontend. See [docs/renderdocx-roadmap.md](docs/renderdocx-roadmap.md).
 
