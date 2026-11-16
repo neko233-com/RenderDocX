@@ -1,6 +1,118 @@
 //! RenderDoc's version-one JSON notes, bookmarks and resource names.
 use serde_json::{Value, json};
 
+pub fn shader_editors(document: &Value) -> Result<&[Value], String> {
+    let object = document
+        .as_object()
+        .ok_or("Shader edits must be a JSON object")?;
+    match object.get("editors") {
+        None => Ok(&[]),
+        Some(value) => value
+            .as_array()
+            .map(Vec::as_slice)
+            .ok_or_else(|| "Shader editors must be an array".into()),
+    }
+}
+
+pub fn shader_editor<'a>(
+    document: &'a Value,
+    id: &str,
+    stage: u32,
+) -> Result<Option<&'a Value>, String> {
+    let mut found = None;
+    for editor in shader_editors(document)? {
+        let object = editor.as_object().ok_or("Invalid shader editor")?;
+        let editor_id = object
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("Shader editor has no resource ID")?;
+        let editor_stage = object
+            .get("stage")
+            .and_then(Value::as_u64)
+            .ok_or("Shader editor has no stage")?;
+        if editor_id == id && editor_stage == u64::from(stage) {
+            if found.is_some() {
+                return Err("Multiple saved editors match this shader and stage".into());
+            }
+            found = Some(editor);
+        }
+    }
+    Ok(found)
+}
+
+pub fn upsert_shader_editor(document: &Value, editor: &Value) -> Result<Value, String> {
+    let object = editor.as_object().ok_or("Invalid shader editor")?;
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or("Shader editor has no resource ID")?;
+    let stage = object
+        .get("stage")
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|n| *n < 8)
+        .ok_or("Invalid shader stage")?;
+    let numeric_id = id
+        .strip_prefix("ResourceId::")
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v != 0)
+        .ok_or("Invalid RenderDoc resource identifier")?;
+    if id != format!("ResourceId::{numeric_id}") {
+        return Err("Noncanonical RenderDoc resource identifier".into());
+    }
+    let files = object
+        .get("files")
+        .and_then(Value::as_array)
+        .filter(|files| !files.is_empty())
+        .ok_or("Shader editor needs source files")?;
+    if files.iter().any(|file| {
+        file.get("name").and_then(Value::as_str).is_none()
+            || file.get("contents").and_then(Value::as_str).is_none()
+    }) {
+        return Err("Invalid shader editor file".into());
+    }
+    for key in ["entryPoint", "commandLine", "tool"] {
+        if object.get(key).and_then(Value::as_str).is_none() {
+            return Err(format!("Invalid shader editor {key}"));
+        }
+    }
+    if object
+        .get("encoding")
+        .and_then(Value::as_u64)
+        .is_none_or(|v| v >= 10)
+        || object
+            .get("flags")
+            .and_then(Value::as_object)
+            .is_none_or(|flags| flags.values().any(|value| !value.is_string()))
+    {
+        return Err("Invalid shader editor encoding or flags".into());
+    }
+    let existing = shader_editor(document, id, stage)?;
+    let mut merged = existing
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    merged.extend(object.clone());
+    let mut updated = document.clone();
+    let root = updated
+        .as_object_mut()
+        .ok_or("Shader edits must be a JSON object")?;
+    let editors = root
+        .entry("editors")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .ok_or("Shader editors must be an array")?;
+    if let Some(index) = editors.iter().position(|item| {
+        item.get("id").and_then(Value::as_str) == Some(id)
+            && item.get("stage").and_then(Value::as_u64) == Some(u64::from(stage))
+    }) {
+        editors[index] = Value::Object(merged);
+    } else {
+        editors.push(Value::Object(merged));
+    }
+    Ok(updated)
+}
+
 pub fn display_resource_name<'a>(
     resources: &'a [crate::replay::ResourceInfo],
     document: Option<&'a Value>,
@@ -202,5 +314,26 @@ mod tests {
             display_resource_name(&resources, None, Some(1), "fallback"),
             "fallback"
         );
+    }
+
+    #[test]
+    fn shader_editor_update_preserves_unrelated_editors_and_rejects_ambiguity() {
+        let existing = json!({"plugin":1,"editors":[{"id":"ResourceId::7","stage":4,"extra":true,"files":[{"name":"old","contents":"old"}]},{"id":"ResourceId::8","stage":0,"files":[]}]});
+        let edit = json!({"id":"ResourceId::7","stage":4,"entryPoint":"main","encoding":5,"commandLine":"","tool":"Builtin","flags":{"@cmdline":""},"files":[{"name":"main.hlsl","contents":"中文"}]});
+        let updated = upsert_shader_editor(&existing, &edit).unwrap();
+        assert_eq!(updated["plugin"], 1);
+        assert_eq!(updated["editors"][0]["extra"], true);
+        assert_eq!(updated["editors"][0]["files"][0]["contents"], "中文");
+        assert_eq!(updated["editors"][1], existing["editors"][1]);
+        assert_eq!(
+            shader_editor(&updated, "ResourceId::7", 4)
+                .unwrap()
+                .unwrap()["entryPoint"],
+            "main"
+        );
+        let duplicate =
+            json!({"editors":[{"id":"ResourceId::7","stage":4},{"id":"ResourceId::7","stage":4}]});
+        assert!(upsert_shader_editor(&duplicate, &edit).is_err());
+        assert!(upsert_shader_editor(&json!({"editors":"bad"}), &edit).is_err());
     }
 }

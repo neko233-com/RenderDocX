@@ -804,6 +804,11 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         .expect("fixture has a stable resource ID");
     let renamed = annotation_agent.send(&serde_json::json!({"command":"resource_rename","index":rename_index,"name":"中文 日本語 한국어"}).to_string());
     assert_eq!(renamed["ok"], true, "{renamed}");
+    let edit_read = annotation_agent.send(r#"{"command":"annotation_read","name":"edits"}"#);
+    assert_eq!(edit_read["ok"], true, "{edit_read}");
+    let edit_doc = serde_json::json!({"editors":[{"id":rename_key,"stage":0,"entryPoint":"main","encoding":5,"commandLine":"","tool":"Builtin","flags":{},"files":[{"name":"main.hlsl","contents":"中文"},{"name":"include.hlsl","contents":"keep"}]}],"extra":true});
+    let edit_saved = annotation_agent.send(&serde_json::json!({"command":"annotation_write","section":edit_read["data"]["section"],"document":edit_doc}).to_string());
+    assert_eq!(edit_saved["ok"], true, "{edit_saved}");
     let read = annotation_agent.send(r#"{"command":"annotation_read","name":"notes"}"#);
     assert_eq!(read["ok"], true, "{read}");
     let original = read["data"]["section"].clone();
@@ -843,6 +848,10 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     assert_eq!(
         reopened.send(r#"{"command":"annotation_read","name":"bookmarks"}"#)["data"]["document"],
         bookmark_doc
+    );
+    assert_eq!(
+        reopened.send(r#"{"command":"annotation_read","name":"edits"}"#)["data"]["document"],
+        edit_doc
     );
     let renamed = reopened.send(r#"{"command":"annotation_read","name":"renames"}"#);
     assert_eq!(

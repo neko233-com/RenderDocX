@@ -958,19 +958,20 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                 let name = request.get("name").and_then(Value::as_str);
                 match (&opened, name) {
                     (None, _) => Err(("no_capture", "No capture is open".into())),
-                    (Some((session, _)), Some(name @ ("notes" | "bookmarks" | "renames"))) => {
-                        session
-                            .annotation_read(name)
-                            .and_then(|section| {
-                                section
-                                    .document()
-                                    .map(|document| json!({"section":section,"document":document}))
-                            })
-                            .map_err(|error| ("replay_annotation_failed", error))
-                    }
+                    (
+                        Some((session, _)),
+                        Some(name @ ("notes" | "bookmarks" | "renames" | "edits")),
+                    ) => session
+                        .annotation_read(name)
+                        .and_then(|section| {
+                            section
+                                .document()
+                                .map(|document| json!({"section":section,"document":document}))
+                        })
+                        .map_err(|error| ("replay_annotation_failed", error)),
                     _ => Err((
                         "invalid_arguments",
-                        "annotation_read requires notes, bookmarks or renames".into(),
+                        "annotation_read requires notes, bookmarks, renames or edits".into(),
                     )),
                 }
             }

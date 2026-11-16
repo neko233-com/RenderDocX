@@ -890,10 +890,10 @@ int run(const std::string &capture, bool structure_worker)
       const bool writing = command.compare(0, 14, "section_write ") == 0;
       std::istringstream arguments(command.substr(writing ? 14 : 13));
       std::string name, expected, payload, extra;
-      if(!(arguments >> name) || (name != "notes" && name != "bookmarks" && name != "renames") ||
+      if(!(arguments >> name) || (name != "notes" && name != "bookmarks" && name != "renames" && name != "edits") ||
          (writing && !(arguments >> expected >> payload)) || (arguments >> extra))
       { error("Invalid annotation section request"); continue; }
-      const SectionType type = name == "notes" ? SectionType::Notes : (name == "bookmarks" ? SectionType::Bookmarks : SectionType::ResourceRenames);
+      const SectionType type = name == "notes" ? SectionType::Notes : (name == "bookmarks" ? SectionType::Bookmarks : (name == "renames" ? SectionType::ResourceRenames : SectionType::EditedShaders));
       bytebuf expected_bytes, new_bytes;
       if(writing && ((expected != "-" && !decode_section_hex(expected, expected_bytes)) || !decode_section_hex(payload, new_bytes)))
       { error("Invalid annotation section encoding"); continue; }
@@ -1488,6 +1488,15 @@ int run(const std::string &capture, bool structure_worker)
       json_string(reflection->debugInfo.debugStatus);
       std::cout << ",\"source_encoding\":" << uint32_t(reflection->debugInfo.encoding) << ",\"source_entry\":";
       json_string(reflection->debugInfo.entrySourceName);
+      std::cout << ",\"compile_flags\":[";
+      for(size_t i = 0; i < reflection->debugInfo.compileFlags.flags.size(); ++i)
+      {
+        if(i) std::cout << ',';
+        const ShaderCompileFlag &flag = reflection->debugInfo.compileFlags.flags[i];
+        std::cout << "{\"name\":"; json_string(flag.name);
+        std::cout << ",\"value\":"; json_string(flag.value); std::cout << '}';
+      }
+      std::cout << ']';
       std::cout << ",\"target_encodings\":[";
       const auto encodings = replay.controller->GetTargetShaderEncodings();
       for(size_t i = 0; i < encodings.size(); ++i) { if(i) std::cout << ','; std::cout << uint32_t(encodings[i]); }

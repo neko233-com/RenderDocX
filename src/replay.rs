@@ -471,6 +471,14 @@ pub struct ShaderReport {
     pub source_encoding: Option<u32>,
     #[serde(default)]
     pub source_entry: Option<String>,
+    #[serde(default)]
+    pub compile_flags: Vec<ShaderCompileFlag>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ShaderCompileFlag {
+    pub name: String,
+    pub value: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2131,7 +2139,7 @@ pub struct Session {
 
 impl Session {
     pub fn annotation_read(&self, name: &str) -> Result<AnnotationSection, String> {
-        if name != "notes" && name != "bookmarks" && name != "renames" {
+        if name != "notes" && name != "bookmarks" && name != "renames" && name != "edits" {
             return Err("Unknown annotation section".into());
         }
         self.process
@@ -2144,7 +2152,11 @@ impl Session {
         section: &AnnotationSection,
         document: &serde_json::Value,
     ) -> Result<AnnotationSection, String> {
-        if section.name != "notes" && section.name != "bookmarks" && section.name != "renames" {
+        if section.name != "notes"
+            && section.name != "bookmarks"
+            && section.name != "renames"
+            && section.name != "edits"
+        {
             return Err("Unknown annotation section".into());
         }
         if section.name == "bookmarks" {
@@ -2153,6 +2165,9 @@ impl Session {
         } else if section.name == "renames" {
             crate::annotations::resource_name(&section.document()?, "ResourceId::1")?;
             crate::annotations::resource_name(document, "ResourceId::1")?;
+        } else if section.name == "edits" {
+            crate::annotations::shader_editors(&section.document()?)?;
+            crate::annotations::shader_editors(document)?;
         } else if section.name == "notes"
             && document
                 .get("comments")
@@ -2966,6 +2981,7 @@ pub mod test_support {
                 target_encodings: vec![2, 5],
                 source_encoding: Some(5),
                 source_entry: Some("main".into()),
+                compile_flags: Vec::new(),
                 source_files: vec![
                     ShaderSourceFile {
                         filename: "fixture.hlsl".into(),

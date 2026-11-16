@@ -45,6 +45,7 @@ struct AnnotationView {
     notes: Option<(AnnotationSection, serde_json::Value)>,
     bookmarks: Option<(AnnotationSection, serde_json::Value)>,
     renames: Option<(AnnotationSection, serde_json::Value)>,
+    edits: Option<serde_json::Value>,
     editor: Option<Entity<TextareaState>>,
 }
 
@@ -84,6 +85,12 @@ struct ShaderEditor {
     stage: usize,
     event: u32,
     filename: String,
+    resource_key: Option<String>,
+    files: Vec<serde_json::Value>,
+    file_index: usize,
+    flags: serde_json::Map<String, serde_json::Value>,
+    command_line: String,
+    tool: String,
     baseline: String,
     baseline_entry: String,
     baseline_encoding: String,
@@ -1515,7 +1522,12 @@ impl Workspace {
                 annotations::resource_name(&document, "ResourceId::1")?;
                 Ok((section, document))
             });
-            Ok::<_, String>((session, snapshot, renames))
+            let edits = session.annotation_read("edits").and_then(|section| {
+                let document = section.document()?;
+                annotations::shader_editors(&document)?;
+                Ok(document)
+            });
+            Ok::<_, String>((session, snapshot, renames, edits))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -1524,7 +1536,7 @@ impl Workspace {
                     return;
                 }
                 match result {
-                    Ok((session, snapshot, renames)) => {
+                    Ok((session, snapshot, renames, edits)) => {
                         // Invalidate work started against the old session while this open was pending.
                         this.open_revision += 1;
                         this.capture = Some(capture);
@@ -1565,6 +1577,13 @@ impl Workspace {
                             }
                             Err(error) => Some(error),
                         };
+                        let edits_error = match edits {
+                            Ok(document) => {
+                                this.annotations.edits = Some(document);
+                                None
+                            }
+                            Err(error) => Some(error),
+                        };
                         this.refresh_resources();
                         this.usage_page = None;
                         this.replay_pending = false;
@@ -1574,14 +1593,14 @@ impl Workspace {
                         this.pixel_history = None;
                         this.history_selected = None;
                         this.statistics = None;
-                        this.status = rename_error.map(|error| {
+                        this.status = rename_error.or(edits_error).map(|error| {
                             format!(
                                 "{}: {error}",
                                 this.t(
-                                    "Could not load resource names",
-                                    "无法加载资源名称",
-                                    "リソース名を読み込めません",
-                                    "리소스 이름을 불러올 수 없습니다"
+                                    "Could not load capture metadata",
+                                    "无法加载捕获元数据",
+                                    "キャプチャのメタデータを読み込めません",
+                                    "캡처 메타데이터를 불러올 수 없습니다"
                                 )
                             )
                         });
@@ -1901,12 +1920,53 @@ impl Workspace {
         let (Some(stage), Some(report)) = (self.selected_shader, self.shader_data.as_ref()) else {
             return;
         };
+        let resource_key = self
+            .pipeline
+            .as_ref()
+            .and_then(|pipeline| {
+                pipeline
+                    .shaders
+                    .iter()
+                    .find(|shader| shader.stage == SHADER_STAGES[stage])
+            })
+            .and_then(|shader| shader.resource.resource_index)
+            .and_then(|index| self.snapshot.as_ref()?.resources.get(index))
+            .and_then(|resource| resource.rename_key.clone());
+        let saved = match (self.annotations.edits.as_ref(), resource_key.as_deref()) {
+            (Some(document), Some(key)) => {
+                match annotations::shader_editor(document, key, stage as u32) {
+                    Ok(editor) => editor.cloned(),
+                    Err(error) => {
+                        self.status = Some(error);
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+            _ => None,
+        };
         let file = self
             .shader_source
             .and_then(|index| report.source_files.get(index));
-        let baseline = file.map(|file| file.contents.clone()).unwrap_or_default();
-        let filename = file.map(|file| file.filename.clone()).unwrap_or_default();
-        let encoding = report
+        let mut files: Vec<serde_json::Value> = report
+            .source_files
+            .iter()
+            .map(|file| serde_json::json!({"name":file.filename,"contents":file.contents}))
+            .collect();
+        let mut file_index = self.shader_source.unwrap_or(0);
+        let mut flags: serde_json::Map<String, serde_json::Value> = report
+            .compile_flags
+            .iter()
+            .map(|flag| {
+                (
+                    flag.name.clone(),
+                    serde_json::Value::String(flag.value.clone()),
+                )
+            })
+            .collect();
+        let mut command_line = String::new();
+        let mut tool = "Builtin".to_owned();
+        let mut encoding = report
             .source_encoding
             .filter(|encoding| report.target_encodings.contains(encoding))
             .or_else(|| {
@@ -1918,12 +1978,149 @@ impl Workspace {
             })
             .or_else(|| report.target_encodings.first().copied())
             .unwrap_or(0);
-        let entry = report
+        let mut entry = report
             .source_entry
             .as_deref()
             .filter(|value| !value.is_empty())
             .unwrap_or(&report.entry_point)
             .to_owned();
+        if let Some(saved) = saved.as_ref() {
+            let Some(saved_files) = saved
+                .get("files")
+                .and_then(serde_json::Value::as_array)
+                .filter(|files| !files.is_empty())
+            else {
+                self.status = Some(
+                    self.t(
+                        "Invalid saved shader draft.",
+                        "保存的着色器草稿无效。",
+                        "保存されたシェーダーの下書きが無効です。",
+                        "저장된 셰이더 초안이 올바르지 않습니다.",
+                    )
+                    .to_owned(),
+                );
+                cx.notify();
+                return;
+            };
+            if saved_files.iter().any(|file| {
+                file.get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none()
+                    || file
+                        .get("contents")
+                        .and_then(serde_json::Value::as_str)
+                        .is_none()
+            }) {
+                self.status = Some(
+                    self.t(
+                        "Invalid saved shader draft.",
+                        "保存的着色器草稿无效。",
+                        "保存されたシェーダーの下書きが無効です。",
+                        "저장된 셰이더 초안이 올바르지 않습니다.",
+                    )
+                    .to_owned(),
+                );
+                cx.notify();
+                return;
+            }
+            files = saved_files.clone();
+            let chosen_name = file.map(|file| file.filename.as_str()).unwrap_or("");
+            file_index = files
+                .iter()
+                .position(|file| file["name"].as_str() == Some(chosen_name))
+                .unwrap_or(0);
+            let Some(saved_encoding) = saved
+                .get("encoding")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|n| u32::try_from(n).ok())
+                .filter(|n| *n < 10)
+            else {
+                self.status = Some(
+                    self.t(
+                        "Invalid saved shader draft.",
+                        "保存的着色器草稿无效。",
+                        "保存されたシェーダーの下書きが無効です。",
+                        "저장된 셰이더 초안이 올바르지 않습니다.",
+                    )
+                    .to_owned(),
+                );
+                cx.notify();
+                return;
+            };
+            let Some(saved_entry) = saved.get("entryPoint").and_then(serde_json::Value::as_str)
+            else {
+                self.status = Some(
+                    self.t(
+                        "Invalid saved shader draft.",
+                        "保存的着色器草稿无效。",
+                        "保存されたシェーダーの下書きが無効です。",
+                        "저장된 셰이더 초안이 올바르지 않습니다.",
+                    )
+                    .to_owned(),
+                );
+                cx.notify();
+                return;
+            };
+            let Some(saved_flags) = saved
+                .get("flags")
+                .and_then(serde_json::Value::as_object)
+                .filter(|flags| flags.values().all(serde_json::Value::is_string))
+            else {
+                self.status = Some(
+                    self.t(
+                        "Invalid saved shader draft.",
+                        "保存的着色器草稿无效。",
+                        "保存されたシェーダーの下書きが無効です。",
+                        "저장된 셰이더 초안이 올바르지 않습니다.",
+                    )
+                    .to_owned(),
+                );
+                cx.notify();
+                return;
+            };
+            let Some(saved_tool) = saved.get("tool").and_then(serde_json::Value::as_str) else {
+                self.status = Some(
+                    self.t(
+                        "Invalid saved shader draft.",
+                        "保存的着色器草稿无效。",
+                        "保存されたシェーダーの下書きが無効です。",
+                        "저장된 셰이더 초안이 올바르지 않습니다.",
+                    )
+                    .to_owned(),
+                );
+                cx.notify();
+                return;
+            };
+            let Some(saved_command) = saved.get("commandLine").and_then(serde_json::Value::as_str)
+            else {
+                self.status = Some(
+                    self.t(
+                        "Invalid saved shader draft.",
+                        "保存的着色器草稿无效。",
+                        "保存されたシェーダーの下書きが無効です。",
+                        "저장된 셰이더 초안이 올바르지 않습니다.",
+                    )
+                    .to_owned(),
+                );
+                cx.notify();
+                return;
+            };
+            encoding = saved_encoding;
+            entry = saved_entry.to_owned();
+            flags = saved_flags.clone();
+            tool = saved_tool.to_owned();
+            command_line = saved_command.to_owned();
+        }
+        if files.is_empty() {
+            files.push(serde_json::json!({"name":"shader.txt","contents":""}));
+            file_index = 0;
+        }
+        let file_index = file_index.min(files.len() - 1);
+        let baseline = files[file_index]["contents"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        let filename = files[file_index]["name"].as_str().unwrap_or("").to_owned();
         let event = report.event_id;
         self.shader_edit_entry
             .update(cx, |input, cx| input.set_value(entry.clone(), window, cx));
@@ -1939,6 +2136,12 @@ impl Workspace {
             stage,
             event,
             filename,
+            resource_key,
+            files,
+            file_index,
+            flags,
+            command_line,
+            tool,
             baseline,
             baseline_entry: entry,
             baseline_encoding: encoding.to_string(),
@@ -1968,6 +2171,32 @@ impl Workspace {
             else {
                 return;
             };
+            if editor.tool != "Builtin" {
+                self.status = Some(self.t("This saved draft uses an external compiler; compile it in RenderDoc or use a built-in draft.", "此草稿使用外部编译器；请在 RenderDoc 中编译，或使用内置编译器草稿。", "この下書きは外部コンパイラーを使用します。RenderDoc でコンパイルするか、組み込みコンパイラーの下書きを使用してください。", "이 초안은 외부 컴파일러를 사용합니다. RenderDoc에서 컴파일하거나 기본 컴파일러 초안을 사용하세요.").to_owned());
+                cx.notify();
+                return;
+            }
+            let current_flags: serde_json::Map<String, serde_json::Value> = self
+                .shader_data
+                .as_ref()
+                .map(|report| {
+                    report
+                        .compile_flags
+                        .iter()
+                        .map(|flag| {
+                            (
+                                flag.name.clone(),
+                                serde_json::Value::String(flag.value.clone()),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if current_flags != editor.flags {
+                self.status = Some(self.t("This draft has different compile flags; applying saved flags is not yet supported.", "此草稿的编译参数不同；暂不支持按保存的参数编译。", "この下書きのコンパイルフラグは異なります。保存済みフラグでのコンパイルはまだサポートされていません。", "이 초안의 컴파일 플래그가 다릅니다. 저장된 플래그 적용은 아직 지원되지 않습니다.").to_owned());
+                cx.notify();
+                return;
+            }
             let Ok(encoding) = self.shader_edit_encoding.read(cx).value().parse::<u32>() else {
                 self.status = Some(
                     self.t(
@@ -2081,6 +2310,100 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    fn save_shader_draft(&mut self, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            return;
+        }
+        let (Some(session), Some(editor)) = (self.session.clone(), self.shader_editor.as_ref())
+        else {
+            return;
+        };
+        let Some(resource_key) = editor.resource_key.clone() else {
+            self.status = Some(
+                self.t(
+                    "A stable shader resource ID is required to save a draft.",
+                    "保存草稿需要稳定的着色器资源 ID。",
+                    "下書きの保存には安定したシェーダーリソース ID が必要です。",
+                    "초안을 저장하려면 안정적인 셰이더 리소스 ID가 필요합니다.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let Ok(encoding) = self.shader_edit_encoding.read(cx).value().parse::<u32>() else {
+            self.status = Some(
+                self.t(
+                    "Enter a valid shader encoding.",
+                    "请输入有效的着色器编码。",
+                    "有効なシェーダーエンコーディングを入力してください。",
+                    "올바른 셰이더 인코딩을 입력하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let entry = self.shader_edit_entry.read(cx).value().to_string();
+        let source = editor.input.read(cx).value().to_string();
+        let stage = editor.stage;
+        let file_index = editor.file_index;
+        let mut files = editor.files.clone();
+        let Some(file) = files
+            .get_mut(file_index)
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            return;
+        };
+        file.insert("contents".into(), serde_json::Value::String(source.clone()));
+        let data = serde_json::json!({"id":resource_key,"stage":stage,"entryPoint":entry,"encoding":encoding,"commandLine":editor.command_line,"tool":editor.tool,"flags":editor.flags,"files":files});
+        self.resource_pending = true;
+        let revision = self.open_revision;
+        self.status = Some(
+            self.t(
+                "Saving shader draft…",
+                "正在保存着色器草稿…",
+                "シェーダーの下書きを保存中…",
+                "셰이더 초안 저장 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            let section = session.annotation_read("edits")?;
+            let document = annotations::upsert_shader_editor(&section.document()?, &data)?;
+            session.annotation_write(&section, &document)?;
+            Ok::<_, String>((
+                document,
+                resource_key,
+                stage,
+                file_index,
+                source,
+                entry,
+                encoding,
+            ))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision { return; }
+                this.resource_pending = false;
+                match result {
+                    Ok((document, resource_key, stage, file_index, source, entry, encoding)) => {
+                        this.annotations.edits = Some(document);
+                        if let Some(editor) = this.shader_editor.as_mut().filter(|editor| editor.stage == stage && editor.resource_key.as_deref() == Some(&resource_key) && editor.file_index == file_index) {
+                            if let Some(file) = editor.files.get_mut(file_index).and_then(serde_json::Value::as_object_mut) { file.insert("contents".into(), serde_json::Value::String(source.clone())); }
+                            editor.baseline = source; editor.baseline_entry = entry; editor.baseline_encoding = encoding.to_string();
+                        }
+                        this.status = Some(this.t("Shader draft saved to capture; it was not applied.", "着色器草稿已保存到捕获文件；尚未应用。", "シェーダーの下書きをキャプチャに保存しました。適用はされていません。", "셰이더 초안을 캡처에 저장했습니다. 적용되지는 않았습니다.").to_owned());
+                    }
+                    Err(error) => this.status = Some(format!("{}: {error}", this.t("Could not save shader draft", "无法保存着色器草稿", "シェーダーの下書きを保存できません", "셰이더 초안을 저장할 수 없습니다"))),
+                }
+                cx.notify();
+            });
+        }).detach();
     }
 
     fn read_descriptors(&mut self, store: Option<usize>, offset: u64, cx: &mut Context<Self>) {
@@ -6513,6 +6836,7 @@ impl Workspace {
                             .child(Textarea::new(&editor.input).aria_label(edit_label))
                             .child(div().flex().gap_2()
                                 .child(button("shader-edit-apply", self.t("Compile and apply", "编译并应用", "コンパイルして適用", "컴파일 및 적용"), true, |this, cx| this.edit_shader(false, cx), cx))
+                                .child(button("shader-edit-save", self.t("Save draft to capture", "保存草稿到捕获", "下書きをキャプチャに保存", "초안을 캡처에 저장"), false, |this, cx| this.save_shader_draft(cx), cx))
                                 .child(button("shader-edit-discard", self.t("Discard draft", "放弃草稿", "下書きを破棄", "초안 버리기"), false, |this, cx| { if !this.resource_pending { this.shader_editor = None; cx.notify(); } }, cx)));
                     }
                     if let Some(file) = self
@@ -9816,7 +10140,13 @@ mod ui_tests {
             assert_eq!(view.read(cx).shader_source_page, 0);
             window.click(("shader-source-file", 1usize), cx);
             assert_eq!(view.read(cx).shader_source, Some(1));
+            view.update(cx, |view, _| {
+                view.pipeline.as_mut().unwrap().shaders[0].resource.resource_index = Some(0);
+                view.annotations.edits = Some(serde_json::json!({"editors":[{"id":"ResourceId::1","stage":0,"entryPoint":"saved_entry","encoding":5,"commandLine":"","tool":"Builtin","flags":{},"files":[{"name":"fixture.hlsl","contents":"saved main"},{"name":"include.hlsl","contents":"saved include"}]}]}));
+            });
             window.click("shader-edit-begin", cx);
+            assert_eq!(view.read(cx).shader_editor.as_ref().unwrap().baseline, "saved include");
+            assert_eq!(view.read(cx).shader_edit_entry.read(cx).value().as_ref(), "saved_entry");
             let entry = view.read(cx).shader_edit_entry.clone();
             entry.update(cx, |entry, cx| entry.set_value("changed", window, cx));
             view.update(cx, |view, cx| {
