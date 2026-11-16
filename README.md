@@ -70,6 +70,8 @@ The native event browser, texture preview, and event replay are initial implemen
 
 On Windows x64, `./scripts/test-windows.ps1` builds the matching core and helpers, runs headless protocol and Agent CLI tests, exercises generated D3D11 capture and replay as well as live target discovery, connection and capture, and runs GPUI interaction tests with both a recording transport and a generated D3D11 capture. Add `-IncludeFast` to include the experimental backend, and `-IncludeOpenGL` for OpenGL 3.3 capture and input inspection tests. The real-core tests need a supported D3D11 device or WARP; OpenGL tests require a compatible graphics driver. The headless real-core tests are marked ignored when running `cargo test` alone. Additional graphics APIs, GPU combinations, Unity/Tuanjie, and platforms still need coverage.
 
+The ignored `real_vulkan_mesh_shader_debug_trace` test takes a debuggable Vulkan mesh-shader capture from `RENDERDOCX_TEST_VULKAN_MESH_CAPTURE` and the matching replay helper from `RENDERDOCX_TEST_BRIDGE`. Run it with `cargo test --test agent_cli real_vulkan_mesh_shader_debug_trace -- --ignored`. It requires a compatible Vulkan replay device; providing a capture and compiling the test do not establish that the test passed. On Windows, a separately registered RenderDoc Vulkan layer can load a different `renderdoc.dll` into the capture target; Vulkan capture with this package and existing installations remains unverified.
+
 ## License
 
 The included RenderDoc source is MIT licensed. See [LICENSE.md](LICENSE.md) and [third-party acknowledgements](docs/credits_acknowledgements.rst). Rust dependencies have their own licenses.

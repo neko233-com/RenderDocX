@@ -122,6 +122,47 @@ fn invoke(args: &[&str]) -> (bool, Value) {
     )
 }
 
+#[test]
+#[ignore = "requires a Vulkan mesh-shader capture and a matching RenderDoc replay bridge"]
+fn real_vulkan_mesh_shader_debug_trace() {
+    let bridge = std::env::var("RENDERDOCX_TEST_BRIDGE").expect("set RENDERDOCX_TEST_BRIDGE");
+    let capture = std::env::var("RENDERDOCX_TEST_VULKAN_MESH_CAPTURE")
+        .expect("set RENDERDOCX_TEST_VULKAN_MESH_CAPTURE");
+    let mut agent = Agent::new(Some(&bridge));
+    let opened = agent.send(&serde_json::json!({"command":"open","path":capture}).to_string());
+    assert_eq!(opened["ok"], true, "{opened}");
+    let actions = opened["data"]["capture"]["actions"]
+        .as_array()
+        .expect("capture actions");
+    let mesh = actions
+        .iter()
+        .find(|action| {
+            action["flags"]
+                .as_u64()
+                .is_some_and(|flags| flags & 0x8 != 0)
+        })
+        .expect("capture must contain a mesh dispatch");
+    let event = mesh["event_id"].as_u64().unwrap();
+    let selected =
+        agent.send(&serde_json::json!({"command":"select","event_id":event}).to_string());
+    assert_eq!(selected["ok"], true, "{selected}");
+    let shader = agent.send(r#"{"command":"shader","stage":"mesh"}"#);
+    assert_eq!(shader["ok"], true, "{shader}");
+    let trace = agent.send(r#"{"command":"debug_mesh","group":[0,0,0],"thread":[0,0,0]}"#);
+    assert_eq!(trace["ok"], true, "{trace}");
+    assert_eq!(trace["data"]["trace"]["event_id"], event);
+    assert_eq!(trace["data"]["trace"]["stage"], 7);
+    let collected = agent.send(r#"{"command":"debug_collect"}"#);
+    assert_eq!(collected["ok"], true, "{collected}");
+    assert!(
+        collected["data"]["total"].as_u64().is_some_and(|n| n > 1),
+        "{collected}"
+    );
+    let stopped = agent.send(r#"{"command":"debug_stop"}"#);
+    assert_eq!(stopped["ok"], true, "{stopped}");
+    agent.quit();
+}
+
 #[cfg(windows)]
 #[test]
 #[ignore = "requires the D3D11 fixture and a matching RenderDoc replay bridge"]
