@@ -1929,6 +1929,16 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     };
     let content = agent.send(&read("4", 8));
     assert_eq!(content["data"]["hex"], "0000404000004040", "{content}");
+    let annotated = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"0", "length":8, "layout":"[[byte_offset(4)]] float value;"}).to_string());
+    assert_eq!(
+        annotated["data"]["page"]["rows"][0]["fields"][0]["offset"], "4",
+        "{annotated}"
+    );
+    assert_eq!(
+        annotated["data"]["page"]["rows"][0]["fields"][0]["values"][0][0], "3",
+        "{annotated}"
+    );
+    assert_eq!(agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"0", "length":8, "layout":"float a; [[offset(2)]] float b;"}).to_string())["error"]["code"], "invalid_layout");
     let layout_page = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"4", "length":8, "layout":"#pack(scalar) float2 position;"}).to_string());
     assert_eq!(layout_page["data"]["page"]["stride"], "8", "{layout_page}");
     assert_eq!(

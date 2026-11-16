@@ -13855,7 +13855,7 @@ mod ui_tests {
             window.render_frame(cx);
             window.click("buffer-layout-input", cx);
             window.press("ctrl-a", cx);
-            window.input("float3 pos; uint id; ushort tail;", cx);
+            window.input("[[pad]] uint skip; vec2 pos; ushort tail[2]; uint id;", cx);
             window.click("buffer-layout-apply", cx);
         })
         .unwrap();

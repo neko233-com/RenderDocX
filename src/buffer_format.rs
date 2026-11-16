@@ -3,6 +3,7 @@ use serde::Serialize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScalarFormat {
+    Bool,
     U8,
     I8,
     U16,
@@ -20,7 +21,8 @@ pub enum ScalarFormat {
     SNorm16,
 }
 impl ScalarFormat {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
+        Self::Bool,
         Self::U8,
         Self::I8,
         Self::U16,
@@ -39,6 +41,7 @@ impl ScalarFormat {
     ];
     pub fn name(self) -> &'static str {
         match self {
+            Self::Bool => "bool",
             Self::U8 => "ubyte",
             Self::I8 => "byte",
             Self::U16 => "ushort",
@@ -63,12 +66,13 @@ impl ScalarFormat {
         match self {
             Self::U8 | Self::I8 | Self::UNorm8 | Self::SNorm8 => 1,
             Self::U16 | Self::I16 | Self::F16 | Self::UNorm16 | Self::SNorm16 => 2,
-            Self::U32 | Self::I32 | Self::F32 => 4,
+            Self::Bool | Self::U32 | Self::I32 | Self::F32 => 4,
             Self::U64 | Self::I64 | Self::F64 => 8,
         }
     }
     pub(crate) fn value(self, b: &[u8]) -> String {
         match self {
+            Self::Bool => (u32::from_le_bytes(b.try_into().unwrap()) != 0).to_string(),
             Self::U8 => b[0].to_string(),
             Self::I8 => (b[0] as i8).to_string(),
             Self::U16 => u16::from_le_bytes(b.try_into().unwrap()).to_string(),

@@ -94,7 +94,10 @@ fn base_type(name: &str) -> Option<ScalarFormat> {
             "uint64_t" => ScalarFormat::U64,
             "float16_t" => ScalarFormat::F16,
             "float32_t" => ScalarFormat::F32,
-            "float64_t" => ScalarFormat::F64,
+            "float64_t" | "dvec" => ScalarFormat::F64,
+            "vec" => ScalarFormat::F32,
+            "ivec" => ScalarFormat::I32,
+            "uvec" => ScalarFormat::U32,
             _ => return None,
         })
     })
@@ -118,9 +121,49 @@ impl Layout {
             i = 5;
         }
         while i < t.len() {
-            let typename = t[i];
+            let mut specified_offset = None;
+            let mut padding = false;
+            let mut normalization = None;
+            while t.get(i) == Some(&"[") && t.get(i + 1) == Some(&"[") {
+                let annotation = *t.get(i + 2).ok_or("Invalid annotation")?;
+                i += 3;
+                match annotation {
+                    "offset" | "byte_offset" => {
+                        if specified_offset.is_some() || t.get(i) != Some(&"(") {
+                            return Err("Invalid offset annotation".into());
+                        }
+                        let value = t
+                            .get(i + 1)
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .filter(|v| *v != u32::MAX)
+                            .ok_or("Invalid offset annotation")?;
+                        if t.get(i + 2) != Some(&")") {
+                            return Err("Invalid offset annotation".into());
+                        }
+                        specified_offset = Some(value as usize);
+                        i += 3;
+                    }
+                    "pad" | "padding" if !padding => padding = true,
+                    "unorm" | "snorm" if normalization.is_none() => {
+                        normalization = Some(annotation)
+                    }
+                    _ => return Err("Unsupported or duplicate annotation".into()),
+                }
+                if t.get(i) != Some(&"]") || t.get(i + 1) != Some(&"]") {
+                    return Err("Invalid annotation".into());
+                }
+                i += 2;
+            }
+            let mut typename = *t.get(i).ok_or("Missing field type")?;
             i += 1;
-            let (format, components) = if let Some(f) = base_type(typename) {
+            let unsigned = typename == "unsigned";
+            if unsigned {
+                typename = *t.get(i).ok_or("Missing unsigned type")?;
+                i += 1;
+            }
+            let (mut format, components) = if matches!(typename, "vec" | "ivec" | "uvec" | "dvec") {
+                return Err("Vector width required".into());
+            } else if let Some(f) = base_type(typename) {
                 (f, 1)
             } else {
                 let (base, suffix) = typename.split_at(typename.len().saturating_sub(1));
@@ -132,6 +175,24 @@ impl Layout {
                 };
                 (base_type(base).ok_or("Unsupported field type")?, n)
             };
+            if unsigned {
+                format = match format {
+                    ScalarFormat::I8 => ScalarFormat::U8,
+                    ScalarFormat::I16 => ScalarFormat::U16,
+                    ScalarFormat::I32 => ScalarFormat::U32,
+                    ScalarFormat::I64 => ScalarFormat::U64,
+                    _ => return Err("Invalid unsigned type".into()),
+                };
+            }
+            if let Some(normalization) = normalization {
+                format = match (normalization, format) {
+                    ("unorm", ScalarFormat::I8 | ScalarFormat::U8) => ScalarFormat::UNorm8,
+                    ("snorm", ScalarFormat::I8 | ScalarFormat::U8) => ScalarFormat::SNorm8,
+                    ("unorm", ScalarFormat::I16 | ScalarFormat::U16) => ScalarFormat::UNorm16,
+                    ("snorm", ScalarFormat::I16 | ScalarFormat::U16) => ScalarFormat::SNorm16,
+                    _ => return Err("Normalization requires a byte or short integer".into()),
+                };
+            }
             let name = *t.get(i).ok_or("Missing field name")?;
             i += 1;
             if !name
@@ -139,7 +200,7 @@ impl Layout {
                 .next()
                 .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
                 || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
-                || !names.insert(name)
+                || (!padding && !names.insert(name))
             {
                 return Err("Invalid or duplicate field name".into());
             }
@@ -160,19 +221,29 @@ impl Layout {
             }
             i += 1;
             let width = format.width();
-            alignment = alignment.max(width);
+            if !padding {
+                alignment = alignment.max(width);
+            }
             cursor = align(cursor, width).ok_or("Layout size overflow")?;
+            if let Some(offset) = specified_offset {
+                if offset < cursor {
+                    return Err("Explicit offset overlaps earlier data".into());
+                }
+                cursor = offset;
+            }
             let size = width
                 .checked_mul(components)
                 .and_then(|v| v.checked_mul(count))
                 .ok_or("Layout size overflow")?;
-            fields.push(Field {
-                name: name.to_owned(),
-                format,
-                components,
-                count,
-                offset: cursor,
-            });
+            if !padding {
+                fields.push(Field {
+                    name: name.to_owned(),
+                    format,
+                    components,
+                    count,
+                    offset: cursor,
+                });
+            }
             cursor = cursor.checked_add(size).ok_or("Layout size overflow")?;
         }
         if fields.is_empty() {
@@ -228,6 +299,35 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_offsets_padding_glsl_and_normalization_follow_scalar_rules() {
+        let layout = Layout::parse("[[pad]] uint reserved; [[offset(8)]] vec2 pos; [[snorm]] byte4 normal; unsigned short id; bool visible;").unwrap();
+        assert_eq!(layout.stride(), 28);
+        assert_eq!(
+            layout.fields.iter().map(|f| f.offset).collect::<Vec<_>>(),
+            [8, 16, 20, 24]
+        );
+        let mut bytes = vec![0; 28];
+        bytes[16] = 128;
+        bytes[20] = 42;
+        bytes[24] = 1;
+        let page = layout.decode(0, &bytes).unwrap();
+        assert_eq!(page.rows[0].fields[1].values[0][0], "-1");
+        assert_eq!(page.rows[0].fields[2].values[0][0], "42");
+        assert_eq!(page.rows[0].fields[3].values[0][0], "true");
+        for bad in [
+            "float a; [[offset(3)]] float b;",
+            "[[offset(1)]] [[offset(4)]] float a;",
+            "[[unorm]] float a;",
+            "[[packed(r10g10b10a2)]] uint4 a;",
+            "vec pos;",
+        ] {
+            assert!(Layout::parse(bad).is_err(), "{bad}");
+        }
+        let pad = Layout::parse("[[pad]] ulong p; ubyte a;").unwrap();
+        assert_eq!(pad.stride(), 9);
+    }
+
     #[test]
     fn scalar_layout_aligns_vectors_arrays_and_reports_unhandled_syntax() {
         let layout = Layout::parse(
