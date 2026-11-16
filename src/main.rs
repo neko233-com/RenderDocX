@@ -4656,6 +4656,102 @@ impl Workspace {
         cx.notify();
     }
 
+    fn export_buffer(&mut self, cx: &mut Context<Self>) {
+        if self.replay_pending
+            || self.export_pending
+            || self.resource_pending
+            || self.selected.is_none()
+        {
+            self.status = Some(
+                self.t(
+                    "Select an event and wait for replay before exporting.",
+                    "请先选择事件并等待回放完成再导出。",
+                    "イベントを選択し、リプレイ完了後に書き出してください。",
+                    "이벤트를 선택하고 리플레이가 끝난 뒤 내보내세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let (Some(session), Some(index)) = (self.session.clone(), self.selected_buffer) else {
+            return;
+        };
+        let Some(size) = self
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.buffers.get(index))
+            .and_then(|b| b.length.parse::<u64>().ok())
+        else {
+            return;
+        };
+        let range = self
+            .buffer_binding_range
+            .filter(|range| range.index == index);
+        let start = range.map_or(0, |range| range.start);
+        let end = range.map_or(size, |range| range.end.min(size));
+        if start > end {
+            return;
+        }
+        let Ok(index) = u32::try_from(index) else {
+            return;
+        };
+        let Some(destination) = rfd::FileDialog::new()
+            .set_file_name("buffer.bin")
+            .add_filter("Binary", &["bin"])
+            .save_file()
+        else {
+            return;
+        };
+        let label = destination.display().to_string();
+        let revision = self.open_revision;
+        self.export_pending = true;
+        self.status = Some(
+            self.t(
+                "Exporting buffer…",
+                "正在导出缓冲区…",
+                "バッファを書き出し中…",
+                "버퍼를 내보내는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx
+            .background_executor()
+            .spawn(async move { session.export_buffer(index, start, end - start, &destination) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision {
+                    return;
+                }
+                this.export_pending = false;
+                this.status = Some(match result {
+                    Ok(()) => format!(
+                        "{}: {label}",
+                        this.t(
+                            "Buffer exported",
+                            "缓冲区已导出",
+                            "バッファを書き出しました",
+                            "버퍼를 내보냈습니다"
+                        )
+                    ),
+                    Err(error) => format!(
+                        "{}: {error}",
+                        this.t(
+                            "Buffer export failed",
+                            "缓冲区导出失败",
+                            "バッファを書き出せません",
+                            "버퍼 내보내기 실패"
+                        )
+                    ),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn export_texture(&mut self, cx: &mut Context<Self>) {
         if self.replay_pending
             || self.export_pending
@@ -9408,7 +9504,19 @@ impl Workspace {
                             .gap_2()
                             .child(prev)
                             .child(read_button)
-                            .child(next_button),
+                            .child(next_button)
+                            .child(button(
+                                "buffer-export",
+                                self.t(
+                                    "Export current range",
+                                    "导出当前范围",
+                                    "現在の範囲を書き出す",
+                                    "현재 범위 내보내기",
+                                ),
+                                false,
+                                |this, cx| this.export_buffer(cx),
+                                cx,
+                            )),
                     )
                     .children(
                         rows.unwrap_or_default()

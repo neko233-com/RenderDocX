@@ -3098,6 +3098,31 @@ impl Session {
             .read_buffer(index, offset, length)
     }
 
+    /// Export a buffer range from one replay selection without overwriting a destination.
+    pub fn export_buffer(
+        &self,
+        index: u32,
+        offset: u64,
+        length: u64,
+        destination: &Path,
+    ) -> Result<(), String> {
+        let revision = self.revision.load(Ordering::SeqCst);
+        let mut process = self.process.lock().map_err(|e| e.to_string())?;
+        crate::buffer_export::write_new(
+            destination,
+            offset,
+            length,
+            |offset, count| process.read_buffer(index, offset, count),
+            || {
+                if self.revision.load(Ordering::SeqCst) == revision {
+                    Ok(())
+                } else {
+                    Err("Replay selection changed".into())
+                }
+            },
+        )
+    }
+
     pub fn timeline_usage(&self, index: u32) -> Result<TimelineUsage, String> {
         self.process
             .lock()

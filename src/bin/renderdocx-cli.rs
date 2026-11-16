@@ -46,7 +46,7 @@ fn usage() -> Value {
         {"name":"select","arguments":["capture.rdc","event_id"],"description":"Replay a capture to an event."},
         {"name":"serve","arguments":[],"description":"Serve sequential JSONL requests using a persistent replay session."},
         {"name":"capabilities","arguments":[],"description":"Describe the commands currently implemented."}
-    ],"serve_commands":["capabilities","open","snapshot","timeline","timeline_usage","timeline_history","select","pipeline","shader","shader_bindings","shader_binding_read","shader_constants","shader_export","shader_apply","shader_revert","debug_vertex","debug_pixel","debug_compute","debug_collect","debug_state","debug_breakpoint","debug_navigate","debug_next","debug_stop","vertex_input","mesh","mesh_read","mesh_draw","mesh_draw_export","structure","structure_buffer","callstack","read_buffer","resource_usage","resource_rename","annotation_read","annotation_write","dependencies","dependencies_save","descriptors","debug_messages","clear_debug_messages","counter_fetch","counter_page","pick_pixel","pixel_history","texture_statistics","export_texture","close","gpu_list","remote_list","remote_download","target_list","target_launch","target_connect","target_connect_pid","target_copy","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"mesh_draw_page_limit":renderdocx::mesh_draw::PAGE_LIMIT,"shader_binding_page_limit":renderdocx::replay::SHADER_BINDING_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"counter_page_limit":renderdocx::replay::COUNTER_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
+    ],"serve_commands":["capabilities","open","snapshot","timeline","timeline_usage","timeline_history","select","pipeline","shader","shader_bindings","shader_binding_read","shader_constants","shader_export","shader_apply","shader_revert","debug_vertex","debug_pixel","debug_compute","debug_collect","debug_state","debug_breakpoint","debug_navigate","debug_next","debug_stop","vertex_input","mesh","mesh_read","mesh_draw","mesh_draw_export","structure","structure_buffer","callstack","read_buffer","export_buffer","resource_usage","resource_rename","annotation_read","annotation_write","dependencies","dependencies_save","descriptors","debug_messages","clear_debug_messages","counter_fetch","counter_page","pick_pixel","pixel_history","texture_statistics","export_texture","close","gpu_list","remote_list","remote_download","target_list","target_launch","target_connect","target_connect_pid","target_copy","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"mesh_draw_page_limit":renderdocx::mesh_draw::PAGE_LIMIT,"shader_binding_page_limit":renderdocx::replay::SHADER_BINDING_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"counter_page_limit":renderdocx::replay::COUNTER_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
 }
 
 fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
@@ -895,6 +895,56 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     _ => Err((
                         "invalid_arguments",
                         "read_buffer requires index, decimal-string offset and length".into(),
+                    )),
+                }
+            }
+            "export_buffer" => {
+                let index = request
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .and_then(|v| u32::try_from(v).ok());
+                let offset = request
+                    .get("offset")
+                    .and_then(Value::as_str)
+                    .and_then(|v| v.parse::<u64>().ok());
+                let length = request
+                    .get("length")
+                    .and_then(Value::as_str)
+                    .and_then(|v| v.parse::<u64>().ok());
+                let path = request
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty());
+                match (&opened, selected_event, index, offset, length, path) {
+                    (None, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some(_), None, _, _, _, _) => Err((
+                        "no_event",
+                        "Select an event before exporting buffers".into(),
+                    )),
+                    (
+                        Some((session, snapshot)),
+                        Some(event),
+                        Some(index),
+                        Some(offset),
+                        Some(length),
+                        Some(path),
+                    ) => {
+                        let size = snapshot
+                            .buffers
+                            .get(index as usize)
+                            .and_then(|b| b.length.parse::<u64>().ok());
+                        if size.is_none_or(|size| offset > size || length > size - offset) {
+                            Err(("invalid_arguments", "Buffer range is out of bounds".into()))
+                        } else {
+                            session.export_buffer(index, offset, length, std::path::Path::new(path))
+                                .map(|()| json!({"event_id":event,"index":index,"offset":offset.to_string(),"length":length.to_string(),"path":path}))
+                                .map_err(|error| ("buffer_export_failed", error))
+                        }
+                    }
+                    _ => Err((
+                        "invalid_arguments",
+                        "export_buffer requires index, decimal-string offset and length, and path"
+                            .into(),
                     )),
                 }
             }

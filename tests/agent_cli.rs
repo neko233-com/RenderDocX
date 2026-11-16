@@ -1929,6 +1929,19 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     };
     let content = agent.send(&read("4", 8));
     assert_eq!(content["data"]["hex"], "0000404000004040", "{content}");
+    let buffer_export = dir.path().join("vertex-range.bin");
+    let export_request = serde_json::json!({"command":"export_buffer", "index":vertex_index, "offset":"4", "length":"8", "path":buffer_export});
+    let exported = agent.send(&export_request.to_string());
+    assert_eq!(exported["ok"], true, "{exported}");
+    assert_eq!(
+        std::fs::read(&buffer_export).unwrap(),
+        [0, 0, 0x40, 0x40, 0, 0, 0x40, 0x40]
+    );
+    assert_eq!(
+        agent.send(&export_request.to_string())["error"]["code"],
+        "buffer_export_failed"
+    );
+    assert_eq!(agent.send(&serde_json::json!({"command":"export_buffer", "index":vertex_index, "offset":"28", "length":"1", "path":dir.path().join("invalid.bin")}).to_string())["error"]["code"], "invalid_arguments");
     assert_eq!(agent.send(&read("28", 0))["data"]["hex"], "");
     assert_eq!(
         agent.send(&read("28", 1))["error"]["code"],
