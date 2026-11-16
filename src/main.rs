@@ -15699,6 +15699,16 @@ mod ui_tests {
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.press("ctrl-a", cx);
+            window.input("$regex(/^(Child)$/)", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(!view.read(cx).event_tree.filter_error());
+            assert_eq!(view.read(cx).event_tree.visible, [0, 1]);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.press("ctrl-a", cx);
             window.press("backspace", cx);
         })
         .unwrap();

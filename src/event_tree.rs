@@ -16,6 +16,7 @@ pub struct EventTree {
     show_api: bool,
     parents: Vec<Option<usize>>,
     names: Vec<String>,
+    lower_names: Vec<String>,
     filter: Filter,
     filter_error: bool,
     actions: Vec<Action>,
@@ -33,7 +34,8 @@ impl EventTree {
         self.rows = (0..actions.len()).map(EventRow::Action).collect();
         self.order.clear();
         self.parents.clear();
-        self.names = actions
+        self.names = actions.iter().map(|action| action.name.clone()).collect();
+        self.lower_names = actions
             .iter()
             .map(|action| action.name.to_lowercase())
             .collect();
@@ -53,7 +55,8 @@ impl EventTree {
                     event: event_index,
                 });
                 self.parents.push(self.parents[action_index]);
-                self.names.push(event.name.to_lowercase());
+                self.names.push(event.name.clone());
+                self.lower_names.push(event.name.to_lowercase());
                 self.event_ids.push(event.event_id);
             }
             self.order.push(action_index);
@@ -145,7 +148,12 @@ impl EventTree {
                     EventRow::Api { .. } => None,
                 };
                 (self.show_api || index < self.action_count)
-                    && self.filter.matches(name, self.event_ids[index], action)
+                    && self.filter.matches(
+                        name,
+                        &self.lower_names[index],
+                        self.event_ids[index],
+                        action,
+                    )
             })
             .collect();
         self.matching_children = vec![false; self.parents.len()];
@@ -340,5 +348,42 @@ mod tests {
         tree.set_filter("$action()");
         assert!(!tree.filter_error());
         assert_eq!(tree.visible, [0, 1, 2]);
+    }
+
+    #[test]
+    fn action_flags_dispatch_and_pcre_filters() {
+        let mut frame = action(-1);
+        frame.name = "Frame".into();
+        let mut draw = action(0);
+        draw.name = "Draw Draw".into();
+        draw.flags = 0x2 | 0x10000;
+        let mut dispatch = action(0);
+        dispatch.name = "Compute 日本".into();
+        dispatch.flags = 0x4;
+        dispatch.dispatch_groups = Some([2, 3, 4]);
+        let mut pop = action(0);
+        pop.name = "Pop".into();
+        pop.flags = 0x80;
+        let mut tree = EventTree::default();
+        tree.reset(&[frame, draw, dispatch, pop]);
+        tree.set_filter("$action(flags & Drawcall|PopMarker)");
+        assert_eq!(tree.visible, [0, 1, 3]);
+        tree.set_filter("$dispatch(size=24)");
+        assert_eq!(tree.visible, [0, 2]);
+        tree.set_filter("$action(dispatchSize=24)");
+        assert_eq!(tree.visible, [0, 2]);
+        tree.set_filter(r"$regex(/^(Draw) \1$/)");
+        assert_eq!(tree.visible, [0, 1]);
+        tree.set_filter(r"$regex(/(*UCP)(?i)^compute \w+$/)");
+        assert_eq!(tree.visible, [0, 2]);
+        tree.set_filter(r"$regex(/^compute/iu)");
+        assert!(tree.visible.is_empty());
+        tree.set_filter(r"$regex(/draw/)");
+        assert!(tree.visible.is_empty());
+        tree.set_filter("$action(flags & Drawcall|)");
+        assert!(tree.filter_error());
+        assert!(tree.visible.is_empty());
+        tree.set_filter("$regex(/(/)");
+        assert!(tree.filter_error());
     }
 }
