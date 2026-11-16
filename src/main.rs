@@ -608,6 +608,7 @@ struct Workspace {
     texture_selection: TextureSelection,
     texture_black_point: Entity<InputState>,
     texture_white_point: Entity<InputState>,
+    texture_hdr_multiplier: Entity<InputState>,
     texture_raw_page: Option<renderdocx::replay::RawTexturePage>,
     texture_raw_seek: Entity<InputState>,
     texture_raw_search: Entity<InputState>,
@@ -5873,6 +5874,37 @@ impl Workspace {
         cx.notify();
     }
 
+    fn change_preview_mode(&mut self, mode: u8, cx: &mut Context<Self>) {
+        if !self.preview_edit_ready(cx) {
+            return;
+        }
+        let multiplier = if mode == 1 {
+            match self.texture_hdr_multiplier.read(cx).value().parse::<f32>() {
+                Ok(value) if value.is_finite() && value >= 0.0 => Some(value),
+                _ => {
+                    self.status = Some(
+                        self.t(
+                            "Enter a finite, non-negative RGBM multiplier.",
+                            "请输入有限且非负的 RGBM 乘数。",
+                            "有限の 0 以上の RGBM 乗数を入力してください。",
+                            "유한한 0 이상의 RGBM 배율을 입력하세요.",
+                        )
+                        .to_owned(),
+                    );
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        self.texture_selection.preview_hdr_multiplier = multiplier;
+        self.texture_selection.preview_decode_yuv = mode == 2;
+        self.preview = None;
+        self.status = None;
+        cx.notify();
+    }
+
     fn change_preview_transform(
         &mut self,
         scale: Option<f32>,
@@ -8662,6 +8694,42 @@ impl Workspace {
             .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t("Preview uses native texture display. Export applies the range only when RenderDoc converts the data.", "预览使用原生纹理显示；导出仅在 RenderDoc 转换数据时应用范围。", "プレビューはネイティブ表示を使用し、書き出しでは変換時のみ範囲が適用されます。", "미리보기는 기본 텍스처 표시를 사용하며 내보내기는 데이터 변환 시에만 범위를 적용합니다.")))
     }
 
+    fn texture_preview_modes(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .child(button(
+                "texture-mode-rgba",
+                "RGBA",
+                self.texture_selection.preview_hdr_multiplier.is_none()
+                    && !self.texture_selection.preview_decode_yuv,
+                |this, cx| this.change_preview_mode(0, cx),
+                cx,
+            ))
+            .child(
+                Input::new(&self.texture_hdr_multiplier)
+                    .id("texture-hdr-multiplier")
+                    .aria_label(self.t("RGBM multiplier", "RGBM 乘数", "RGBM 乗数", "RGBM 배율"))
+                    .w(px(90.)),
+            )
+            .child(button(
+                "texture-mode-rgbm",
+                "RGBM",
+                self.texture_selection.preview_hdr_multiplier.is_some(),
+                |this, cx| this.change_preview_mode(1, cx),
+                cx,
+            ))
+            .child(button(
+                "texture-mode-yuv",
+                self.t("YUVA decode", "YUVA 解码", "YUVA デコード", "YUVA 디코딩"),
+                self.texture_selection.preview_decode_yuv,
+                |this, cx| this.change_preview_mode(2, cx),
+                cx,
+            ))
+            .into_any_element()
+    }
+
     fn texture_preview_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let channels = self.texture_selection.effective_preview_channels();
         div()
@@ -8700,13 +8768,18 @@ impl Workspace {
                         |this, cx| this.change_preview_channel(2, cx),
                         cx,
                     ))
-                    .child(button(
-                        "texture-preview-alpha",
-                        "A",
-                        channels[3],
-                        |this, cx| this.change_preview_channel(3, cx),
-                        cx,
-                    ))
+                    .when(
+                        self.texture_selection.preview_hdr_multiplier.is_none(),
+                        |row| {
+                            row.child(button(
+                                "texture-preview-alpha",
+                                "A",
+                                channels[3],
+                                |this, cx| this.change_preview_channel(3, cx),
+                                cx,
+                            ))
+                        },
+                    )
                     .child(button(
                         "texture-preview-flip",
                         self.t("Flip Y", "垂直翻转", "上下反転", "상하 반전"),
@@ -8735,6 +8808,7 @@ impl Workspace {
                 "チャンネルの組み合わせ、反転、ガンマはプレビューのみに影響します。",
                 "채널 조합, 반전 및 감마는 미리보기에만 적용됩니다.",
             )))
+            .child(self.texture_preview_modes(cx))
             .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
                 "Preview zoom and pan (output pixels)",
                 "预览缩放与平移（输出像素）",
@@ -8840,6 +8914,7 @@ impl Workspace {
                         }),
                 ),
             )
+            .into_any_element()
     }
 
     fn texture_preview_image(&self, path: PathBuf, cx: &mut Context<Self>) -> impl IntoElement {
@@ -8924,6 +8999,7 @@ impl Workspace {
                 }),
             )
             .child(img(path).size_full().object_fit(gpui::ObjectFit::Contain))
+            .into_any_element()
     }
 
     fn capture_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -14908,6 +14984,8 @@ fn main() {
                         cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let texture_white_point =
                         cx.new(|cx| InputState::new(window, cx).default_value("1"));
+                    let texture_hdr_multiplier =
+                        cx.new(|cx| InputState::new(window, cx).default_value("32"));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_debug_primitive = cx.new(|cx| InputState::new(window, cx));
                     let pixel_debug_view = cx.new(|cx| InputState::new(window, cx));
@@ -14971,6 +15049,7 @@ fn main() {
                         texture_selection: TextureSelection::default(),
                         texture_black_point,
                         texture_white_point,
+                        texture_hdr_multiplier,
                         texture_raw_page: None,
                         texture_raw_seek,
                         texture_raw_search,
@@ -15105,6 +15184,86 @@ mod ui_tests {
     use gpui_kit::{ScrollDelta, TestAppContext, base::Root, point, test::TestWindowExt};
 
     #[inline(never)]
+    fn exercise_remote_browser(
+        cx: &mut TestAppContext,
+        view: &Entity<Workspace>,
+        handle: gpui::WindowHandle<Root>,
+    ) {
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.remote_target_url
+                    .update(cx, |input, cx| input.set_value("fixture", window, cx))
+            });
+            window.render_frame(cx);
+            window.click("capture-remote-browser", cx);
+            window.render_frame(cx);
+            window.click("remote-browser-home", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                view.read(cx).remote_directory.as_ref().unwrap().path,
+                "/home"
+            )
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("capture-remote-browser", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+
+    #[inline(never)]
+    fn exercise_texture_display_modes(
+        cx: &mut TestAppContext,
+        view: &Entity<Workspace>,
+        handle: gpui::WindowHandle<Root>,
+    ) {
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            reveal_details(window, "texture-preview-red", cx);
+            window.click("texture-preview-red", cx);
+            reveal_details(window, "texture-preview-flip", cx);
+            window.click("texture-preview-flip", cx);
+            reveal_details(window, "texture-preview-gamma", cx);
+            window.click("texture-preview-gamma", cx);
+            reveal_details(window, "texture-view-scale-200", cx);
+            window.click("texture-view-scale-200", cx);
+            reveal_details(window, "texture-view-pan-1", cx);
+            window.click("texture-view-pan-1", cx);
+            reveal_details(window, "texture-mode-yuv", cx);
+            window.click("texture-mode-yuv", cx);
+            assert!(view.read(cx).texture_selection.preview_decode_yuv);
+            reveal_details(window, "texture-mode-rgbm", cx);
+            window.click("texture-mode-rgbm", cx);
+            assert_eq!(
+                view.read(cx).texture_selection.preview_hdr_multiplier,
+                Some(32.0)
+            );
+            assert!(!view.read(cx).texture_selection.preview_decode_yuv);
+            reveal_details(window, "texture-overlay-1", cx);
+            window.click("texture-overlay-1", cx);
+        })
+        .unwrap();
+        cx.update(|cx| {
+            let selection = view.read(cx).texture_selection;
+            assert_eq!(selection.preview_channels, Some([true, true, false, false]));
+            assert!(selection.preview_flip_y);
+            assert_eq!(selection.preview_linear_as_gamma, Some(false));
+            assert_eq!(selection.preview_hdr_multiplier, Some(32.0));
+            assert!(!selection.preview_decode_yuv);
+            assert_eq!(selection.preview_scale, Some(2.0));
+            assert_eq!(selection.preview_offset, [32.0, 0.0]);
+            assert_eq!(
+                selection.preview_overlay,
+                renderdocx::texture_overlay::TextureOverlay::Drawcall
+            );
+        });
+    }
+
+    #[inline(never)]
     fn exercise_texture_preview_gestures(
         cx: &mut TestAppContext,
         view: &Entity<Workspace>,
@@ -15117,9 +15276,9 @@ mod ui_tests {
                 ScrollDelta::Pixels(point(px(0.), px(-800.))),
                 cx,
             );
+            reveal_details(window, "texture-preview-image", cx);
             assert!(window.find("texture-preview-image").visible());
             assert!(window.find("texture-preview-image").bounds().size.height > px(0.));
-            reveal_details(window, "texture-preview-image", cx);
             window.scroll(
                 "texture-preview-image",
                 ScrollDelta::Lines(point(0., 1.)),
@@ -15293,6 +15452,8 @@ mod ui_tests {
                         cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let texture_white_point =
                         cx.new(|cx| InputState::new(window, cx).default_value("1"));
+                    let texture_hdr_multiplier =
+                        cx.new(|cx| InputState::new(window, cx).default_value("32"));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_debug_primitive = cx.new(|cx| InputState::new(window, cx));
                     let pixel_debug_view = cx.new(|cx| InputState::new(window, cx));
@@ -15374,6 +15535,7 @@ mod ui_tests {
                         texture_selection: TextureSelection::default(),
                         texture_black_point,
                         texture_white_point,
+                        texture_hdr_multiplier,
                         texture_raw_page: None,
                         texture_raw_seek,
                         texture_raw_search,
@@ -15713,6 +15875,8 @@ mod ui_tests {
                         cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let texture_white_point =
                         cx.new(|cx| InputState::new(window, cx).default_value("1"));
+                    let texture_hdr_multiplier =
+                        cx.new(|cx| InputState::new(window, cx).default_value("32"));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_debug_primitive = cx.new(|cx| InputState::new(window, cx));
                     let pixel_debug_view = cx.new(|cx| InputState::new(window, cx));
@@ -15914,6 +16078,7 @@ mod ui_tests {
                         texture_selection: TextureSelection::default(),
                         texture_black_point,
                         texture_white_point,
+                        texture_hdr_multiplier,
                         texture_raw_page: None,
                         texture_raw_seek,
                         texture_raw_search,
@@ -16018,30 +16183,7 @@ mod ui_tests {
             .unwrap()
         });
         let handle = handle.downcast::<Root>().unwrap();
-        cx.update_window(handle.into(), |_, window, cx| {
-            view.update(cx, |view, cx| {
-                view.remote_target_url
-                    .update(cx, |input, cx| input.set_value("fixture", window, cx))
-            });
-            window.render_frame(cx);
-            window.click("capture-remote-browser", cx);
-            window.render_frame(cx);
-            window.click("remote-browser-home", cx);
-        })
-        .unwrap();
-        cx.run_until_parked();
-        cx.update(|cx| {
-            assert_eq!(
-                view.read(cx).remote_directory.as_ref().unwrap().path,
-                "/home"
-            )
-        });
-        cx.update_window(handle.into(), |_, window, cx| {
-            window.render_frame(cx);
-            window.click("capture-remote-browser", cx);
-        })
-        .unwrap();
-        cx.run_until_parked();
+        exercise_remote_browser(cx, &view, handle);
         cx.update(|cx| {
             view.update(cx, |view, cx| {
                 view.tab = CaptureTab::Annotations;
@@ -16402,6 +16544,8 @@ mod ui_tests {
                 preview_overlay: renderdocx::texture_overlay::TextureOverlay::None,
                 preview_scale: None,
                 preview_offset: [0.0, 0.0],
+                preview_hdr_multiplier: None,
+                preview_decode_yuv: false,
             }]
         );
         cx.update(|cx| {
@@ -16446,34 +16590,7 @@ mod ui_tests {
                 Some([0.25, 1.0])
             )
         });
-        cx.update_window(handle.into(), |_, window, cx| {
-            window.render_frame(cx);
-            reveal_details(window, "texture-preview-red", cx);
-            window.click("texture-preview-red", cx);
-            reveal_details(window, "texture-preview-flip", cx);
-            window.click("texture-preview-flip", cx);
-            reveal_details(window, "texture-preview-gamma", cx);
-            window.click("texture-preview-gamma", cx);
-            reveal_details(window, "texture-view-scale-200", cx);
-            window.click("texture-view-scale-200", cx);
-            reveal_details(window, "texture-view-pan-1", cx);
-            window.click("texture-view-pan-1", cx);
-            reveal_details(window, "texture-overlay-1", cx);
-            window.click("texture-overlay-1", cx);
-        })
-        .unwrap();
-        cx.update(|cx| {
-            let selection = view.read(cx).texture_selection;
-            assert_eq!(selection.preview_channels, Some([true, true, false, false]));
-            assert!(selection.preview_flip_y);
-            assert_eq!(selection.preview_linear_as_gamma, Some(false));
-            assert_eq!(selection.preview_scale, Some(2.0));
-            assert_eq!(selection.preview_offset, [32.0, 0.0]);
-            assert_eq!(
-                selection.preview_overlay,
-                renderdocx::texture_overlay::TextureOverlay::Drawcall
-            );
-        });
+        exercise_texture_display_modes(cx, &view, handle);
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             reveal_details(window, "texture-preview", cx);

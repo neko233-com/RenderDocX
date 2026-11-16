@@ -893,6 +893,31 @@ fn real_d3d11_mesh_draw_order() {
         &dir.path().join("normal-options.png"),
         serde_json::json!({}),
     );
+    let rgbm = render_options(
+        &mut agent,
+        &dir.path().join("rgbm-options.png"),
+        serde_json::json!({"preview_hdr_multiplier":0.25}),
+    );
+    assert_ne!(
+        &normal[..3],
+        &rgbm[..3],
+        "RGBM must affect the rendered image"
+    );
+    let _yuv_request = render_options(
+        &mut agent,
+        &dir.path().join("yuv-request.png"),
+        serde_json::json!({"preview_decode_yuv":true}),
+    );
+    let invalid_mode = agent.send(&serde_json::json!({"command":"render_texture","index":float_index,"width":4,"height":4,"path":dir.path().join("invalid-mode.png"),"preview_hdr_multiplier":2.0,"preview_decode_yuv":true}).to_string());
+    assert_eq!(
+        invalid_mode["error"]["code"], "invalid_arguments",
+        "{invalid_mode}"
+    );
+    let invalid_multiplier = agent.send(&serde_json::json!({"command":"render_texture","index":float_index,"width":4,"height":4,"path":dir.path().join("invalid-multiplier.png"),"preview_hdr_multiplier":-2.0}).to_string());
+    assert_eq!(
+        invalid_multiplier["error"]["code"], "invalid_arguments",
+        "{invalid_multiplier}"
+    );
     let flipped = render_options(
         &mut agent,
         &dir.path().join("flipped-options.png"),

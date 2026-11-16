@@ -887,6 +887,9 @@ pub struct TextureSelection {
     pub preview_scale: Option<f32>,
     /// Preview pan in output pixels.
     pub preview_offset: [f32; 2],
+    /// RGBM multiplier; None disables RGBM.
+    pub preview_hdr_multiplier: Option<f32>,
+    pub preview_decode_yuv: bool,
 }
 
 /// Raw data is a whole subresource; a 3D mip contains its complete depth.
@@ -1116,7 +1119,7 @@ pub struct PixelHistoryPage {
 
 impl TextureSelection {
     pub fn effective_preview_channels(&self) -> [bool; 4] {
-        self.preview_channels.unwrap_or_else(|| {
+        let mut result = self.preview_channels.unwrap_or_else(|| {
             let mut channels = [true, true, true, false];
             if let Some(channel) = self.channel {
                 channels = [false; 4];
@@ -1125,7 +1128,11 @@ impl TextureSelection {
                 }
             }
             channels
-        })
+        });
+        if self.preview_hdr_multiplier.is_some() {
+            result[3] = false;
+        }
+        result
     }
 
     pub fn validate(&self, texture: &Texture) -> Result<(), String> {
@@ -1137,6 +1144,10 @@ impl TextureSelection {
         if self.mip >= texture.mips
             || self.preview_type_cast > 9
             || self.analysis_type_cast > 9
+            || self
+                .preview_hdr_multiplier
+                .is_some_and(|value| !value.is_finite() || value < 0.0)
+            || (self.preview_hdr_multiplier.is_some() && self.preview_decode_yuv)
             || self
                 .preview_scale
                 .is_some_and(|scale| !scale.is_finite() || scale <= 0.0)
@@ -1991,6 +2002,8 @@ impl Transport for Process {
             || selection.preview_linear_as_gamma.is_some()
             || selection.preview_overlay != crate::texture_overlay::TextureOverlay::None
             || selection.preview_scale.is_some()
+            || selection.preview_hdr_multiplier.is_some()
+            || selection.preview_decode_yuv
         {
             let channels = selection.effective_preview_channels();
             let mask = channels
@@ -2006,17 +2019,31 @@ impl Transport for Process {
             .map_err(|e| e.to_string())?;
             if selection.preview_overlay != crate::texture_overlay::TextureOverlay::None
                 || selection.preview_scale.is_some()
+                || selection.preview_hdr_multiplier.is_some()
+                || selection.preview_decode_yuv
             {
                 write!(input, " {}", selection.preview_overlay as u32)
                     .map_err(|e| e.to_string())?;
             }
-            if let Some(scale) = selection.preview_scale {
+            if selection.preview_scale.is_some()
+                || selection.preview_hdr_multiplier.is_some()
+                || selection.preview_decode_yuv
+            {
                 write!(
                     input,
                     " {} {} {}",
-                    scale.to_bits(),
+                    selection.preview_scale.unwrap_or(-1.0).to_bits(),
                     selection.preview_offset[0].to_bits(),
                     selection.preview_offset[1].to_bits()
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            if selection.preview_hdr_multiplier.is_some() || selection.preview_decode_yuv {
+                write!(
+                    input,
+                    " {} {}",
+                    selection.preview_hdr_multiplier.unwrap_or(-1.0).to_bits(),
+                    u8::from(selection.preview_decode_yuv)
                 )
                 .map_err(|e| e.to_string())?;
             }
@@ -5344,6 +5371,8 @@ mod tests {
             preview_overlay: crate::texture_overlay::TextureOverlay::None,
             preview_scale: None,
             preview_offset: [0.0, 0.0],
+            preview_hdr_multiplier: None,
+            preview_decode_yuv: false,
         };
         let raw = RawTextureSelection {
             mip: 2,
