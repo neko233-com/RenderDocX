@@ -13879,7 +13879,10 @@ mod ui_tests {
             window.render_frame(cx);
             window.click("buffer-layout-input", cx);
             window.press("ctrl-a", cx);
-            window.input("[[row_major]] float2x2 transform; ushort tail[2];", cx);
+            window.input(
+                "[[packed(r10g10b10a2_unorm)]] uint4 color; [[row_major]] float2x2 transform;",
+                cx,
+            );
             window.click("buffer-layout-apply", cx);
         })
         .unwrap();

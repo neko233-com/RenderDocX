@@ -1,5 +1,5 @@
 //! A deliberately restricted, scalar-packed subset of RenderDoc buffer declarations.
-use crate::buffer_format::ScalarFormat;
+use crate::{buffer_format::ScalarFormat, packed_format::PackedFormat};
 use serde::Serialize;
 use std::collections::HashSet;
 
@@ -10,6 +10,7 @@ struct Field {
     components: usize,
     matrix_rows: usize,
     row_major: bool,
+    packed: Option<PackedFormat>,
     count: usize,
     offset: usize,
 }
@@ -28,6 +29,8 @@ pub struct FieldValue {
     pub matrix_columns: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub row_major: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub packed: Option<&'static str>,
     pub values: Vec<Vec<String>>,
 }
 #[derive(Serialize)]
@@ -133,6 +136,7 @@ impl Layout {
             let mut specified_offset = None;
             let mut padding = false;
             let mut normalization = None;
+            let mut packed_name = None;
             let mut major = None;
             while t.get(i) == Some(&"[") && t.get(i + 1) == Some(&"[") {
                 let annotation = *t.get(i + 2).ok_or("Invalid annotation")?;
@@ -151,6 +155,13 @@ impl Layout {
                             return Err("Invalid offset annotation".into());
                         }
                         specified_offset = Some(value as usize);
+                        i += 3;
+                    }
+                    "packed" if packed_name.is_none() => {
+                        if t.get(i) != Some(&"(") || t.get(i + 2) != Some(&")") {
+                            return Err("Invalid packed annotation".into());
+                        }
+                        packed_name = Some(*t.get(i + 1).ok_or("Missing packed format")?);
                         i += 3;
                     }
                     "pad" | "padding" if !padding => padding = true,
@@ -182,46 +193,59 @@ impl Layout {
                 typename = *t.get(i).ok_or("Missing unsigned type")?;
                 i += 1;
             }
-            let (mut format, matrix_rows, components) =
-                if let Some((left, right)) = typename.split_once('x') {
-                    let (base, first) = left.split_at(left.len().saturating_sub(1));
-                    let dimension = |text: &str| match text {
-                        "2" => Some(2),
-                        "3" => Some(3),
-                        "4" => Some(4),
-                        _ => None,
-                    };
-                    let first = dimension(first).ok_or("Unsupported matrix dimension")?;
-                    let second = dimension(right).ok_or("Unsupported matrix dimension")?;
-                    let gl = matches!(base, "mat" | "imat" | "umat" | "dmat");
-                    let format = base_type(base).ok_or("Unsupported matrix type")?;
-                    if matches!(base, "vec" | "ivec" | "uvec" | "dvec") {
-                        return Err("Unsupported matrix type".into());
-                    }
-                    let (rows, cols) = if gl { (second, first) } else { (first, second) };
-                    (format, rows, cols)
-                } else if matches!(
-                    typename,
-                    "vec" | "ivec" | "uvec" | "dvec" | "mat" | "imat" | "umat" | "dmat"
-                ) {
-                    return Err("Vector or matrix width required".into());
-                } else if let Some(f) = base_type(typename) {
-                    (f, 1, 1)
-                } else {
-                    let (base, suffix) = typename.split_at(typename.len().saturating_sub(1));
-                    let n = match suffix {
-                        "2" => 2,
-                        "3" => 3,
-                        "4" => 4,
-                        _ => return Err("Unsupported field type".into()),
-                    };
-                    let f = base_type(base).ok_or("Unsupported field type")?;
-                    if matches!(base, "mat" | "imat" | "umat" | "dmat") {
-                        (f, n, n)
-                    } else {
-                        (f, 1, n)
-                    }
+            let alias = match typename {
+                "uintten" => Some(("r10g10b10a2_uint", ScalarFormat::U32, 4)),
+                "unormten" => Some(("r10g10b10a2_unorm", ScalarFormat::U32, 4)),
+                "floateleven" => Some(("r11g11b10", ScalarFormat::F32, 3)),
+                _ => None,
+            };
+            if alias.is_some() && packed_name.is_some() {
+                return Err("Duplicate packed format".into());
+            }
+            if let Some((name, _, _)) = alias {
+                packed_name = Some(name);
+            }
+            let (mut format, matrix_rows, components) = if let Some((_, format, count)) = alias {
+                (format, 1, count)
+            } else if let Some((left, right)) = typename.split_once('x') {
+                let (base, first) = left.split_at(left.len().saturating_sub(1));
+                let dimension = |text: &str| match text {
+                    "2" => Some(2),
+                    "3" => Some(3),
+                    "4" => Some(4),
+                    _ => None,
                 };
+                let first = dimension(first).ok_or("Unsupported matrix dimension")?;
+                let second = dimension(right).ok_or("Unsupported matrix dimension")?;
+                let gl = matches!(base, "mat" | "imat" | "umat" | "dmat");
+                let format = base_type(base).ok_or("Unsupported matrix type")?;
+                if matches!(base, "vec" | "ivec" | "uvec" | "dvec") {
+                    return Err("Unsupported matrix type".into());
+                }
+                let (rows, cols) = if gl { (second, first) } else { (first, second) };
+                (format, rows, cols)
+            } else if matches!(
+                typename,
+                "vec" | "ivec" | "uvec" | "dvec" | "mat" | "imat" | "umat" | "dmat"
+            ) {
+                return Err("Vector or matrix width required".into());
+            } else if let Some(f) = base_type(typename) {
+                (f, 1, 1)
+            } else {
+                let (base, suffix) = typename.split_at(typename.len().saturating_sub(1));
+                let n = match suffix {
+                    "2" => 2,
+                    "3" => 3,
+                    "4" => 4,
+                    _ => return Err("Unsupported field type".into()),
+                };
+                let f = base_type(base).ok_or("Unsupported field type")?;
+                if matches!(base, "mat" | "imat" | "umat" | "dmat") {
+                    (f, n, n)
+                } else {
+                    (f, 1, n)
+                }
+            };
             if matrix_rows == 1 && major.is_some() {
                 return Err("Matrix order requires a matrix".into());
             }
@@ -235,7 +259,12 @@ impl Layout {
                     _ => return Err("Invalid unsigned type".into()),
                 };
             }
-            if let Some(normalization) = normalization {
+            let packed = packed_name
+                .map(|name| {
+                    PackedFormat::parse(name, format, components, matrix_rows, normalization)
+                })
+                .transpose()?;
+            if let Some(normalization) = normalization.filter(|_| packed.is_none()) {
                 format = match (normalization, format) {
                     ("unorm", ScalarFormat::I8 | ScalarFormat::U8) => ScalarFormat::UNorm8,
                     ("snorm", ScalarFormat::I8 | ScalarFormat::U8) => ScalarFormat::SNorm8,
@@ -271,7 +300,7 @@ impl Layout {
                 return Err("Expected semicolon").map_err(String::from);
             }
             i += 1;
-            let width = format.width();
+            let width = if packed.is_some() { 4 } else { format.width() };
             if !padding {
                 alignment = alignment.max(width);
             }
@@ -282,11 +311,15 @@ impl Layout {
                 }
                 cursor = offset;
             }
-            let size = width
-                .checked_mul(components)
-                .and_then(|v| v.checked_mul(matrix_rows))
-                .and_then(|v| v.checked_mul(count))
-                .ok_or("Layout size overflow")?;
+            let size = if packed.is_some() {
+                width.checked_mul(count)
+            } else {
+                width
+                    .checked_mul(components)
+                    .and_then(|v| v.checked_mul(matrix_rows))
+                    .and_then(|v| v.checked_mul(count))
+            }
+            .ok_or("Layout size overflow")?;
             if !padding {
                 fields.push(Field {
                     name: name.to_owned(),
@@ -294,6 +327,7 @@ impl Layout {
                     components,
                     matrix_rows,
                     row_major,
+                    packed,
                     count,
                     offset: cursor,
                 });
@@ -319,6 +353,13 @@ impl Layout {
                 let width = field.format.width();
                 let mut values = Vec::new();
                 for item in 0..field.count {
+                    if let Some(packed) = field.packed {
+                        let start = field.offset + item * 4;
+                        values.push(packed.decode(u32::from_le_bytes(
+                            bytes[start..start + 4].try_into().unwrap(),
+                        )));
+                        continue;
+                    }
                     let base = field.offset + item * field.matrix_rows * field.components * width;
                     let mut components = Vec::new();
                     for row in 0..field.matrix_rows {
@@ -340,6 +381,7 @@ impl Layout {
                     matrix_rows: (field.matrix_rows > 1).then_some(field.matrix_rows),
                     matrix_columns: (field.matrix_rows > 1).then_some(field.components),
                     row_major: (field.matrix_rows > 1).then_some(field.row_major),
+                    packed: field.packed.map(PackedFormat::name),
                     values,
                 });
             }
@@ -363,6 +405,27 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn packed_layouts_use_four_byte_stride_and_preserve_array_elements() {
+        let layout = Layout::parse(
+            "ubyte tag; [[packed(r10g10b10a2_unorm)]] uint4 color[2]; floateleven light;",
+        )
+        .unwrap();
+        assert_eq!(layout.stride(), 16);
+        assert_eq!(
+            layout.fields.iter().map(|f| f.offset).collect::<Vec<_>>(),
+            [0, 4, 12]
+        );
+        let mut bytes = vec![0; 16];
+        bytes[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        let page = layout.decode(0, &bytes).unwrap();
+        assert_eq!(page.rows[0].fields[1].values[0], ["1", "1", "1", "1"]);
+        assert_eq!(page.rows[0].fields[1].values[1], ["0", "0", "0", "0"]);
+        assert_eq!(page.rows[0].fields[2].packed, Some("r11g11b10"));
+        assert!(Layout::parse("[[packed(r11g11b10)]] float4 bad;").is_err());
+        assert!(Layout::parse("[[packed(r10g10b10a2)]] [[snorm]] uint4 bad;").is_err());
+    }
+
     #[test]
     fn matrices_follow_hlsl_glsl_dimensions_and_storage_order() {
         let bytes: Vec<u8> = (1..=6).flat_map(|n| (n as f32).to_le_bytes()).collect();
@@ -414,7 +477,7 @@ mod tests {
             "float a; [[offset(3)]] float b;",
             "[[offset(1)]] [[offset(4)]] float a;",
             "[[unorm]] float a;",
-            "[[packed(r10g10b10a2)]] uint4 a;",
+            "[[packed(r10g10b10a2)]] float4 a;",
             "vec pos;",
         ] {
             assert!(Layout::parse(bad).is_err(), "{bad}");
