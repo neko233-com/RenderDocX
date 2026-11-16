@@ -419,6 +419,15 @@ enum CaptureTab {
     Descriptors,
     Annotations,
 }
+
+#[derive(Clone)]
+struct LiveCapture {
+    frame: u32,
+    path: PathBuf,
+    local: bool,
+    capture_id: Option<u32>,
+    generation: u64,
+}
 #[derive(Clone, Copy)]
 enum TextureField {
     Mip,
@@ -512,7 +521,7 @@ struct Workspace {
     live_generation: u64,
     live_starting: bool,
     live_status: Option<String>,
-    live_captures: Vec<(u32, PathBuf, bool)>,
+    live_captures: Vec<LiveCapture>,
     live_targets: Vec<u32>,
     live_target_url: Option<String>,
     remote_target_url: Entity<InputState>,
@@ -1397,11 +1406,23 @@ impl Workspace {
                     for event in events {
                         match event.get("type").and_then(serde_json::Value::as_str) {
                             Some("capture") => {
-                                if let Some(capture) = capture_notice(&event) {
+                                if let Some((frame, path, local)) = capture_notice(&event) {
+                                    let capture_id = event.get("capture_id").and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok());
                                     if !this.live_captures.iter().any(|existing| {
-                                        existing.1 == capture.1 && existing.2 == capture.2
+                                        existing.path == path && existing.local == local && existing.generation == generation
                                     }) {
-                                        this.live_captures.push(capture);
+                                        this.live_captures.push(LiveCapture { frame, path, local, capture_id, generation });
+                                    }
+                                }
+                            }
+                            Some("copied") => {
+                                let id = event.get("capture_id").and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok());
+                                let path = event.get("path").and_then(serde_json::Value::as_str).map(PathBuf::from);
+                                if let (Some(id), Some(path)) = (id, path) {
+                                    if let Some(capture) = this.live_captures.iter_mut().find(|capture| capture.generation == generation && capture.capture_id == Some(id)) {
+                                        capture.path = path;
+                                        capture.local = true;
+                                        this.live_status = Some(this.t("Capture copied; select it to open.", "捕获已复制，选择后可打开。", "キャプチャをコピーしました。選択して開いてください。", "캡처를 복사했습니다. 선택하여 여세요.").to_owned());
                                     }
                                 }
                             }
@@ -9920,12 +9941,20 @@ impl Render for Workspace {
         let disconnect = self.t("Disconnect", "断开连接", "切断", "연결 끊기");
         let frame_label = self.t("Frame", "帧", "フレーム", "프레임");
         let remote_label = self.t(
-            "Remote capture",
-            "远程捕获",
-            "リモートキャプチャ",
-            "원격 캡처",
+            " · remote · select to copy",
+            " · 远程 · 点击复制",
+            " · リモート · 選択してコピー",
+            " · 원격 · 선택하여 복사",
+        );
+        let remote_unavailable = self.t(
+            " · remote · original session closed",
+            " · 远程 · 原连接已关闭",
+            " · リモート · 元の接続は終了",
+            " · 원격 · 원래 연결이 종료됨",
         );
         let active = self.live.is_some();
+        let live_connected = self.live.as_ref().is_some_and(LiveSession::is_alive);
+        let live_generation = self.live_generation;
         let live_status = self.live_status.clone();
         let live_captures = self.live_captures.clone();
         let live_targets = self.live_targets.clone();
@@ -10296,11 +10325,12 @@ impl Render for Workspace {
                                 )
                             })
                             .children(live_captures.into_iter().enumerate().map(
-                                |(index, (frame, path, local))| {
+                                |(index, capture)| {
+                                    let LiveCapture { frame, path, local, capture_id, generation } = capture;
                                     let label = format!(
                                         "{frame_label} {frame} · {}{}",
                                         path.display(),
-                                        if local { "" } else { remote_label }
+                                        if local { "" } else if live_connected && generation == live_generation && capture_id.is_some() { remote_label } else { remote_unavailable }
                                     );
                                     div()
                                         .id(SharedString::from(format!("live-capture-{index}")))
@@ -10311,6 +10341,14 @@ impl Render for Workspace {
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             if local {
                                                 this.open(path.clone(), cx);
+                                            } else if generation == this.live_generation {
+                                                if let (Some(session), Some(id)) = (&this.live, capture_id) {
+                                                    this.live_status = Some(match session.copy_capture(id) {
+                                                        Ok(_) => this.t("Copy requested; waiting for completion…", "已请求复制，等待完成…", "コピーを要求しました。完了を待っています…", "복사를 요청했습니다. 완료를 기다리는 중…").to_owned(),
+                                                        Err(error) => format!("{}: {error}", this.t("Copy failed", "复制失败", "コピー失敗", "복사 실패")),
+                                                    });
+                                                    cx.notify();
+                                                }
                                             }
                                         }))
                                 },
@@ -10819,8 +10857,13 @@ mod ui_tests {
                 view.settings.replay_bridge = Some("definitely-missing-replay-bridge".into());
                 view.live_status = Some("fixture".into());
                 view.live_targets = vec![38920];
-                view.live_captures
-                    .push((42, "missing-live-capture.rdc".into(), true));
+                view.live_captures.push(LiveCapture {
+                    frame: 42,
+                    path: "missing-live-capture.rdc".into(),
+                    local: true,
+                    capture_id: None,
+                    generation: 0,
+                });
                 cx.notify();
             })
         });

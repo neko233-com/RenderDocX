@@ -692,6 +692,35 @@ fn native_target_launch_triggers_capture_and_disconnects_without_stopping_target
         }
     }
     let capture = captured.expect("target must report a completed capture");
+    let capture_id = capture["capture_id"].as_u64().unwrap();
+    let copy_request = serde_json::json!({"command":"target_copy","capture_id":capture_id,"capture_directory":dir.path()});
+    let copy = agent.send(&copy_request.to_string());
+    assert_eq!(copy["ok"], true, "{copy}");
+    let copy_path = PathBuf::from(copy["data"]["path"].as_str().unwrap());
+    assert!(copy_path.starts_with(dir.path()));
+    assert_eq!(
+        agent.send(&copy_request.to_string())["error"]["code"],
+        "target_copy_failed"
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut copied = false;
+    while Instant::now() < deadline && !copied {
+        let reply = agent.send(r#"{"command":"target_events"}"#);
+        assert_eq!(reply["data"]["connected"], true, "{reply}");
+        copied = reply["data"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["type"] == "copied" && event["capture_id"] == capture_id);
+        if !copied {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    assert!(copied, "capture copy completion was not reported");
+    assert_eq!(
+        std::fs::read(&copy_path).unwrap(),
+        std::fs::read(capture["path"].as_str().unwrap()).unwrap()
+    );
     assert_eq!(
         agent.send(r#"{"command":"target_cycle"}"#)["data"]["submitted"],
         true
@@ -763,6 +792,27 @@ fn native_target_launch_triggers_capture_and_disconnects_without_stopping_target
     );
     assert_eq!(remote["ok"], true, "{remote}");
     assert_eq!(remote["data"]["target"]["ident"], ident);
+    let remote_copy = agent.send(&copy_request.to_string());
+    assert_eq!(remote_copy["ok"], true, "{remote_copy}");
+    let remote_path = PathBuf::from(remote_copy["data"]["path"].as_str().unwrap());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut completed = false;
+    while Instant::now() < deadline && !completed {
+        let response = agent.send(r#"{"command":"target_events"}"#);
+        completed = response["data"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["type"] == "copied" && event["capture_id"] == capture_id);
+        if !completed {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    assert!(completed, "loopback target copy did not complete");
+    assert_eq!(
+        std::fs::read(remote_path).unwrap(),
+        std::fs::read(&copy_path).unwrap()
+    );
     assert_eq!(agent.send(r#"{"command":"target_close"}"#)["ok"], true);
     agent.quit();
 }

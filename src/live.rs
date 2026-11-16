@@ -2,7 +2,7 @@ use crate::backend::{Settings, find_tool};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
@@ -128,6 +128,7 @@ struct Inner {
     child: Mutex<Option<Child>>,
     events: Arc<Mutex<VecDeque<Value>>>,
     alive: Arc<AtomicBool>,
+    pending_copies: Mutex<HashMap<u32, PathBuf>>,
 }
 
 impl Drop for Inner {
@@ -398,6 +399,7 @@ impl LiveSession {
                 child: Mutex::new(Some(child)),
                 events,
                 alive,
+                pending_copies: Mutex::new(HashMap::new()),
             }),
             connected,
             capture_template: None,
@@ -511,14 +513,60 @@ impl LiveSession {
     pub fn cycle(&self) -> Result<(), String> {
         self.send("cycle")
     }
+    /// Start a copy into a fresh application-owned directory. Completion arrives via `drain`.
+    pub fn copy_capture(&self, capture_id: u32) -> Result<PathBuf, String> {
+        self.copy_capture_to(capture_id, &capture_directory()?)
+    }
+    pub fn copy_capture_to(&self, capture_id: u32, root: &Path) -> Result<PathBuf, String> {
+        if !root.is_absolute() || !root.is_dir() {
+            return Err("Capture directory must be an existing absolute path".into());
+        }
+        let mut pending = self
+            .inner
+            .pending_copies
+            .lock()
+            .map_err(|e| e.to_string())?;
+        if pending.contains_key(&capture_id) {
+            return Err("Capture copy is already pending".into());
+        }
+        let folder = tempfile::Builder::new()
+            .prefix("remote-")
+            .tempdir_in(root)
+            .map_err(|e| e.to_string())?;
+        let path = folder.path().join("capture.rdc");
+        let text = path
+            .to_str()
+            .ok_or("Capture copy path is not valid UTF-8")?;
+        let encoded: String = text
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        self.send(&format!("copy {capture_id} {encoded}"))?;
+        pending.insert(capture_id, path.clone());
+        let _ = folder.keep();
+        Ok(path)
+    }
     pub fn drain(&self) -> Result<Vec<Value>, String> {
-        Ok(self
+        let events: Vec<Value> = self
             .inner
             .events
             .lock()
             .map_err(|e| e.to_string())?
             .drain(..)
-            .collect())
+            .collect();
+        let mut pending = self
+            .inner
+            .pending_copies
+            .lock()
+            .map_err(|e| e.to_string())?;
+        Ok(events.into_iter().map(|event| {
+            if event.get("type").and_then(Value::as_str) != Some("copied") { return event; }
+            let id = event.get("capture_id").and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok());
+            let expected = id.and_then(|id| pending.remove(&id));
+            let valid = expected.as_ref().is_some_and(|path| event.get("path").and_then(Value::as_str).is_some_and(|actual| Path::new(actual) == path) && path.metadata().is_ok_and(|meta| meta.is_file() && meta.len() > 0));
+            if valid { event } else { json!({"type":"error","message":"Capture copy completion did not match a pending local file"}) }
+        }).collect())
     }
     pub fn close(&self) -> Result<(), String> {
         if let Some(mut input) = self.inner.input.lock().map_err(|e| e.to_string())?.take() {

@@ -195,6 +195,12 @@ int run(const std::vector<std::string> &args)
         target->TriggerCapture(count);
       else if(command == "queue" && (parts >> a >> b) && !(parts >> extra) && decimal(a, first) && decimal(b, count) && count > 0)
         target->QueueCapture(first, count);
+      else if(command == "copy" && (parts >> a >> b) && !(parts >> extra) && decimal(a, first))
+      {
+        std::string path;
+        if(!unhex(b, path) || path.empty()) { failure("Invalid capture copy path"); continue; }
+        target->CopyCapture(first, path.c_str());
+      }
       else if(command == "cycle" && !(parts >> extra)) target->CycleActiveWindow();
       else { failure("Invalid target command"); continue; }
       if(!target->Connected()) { failure("Target disconnected while sending command"); quit = true; break; }
@@ -207,12 +213,13 @@ int run(const std::vector<std::string> &args)
     {
       case TargetControlMessageType::Noop: break;
       case TargetControlMessageType::NewCapture:
-      case TargetControlMessageType::CaptureCopied:
-        std::cout << "\nRENDERDOCX-TARGET/1 {\"type\":\"" << (msg.type == TargetControlMessageType::NewCapture ? "capture" : "copied")
-                  << "\",\"capture_id\":" << msg.newCapture.captureId << ",\"frame\":" << msg.newCapture.frameNumber
+        std::cout << "\nRENDERDOCX-TARGET/1 {\"type\":\"capture\",\"capture_id\":" << msg.newCapture.captureId << ",\"frame\":" << msg.newCapture.frameNumber
                   << ",\"timestamp\":\"" << msg.newCapture.timestamp << "\",\"bytes\":\"" << msg.newCapture.byteSize
                   << "\",\"local\":" << (msg.newCapture.local ? "true" : "false") << ",\"path\":";
         json(msg.newCapture.path); std::cout << ",\"title\":"; json(msg.newCapture.title); std::cout << ",\"api\":"; json(msg.newCapture.api); std::cout << "}" << std::endl; break;
+      case TargetControlMessageType::CaptureCopied:
+        std::cout << "\nRENDERDOCX-TARGET/1 {\"type\":\"copied\",\"capture_id\":" << msg.newCapture.captureId << ",\"path\":";
+        json(msg.newCapture.path); std::cout << "}" << std::endl; break;
       case TargetControlMessageType::RegisterAPI:
         std::cout << "\nRENDERDOCX-TARGET/1 {\"type\":\"api\",\"name\":"; json(msg.apiUse.name);
         std::cout << ",\"presenting\":" << (msg.apiUse.presenting ? "true" : "false") << ",\"supported\":" << (msg.apiUse.supported ? "true" : "false") << ",\"message\":";
