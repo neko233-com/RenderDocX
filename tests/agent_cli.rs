@@ -1238,6 +1238,11 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let mesh_bytes =
         agent.send(r#"{"command":"mesh_read","kind":"vertex","offset":"0","length":16}"#);
     assert_eq!(mesh_bytes["ok"], true, "{mesh_bytes}");
+    assert_eq!(mesh_bytes["data"]["positions"][0]["row"], "0");
+    assert_eq!(
+        mesh_bytes["data"]["positions"][0]["values"],
+        serde_json::json!([3.0, 3.0, 0.0, 1.0])
+    );
     assert_eq!(
         mesh_bytes["data"]["hex"],
         "0000404000004040000000000000803f"

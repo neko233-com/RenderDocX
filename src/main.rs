@@ -233,15 +233,7 @@ impl Default for MeshView {
 }
 
 fn mesh_position_format(info: &MeshInfo) -> bool {
-    cfg!(target_endian = "little")
-        && info.unproject
-        && info.format_type == 0
-        && info.component_type == 1
-        && info.component_byte_width == 4
-        && (1..=4).contains(&info.component_count)
-        && info.vertex_stride > 0
-        && u64::from(info.vertex_stride) <= BUFFER_VIEW_PAGE
-        && info.component_count * 4 <= info.vertex_stride
+    renderdocx::mesh_positions::supported(info) && u64::from(info.vertex_stride) <= BUFFER_VIEW_PAGE
 }
 
 fn mesh_page_size(info: &MeshInfo) -> u64 {
@@ -270,21 +262,10 @@ fn mesh_positions(info: &MeshInfo, bytes: &[u8], offset: u64) -> Option<Vec<(u64
     if !mesh_position_format(info) {
         return None;
     }
-    let stride = u64::from(info.vertex_stride);
-    let mut relative = (stride - offset % stride) % stride;
-    let mut positions = Vec::new();
-    while relative.checked_add(u64::from(info.component_count) * 4)? <= bytes.len() as u64 {
-        let start = usize::try_from(relative).ok()?;
-        let components = (0..info.component_count as usize)
-            .map(|index| {
-                let i = start + index * 4;
-                f32::from_le_bytes(bytes[i..i + 4].try_into().unwrap())
-            })
-            .collect();
-        positions.push((offset.checked_add(relative)? / stride, components));
-        relative = relative.checked_add(stride)?;
-    }
-    Some(positions)
+    renderdocx::mesh_positions::decode(info, bytes, offset)?
+        .into_iter()
+        .map(|position| Some((position.row.parse().ok()?, position.values)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -315,6 +296,14 @@ mod mesh_tests {
         assert_eq!(second.len(), 12);
         assert_eq!(first[11].0, 11);
         assert_eq!(second[0], (12, vec![12.0, 3.0, 0.0, 1.0]));
+        let unprojected = MeshInfo {
+            unproject: false,
+            ..info.clone()
+        };
+        assert_eq!(
+            mesh_positions(&unprojected, &bytes[..240], 0).unwrap(),
+            first
+        );
         let unsupported = MeshInfo {
             vertex_stride: 512,
             ..info

@@ -2,7 +2,7 @@ use renderdocx::{
     backend::Settings,
     debug_navigation::{Breakpoint, DebugNavigator, SourceStep, StopReason},
     live::{CaptureOptions, LaunchConfiguration, LiveSession, enumerate},
-    mesh_indices,
+    mesh_indices, mesh_positions,
     replay::{
         BUFFER_PAGE_LIMIT, ComputeDebugSelection, DebugState, DebugTrace, MeshInfo, MeshSelection,
         Pipeline, PixelDebugSelection, SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session, Snapshot,
@@ -537,7 +537,8 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         session.mesh_read(*event, *selection, kind, offset, length).map(|bytes| {
                             let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
                             let indices = if kind == "index" { mesh_indices::decode(info, &bytes, offset) } else { None };
-                            json!({"event_id":event,"selection":selection,"kind":kind,"offset":offset.to_string(),"length":bytes.len(),"hex":hex,"indices":indices})
+                            let positions = if kind == "vertex" { mesh_positions::decode(info, &bytes, offset) } else { None };
+                            json!({"event_id":event,"selection":selection,"kind":kind,"offset":offset.to_string(),"length":bytes.len(),"hex":hex,"indices":indices,"positions":positions})
                         }).map_err(|error| ("replay_mesh_read_failed", error)),
                     _ => Err(("invalid_arguments", "mesh_read requires kind, decimal-string offset and valid length".into())),
                 }
