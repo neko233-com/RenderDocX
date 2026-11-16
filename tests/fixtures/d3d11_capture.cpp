@@ -50,6 +50,14 @@ int wmain(int argc, wchar_t **argv)
   hr = device->CreateTexture2D(&desc, nullptr, &texture);
   if(SUCCEEDED(hr)) hr = device->CreateRenderTargetView(texture, nullptr, &view);
   if(FAILED(hr)) { std::cerr << "Could not create render target"; return 8; }
+  D3D11_TEXTURE2D_DESC depth_desc = desc;
+  depth_desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+  depth_desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+  ID3D11Texture2D *depth_texture = nullptr;
+  ID3D11DepthStencilView *depth_view = nullptr;
+  hr = device->CreateTexture2D(&depth_desc, nullptr, &depth_texture);
+  if(SUCCEEDED(hr)) hr = device->CreateDepthStencilView(depth_texture, nullptr, &depth_view);
+  if(FAILED(hr)) { std::cerr << "Could not create depth stencil texture"; return 28; }
   D3D11_TEXTURE2D_DESC layered_desc = desc;
   layered_desc.Width = 8; layered_desc.Height = 8; layered_desc.MipLevels = 2; layered_desc.ArraySize = 2;
   ID3D11Texture2D *layered = nullptr;
@@ -200,6 +208,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint3 id : 
   if(!api->IsFrameCapturing()) { std::cerr << "Capture did not start"; return 9; }
   const float color[4] = {0.25f, 0.5f, 0.75f, 1.0f};
   context->ClearRenderTargetView(view, color);
+  context->ClearDepthStencilView(depth_view, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 0.375f, 0x65);
   const float integer_color[4] = {1, 2, 3, 4};
   context->ClearRenderTargetView(integer_view, integer_color);
   context->ClearRenderTargetView(float_view, color);
@@ -266,6 +275,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint3 id : 
   for(auto *layer_view : layered_views) layer_view->Release();
   for(auto *volume_view : volume_views) volume_view->Release();
   if(msaa_view) msaa_view->Release(); if(msaa_texture) msaa_texture->Release();
+  depth_view->Release(); depth_texture->Release();
   single_texture->Release(); strip_texture->Release(); constant_buffer->Release(); compute_uav->Release(); compute_buffer->Release(); compute_shader->Release();
   scissor_rasterizer->Release(); history_rasterizer->Release(); history_shader->Release(); volume->Release(); float_view->Release(); float_texture->Release(); integer_view->Release(); integer_texture->Release(); layered->Release(); index_buffer->Release(); vertex_buffer->Release(); layout->Release(); vertex->Release(); pixel->Release(); view->Release(); texture->Release(); context->Release(); device->Release();
   return 0;

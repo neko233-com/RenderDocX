@@ -562,7 +562,8 @@ void write_snapshot(IReplayController *controller, const ReplayOptions &options,
               << ",\"samples\":" << texture.msSamp << ",\"bytes\":\"" << texture.byteSize
               << "\",\"format_name\":";
     json_string(texture.format.Name());
-    std::cout << ",\"format_type\":" << uint32_t(texture.format.type)
+    std::cout << ",\"creation_flags\":" << uint32_t(texture.creationFlags)
+              << ",\"format_type\":" << uint32_t(texture.format.type)
               << ",\"component_type\":" << uint32_t(texture.format.compType)
               << ",\"component_count\":" << uint32_t(texture.format.compCount)
               << ",\"component_byte_width\":" << uint32_t(texture.format.compByteWidth)

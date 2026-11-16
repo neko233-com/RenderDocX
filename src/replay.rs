@@ -879,10 +879,25 @@ pub struct Texture {
     pub bytes: String,
     #[serde(default)]
     pub format_name: String,
+    #[serde(default)]
+    pub creation_flags: u32,
     pub format_type: u32,
     pub component_type: u32,
     pub component_count: u32,
     pub component_byte_width: u32,
+}
+
+impl Texture {
+    /// RenderDoc TextureCategory::DepthTarget and CompType::Depth; packed formats
+    /// are also recognized when opening snapshots produced by older bridges.
+    pub fn is_depth_stencil(&self) -> bool {
+        self.creation_flags & 0x4 != 0
+            || self.component_type == 8
+            || (19..=22).contains(&self.format_type)
+    }
+    pub fn is_stencil_only(&self) -> bool {
+        self.format_type == 22
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize, Serialize)]
@@ -5635,6 +5650,7 @@ mod tests {
             samples: 1,
             bytes: "0".into(),
             format_name: String::new(),
+            creation_flags: 0,
             format_type: 0,
             component_type: 0,
             component_count: 4,
@@ -5921,11 +5937,27 @@ mod tests {
             samples: 1,
             bytes: "0".into(),
             format_name: String::new(),
+            creation_flags: 0,
             format_type: 0,
             component_type: 0,
             component_count: 4,
             component_byte_width: 1,
         };
+        let mut old_snapshot = serde_json::to_value(&texture).unwrap();
+        old_snapshot
+            .as_object_mut()
+            .unwrap()
+            .remove("creation_flags");
+        old_snapshot["format_type"] = 20.into();
+        let packed: Texture = serde_json::from_value(old_snapshot).unwrap();
+        assert_eq!(packed.creation_flags, 0);
+        assert!(packed.is_depth_stencil());
+        assert!(!packed.is_stencil_only());
+        let stencil = Texture {
+            format_type: 22,
+            ..packed
+        };
+        assert!(stencil.is_stencil_only());
         let mut selection = TextureSelection {
             mip: 2,
             slice: 1,

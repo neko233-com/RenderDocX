@@ -1056,6 +1056,35 @@ fn real_d3d11_mesh_draw_order() {
         invalid_background["error"]["code"], "invalid_arguments",
         "{invalid_background}"
     );
+    let depth_index = opened["data"]["capture"]["textures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|texture| {
+            texture["creation_flags"].as_u64().unwrap_or(0) & 4 != 0 && texture["format_type"] == 20
+        })
+        .expect("D24S8 depth texture");
+    let depth_path = dir.path().join("depth-preview.png");
+    let depth_result = agent.send(&serde_json::json!({"command":"render_texture","index":depth_index,"width":16,"height":16,"path":depth_path,"preview_channels":[true,false,false,false],"preview_linear_as_gamma":false}).to_string());
+    assert_eq!(depth_result["ok"], true, "{depth_result}");
+    let stencil_path = dir.path().join("stencil-preview.png");
+    let stencil_result = agent.send(&serde_json::json!({"command":"render_texture","index":depth_index,"width":16,"height":16,"path":stencil_path,"preview_channels":[false,true,false,false],"preview_linear_as_gamma":false}).to_string());
+    assert_eq!(stencil_result["ok"], true, "{stencil_result}");
+    let decode_preview = |path: &std::path::Path| {
+        let mut reader =
+            png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path).unwrap()))
+                .read_info()
+                .unwrap();
+        let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut pixels).unwrap();
+        pixels
+    };
+    let depth_pixels = decode_preview(&depth_path);
+    let stencil_pixels = decode_preview(&stencil_path);
+    assert_ne!(
+        depth_pixels, stencil_pixels,
+        "depth and stencil previews must differ"
+    );
     let ordinary_fit = agent
         .send(&serde_json::json!({"command":"texture_fit_range","index":float_index}).to_string());
     assert_eq!(ordinary_fit["ok"], true, "{ordinary_fit}");

@@ -829,6 +829,26 @@ impl Workspace {
         let new_texture = self.selected_texture != Some(index);
         let has_saved = self.settings.texture_per_resource_settings
             && self.texture_saved_selection.contains_key(&index);
+        let saved_custom_was_invalidated =
+            self.texture_saved_selection
+                .get(&index)
+                .is_some_and(|(saved, _)| {
+                    saved.preview_custom_shader && !selection.preview_custom_shader
+                });
+        if new_texture
+            && texture.is_depth_stencil()
+            && !selection.preview_custom_shader
+            && (!has_saved || saved_custom_was_invalidated)
+        {
+            selection.preview_hdr_multiplier = None;
+            selection.preview_decode_yuv = false;
+            selection.channel = None;
+            selection.preview_channels = Some(if texture.is_stencil_only() {
+                [false, true, false, false]
+            } else {
+                [true, false, false, false]
+            });
+        }
         if new_texture
             && (self.settings.texture_reset_range
                 || (self.settings.texture_per_resource_settings && !has_saved))
@@ -6249,6 +6269,21 @@ impl Workspace {
         if let Some(value) = channels.get_mut(channel) {
             *value = !*value;
         }
+        if let Some(texture) = self.snapshot.as_ref().and_then(|snapshot| {
+            self.selected_texture
+                .and_then(|index| snapshot.textures.get(index))
+        }) {
+            if texture.is_depth_stencil() && !self.texture_selection.preview_custom_shader {
+                channels[2] = false;
+                channels[3] = false;
+                if texture.is_stencil_only() {
+                    channels[0] = false;
+                    channels[1] = true;
+                } else if !channels[0] && !channels[1] {
+                    channels[0] = true;
+                }
+            }
+        }
         self.texture_selection.preview_channels = Some(channels);
         self.preview = None;
         cx.notify();
@@ -6296,10 +6331,33 @@ impl Workspace {
         }
     }
 
+    fn selected_depth_texture(&self) -> Option<&renderdocx::replay::Texture> {
+        self.snapshot
+            .as_ref()?
+            .textures
+            .get(self.selected_texture?)
+            .filter(|texture| texture.is_depth_stencil())
+    }
+
+    fn reset_depth_channels(&mut self) {
+        if let Some(texture) = self.selected_depth_texture() {
+            self.texture_selection.preview_channels = Some(if texture.is_stencil_only() {
+                [false, true, false, false]
+            } else {
+                [true, false, false, false]
+            });
+            self.texture_selection.channel = None;
+        }
+    }
+
     fn change_preview_mode(&mut self, mode: u8, cx: &mut Context<Self>) {
         if !self.preview_edit_ready(cx) {
             return;
         }
+        if self.selected_depth_texture().is_some() && mode != 0 {
+            return;
+        }
+        let was_custom = self.texture_selection.preview_custom_shader;
         let multiplier = if mode == 1 {
             match self.texture_hdr_multiplier.read(cx).value().parse::<f32>() {
                 Ok(value) if value.is_finite() && value >= 0.0 => Some(value),
@@ -6323,6 +6381,9 @@ impl Workspace {
         self.texture_selection.preview_hdr_multiplier = multiplier;
         self.texture_selection.preview_decode_yuv = mode == 2;
         self.texture_selection.preview_custom_shader = false;
+        if was_custom {
+            self.reset_depth_channels();
+        }
         self.normalize_texture_channel();
         self.preview = None;
         self.status = None;
@@ -6670,9 +6731,16 @@ impl Workspace {
                                 .join("\n");
                         if clear {
                             this.texture_selection.preview_custom_shader = false;
+                            this.reset_depth_channels();
                             this.normalize_texture_channel();
                             this.preview = None;
                         } else if result.compiled {
+                            if this.selected_depth_texture().is_some()
+                                && !this.texture_selection.preview_custom_shader
+                            {
+                                this.texture_selection.preview_channels = None;
+                                this.texture_selection.channel = None;
+                            }
                             this.texture_selection.preview_hdr_multiplier = None;
                             this.texture_selection.preview_decode_yuv = false;
                             this.texture_selection.preview_custom_shader = true;
@@ -6703,6 +6771,12 @@ impl Workspace {
                 .to_owned(),
             );
         } else {
+            if self.selected_depth_texture().is_some()
+                && !self.texture_selection.preview_custom_shader
+            {
+                self.texture_selection.preview_channels = None;
+                self.texture_selection.channel = None;
+            }
             self.texture_selection.preview_hdr_multiplier = None;
             self.texture_selection.preview_decode_yuv = false;
             self.texture_selection.preview_custom_shader = true;
@@ -9915,39 +9989,56 @@ impl Workspace {
     }
 
     fn texture_preview_modes(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let depth = self.selected_depth_texture().is_some();
         div()
             .flex()
             .flex_wrap()
             .gap_2()
             .child(button(
                 "texture-mode-rgba",
-                "RGBA",
+                if depth {
+                    self.t(
+                        "Depth / stencil",
+                        "深度 / 模板",
+                        "深度 / ステンシル",
+                        "깊이 / 스텐실",
+                    )
+                } else {
+                    "RGBA"
+                },
                 self.texture_selection.preview_hdr_multiplier.is_none()
                     && !self.texture_selection.preview_decode_yuv
                     && !self.texture_selection.preview_custom_shader,
                 |this, cx| this.change_preview_mode(0, cx),
                 cx,
             ))
-            .child(
-                Input::new(&self.texture_hdr_multiplier)
-                    .id("texture-hdr-multiplier")
-                    .aria_label(self.t("RGBM multiplier", "RGBM 乘数", "RGBM 乗数", "RGBM 배율"))
-                    .w(px(90.)),
-            )
-            .child(button(
-                "texture-mode-rgbm",
-                "RGBM",
-                self.texture_selection.preview_hdr_multiplier.is_some(),
-                |this, cx| this.change_preview_mode(1, cx),
-                cx,
-            ))
-            .child(button(
-                "texture-mode-yuv",
-                self.t("YUVA decode", "YUVA 解码", "YUVA デコード", "YUVA 디코딩"),
-                self.texture_selection.preview_decode_yuv,
-                |this, cx| this.change_preview_mode(2, cx),
-                cx,
-            ))
+            .when(!depth, |view| {
+                view.child(
+                    Input::new(&self.texture_hdr_multiplier)
+                        .id("texture-hdr-multiplier")
+                        .aria_label(self.t(
+                            "RGBM multiplier",
+                            "RGBM 乘数",
+                            "RGBM 乗数",
+                            "RGBM 배율",
+                        ))
+                        .w(px(90.)),
+                )
+                .child(button(
+                    "texture-mode-rgbm",
+                    "RGBM",
+                    self.texture_selection.preview_hdr_multiplier.is_some(),
+                    |this, cx| this.change_preview_mode(1, cx),
+                    cx,
+                ))
+                .child(button(
+                    "texture-mode-yuv",
+                    self.t("YUVA decode", "YUVA 解码", "YUVA デコード", "YUVA 디코딩"),
+                    self.texture_selection.preview_decode_yuv,
+                    |this, cx| this.change_preview_mode(2, cx),
+                    cx,
+                ))
+            })
             .child(button(
                 "texture-mode-custom",
                 self.t(
@@ -10087,6 +10178,16 @@ impl Workspace {
 
     fn texture_preview_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let channels = self.texture_selection.effective_preview_channels();
+        let depth = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                self.selected_texture
+                    .and_then(|index| snapshot.textures.get(index))
+            })
+            .filter(|texture| {
+                texture.is_depth_stencil() && !self.texture_selection.preview_custom_shader
+            });
         div()
             .flex()
             .flex_col()
@@ -10145,39 +10246,62 @@ impl Workspace {
                     .flex()
                     .flex_wrap()
                     .gap_2()
-                    .child(button(
-                        "texture-preview-red",
-                        "R",
-                        channels[0],
-                        |this, cx| this.change_preview_channel(0, cx),
-                        cx,
-                    ))
-                    .child(button(
-                        "texture-preview-green",
-                        "G",
-                        channels[1],
-                        |this, cx| this.change_preview_channel(1, cx),
-                        cx,
-                    ))
-                    .child(button(
-                        "texture-preview-blue",
-                        "B",
-                        channels[2],
-                        |this, cx| this.change_preview_channel(2, cx),
-                        cx,
-                    ))
-                    .when(
-                        self.texture_selection.preview_hdr_multiplier.is_none(),
-                        |row| {
-                            row.child(button(
-                                "texture-preview-alpha",
-                                "A",
-                                channels[3],
-                                |this, cx| this.change_preview_channel(3, cx),
-                                cx,
-                            ))
-                        },
-                    )
+                    .when(depth.is_some(), |row| {
+                        row.when(
+                            depth.is_some_and(|texture| !texture.is_stencil_only()),
+                            |row| {
+                                row.child(button(
+                                    "texture-preview-depth",
+                                    self.t("Depth", "深度", "深度", "깊이"),
+                                    channels[0],
+                                    |this, cx| this.change_preview_channel(0, cx),
+                                    cx,
+                                ))
+                            },
+                        )
+                        .child(button(
+                            "texture-preview-stencil",
+                            self.t("Stencil", "模板", "ステンシル", "스텐실"),
+                            channels[1],
+                            |this, cx| this.change_preview_channel(1, cx),
+                            cx,
+                        ))
+                    })
+                    .when(depth.is_none(), |row| {
+                        row.child(button(
+                            "texture-preview-red",
+                            "R",
+                            channels[0],
+                            |this, cx| this.change_preview_channel(0, cx),
+                            cx,
+                        ))
+                        .child(button(
+                            "texture-preview-green",
+                            "G",
+                            channels[1],
+                            |this, cx| this.change_preview_channel(1, cx),
+                            cx,
+                        ))
+                        .child(button(
+                            "texture-preview-blue",
+                            "B",
+                            channels[2],
+                            |this, cx| this.change_preview_channel(2, cx),
+                            cx,
+                        ))
+                        .when(
+                            self.texture_selection.preview_hdr_multiplier.is_none(),
+                            |row| {
+                                row.child(button(
+                                    "texture-preview-alpha",
+                                    "A",
+                                    channels[3],
+                                    |this, cx| this.change_preview_channel(3, cx),
+                                    cx,
+                                ))
+                            },
+                        )
+                    })
                     .child(button(
                         "texture-preview-flip",
                         self.t("Flip Y", "垂直翻转", "上下反転", "상하 반전"),
@@ -17761,6 +17885,7 @@ mod ui_tests {
                                 samples: 1,
                                 bytes: "1024".into(),
                                 format_name: "R8G8B8A8_UNORM".into(),
+                                creation_flags: 0,
                                 format_type: 0,
                                 component_type: 0,
                                 component_count: 4,
@@ -18553,6 +18678,90 @@ mod ui_tests {
                 view.texture_selection = old_selection;
                 view.texture_custom_active = old_active;
                 view.texture_custom_revision = old_revision;
+            });
+        })
+        .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                let old_index = view.selected_texture.unwrap();
+                let old_selection = view.texture_selection;
+                let count = view.snapshot.as_ref().unwrap().textures.len();
+                let mut depth = view.snapshot.as_ref().unwrap().textures[old_index].clone();
+                depth.creation_flags = 4;
+                depth.component_type = 8;
+                depth.format_type = 20;
+                depth.component_count = 2;
+                view.snapshot.as_mut().unwrap().textures.push(depth);
+                assert!(view.switch_texture(count, None, window, cx));
+                assert_eq!(
+                    view.texture_selection.effective_preview_channels(),
+                    [true, false, false, false]
+                );
+                view.change_preview_channel(1, cx);
+                assert_eq!(
+                    view.texture_selection.effective_preview_channels(),
+                    [true, true, false, false]
+                );
+                view.change_preview_channel(0, cx);
+                assert_eq!(
+                    view.texture_selection.effective_preview_channels(),
+                    [false, true, false, false]
+                );
+                view.change_preview_channel(1, cx);
+                assert_eq!(
+                    view.texture_selection.effective_preview_channels(),
+                    [true, false, false, false]
+                );
+                assert!(view.switch_texture(old_index, None, window, cx));
+                view.snapshot.as_mut().unwrap().textures[count].format_type = 22;
+                view.texture_saved_selection.remove(&count);
+                assert!(view.switch_texture(count, None, window, cx));
+                assert_eq!(
+                    view.texture_selection.effective_preview_channels(),
+                    [false, true, false, false]
+                );
+                view.change_preview_channel(1, cx);
+                assert_eq!(
+                    view.texture_selection.effective_preview_channels(),
+                    [false, true, false, false]
+                );
+                assert!(view.switch_texture(old_index, None, window, cx));
+                view.snapshot.as_mut().unwrap().textures.pop();
+                view.texture_saved_selection.clear();
+                view.texture_selection = old_selection;
+            });
+        })
+        .unwrap();
+        let original_index = cx.update(|cx| view.read(cx).selected_texture.unwrap());
+        let original_selection = cx.update(|cx| view.read(cx).texture_selection);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                let mut depth = view.snapshot.as_ref().unwrap().textures[original_index].clone();
+                depth.creation_flags = 4;
+                depth.component_type = 8;
+                depth.format_type = 20;
+                depth.component_count = 2;
+                let index = view.snapshot.as_ref().unwrap().textures.len();
+                view.snapshot.as_mut().unwrap().textures.push(depth);
+                assert!(view.switch_texture(index, None, window, cx));
+            });
+            reveal_details(window, "texture-preview-stencil", cx);
+            assert!(window.find("texture-preview-depth").visible());
+            window.click("texture-preview-stencil", cx);
+        })
+        .unwrap();
+        cx.update(|cx| {
+            assert_eq!(
+                view.read(cx).texture_selection.effective_preview_channels(),
+                [true, true, false, false]
+            )
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                assert!(view.switch_texture(original_index, None, window, cx));
+                view.snapshot.as_mut().unwrap().textures.pop();
+                view.texture_saved_selection.clear();
+                view.texture_selection = original_selection;
             });
         })
         .unwrap();
