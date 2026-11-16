@@ -585,6 +585,7 @@ struct Workspace {
     statistics: Option<TextureStatistics>,
     selected_buffer: Option<usize>,
     buffer_offset: u64,
+    buffer_format: Option<renderdocx::buffer_format::ScalarFormat>,
     buffer_seek: Entity<InputState>,
     buffer_search: Entity<InputState>,
     buffer_search_last: Option<BufferSearchHit>,
@@ -9566,14 +9567,84 @@ impl Workspace {
                 })
         } else if self.tab == CaptureTab::Buffers {
             let rows = self.buffer_data.as_ref().map(|data| {
-                data.chunks(8)
-                    .enumerate()
-                    .map(|(line, bytes)| {
-                        let hex: String = bytes.iter().map(|byte| format!("{byte:02x} ")).collect();
-                        format!("{:016x}  {hex}", self.buffer_offset + (line as u64 * 8))
-                    })
-                    .collect::<Vec<_>>()
+                if let Some(format) = self.buffer_format {
+                    let mut result = Vec::new();
+                    if let Ok(page) =
+                        renderdocx::buffer_format::decode(format, self.buffer_offset, data)
+                    {
+                        result.extend(
+                            page.values
+                                .into_iter()
+                                .map(|value| format!("{}  {}", value.offset, value.value)),
+                        );
+                        if !page.trailing_hex.is_empty() {
+                            result.push(format!(
+                                "{}: {}",
+                                self.t("Trailing bytes", "剩余字节", "残りのバイト", "남은 바이트"),
+                                page.trailing_hex
+                            ));
+                        }
+                    }
+                    result
+                } else {
+                    data.chunks(8)
+                        .enumerate()
+                        .map(|(line, bytes)| {
+                            let hex: String =
+                                bytes.iter().map(|byte| format!("{byte:02x} ")).collect();
+                            format!("{:016x}  {hex}", self.buffer_offset + (line as u64 * 8))
+                        })
+                        .collect::<Vec<_>>()
+                }
             });
+            let mut formats = div()
+                .flex()
+                .flex_wrap()
+                .gap_2()
+                .child(self.t("Display type", "显示类型", "表示型", "표시 형식"))
+                .child(
+                    div()
+                        .id("buffer-format-raw")
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(rgb(if self.buffer_format.is_none() {
+                            0x4169e1
+                        } else {
+                            0x252f40
+                        }))
+                        .child(self.t("Raw", "原始", "生データ", "원시"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.buffer_format = None;
+                            cx.notify();
+                        })),
+                );
+            for format in renderdocx::buffer_format::ScalarFormat::ALL {
+                formats = formats.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "buffer-format-{}",
+                            format.name()
+                        )))
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(rgb(if self.buffer_format == Some(format) {
+                            0x4169e1
+                        } else {
+                            0x252f40
+                        }))
+                        .child(format.name())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.buffer_format = Some(format);
+                            cx.notify();
+                        })),
+                );
+            }
             let prev = button(
                 "buffer-prev",
                 previous,
@@ -9676,6 +9747,8 @@ impl Workspace {
                         ))
                     })
                     .child(format!("{flags_label}: 0x{:08X}", buffer.creation_flags))
+                    .child(formats)
+                    .when(self.buffer_format.is_some(), |view| view.child(self.t("Typed offsets are decimal; values start at the current byte offset.", "类型视图的偏移为十进制；值从当前字节偏移开始解码。", "型付き表示のオフセットは 10 進数で、現在のバイト位置からデコードします。", "형식 보기의 오프셋은 10진수이며 현재 바이트 위치부터 디코딩합니다.")))
                     .child(
                         div()
                             .flex()
@@ -12427,6 +12500,7 @@ fn main() {
                         statistics: None,
                         selected_buffer: None,
                         buffer_offset: 0,
+                        buffer_format: None,
                         buffer_seek,
                         buffer_search,
                         buffer_search_last: None,
@@ -12693,6 +12767,7 @@ mod ui_tests {
                         statistics: None,
                         selected_buffer: None,
                         buffer_offset: 0,
+                        buffer_format: None,
                         buffer_seek,
                         buffer_search,
                         buffer_search_last: None,
@@ -13179,6 +13254,7 @@ mod ui_tests {
                         statistics: None,
                         selected_buffer: None,
                         buffer_offset: 0,
+                        buffer_format: None,
                         buffer_seek,
                         buffer_search,
                         buffer_search_last: None,
@@ -13677,7 +13753,35 @@ mod ui_tests {
                 ScrollDelta::Pixels(point(px(0.), px(2000.))),
                 cx,
             );
+            let line_y = window.find(("buffer-line", 0usize)).bounds().origin.y;
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(500.) - line_y)),
+                cx,
+            );
+            window.render_frame(cx);
             assert!(window.find(("buffer-line", 0usize)).visible());
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(2000.))),
+                cx,
+            );
+            window.render_frame(cx);
+            window.click("buffer-format-float", cx);
+            window.render_frame(cx);
+            assert!(
+                view.read(cx).buffer_format == Some(renderdocx::buffer_format::ScalarFormat::F32)
+            );
+            assert!(window.try_find(("buffer-line", 0usize)).is_some());
+            window.click("buffer-format-raw", cx);
+            window.render_frame(cx);
+            let next_y = window.find("buffer-next").bounds().origin.y;
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(500.) - next_y)),
+                cx,
+            );
+            window.render_frame(cx);
             window.click("buffer-next", cx);
         })
         .unwrap();

@@ -1929,6 +1929,20 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     };
     let content = agent.send(&read("4", 8));
     assert_eq!(content["data"]["hex"], "0000404000004040", "{content}");
+    let decoded = agent.send(&serde_json::json!({"command":"decode_buffer", "index":vertex_index, "offset":"4", "length":8, "format":"float"}).to_string());
+    assert_eq!(
+        decoded["data"]["page"]["values"][0]["offset"], "4",
+        "{decoded}"
+    );
+    assert_eq!(
+        decoded["data"]["page"]["values"][0]["value"], "3",
+        "{decoded}"
+    );
+    assert_eq!(
+        decoded["data"]["page"]["values"][1]["value"], "3",
+        "{decoded}"
+    );
+    assert_eq!(agent.send(&serde_json::json!({"command":"decode_buffer", "index":vertex_index, "offset":"4", "length":8, "format":"invalid"}).to_string())["error"]["code"], "invalid_arguments");
     let found = agent.send(&serde_json::json!({"command":"find_buffer", "index":vertex_index, "offset":"4", "length":"8", "hex":"00 00 40 40"}).to_string());
     assert_eq!(found["data"]["offset"], "4", "{found}");
     let missing = agent.send(&serde_json::json!({"command":"find_buffer", "index":vertex_index, "offset":"4", "length":"8", "hex":"de ad be ef"}).to_string());
