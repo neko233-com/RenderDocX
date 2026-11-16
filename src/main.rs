@@ -214,6 +214,7 @@ struct TimelineView {
     end: u32,
     collapsed: std::collections::HashSet<usize>,
     pending_scrub: Option<usize>,
+    drag_x: Option<f32>,
     usage: Option<renderdocx::replay::TimelineUsage>,
     history: Option<renderdocx::replay::TimelineHistory>,
 }
@@ -224,6 +225,7 @@ impl TimelineView {
         self.end = self.model.max_event;
         self.collapsed.clear();
         self.pending_scrub = None;
+        self.drag_x = None;
         self.usage = None;
         self.history = None;
     }
@@ -242,6 +244,42 @@ impl TimelineView {
         let start = center.saturating_sub(next / 2).min(total - next);
         self.start = start as u32;
         self.end = (start + next - 1) as u32;
+    }
+    fn zoom_at(&mut self, steps: f32, anchor: f32) {
+        if !steps.is_finite() || !anchor.is_finite() || steps == 0.0 {
+            return;
+        }
+        let total = u64::from(self.model.max_event) + 1;
+        let length = u64::from(self.end) - u64::from(self.start) + 1;
+        let factor = 1.048_f64.powf(f64::from(steps).clamp(-200.0, 200.0));
+        let mut next = ((length as f64 / factor).round() as u64).clamp(1, total);
+        if next == length {
+            next = if steps > 0.0 {
+                length.saturating_sub(1).max(1)
+            } else {
+                length.saturating_add(1).min(total)
+            };
+        }
+        let anchor = f64::from(anchor.clamp(0.0, 1.0));
+        let focal = f64::from(self.start) + length as f64 * anchor;
+        let start = (focal - next as f64 * anchor)
+            .round()
+            .clamp(0.0, (total - next) as f64) as u64;
+        self.start = start as u32;
+        self.end = (start + next - 1) as u32;
+    }
+    fn pan_pixels(&mut self, delta: f32, width: f32) {
+        if !delta.is_finite() || !width.is_finite() || width <= 0.0 {
+            return;
+        }
+        let total = u64::from(self.model.max_event) + 1;
+        let length = u64::from(self.end) - u64::from(self.start) + 1;
+        let offset = f64::from(delta) / f64::from(width) * length as f64;
+        let start = (f64::from(self.start) - offset)
+            .round()
+            .clamp(0.0, (total - length) as f64) as u64;
+        self.start = start as u32;
+        self.end = (start + length - 1) as u32;
     }
     fn pan(&mut self, forward: bool) {
         let total = u64::from(self.model.max_event) + 1;
@@ -6307,6 +6345,7 @@ impl Workspace {
         let paint_bounds = axis_bounds.clone();
         let down_bounds = axis_bounds.clone();
         let move_bounds = axis_bounds.clone();
+        let scroll_bounds = axis_bounds.clone();
         let axis = div()
             .id("timeline-axis")
             .test_support()
@@ -6319,16 +6358,48 @@ impl Workspace {
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
-                    this.scrub_timeline(event.position, down_bounds.get(), window, cx)
+                    this.timeline.drag_x = Some(f32::from(event.position.x));
+                    if !event.modifiers.alt {
+                        this.scrub_timeline(event.position, down_bounds.get(), window, cx);
+                    }
                 }),
             )
             .on_mouse_move(
                 cx.listener(move |this, event: &gpui::MouseMoveEvent, window, cx| {
                     if event.dragging() {
-                        this.scrub_timeline(event.position, move_bounds.get(), window, cx);
+                        let x = f32::from(event.position.x);
+                        if event.modifiers.alt {
+                            if let Some(previous) = this.timeline.drag_x {
+                                this.timeline.pan_pixels(
+                                    x - previous,
+                                    f32::from(move_bounds.get().size.width),
+                                );
+                                cx.notify();
+                            }
+                        } else {
+                            this.scrub_timeline(event.position, move_bounds.get(), window, cx);
+                        }
+                        this.timeline.drag_x = Some(x);
+                    } else {
+                        this.timeline.drag_x = None;
                     }
                 }),
-            );
+            )
+            .on_scroll(cx.listener(move |this, event: &gpui::ScrollEvent, _, cx| {
+                let bounds = scroll_bounds.get();
+                let width = f32::from(bounds.size.width);
+                if width <= 0.0 {
+                    return;
+                }
+                let steps = match event.delta {
+                    gpui::ScrollDelta::Lines(delta) => delta.y,
+                    gpui::ScrollDelta::Pixels(delta) => f32::from(delta.y) / 40.0,
+                };
+                let anchor = f32::from(event.position.x - bounds.origin.x) / width;
+                this.timeline.zoom_at(steps, anchor);
+                cx.stop_propagation();
+                cx.notify();
+            }));
         div().flex().flex_col().gap_2()
             .child(div().flex().flex_wrap().gap_2()
                 .child(button("timeline-previous", self.t("Previous range", "上一范围", "前の範囲", "이전 범위"), false, |this, cx| { this.timeline.pan(false); cx.notify(); }, cx))
@@ -6337,7 +6408,7 @@ impl Workspace {
                 .child(button("timeline-zoom-out", self.t("Zoom out", "缩小", "縮小", "축소"), false, |this, cx| { this.timeline.zoom(false, this.pipeline.as_ref().map(|p| p.event_id)); cx.notify(); }, cx))
                 .child(button("timeline-load-usage", self.t("Highlight all resource usage", "高亮全部资源使用", "すべてのリソース使用を強調", "전체 리소스 사용 강조"), false, |this, cx| this.load_timeline_usage(cx), cx)))
             .child(format!("{}: {start}–{end} / {}", self.t("Event IDs", "事件 ID", "イベント ID", "이벤트 ID"), self.timeline.model.max_event))
-            .child(self.t("Drag the axis to select actions. Orange: resource usage · red: pixel history · green: loaded bookmarks.", "拖动坐标轴选择操作。橙：资源使用 · 红：像素历史 · 绿：已加载书签。", "軸をドラッグしてアクションを選択。橙：リソース使用・赤：ピクセル履歴・緑：読込済みブックマーク。", "축을 드래그하여 작업 선택. 주황: 리소스 사용 · 빨강: 픽셀 기록 · 초록: 불러온 북마크."))
+            .child(self.t("Drag the axis to select actions; Alt-drag pans, scroll zooms. Orange: resource usage · red: pixel history · green: loaded bookmarks.", "拖动坐标轴选择操作；Alt 拖动平移，滚轮缩放。橙：资源使用 · 红：像素历史 · 绿：已加载书签。", "軸をドラッグして選択、Alt ドラッグで移動、スクロールで拡大縮小。橙：リソース使用・赤：ピクセル履歴・緑：読込済みブックマーク。", "축 드래그로 선택, Alt 드래그로 이동, 스크롤로 확대/축소. 주황: 리소스 사용 · 빨강: 픽셀 기록 · 초록: 불러온 북마크."))
             .child(format!("{}: {} · {}: {}", self.t("Resource usage", "资源使用", "リソース使用", "리소스 사용"), if full_usage.is_some() { self.t("complete", "完整", "全件", "전체") } else { self.t("loaded page", "已加载页", "読込済みページ", "불러온 페이지") }, self.t("Pixel history", "像素历史", "ピクセル履歴", "픽셀 기록"), if self.timeline.history.is_some() { self.t("complete", "完整", "全件", "전체") } else { self.t("loaded page", "已加载页", "読込済みページ", "불러온 페이지") }))
             .child(div().id("timeline-scroll").test_support().max_h(px(180.)).overflow_scroll().child(graph))
             .child(div().id("timeline-axis-scroll").test_support().overflow_x_scroll().child(axis))
@@ -11929,6 +12000,32 @@ mod ui_tests {
         assert_eq!(view.start, u32::MAX - 1);
     }
 
+    #[test]
+    fn timeline_wheel_zoom_anchors_and_pan_clamps() {
+        let mut view = TimelineView::default();
+        view.model.max_event = u32::MAX;
+        view.end = u32::MAX;
+        view.zoom_at(15.0, 0.25);
+        let anchor = u64::from(view.start) + (u64::from(view.end) - u64::from(view.start) + 1) / 4;
+        assert!((anchor as i64 - (1_i64 << 30)).abs() <= 1);
+        let old = view.start;
+        view.pan_pixels(-100.0, 768.0);
+        assert!(view.start > old);
+        view.pan_pixels(f32::MAX, 768.0);
+        assert_eq!(view.start, 0);
+        view.zoom_at(-200.0, 1.0);
+        assert_eq!((view.start, view.end), (0, u32::MAX));
+        view.start = 5;
+        view.end = 6;
+        view.zoom_at(1.0, 0.0);
+        assert_eq!((view.start, view.end), (5, 5));
+        view.start = 0;
+        view.end = u32::MAX;
+        view.zoom_at(f32::NAN, 0.5);
+        view.pan_pixels(10.0, 0.0);
+        assert_eq!((view.start, view.end), (0, u32::MAX));
+    }
+
     #[gpui_kit::test]
     fn capture_workspace_back_button_returns_to_home(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
@@ -12654,7 +12751,7 @@ mod ui_tests {
             assert!(window.try_find(("timeline-action", 1usize)).is_none());
             window.click(("timeline-marker", 0usize), cx);
             window.render_frame(cx);
-            window.click("timeline-zoom-in", cx);
+            window.scroll("timeline-axis", ScrollDelta::Lines(point(0., 15.)), cx);
         })
         .unwrap();
         cx.update(|cx| assert!(view.read(cx).timeline.start > 0));
