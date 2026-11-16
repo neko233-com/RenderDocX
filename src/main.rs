@@ -22,7 +22,8 @@ use renderdocx::{
         HistogramRequest, MeshInfo, MeshSelection, PIXEL_HISTORY_PAGE_LIMIT, Pipeline, Pixel,
         PixelDebugSelection, PixelHistoryPage, RESOURCE_USAGE_PAGE_LIMIT, ResourceUsagePage,
         SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session, ShaderReport, ShaderSourceFile, Snapshot,
-        StructurePage, StructuredNode, TextureSelection, TextureStatistics, resource_type_name,
+        StructurePage, StructuredNode, TextureSelection, TextureStatistics,
+        debug_message_category_name, debug_message_source_name, resource_type_name,
         resource_usage_name,
     },
     vertex_input::{INPUT_PAGE_LIMIT, InputPage},
@@ -288,6 +289,17 @@ struct Workspace {
     _resource_search_subscription: gpui::Subscription,
     resource_query: String,
     resource_visible: Vec<usize>,
+    message_search: Entity<InputState>,
+    _message_search_subscription: gpui::Subscription,
+    message_query: String,
+    message_visible: Vec<usize>,
+    message_severity: Option<u32>,
+    hidden_message_sources: std::collections::BTreeSet<u32>,
+    hidden_message_categories: std::collections::BTreeSet<u32>,
+    hidden_message_types: std::collections::BTreeSet<(u32, u32, u32)>,
+    show_hidden_messages: bool,
+    message_poll_pending: bool,
+    message_generation: u64,
     selected: Option<usize>,
     pipeline: Option<Pipeline>,
     tab: CaptureTab,
@@ -344,6 +356,211 @@ struct Workspace {
 }
 
 impl Workspace {
+    fn message_source_label(&self, source: u32) -> &'static str {
+        match source {
+            0 => "API",
+            1 => self.t(
+                "Redundant API use",
+                "冗余 API 调用",
+                "冗長な API 使用",
+                "중복 API 사용",
+            ),
+            2 => self.t(
+                "Incorrect API use",
+                "错误的 API 调用",
+                "不正な API 使用",
+                "잘못된 API 사용",
+            ),
+            3 => self.t(
+                "General performance",
+                "通用性能",
+                "一般的な性能",
+                "일반 성능",
+            ),
+            4 => self.t("GCN performance", "GCN 性能", "GCN 性能", "GCN 성능"),
+            5 => self.t("Runtime warning", "运行时警告", "実行時警告", "런타임 경고"),
+            6 => self.t(
+                "Unsupported configuration",
+                "不支持的配置",
+                "未対応の構成",
+                "지원하지 않는 구성",
+            ),
+            _ => self.t("Unknown", "未知", "不明", "알 수 없음"),
+        }
+    }
+
+    fn message_category_label(&self, category: u32) -> &'static str {
+        match category {
+            0 => self.t(
+                "Application defined",
+                "应用自定义",
+                "アプリ定義",
+                "애플리케이션 정의",
+            ),
+            1 => self.t("Miscellaneous", "其他", "その他", "기타"),
+            2 => self.t("Initialization", "初始化", "初期化", "초기화"),
+            3 => self.t("Cleanup", "清理", "クリーンアップ", "정리"),
+            4 => self.t("Compilation", "编译", "コンパイル", "컴파일"),
+            5 => self.t("State creation", "状态创建", "状態の作成", "상태 생성"),
+            6 => self.t("State setting", "状态设置", "状態の設定", "상태 설정"),
+            7 => self.t("State getting", "状态查询", "状態の取得", "상태 조회"),
+            8 => self.t(
+                "Resource manipulation",
+                "资源操作",
+                "リソース操作",
+                "리소스 조작",
+            ),
+            9 => self.t("Execution", "执行", "実行", "실행"),
+            10 => self.t("Shaders", "着色器", "シェーダー", "셰이더"),
+            11 => self.t("Deprecated", "已弃用", "非推奨", "지원 중단"),
+            12 => self.t("Undefined", "未定义", "未定義", "정의되지 않음"),
+            13 => self.t("Portability", "可移植性", "移植性", "이식성"),
+            14 => self.t("Performance", "性能", "性能", "성능"),
+            _ => self.t("Unknown", "未知", "不明", "알 수 없음"),
+        }
+    }
+
+    fn watch_message_search(
+        input: &Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Subscription {
+        cx.subscribe(input, |this, input, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.message_query = input.read(cx).value().to_lowercase();
+                this.refresh_messages();
+                cx.notify();
+            }
+        })
+    }
+
+    fn refresh_messages(&mut self) {
+        self.message_visible = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .debug_messages
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, message)| {
+                        let query = &self.message_query;
+                        let matched = query.is_empty()
+                            || message.description.to_lowercase().contains(query)
+                            || message.event_id.to_string().contains(query)
+                            || message.message_id.to_string().contains(query)
+                            || debug_message_source_name(message.source)
+                                .to_lowercase()
+                                .contains(query)
+                            || debug_message_category_name(message.category)
+                                .to_lowercase()
+                                .contains(query)
+                            || self
+                                .message_source_label(message.source)
+                                .to_lowercase()
+                                .contains(query)
+                            || self
+                                .message_category_label(message.category)
+                                .to_lowercase()
+                                .contains(query);
+                        let hidden = self.hidden_message_sources.contains(&message.source)
+                            || self.hidden_message_categories.contains(&message.category)
+                            || self.hidden_message_types.contains(&(
+                                message.source,
+                                message.category,
+                                message.message_id,
+                            ));
+                        (matched
+                            && self
+                                .message_severity
+                                .is_none_or(|severity| message.severity == severity)
+                            && (self.show_hidden_messages || !hidden))
+                            .then_some(index)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+
+    fn poll_messages(&mut self, session: Session, revision: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                let ready = this.update(cx, |this, _| {
+                    if this.message_generation != revision || this.session.is_none() {
+                        return None;
+                    }
+                    if this.message_poll_pending
+                        || this.replay_pending
+                        || this.resource_pending
+                        || this.export_pending
+                    {
+                        return Some(false);
+                    }
+                    this.message_poll_pending = true;
+                    Some(true)
+                });
+                match ready {
+                    Ok(Some(true)) => {}
+                    Ok(Some(false)) => continue,
+                    _ => break,
+                }
+                let replay = session.clone();
+                let task = cx
+                    .background_executor()
+                    .spawn(async move { replay.debug_messages() });
+                let result = task.await;
+                let keep_polling = this.update(cx, |this, cx| {
+                    if this.message_generation != revision {
+                        return false;
+                    }
+                    this.message_poll_pending = false;
+                    match result {
+                        Ok(messages) => {
+                            if this.status.as_deref()
+                                == Some(this.t(
+                                    "Wait for the message refresh.",
+                                    "请等待消息刷新完成。",
+                                    "メッセージの更新をお待ちください。",
+                                    "메시지 새로 고침이 완료될 때까지 기다려 주세요.",
+                                ))
+                            {
+                                this.status = None;
+                                cx.notify();
+                            }
+                            if !messages.is_empty() {
+                                if let Some(snapshot) = &mut this.snapshot {
+                                    snapshot.debug_messages.extend(messages);
+                                }
+                                this.refresh_messages();
+                                cx.notify();
+                            }
+                            true
+                        }
+                        Err(error) => {
+                            this.status = Some(format!(
+                                "{}: {error}",
+                                this.t(
+                                    "Debug message polling failed",
+                                    "调试消息获取失败",
+                                    "デバッグメッセージの取得に失敗",
+                                    "디버그 메시지를 가져오지 못했습니다"
+                                )
+                            ));
+                            cx.notify();
+                            false
+                        }
+                    }
+                });
+                if !matches!(keep_polling, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     fn watch_resource_search(
         input: &Entity<InputState>,
         cx: &mut Context<Self>,
@@ -836,7 +1053,11 @@ impl Workspace {
                         this.capture = Some(capture);
                         this.event_tree.reset(&snapshot.actions);
                         this.snapshot = Some(snapshot);
-                        this.session = Some(session);
+                        this.session = Some(session.clone());
+                        this.message_generation += 1;
+                        this.message_poll_pending = false;
+                        this.refresh_messages();
+                        this.poll_messages(session, this.message_generation, cx);
                         this.selected = None;
                         this.pipeline = None;
                         this.selected_texture = None;
@@ -2949,7 +3170,7 @@ impl Workspace {
                         .count()
                 })
                 .unwrap_or(0),
-            CaptureTab::Messages => snapshot.debug_messages.len(),
+            CaptureTab::Messages => self.message_visible.len(),
             CaptureTab::Resources => self.resource_visible.len(),
             CaptureTab::VertexInput => self.input_page.as_ref().map_or(0, |page| page.rows.len()),
             CaptureTab::Mesh => mesh_lines.len(),
@@ -3286,12 +3507,14 @@ impl Workspace {
             .flex_1()
             .into_any_element()
         } else if self.tab == CaptureTab::Messages {
+            let visible = std::sync::Arc::new(self.message_visible.clone());
             uniform_list(
                 "capture-messages",
                 count,
-                cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                     range
-                        .filter_map(|index| {
+                        .filter_map(|row| {
+                            let index = *visible.get(row)?;
                             let message = this.snapshot.as_ref()?.debug_messages.get(index)?;
                             let event = message.event_id;
                             let severity = match message.severity {
@@ -4032,13 +4255,16 @@ impl Workspace {
                     info.map_or("—", |v| v.uncompressed_size.as_str())
                 ))
                 .child(self.t(
-                    "Messages collected when opening the capture",
-                    "打开捕获时收集的消息",
-                    "キャプチャを開いた際のメッセージ",
-                    "캡처를 열 때 수집된 메시지",
+                    "Messages collected from the replay session",
+                    "从回放会话收集的消息",
+                    "リプレイセッションから収集したメッセージ",
+                    "리플레이 세션에서 수집한 메시지",
                 ));
             if let Some(message) = message {
                 let event = message.event_id;
+                let source = message.source;
+                let category = message.category;
+                let message_type = (source, category, message.message_id);
                 detail = detail
                     .child(format!(
                         "{}: {} · ID: {} · {}: {} · {}: {} · {}: {}",
@@ -4046,13 +4272,88 @@ impl Workspace {
                         event,
                         message.message_id,
                         self.t("Category", "类别", "カテゴリ", "범주"),
-                        message.category,
+                        format!(
+                            "{} ({})",
+                            self.message_category_label(message.category),
+                            message.category
+                        ),
                         self.t("Severity", "严重程度", "重大度", "심각도"),
                         message.severity,
                         self.t("Source", "来源", "ソース", "출처"),
-                        message.source
+                        format!(
+                            "{} ({})",
+                            self.message_source_label(message.source),
+                            message.source
+                        )
                     ))
                     .child(message.description.clone());
+                detail = detail
+                    .child(button(
+                        "message-hide-source",
+                        if self.hidden_message_sources.contains(&source) {
+                            self.t("Show source", "显示此来源", "ソースを表示", "소스 표시")
+                        } else {
+                            self.t("Hide source", "隐藏此来源", "ソースを非表示", "소스 숨기기")
+                        },
+                        false,
+                        move |this, cx| {
+                            if !this.hidden_message_sources.insert(source) {
+                                this.hidden_message_sources.remove(&source);
+                            }
+                            this.refresh_messages();
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(button(
+                        "message-hide-category",
+                        if self.hidden_message_categories.contains(&category) {
+                            self.t("Show category", "显示此类别", "カテゴリを表示", "범주 표시")
+                        } else {
+                            self.t(
+                                "Hide category",
+                                "隐藏此类别",
+                                "カテゴリを非表示",
+                                "범주 숨기기",
+                            )
+                        },
+                        false,
+                        move |this, cx| {
+                            if !this.hidden_message_categories.insert(category) {
+                                this.hidden_message_categories.remove(&category);
+                            }
+                            this.refresh_messages();
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(button(
+                        "message-hide-type",
+                        if self.hidden_message_types.contains(&message_type) {
+                            self.t(
+                                "Show message type",
+                                "显示此消息类型",
+                                "メッセージ種別を表示",
+                                "메시지 유형 표시",
+                            )
+                        } else {
+                            self.t(
+                                "Hide message type",
+                                "隐藏此消息类型",
+                                "メッセージ種別を非表示",
+                                "메시지 유형 숨기기",
+                            )
+                        },
+                        false,
+                        move |this, cx| {
+                            if !this.hidden_message_types.insert(message_type) {
+                                this.hidden_message_types.remove(&message_type);
+                            }
+                            this.refresh_messages();
+                            cx.notify();
+                        },
+                        cx,
+                    ));
                 if event != 0 {
                     detail = detail.child(
                         div()
@@ -5417,6 +5718,10 @@ impl Workspace {
                             this.open_revision += 1;
                             this.session = None;
                             this.snapshot = None;
+                            this.message_generation += 1;
+                            this.message_poll_pending = false;
+                            this.message_visible.clear();
+                            this.selected_message = None;
                             this.event_tree.reset(&[]);
                             this.capture = None;
                             this.selected = None;
@@ -5672,6 +5977,96 @@ impl Workspace {
                                                 .aria_label(label)
                                                 .w_full(),
                                         ),
+                                )
+                            })
+                            .when(self.tab == CaptureTab::Messages, |view| {
+                                let label = self.t(
+                                    "Filter messages by text, event or ID",
+                                    "按文本、事件或 ID 筛选消息",
+                                    "テキスト・イベント・ID で絞り込み",
+                                    "텍스트, 이벤트 또는 ID로 필터링",
+                                );
+                                let options = [
+                                    ("message-all", self.t("All", "全部", "すべて", "전체"), None),
+                                    ("message-high", self.t("High", "高", "高", "높음"), Some(0)),
+                                    (
+                                        "message-medium",
+                                        self.t("Medium", "中", "中", "중간"),
+                                        Some(1),
+                                    ),
+                                    ("message-low", self.t("Low", "低", "低", "낮음"), Some(2)),
+                                    (
+                                        "message-info",
+                                        self.t("Info", "信息", "情報", "정보"),
+                                        Some(3),
+                                    ),
+                                ];
+                                view.child(
+                                    div().px_3().pb_2().child(
+                                        Input::new(&self.message_search)
+                                            .id("message-filter")
+                                            .aria_label(label)
+                                            .w_full(),
+                                    ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .gap_2()
+                                        .px_3()
+                                        .pb_2()
+                                        .children(options.into_iter().map(
+                                            |(id, label, severity)| {
+                                                button(
+                                                    id,
+                                                    label,
+                                                    self.message_severity == severity,
+                                                    move |this, cx| {
+                                                        this.message_severity = severity;
+                                                        this.refresh_messages();
+                                                        cx.notify();
+                                                    },
+                                                    cx,
+                                                )
+                                            },
+                                        ))
+                                        .child(button(
+                                            "messages-show-hidden",
+                                            self.t(
+                                                "Show hidden",
+                                                "显示已隐藏",
+                                                "非表示を表示",
+                                                "숨긴 항목 표시",
+                                            ),
+                                            self.show_hidden_messages,
+                                            |this, cx| {
+                                                this.show_hidden_messages =
+                                                    !this.show_hidden_messages;
+                                                this.refresh_messages();
+                                                cx.notify();
+                                            },
+                                            cx,
+                                        ))
+                                        .child(button(
+                                            "messages-clear",
+                                            self.t("Clear", "清空", "クリア", "지우기"),
+                                            false,
+                                            |this, cx| {
+                                                if !this.message_poll_pending {
+                                                    if let Some(snapshot) = &mut this.snapshot {
+                                                        snapshot.debug_messages.clear();
+                                                    }
+                                                    this.selected_message = None;
+                                                    this.refresh_messages();
+                                                    cx.notify();
+                                                } else {
+                                                    this.status = Some(this.t("Wait for the message refresh.", "请等待消息刷新完成。", "メッセージの更新をお待ちください。", "메시지 새로 고침이 완료될 때까지 기다려 주세요.").to_owned());
+                                                    cx.notify();
+                                                }
+                                            },
+                                            cx,
+                                        )),
                                 )
                             })
                             .when(self.tab == CaptureTab::VertexInput, |view| {
@@ -6720,6 +7115,7 @@ fn main() {
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
+                    let message_search = cx.new(|cx| InputState::new(window, cx));
                     let stats_min = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_x = cx.new(|cx| InputState::new(window, cx).default_value("0"));
@@ -6743,6 +7139,20 @@ fn main() {
                         resource_search,
                         resource_query: String::new(),
                         resource_visible: Vec::new(),
+                        _message_search_subscription: Workspace::watch_message_search(
+                            &message_search,
+                            cx,
+                        ),
+                        message_search,
+                        message_query: String::new(),
+                        message_visible: Vec::new(),
+                        message_severity: None,
+                        hidden_message_sources: Default::default(),
+                        hidden_message_categories: Default::default(),
+                        hidden_message_types: Default::default(),
+                        show_hidden_messages: false,
+                        message_poll_pending: false,
+                        message_generation: 0,
                         _event_search_subscription: Workspace::watch_event_search(
                             &event_search,
                             cx,
@@ -6853,6 +7263,7 @@ mod ui_tests {
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
+                    let message_search = cx.new(|cx| InputState::new(window, cx));
                     let stats_min = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_x = cx.new(|cx| InputState::new(window, cx).default_value("0"));
@@ -6892,6 +7303,20 @@ mod ui_tests {
                         resource_search,
                         resource_query: String::new(),
                         resource_visible: Vec::new(),
+                        _message_search_subscription: Workspace::watch_message_search(
+                            &message_search,
+                            cx,
+                        ),
+                        message_search,
+                        message_query: String::new(),
+                        message_visible: Vec::new(),
+                        message_severity: None,
+                        hidden_message_sources: Default::default(),
+                        hidden_message_categories: Default::default(),
+                        hidden_message_types: Default::default(),
+                        show_hidden_messages: false,
+                        message_poll_pending: false,
+                        message_generation: 0,
                         _event_search_subscription: Workspace::watch_event_search(
                             &event_search,
                             cx,
@@ -7084,6 +7509,7 @@ mod ui_tests {
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
+                    let message_search = cx.new(|cx| InputState::new(window, cx));
                     let stats_min = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_x = cx.new(|cx| InputState::new(window, cx).default_value("0"));
@@ -7225,6 +7651,20 @@ mod ui_tests {
                         resource_search,
                         resource_query: String::new(),
                         resource_visible: Vec::new(),
+                        _message_search_subscription: Workspace::watch_message_search(
+                            &message_search,
+                            cx,
+                        ),
+                        message_search,
+                        message_query: String::new(),
+                        message_visible: Vec::new(),
+                        message_severity: None,
+                        hidden_message_sources: Default::default(),
+                        hidden_message_categories: Default::default(),
+                        hidden_message_types: Default::default(),
+                        show_hidden_messages: false,
+                        message_poll_pending: false,
+                        message_generation: 0,
                         _event_search_subscription: Workspace::watch_event_search(
                             &event_search,
                             cx,

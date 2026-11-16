@@ -223,6 +223,40 @@ pub struct DebugMessage {
     pub description: String,
 }
 
+pub fn debug_message_source_name(source: u32) -> &'static str {
+    const NAMES: &[&str] = &[
+        "API",
+        "Redundant API use",
+        "Incorrect API use",
+        "General performance",
+        "GCN performance",
+        "Runtime warning",
+        "Unsupported configuration",
+    ];
+    NAMES.get(source as usize).copied().unwrap_or("Unknown")
+}
+
+pub fn debug_message_category_name(category: u32) -> &'static str {
+    const NAMES: &[&str] = &[
+        "Application defined",
+        "Miscellaneous",
+        "Initialization",
+        "Cleanup",
+        "Compilation",
+        "State creation",
+        "State setting",
+        "State getting",
+        "Resource manipulation",
+        "Execution",
+        "Shaders",
+        "Deprecated",
+        "Undefined",
+        "Portability",
+        "Performance",
+    ];
+    NAMES.get(category as usize).copied().unwrap_or("Unknown")
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ResourceInfo {
     pub name: String,
@@ -784,6 +818,9 @@ pub struct Pipeline {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Reply {
     Snapshot(Snapshot),
+    DebugMessages {
+        messages: Vec<DebugMessage>,
+    },
     CounterFetch(CounterFetch),
     CounterPage(CounterPage),
     ResourceUsage(ResourceUsagePage),
@@ -1026,6 +1063,9 @@ fn validate_snapshot(snapshot: &Snapshot) -> Result<(), String> {
 
 trait Transport: Send {
     fn select(&mut self, event: u32) -> Result<Pipeline, String>;
+    fn debug_messages(&mut self) -> Result<Vec<DebugMessage>, String> {
+        Err("Debug messages are not supported by this transport".into())
+    }
     fn counter_fetch(&mut self, _ids: &[u32]) -> Result<CounterFetch, String> {
         Err("GPU counters are not supported by this transport".into())
     }
@@ -1151,6 +1191,17 @@ trait Transport: Send {
 }
 
 impl Transport for Process {
+    fn debug_messages(&mut self) -> Result<Vec<DebugMessage>, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(input, "debug_messages")
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::DebugMessages { messages } => Ok(messages),
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected debug messages response".into()),
+        }
+    }
     fn counter_fetch(&mut self, ids: &[u32]) -> Result<CounterFetch, String> {
         let input = self.input.as_mut().ok_or("Replay session has closed")?;
         write!(input, "counter_fetch").map_err(|e| e.to_string())?;
@@ -1814,6 +1865,13 @@ pub struct Session {
 }
 
 impl Session {
+    /// Drain messages queued by the replay driver since the previous read.
+    pub fn debug_messages(&self) -> Result<Vec<DebugMessage>, String> {
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .debug_messages()
+    }
     pub fn counter_fetch(&self, ids: &[u32]) -> Result<CounterFetch, String> {
         if ids.is_empty()
             || ids
@@ -2738,6 +2796,24 @@ mod tests {
         assert_eq!(snapshot.actions[1].parent, 0);
         assert!(snapshot.actions[1].api_events.is_empty());
         assert_eq!(snapshot.texture_count, 2);
+    }
+
+    #[test]
+    fn debug_messages_reply_preserves_metadata_and_text() {
+        let reply = read_reply(&mut Cursor::new("RENDERDOCX/1 {\"type\":\"debug_messages\",\"messages\":[{\"event_id\":42,\"category\":14,\"severity\":1,\"source\":3,\"message_id\":99,\"description\":\"性能 warning\"}]}\n")).unwrap();
+        let Reply::DebugMessages { messages } = reply else {
+            panic!("expected messages")
+        };
+        assert_eq!(messages[0].event_id, 42);
+        assert_eq!(messages[0].description, "性能 warning");
+        assert_eq!(
+            debug_message_source_name(messages[0].source),
+            "General performance"
+        );
+        assert_eq!(
+            debug_message_category_name(messages[0].category),
+            "Performance"
+        );
     }
 
     #[test]

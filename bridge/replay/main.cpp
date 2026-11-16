@@ -187,6 +187,15 @@ struct PendingAction
 struct BufferRef { ResourceId id; uint64_t length; };
 struct TextureRef { ResourceId id; uint32_t width, height, dimension, depth, mips, arraysize, samples, components; };
 
+void write_debug_message(const DebugMessage &message)
+{
+  std::cout << "{\"event_id\":" << message.eventId << ",\"category\":" << uint32_t(message.category)
+            << ",\"severity\":" << uint32_t(message.severity) << ",\"source\":" << uint32_t(message.source)
+            << ",\"message_id\":" << message.messageID << ",\"description\":";
+  json_string(message.description);
+  std::cout << '}';
+}
+
 bool decimal(const std::string &text, uint64_t &value)
 {
   value = 0;
@@ -233,11 +242,7 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
     {
       if(!first_message) std::cout << ',';
       first_message = false;
-      std::cout << "{\"event_id\":" << message.eventId << ",\"category\":" << uint32_t(message.category)
-                << ",\"severity\":" << uint32_t(message.severity) << ",\"source\":" << uint32_t(message.source)
-                << ",\"message_id\":" << message.messageID << ",\"description\":";
-      json_string(message.description);
-      std::cout << '}';
+      write_debug_message(message);
     }
   };
   write_messages(frame.debugMessages);
@@ -752,11 +757,21 @@ int run(const std::string &capture, bool structure_worker)
     if(command == "quit") break;
     // A live debugger can hold backend replay state. Do not allow unrelated replay
     // operations to mutate that state between ContinueDebug calls.
-    if(debug.trace && command != "debug_next" && command != "debug_stop" &&
+    if(debug.trace && command != "debug_next" && command != "debug_stop" && command != "debug_messages" &&
        command.compare(0, 13, "debug_vertex ") != 0 && command.compare(0, 12, "debug_pixel ") != 0 &&
        command.compare(0, 14, "debug_compute ") != 0 &&
        command.compare(0, 7, "select ") != 0)
     { error("Stop the shader debug trace before other replay operations"); continue; }
+    if(command == "debug_messages")
+    {
+      const auto messages = replay.controller->GetDebugMessages();
+      result = replay.controller->GetFatalErrorStatus();
+      if(!result.OK()) { error(result_message(result)); break; }
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"debug_messages\",\"messages\":[";
+      for(size_t i = 0; i < messages.size(); ++i) { if(i) std::cout << ','; write_debug_message(messages[i]); }
+      std::cout << "]}" << std::endl;
+      continue;
+    }
     if(command.compare(0, 13, "debug_vertex ") == 0)
     {
       std::istringstream arguments(command.substr(13));

@@ -310,6 +310,8 @@ fn agent_jsonl_session_has_correlated_errors_and_clean_shutdown() {
         "debug_compute",
         "debug_next",
         "debug_stop",
+        "debug_messages",
+        "clear_debug_messages",
     ] {
         assert_eq!(
             agent.send(&serde_json::json!({"command":command}).to_string())["error"]["code"],
@@ -774,6 +776,29 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let opened = agent.send(&request);
     assert_eq!(opened["ok"], true, "{opened}");
     let capture_data = &opened["data"]["capture"];
+    let messages = agent.send(r#"{"command":"debug_messages","offset":"0","limit":1}"#);
+    assert_eq!(messages["ok"], true, "{messages}");
+    let total = messages["data"]["total"]
+        .as_str()
+        .unwrap()
+        .parse::<usize>()
+        .unwrap();
+    assert_eq!(
+        messages["data"]["messages"].as_array().unwrap().len(),
+        total.min(1)
+    );
+    let invalid = agent.send(r#"{"command":"debug_messages","limit":0}"#);
+    assert_eq!(invalid["error"]["code"], "invalid_arguments");
+    assert_eq!(
+        agent.send(r#"{"command":"clear_debug_messages"}"#)["ok"],
+        true
+    );
+    assert!(
+        agent.send(r#"{"command":"snapshot"}"#)["data"]["capture"]["debug_messages"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     let counters = capture_data["counters"].as_array().unwrap();
     if let Some(counter) = counters.first() {
         let id = counter["id"].as_u64().unwrap();
