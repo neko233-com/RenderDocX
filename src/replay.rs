@@ -114,6 +114,8 @@ pub struct MeshInfo {
     pub num_indices: u32,
     pub restart_index: u32,
     pub allow_restart: bool,
+    #[serde(default)]
+    pub index_restart: Option<u32>,
     pub unproject: bool,
     pub flip_y: bool,
     pub near_plane: Option<f32>,

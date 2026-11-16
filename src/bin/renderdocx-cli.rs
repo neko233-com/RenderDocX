@@ -2,9 +2,10 @@ use renderdocx::{
     backend::Settings,
     debug_navigation::{Breakpoint, DebugNavigator, SourceStep, StopReason},
     live::{CaptureOptions, LaunchConfiguration, LiveSession, enumerate},
+    mesh_indices,
     replay::{
-        BUFFER_PAGE_LIMIT, ComputeDebugSelection, DebugState, DebugTrace, MeshSelection, Pipeline,
-        PixelDebugSelection, SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session, Snapshot,
+        BUFFER_PAGE_LIMIT, ComputeDebugSelection, DebugState, DebugTrace, MeshInfo, MeshSelection,
+        Pipeline, PixelDebugSelection, SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session, Snapshot,
         TextureSelection,
     },
 };
@@ -127,7 +128,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
     let mut opened: Option<(Session, Snapshot)> = None;
     let mut selected_event: Option<u32> = None;
     let mut pipeline: Option<Pipeline> = None;
-    let mut mesh_selection: Option<(u32, MeshSelection)> = None;
+    let mut mesh_selection: Option<(u32, MeshSelection, MeshInfo)> = None;
     let mut pending_debug: Option<DebugTrace> = None;
     let mut debug_streamed = false;
     let mut debug_timeline: Option<AgentDebugTimeline> = None;
@@ -504,7 +505,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         session
                             .mesh(event, selection)
                             .map(|mesh| {
-                                mesh_selection = Some((event, selection));
+                                mesh_selection = Some((event, selection, mesh.clone()));
                                 json!({"mesh":mesh})
                             })
                             .map_err(|error| ("replay_mesh_failed", error))
@@ -529,13 +530,14 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     .and_then(Value::as_u64)
                     .and_then(|v| u32::try_from(v).ok())
                     .filter(|v| *v <= BUFFER_PAGE_LIMIT);
-                match (&opened, mesh_selection, kind, offset, length) {
+                match (&opened, mesh_selection.as_ref(), kind, offset, length) {
                     (None, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
                     (Some(_), None, _, _, _) => Err(("no_mesh", "Query mesh data first".into())),
-                    (Some((session, _)), Some((event, selection)), Some(kind), Some(offset), Some(length)) if offset.checked_add(u64::from(length)).is_some() =>
-                        session.mesh_read(event, selection, kind, offset, length).map(|bytes| {
+                    (Some((session, _)), Some((event, selection, info)), Some(kind), Some(offset), Some(length)) if offset.checked_add(u64::from(length)).is_some() =>
+                        session.mesh_read(*event, *selection, kind, offset, length).map(|bytes| {
                             let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-                            json!({"event_id":event,"selection":selection,"kind":kind,"offset":offset.to_string(),"length":bytes.len(),"hex":hex})
+                            let indices = if kind == "index" { mesh_indices::decode(info, &bytes, offset) } else { None };
+                            json!({"event_id":event,"selection":selection,"kind":kind,"offset":offset.to_string(),"length":bytes.len(),"hex":hex,"indices":indices})
                         }).map_err(|error| ("replay_mesh_read_failed", error)),
                     _ => Err(("invalid_arguments", "mesh_read requires kind, decimal-string offset and valid length".into())),
                 }

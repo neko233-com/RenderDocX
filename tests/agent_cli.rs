@@ -1231,6 +1231,10 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         agent.send(r#"{"command":"mesh_read","kind":"index","offset":"0","length":6}"#);
     assert_eq!(mesh_indices["ok"], true, "{mesh_indices}");
     assert_eq!(mesh_indices["data"]["hex"], "000001000200");
+    assert_eq!(mesh_indices["data"]["indices"][0]["row"], "0");
+    assert_eq!(mesh_indices["data"]["indices"][1]["raw"], 1);
+    assert_eq!(mesh_indices["data"]["indices"][1]["vertex"], 1);
+    assert_eq!(mesh_indices["data"]["indices"][1]["restart"], false);
     let mesh_bytes =
         agent.send(r#"{"command":"mesh_read","kind":"vertex","offset":"0","length":16}"#);
     assert_eq!(mesh_bytes["ok"], true, "{mesh_bytes}");

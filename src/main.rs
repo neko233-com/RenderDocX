@@ -252,26 +252,12 @@ fn mesh_page_size(info: &MeshInfo) -> u64 {
     }
 }
 
+#[cfg(test)]
 fn mesh_indices(info: &MeshInfo, bytes: &[u8], offset: u64) -> Option<Vec<(u64, u32)>> {
-    let stride = usize::try_from(info.index_stride).ok()?;
-    if !matches!(stride, 1 | 2 | 4) || offset % stride as u64 != 0 || bytes.len() % stride != 0 {
-        return None;
-    }
-    Some(
-        bytes
-            .chunks_exact(stride)
-            .enumerate()
-            .map(|(i, bytes)| {
-                let value = match stride {
-                    1 => u32::from(bytes[0]),
-                    2 => u32::from(u16::from_le_bytes(bytes.try_into().unwrap())),
-                    4 => u32::from_le_bytes(bytes.try_into().unwrap()),
-                    _ => unreachable!(),
-                };
-                (offset / stride as u64 + i as u64, value)
-            })
-            .collect(),
-    )
+    renderdocx::mesh_indices::decode(info, bytes, offset)?
+        .into_iter()
+        .map(|index| Some((index.row.parse().ok()?, index.raw)))
+        .collect()
 }
 
 fn mesh_index_page_len(info: &MeshInfo, offset: u64) -> u64 {
@@ -4859,11 +4845,20 @@ impl Workspace {
         let mesh_lines = match (&self.mesh.info, &self.mesh.bytes) {
             (Some(info), Some(bytes)) => {
                 if self.mesh.kind == MeshBufferKind::Index
-                    && let Some(indices) = mesh_indices(info, bytes, self.mesh.offset)
+                    && let Some(indices) =
+                        renderdocx::mesh_indices::decode(info, bytes, self.mesh.offset)
                 {
                     indices
                         .into_iter()
-                        .map(|(index, value)| format!("{index}: {value}"))
+                        .map(|index| match index.vertex {
+                            Some(vertex) => format!("{}: {} → {}", index.row, index.raw, vertex),
+                            None => format!(
+                                "{}: {} ({})",
+                                index.row,
+                                index.raw,
+                                self.t("Restart", "重启", "リスタート", "재시작")
+                            ),
+                        })
                         .collect()
                 } else if self.mesh.kind == MeshBufferKind::Vertex
                     && let Some(positions) = mesh_positions(info, bytes, self.mesh.offset)

@@ -3,6 +3,7 @@ pub mod backend;
 pub mod debug_navigation;
 pub mod i18n;
 pub mod live;
+pub mod mesh_indices;
 pub mod replay;
 pub mod shader_export;
 pub mod shader_processor;

@@ -308,6 +308,7 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
                     std::map<uint32_t, uint32_t> &event_chunks,
                     std::map<uint32_t, uint32_t> &draw_instances,
                     std::map<uint32_t, uint32_t> &draw_vertices,
+                    std::set<uint32_t> &indexed_draws,
                     std::map<uint32_t, const ActionDescription *> &dispatch_actions)
 {
   const APIProperties api = controller->GetAPIProperties();
@@ -433,6 +434,8 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
       draw_instances.emplace(action.eventId, (std::max)(1U, action.numInstances));
     if(action.flags & ActionFlags::Drawcall)
       draw_vertices.emplace(action.eventId, action.numIndices);
+    if((action.flags & ActionFlags::Drawcall) && (action.flags & ActionFlags::Indexed))
+      indexed_draws.insert(action.eventId);
     if(action.flags & ActionFlags::Dispatch)
       dispatch_actions.emplace(action.eventId, &action);
     for(size_t i = action.children.size(); i > 0; --i)
@@ -532,7 +535,7 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
   std::cout << "]}" << std::endl;
 }
 
-void write_mesh(const MeshFormat &mesh, uint32_t event, uint32_t instance, uint32_t view, uint32_t stage)
+void write_mesh(const MeshFormat &mesh, uint32_t event, uint32_t instance, uint32_t view, uint32_t stage, bool restart_enabled, uint32_t restart_index)
 {
   auto number = [](float value) {
     if(std::isfinite(value)) std::cout << std::setprecision(std::numeric_limits<float>::max_digits10) << value;
@@ -552,6 +555,9 @@ void write_mesh(const MeshFormat &mesh, uint32_t event, uint32_t instance, uint3
             << ",\"component_count\":" << uint32_t(mesh.format.compCount) << ",\"component_byte_width\":" << uint32_t(mesh.format.compByteWidth)
             << ",\"topology\":" << uint32_t(mesh.topology) << ",\"num_indices\":" << mesh.numIndices
             << ",\"restart_index\":" << mesh.restartIndex << ",\"allow_restart\":" << (mesh.allowRestart ? "true" : "false")
+            << ",\"index_restart\":";
+  if(restart_enabled && restart_index != 0) std::cout << restart_index; else std::cout << "null";
+  std::cout
             << ",\"unproject\":" << (mesh.unproject ? "true" : "false") << ",\"flip_y\":" << (mesh.flipY ? "true" : "false")
             << ",\"near_plane\":"; number(mesh.nearPlane); std::cout << ",\"far_plane\":"; number(mesh.farPlane);
   std::cout << ",\"meshlet_offset\":" << mesh.meshletOffset << ",\"meshlet_index_offset\":" << mesh.meshletIndexOffset
@@ -846,8 +852,9 @@ int run(const std::string &capture, bool structure_worker)
   std::map<uint32_t, uint32_t> event_chunks;
   std::map<uint32_t, uint32_t> draw_instances;
   std::map<uint32_t, uint32_t> draw_vertices;
+  std::set<uint32_t> indexed_draws;
   std::map<uint32_t, const ActionDescription *> dispatch_actions;
-  write_snapshot(replay.controller, event_ids, texture_ids, buffer_ids, event_chunks, draw_instances, draw_vertices, dispatch_actions);
+  write_snapshot(replay.controller, event_ids, texture_ids, buffer_ids, event_chunks, draw_instances, draw_vertices, indexed_draws, dispatch_actions);
   std::map<ResourceId, size_t> resource_indices;
   const auto &resources = replay.controller->GetResources();
   for(size_t i = 0; i < resources.size(); ++i) resource_indices.emplace(resources[i].resourceId, i);
@@ -1260,7 +1267,13 @@ int run(const std::string &capture, bool structure_worker)
       if(!result.OK()) { error(result_message(result)); break; }
       mesh_ready = true;
       mesh_instance = uint32_t(instance); mesh_view = uint32_t(view); mesh_stage = uint32_t(stage);
-      write_mesh(selected_mesh, selected_event, uint32_t(instance), uint32_t(view), uint32_t(stage));
+      const PipeState &pipeline = replay.controller->GetPipelineState();
+      uint32_t restart_index = pipeline.GetRestartIndex();
+      if(pipeline.GetIBuffer().byteStride == 1) restart_index &= 0xff;
+      else if(pipeline.GetIBuffer().byteStride == 2) restart_index &= 0xffff;
+      const bool restart_enabled = stage == uint32_t(MeshDataStage::VSOut) &&
+                                   indexed_draws.count(selected_event) && pipeline.IsRestartEnabled();
+      write_mesh(selected_mesh, selected_event, uint32_t(instance), uint32_t(view), uint32_t(stage), restart_enabled, restart_index);
       continue;
     }
     if(command.compare(0, 10, "mesh_read ") == 0)
