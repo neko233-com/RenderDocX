@@ -346,7 +346,21 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                 .and_then(Value::as_str)
                 .filter(|path| !path.is_empty())
             {
-                Some(path) => match Session::open(&settings, PathBuf::from(path).as_path()) {
+                Some(_)
+                    if request.get("remote_url").is_some_and(|v| {
+                        !v.is_string() || v.as_str().is_some_and(|s| s.trim().is_empty())
+                    }) =>
+                {
+                    Err((
+                        "invalid_arguments",
+                        "remote_url must be a nonempty string".into(),
+                    ))
+                }
+                Some(path) => match Session::open_remote(
+                    &settings,
+                    PathBuf::from(path).as_path(),
+                    request.get("remote_url").and_then(Value::as_str),
+                ) {
                     Ok((session, snapshot)) => {
                         let value = json!({"capture": &snapshot});
                         opened = Some((session, snapshot));

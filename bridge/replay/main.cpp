@@ -95,10 +95,12 @@ struct ReplayScope
 {
   ICaptureFile *file = nullptr;
   IReplayController *controller = nullptr;
+  IRemoteServer *remote = nullptr;
   bool initialised = false;
   ~ReplayScope()
   {
-    if(controller) controller->Shutdown();
+    if(controller) { if(remote) remote->CloseCapture(controller); else controller->Shutdown(); }
+    if(remote) remote->ShutdownConnection();
     if(file) file->Shutdown();
     if(initialised) RENDERDOC_ShutdownReplay();
   }
@@ -925,7 +927,7 @@ void write_pipeline(IReplayController *controller, uint32_t event)
   std::cout << '}';
 }
 
-int run(const std::string &capture, bool structure_worker)
+int run(const std::string &capture, bool structure_worker, const std::string &remote_url)
 {
   const char *version = RENDERDOC_GetVersionString();
   const char *commit = RENDERDOC_GetCommitHash();
@@ -944,9 +946,22 @@ int run(const std::string &capture, bool structure_worker)
   if(!replay.file) { error("RenderDoc could not create a capture file handle"); return 1; }
   ResultDetails result = replay.file->OpenFile(capture.c_str(), "rdc", nullptr);
   if(!result.OK()) { error(result_message(result)); return 1; }
-  auto opened = replay.file->OpenCapture(ReplayOptions(), nullptr);
-  if(!opened.first.OK()) { error(result_message(opened.first)); return 1; }
-  replay.controller = opened.second;
+  if(!remote_url.empty())
+  {
+    result = RENDERDOC_CreateRemoteServerConnection(remote_url.c_str(), &replay.remote);
+    if(!result.OK() || !replay.remote) { error(result.OK() ? "Remote server returned no connection" : result_message(result)); return 1; }
+    const rdcstr remote_path = replay.remote->CopyCaptureToRemote(capture.c_str(), nullptr);
+    if(remote_path.empty()) { error("Could not copy capture to remote replay server"); return 1; }
+    auto opened = replay.remote->OpenCapture(IRemoteServer::NoPreference, remote_path, ReplayOptions(), nullptr);
+    if(!opened.first.OK()) { error(result_message(opened.first)); return 1; }
+    replay.controller = opened.second;
+  }
+  else
+  {
+    auto opened = replay.file->OpenCapture(ReplayOptions(), nullptr);
+    if(!opened.first.OK()) { error(result_message(opened.first)); return 1; }
+    replay.controller = opened.second;
+  }
   if(!replay.controller) { error("RenderDoc returned no replay controller"); return 1; }
   DebugTraceScope debug{replay.controller};
   ShaderReplacementScope replacements{replay.controller};
@@ -2027,23 +2042,31 @@ int run(const std::string &capture, bool structure_worker)
 } // namespace
 
 #ifdef _WIN32
+std::string utf8_argument(const wchar_t *value)
+{
+  const int size = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value, -1, nullptr, 0, nullptr, nullptr);
+  if(size <= 0) return {};
+  std::vector<char> bytes(size_t(size), 0);
+  if(WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value, -1, bytes.data(), size, nullptr, nullptr) != size) return {};
+  return bytes.data();
+}
 int wmain(int argc, wchar_t **argv)
 {
   const bool worker = argc == 3 && std::wcscmp(argv[1], L"--structure-worker") == 0;
-  if(argc != 2 && !worker) { error("Expected one capture file path"); return 2; }
-  const wchar_t *capture = argv[worker ? 2 : 1];
-  const int size = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, capture, -1, nullptr, 0, nullptr, nullptr);
-  if(size <= 0) { error("Capture path is not valid Unicode"); return 2; }
-  std::vector<char> path(size_t(size), 0);
-  if(WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, capture, -1, path.data(), size, nullptr, nullptr) != size)
-  { error("Could not convert capture path"); return 2; }
-  return run(path.data(), worker);
+  const bool remote = argc == 4 && std::wcscmp(argv[1], L"--remote") == 0;
+  if(argc != 2 && !worker && !remote) { error("Expected a capture path and optional remote server"); return 2; }
+  const std::string capture = utf8_argument(argv[remote ? 3 : (worker ? 2 : 1)]);
+  const std::string url = remote ? utf8_argument(argv[2]) : std::string();
+  if(capture.empty() || (remote && url.empty())) { error("Invalid Unicode path or remote server"); return 2; }
+  return run(capture, worker, url);
 }
 #else
 int main(int argc, char **argv)
 {
   const bool worker = argc == 3 && std::strcmp(argv[1], "--structure-worker") == 0;
-  if(argc != 2 && !worker) { error("Expected one capture file path"); return 2; }
-  return run(argv[worker ? 2 : 1], worker);
+  const bool remote = argc == 4 && std::strcmp(argv[1], "--remote") == 0;
+  if(argc != 2 && !worker && !remote) { error("Expected a capture path and optional remote server"); return 2; }
+  if(remote && !argv[2][0]) { error("Remote server must not be empty"); return 2; }
+  return run(argv[remote ? 3 : (worker ? 2 : 1)], worker, remote ? argv[2] : "");
 }
 #endif

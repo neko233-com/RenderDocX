@@ -1652,6 +1652,10 @@ impl Workspace {
     }
 
     fn open(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.open_with_remote(path, None, cx);
+    }
+
+    fn open_with_remote(&mut self, path: PathBuf, remote: Option<String>, cx: &mut Context<Self>) {
         if self.protect_shader_draft(cx) {
             return;
         }
@@ -1705,7 +1709,7 @@ impl Workspace {
         );
         cx.notify();
         let task = cx.background_executor().spawn(async move {
-            let (session, snapshot) = Session::open(&settings, &path)?;
+            let (session, snapshot) = Session::open_remote(&settings, &path, remote.as_deref())?;
             let renames = session.annotation_read("renames").and_then(|section| {
                 let document = section.document()?;
                 annotations::resource_name(&document, "ResourceId::1")?;
@@ -10194,6 +10198,17 @@ impl Render for Workspace {
                 .child(button("discover-remote-targets", self.t("Discover remote targets", "查找远程目标", "リモートターゲットを検索", "원격 대상 검색"), false, |this, cx| {
                     let url = this.remote_target_url.read(cx).value().to_string();
                     this.discover_target(Some(url), cx);
+                }, cx))
+                .child(button("open-remote-replay", self.t("Replay capture on remote server", "在远程服务器回放捕获", "リモートサーバーでキャプチャを再生", "원격 서버에서 캡처 리플레이"), false, |this, cx| {
+                    let url = this.remote_target_url.read(cx).value().to_string();
+                    if url.trim().is_empty() {
+                        this.status = Some(this.t("Enter a remote server URL.", "请输入远程服务器地址。", "リモートサーバーの URL を入力してください。", "원격 서버 URL을 입력하세요.").to_owned());
+                        cx.notify();
+                        return;
+                    }
+                    if let Some(path) = rfd::FileDialog::new().add_filter("RenderDoc", &["rdc"]).pick_file() {
+                        this.open_with_remote(path, Some(url), cx);
+                    }
                 }, cx)))
             .when(!live_targets.is_empty(), |view| {
                 view.child(

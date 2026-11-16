@@ -2340,3 +2340,94 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     assert_eq!(reopened["ok"], true, "{reopened}");
     agent.quit();
 }
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires a matching RenderDoc core, D3D11 and remote server fixtures"]
+fn real_remote_replay_loopback() {
+    use std::{net::TcpListener, os::windows::process::CommandExt, path::PathBuf};
+    struct Server(Child);
+    impl Drop for Server {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let bridge = PathBuf::from(std::env::var_os("RENDERDOCX_TEST_BRIDGE").unwrap());
+    let fixture = std::env::var_os("RENDERDOCX_TEST_FIXTURE").unwrap();
+    let server_exe = std::env::var_os("RENDERDOCX_TEST_REMOTE_SERVER").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(fixture)
+        .arg(bridge.parent().unwrap().join("renderdoc.dll"))
+        .arg(dir.path().join("frame"))
+        .creation_flags(0x08000000)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let capture = stdout
+        .lines()
+        .find_map(|s| s.strip_prefix("RENDERDOCX_CAPTURE="))
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let _server = Server(
+        Command::new(server_exe)
+            .arg(port.to_string())
+            .creation_flags(0x08000000)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let mut agent = Agent::new(bridge.to_str());
+    let request = serde_json::json!({"command":"open", "path":capture, "remote_url":format!("127.0.0.1:{port}")}).to_string();
+    let mut opened = Value::Null;
+    for _ in 0..20 {
+        opened = agent.send(&request);
+        if opened["ok"] == true {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(opened["ok"], true, "{opened}");
+    let event = opened["data"]["capture"]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| {
+            a["name"]
+                .as_str()
+                .is_some_and(|n| n.contains("DrawIndexed"))
+        })
+        .expect("draw action")["event_id"]
+        .as_u64()
+        .unwrap();
+    let selected =
+        agent.send(&serde_json::json!({"command":"select", "event_id":event}).to_string());
+    assert_eq!(selected["ok"], true, "{selected}");
+    assert_eq!(agent.send(r#"{"command":"close"}"#)["ok"], true);
+    agent.quit();
+}
+
+#[test]
+fn remote_open_rejects_invalid_url() {
+    let mut agent = Agent::new(None);
+    for value in [
+        serde_json::json!(""),
+        serde_json::json!("  "),
+        serde_json::json!(42),
+        serde_json::Value::Null,
+    ] {
+        let request =
+            serde_json::json!({"command":"open", "path":"capture.rdc", "remote_url":value})
+                .to_string();
+        assert_eq!(agent.send(&request)["error"]["code"], "invalid_arguments");
+    }
+    agent.quit();
+}

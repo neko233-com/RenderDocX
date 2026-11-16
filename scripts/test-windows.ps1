@@ -7,6 +7,7 @@ if (-not $IsWindows -or -not [Environment]::Is64BitProcess) {
 $root = Split-Path -Parent $PSScriptRoot
 $previousBridge = $env:RENDERDOCX_TEST_BRIDGE
 $previousFixture = $env:RENDERDOCX_TEST_FIXTURE
+$previousRemoteServer = $env:RENDERDOCX_TEST_REMOTE_SERVER
 $previousMismatch = $env:RENDERDOCX_TEST_MISMATCH_BRIDGE
 $previousLiveFixture = $env:RENDERDOCX_TEST_LIVE_FIXTURE
 $previousOpenGLFixture = $env:RENDERDOCX_TEST_OPENGL_FIXTURE
@@ -22,6 +23,7 @@ try {
     Copy-Item -LiteralPath 'target/renderdocx-runtime/renderdoc.dll' -Destination 'target/replay-mismatch/Release/' -Force
     $env:RENDERDOCX_TEST_BRIDGE = Join-Path $root 'target/renderdocx-runtime/renderdocx-replay.exe'
     $env:RENDERDOCX_TEST_FIXTURE = Join-Path $root 'target/replay-bridge/Release/renderdocx-d3d11-fixture.exe'
+    $env:RENDERDOCX_TEST_REMOTE_SERVER = Join-Path $root 'target/renderdocx-runtime/renderdocx-remote-server-fixture.exe'
     $env:RENDERDOCX_TEST_MISMATCH_BRIDGE = Join-Path $root 'target/replay-mismatch/Release/renderdocx-replay.exe'
     $env:RENDERDOCX_TEST_LIVE_FIXTURE = Join-Path $root 'target/replay-bridge/Release/renderdocx-d3d11-live-fixture.exe'
     $env:RENDERDOCX_TEST_SHADER_PROCESSOR = Join-Path $root 'target/replay-bridge/Release/renderdocx-shader-processor-fixture.exe'
@@ -50,6 +52,7 @@ try {
 finally {
     $env:RENDERDOCX_TEST_BRIDGE = $previousBridge
     $env:RENDERDOCX_TEST_FIXTURE = $previousFixture
+    $env:RENDERDOCX_TEST_REMOTE_SERVER = $previousRemoteServer
     $env:RENDERDOCX_TEST_MISMATCH_BRIDGE = $previousMismatch
     $env:RENDERDOCX_TEST_LIVE_FIXTURE = $previousLiveFixture
     $env:RENDERDOCX_TEST_OPENGL_FIXTURE = $previousOpenGLFixture

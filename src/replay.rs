@@ -1202,12 +1202,19 @@ impl Process {
         read_reply(self.output.as_mut().ok_or("Replay session has closed")?)
     }
 
-    fn open(executable: &Path, capture: &Path, worker: bool) -> Result<(Self, Snapshot), String> {
+    fn open(
+        executable: &Path,
+        capture: &Path,
+        worker: bool,
+        remote: Option<&str>,
+    ) -> Result<(Self, Snapshot), String> {
         let capture = std::fs::canonicalize(capture).unwrap_or_else(|_| capture.to_path_buf());
         let before = capture_stamp(&capture);
         let mut command = Command::new(executable);
         if worker {
             command.arg("--structure-worker");
+        } else if let Some(url) = remote {
+            command.arg("--remote").arg(url);
         }
         command
             .arg(&capture)
@@ -2014,7 +2021,7 @@ impl Transport for Process {
             .ok_or("Structured data is unavailable for this event")?
             .clone();
         if self.structure_worker.is_none() {
-            let (worker, _) = Process::open(&self.executable, &self.capture, true)?;
+            let (worker, _) = Process::open(&self.executable, &self.capture, true, None)?;
             if worker.capture_stamp.as_ref() != Some(stamp) {
                 return Err("Capture changed while opening structured data".into());
             }
@@ -2541,9 +2548,20 @@ impl Session {
             .counter_page(generation, offset, limit)
     }
     pub fn open(settings: &Settings, capture: &Path) -> Result<(Self, Snapshot), String> {
+        Self::open_remote(settings, capture, None)
+    }
+
+    pub fn open_remote(
+        settings: &Settings,
+        capture: &Path,
+        remote: Option<&str>,
+    ) -> Result<(Self, Snapshot), String> {
+        if remote.is_some_and(|url| url.trim().is_empty() || url.contains('\0')) {
+            return Err("Remote replay server must be a nonempty URL".into());
+        }
         let executable = find_tool(&settings.replay_bridge, "renderdocx-replay")?;
         let executable = std::fs::canonicalize(&executable).unwrap_or(executable);
-        let (process, snapshot) = Process::open(&executable, capture, false)?;
+        let (process, snapshot) = Process::open(&executable, capture, false, remote)?;
         Ok((
             Self {
                 process: Arc::new(Mutex::new(Box::new(process))),
