@@ -658,7 +658,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                                     EventRow::Action(action) => (action, None),
                                     EventRow::Api { action, event } => (action, Some(event)),
                                 };
-                                Some(json!({"event_id":tree.event_id(row)?,"action_index":action_index,"api_index":api_index}))
+                                Some(json!({"event_id":tree.event_id(row)?,"action_index":action_index,"api_index":api_index,"group_range":tree.action_range(row)}))
                             });
                             Ok(json!({"match":found}))
                         }
@@ -708,7 +708,8 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                                 }).unwrap_or((action.event_id, &action.name));
                                 json!({"action_index":action_index,"api_index":api_index,"event_id":event_id,
                                     "parent_action_index": if action.parent < 0 { None } else { Some(action.parent) },
-                                    "name":name,"direct_match":tree.directly_matches(row),"duration_seconds":tree.duration(event_id)})
+                                    "name":name,"direct_match":tree.directly_matches(row),"duration_seconds":tree.duration(event_id),
+                                    "group_range":tree.action_range(row)})
                             }).collect();
                             Ok(json!({"events":{"expression":expression,"show_api":show_api,"offset":offset.to_string(),
                                 "total":tree.visible.len().to_string(),"items":items}}))

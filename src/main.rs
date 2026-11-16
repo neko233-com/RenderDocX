@@ -9101,10 +9101,14 @@ impl Workspace {
                                             .cursor_pointer()
                                             .child(
                                                 div()
-                                                    .w(px(64.))
+                                                    .w(px(108.))
                                                     .flex_none()
                                                     .text_color(rgb(0x91a7c0))
-                                                    .child(event.to_string()),
+                                                    .child(
+                                                        this.event_tree
+                                                            .event_label(node)
+                                                            .unwrap_or_else(|| event.to_string()),
+                                                    ),
                                             )
                                             .child(div().overflow_hidden().child(name))
                                             .when(this.event_tree.has_durations(), |row| {
@@ -15883,6 +15887,10 @@ mod ui_tests {
             assert_eq!(view.read(cx).selected, Some(1));
             assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 43);
             assert_eq!(view.read(cx).event_tree.visible, [0, 2]);
+            assert_eq!(
+                view.read(cx).event_tree.event_label(0).as_deref(),
+                Some("42-43")
+            );
         });
         assert_eq!(*events.lock().unwrap(), vec![42, 77, 43]);
         cx.update_window(handle.into(), |_, window, cx| {

@@ -11,6 +11,7 @@ pub enum EventRow {
 pub struct ExportRow {
     pub event_id: u32,
     pub action_id: Option<u32>,
+    pub action_range: Option<crate::event_ranges::ActionRange>,
     pub name: String,
     pub depth: usize,
     pub first_child: bool,
@@ -31,6 +32,7 @@ pub struct EventTree {
     filter: Filter,
     filter_error: bool,
     actions: Vec<Action>,
+    ranges: Vec<Option<crate::event_ranges::ActionRange>>,
     event_ids: Vec<u32>,
     durations: Option<std::collections::HashMap<u32, f64>>,
     matching_children: Vec<bool>,
@@ -45,6 +47,7 @@ impl EventTree {
         self.durations = None;
         self.action_count = actions.len();
         self.actions = actions.to_vec();
+        self.ranges = crate::event_ranges::calculate(actions);
         self.marker_names = actions
             .iter()
             .map(|a| a.marker_name.as_deref().unwrap_or("").to_lowercase())
@@ -238,6 +241,25 @@ impl EventTree {
         self.event_ids.get(row).copied()
     }
 
+    pub fn action_range(&self, row: usize) -> Option<&crate::event_ranges::ActionRange> {
+        match self.rows.get(row)? {
+            EventRow::Action(index) => self.ranges.get(*index)?.as_ref(),
+            EventRow::Api { .. } => None,
+        }
+    }
+
+    pub fn event_label(&self, row: usize) -> Option<String> {
+        if let Some(range) = self.action_range(row) {
+            Some(if range.first_event == range.last_event {
+                range.first_event.to_string()
+            } else {
+                format!("{}-{}", range.first_event, range.last_event)
+            })
+        } else {
+            self.event_id(row).map(|id| id.to_string())
+        }
+    }
+
     /// Export the filter-admitted tree, independent of interactive collapse state.
     pub fn export_rows(&self) -> Vec<ExportRow> {
         let mut seen_parents = std::collections::HashSet::new();
@@ -260,6 +282,7 @@ impl EventTree {
                         && action.flags & (0x20 | 0x40 | 0x80) == 0
                         && !parents.contains(&row))
                     .then_some(action.action_id),
+                    action_range: self.action_range(row).cloned(),
                     name: self.names[row].clone(),
                     depth: action.depth,
                     first_child,

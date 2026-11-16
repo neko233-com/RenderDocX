@@ -58,7 +58,15 @@ pub fn write_new(
         .map_err(|e| e.to_string())?;
         for (row, name) in rows.iter().zip(&names) {
             let name_pad = width.saturating_sub(name.encode_utf16().count());
-            let action = row.action_id.map(|id| id.to_string()).unwrap_or_default();
+            let action = if let Some(range) = &row.action_range {
+                range
+                    .last_action
+                    .filter(|end| *end != range.first_action)
+                    .map(|end| format!("{}-{end}", range.first_action))
+                    .unwrap_or_default()
+            } else {
+                row.action_id.map(|id| id.to_string()).unwrap_or_default()
+            };
             write!(
                 output,
                 "{:<5} | {}{} | {:<6}",
@@ -96,6 +104,12 @@ mod tests {
             ExportRow {
                 event_id: 4,
                 action_id: None,
+                action_range: Some(crate::event_ranges::ActionRange {
+                    first_event: 4,
+                    last_event: 5,
+                    first_action: 2,
+                    last_action: Some(3),
+                }),
                 name: "帧".into(),
                 depth: 0,
                 first_child: false,
@@ -104,6 +118,7 @@ mod tests {
             ExportRow {
                 event_id: 5,
                 action_id: Some(1),
+                action_range: None,
                 name: "Draw".into(),
                 depth: 1,
                 first_child: true,
@@ -115,6 +130,7 @@ mod tests {
         assert!(text.contains("测试.rdc - Frame #3"));
         assert!(text.contains("\\- Draw"));
         assert!(text.contains("1.000"));
+        assert!(text.contains("2-3"));
         assert!(write_new(&path, "other", 4, &rows, false).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
     }
