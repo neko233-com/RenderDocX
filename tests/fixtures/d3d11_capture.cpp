@@ -52,29 +52,46 @@ int wmain(int argc, wchar_t **argv)
   HMODULE compiler = LoadLibraryW(L"d3dcompiler_47.dll");
   auto compile = compiler ? reinterpret_cast<decltype(&D3DCompile)>(GetProcAddress(compiler, "D3DCompile")) : nullptr;
   if(!compile) { std::cerr << "Could not load D3D compiler"; return 14; }
-  const char *vertex_source = "float4 main(uint id : SV_VertexID) : SV_Position { return float4(2,2,0,1); }";
+  const char *vertex_source = "float4 main(float2 position : POSITION) : SV_Position { return float4(position,0,1); }";
   const char *pixel_source = "float4 main() : SV_Target { return float4(0.25,0.5,0.75,1); }";
   ID3DBlob *vertex_code = nullptr, *pixel_code = nullptr;
   hr = compile(vertex_source, strlen(vertex_source), nullptr, nullptr, nullptr, "main", "vs_4_0", 0, 0, &vertex_code, nullptr);
   if(SUCCEEDED(hr)) hr = compile(pixel_source, strlen(pixel_source), nullptr, nullptr, nullptr, "main", "ps_4_0", 0, 0, &pixel_code, nullptr);
   ID3D11VertexShader *vertex = nullptr;
   ID3D11PixelShader *pixel = nullptr;
+  ID3D11InputLayout *layout = nullptr;
+  D3D11_INPUT_ELEMENT_DESC element = {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0};
   if(SUCCEEDED(hr)) hr = device->CreateVertexShader(vertex_code->GetBufferPointer(), vertex_code->GetBufferSize(), nullptr, &vertex);
+  if(SUCCEEDED(hr)) hr = device->CreateInputLayout(&element, 1, vertex_code->GetBufferPointer(), vertex_code->GetBufferSize(), &layout);
   if(SUCCEEDED(hr)) hr = device->CreatePixelShader(pixel_code->GetBufferPointer(), pixel_code->GetBufferSize(), nullptr, &pixel);
   if(FAILED(hr)) { std::cerr << "Could not create fixture shaders"; return 15; }
   vertex_code->Release(); pixel_code->Release();
+  const float vertices[] = {0, 2, 2, 2, 2, 2, 2};
+  const uint16_t indices[] = {0, 0, 1, 2};
+  D3D11_BUFFER_DESC buffer_desc = {};
+  buffer_desc.ByteWidth = sizeof(vertices); buffer_desc.Usage = D3D11_USAGE_DEFAULT; buffer_desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+  D3D11_SUBRESOURCE_DATA initial = {}; initial.pSysMem = vertices;
+  ID3D11Buffer *vertex_buffer = nullptr, *index_buffer = nullptr;
+  hr = device->CreateBuffer(&buffer_desc, &initial, &vertex_buffer);
+  buffer_desc.ByteWidth = sizeof(indices); buffer_desc.BindFlags = D3D11_BIND_INDEX_BUFFER; initial.pSysMem = indices;
+  if(SUCCEEDED(hr)) hr = device->CreateBuffer(&buffer_desc, &initial, &index_buffer);
+  if(FAILED(hr)) { std::cerr << "Could not create fixture buffers"; return 16; }
 
   api->StartFrameCapture(device, nullptr);
   if(!api->IsFrameCapturing()) { std::cerr << "Capture did not start"; return 9; }
   const float color[4] = {0.25f, 0.5f, 0.75f, 1.0f};
   context->ClearRenderTargetView(view, color);
   context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  const UINT stride = 8, offset = 4;
+  context->IASetInputLayout(layout);
+  context->IASetVertexBuffers(0, 1, &vertex_buffer, &stride, &offset);
+  context->IASetIndexBuffer(index_buffer, DXGI_FORMAT_R16_UINT, 2);
   context->VSSetShader(vertex, nullptr, 0);
   context->PSSetShader(pixel, nullptr, 0);
   context->OMSetRenderTargets(1, &view, nullptr);
   D3D11_VIEWPORT viewport = {0, 0, 16, 16, 0, 1};
   context->RSSetViewports(1, &viewport);
-  context->Draw(3, 0);
+  context->DrawIndexed(3, 0, 0);
   context->Flush();
   if(!api->EndFrameCapture(device, nullptr)) { std::cerr << "Capture did not complete"; return 10; }
   if(api->GetNumCaptures() == 0) { std::cerr << "No capture was recorded"; return 11; }
@@ -83,6 +100,6 @@ int wmain(int argc, wchar_t **argv)
   std::vector<char> output(length, 0);
   if(!api->GetCapture(0, output.data(), &length, nullptr)) { std::cerr << "Could not read capture path"; return 13; }
   std::cout << "RENDERDOCX_CAPTURE=" << output.data() << std::endl;
-  vertex->Release(); pixel->Release(); view->Release(); texture->Release(); context->Release(); device->Release();
+  index_buffer->Release(); vertex_buffer->Release(); layout->Release(); vertex->Release(); pixel->Release(); view->Release(); texture->Release(); context->Release(); device->Release();
   return 0;
 }

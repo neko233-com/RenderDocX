@@ -12,7 +12,9 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # A real RenderDoc core build takes longer than a typical change cycle.
+  # Let the running validation finish; GitHub may replace older pending runs.
+  cancel-in-progress: false
 
 jobs:
   headless:

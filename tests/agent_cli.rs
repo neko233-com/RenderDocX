@@ -301,6 +301,31 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     assert_eq!(pipeline["event_id"], draw_event);
     assert_eq!(pipeline["available"], true);
     assert_eq!(pipeline["topology"], 5);
+    assert_eq!(pipeline["index_buffer"]["bound"], true, "{pipeline}");
+    assert_eq!(pipeline["index_buffer"]["byte_offset"], "2");
+    assert_eq!(pipeline["index_buffer"]["byte_stride"], 2);
+    let vb = &pipeline["vertex_buffers"][0];
+    assert_eq!(vb["bound"], true, "{pipeline}");
+    assert_eq!(vb["byte_offset"], "4");
+    assert_eq!(vb["byte_stride"], 8);
+    let inputs = pipeline["vertex_inputs"].as_array().unwrap();
+    assert!(
+        inputs.iter().any(|input| input["name"] == "POSITION"
+            && input["vertex_buffer"] == 0
+            && input["byte_offset"] == 0
+            && input["used"] == true),
+        "{pipeline}"
+    );
+    assert!(
+        pipeline["viewports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|viewport| viewport["enabled"] == true
+                && viewport["width"] == 16.0
+                && viewport["height"] == 16.0),
+        "{pipeline}"
+    );
     let shaders = pipeline["shaders"].as_array().unwrap();
     for stage in ["vertex", "fragment"] {
         assert!(

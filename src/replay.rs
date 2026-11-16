@@ -71,12 +71,52 @@ pub struct PipelineShader {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct PipelineBuffer {
+    #[serde(flatten)]
+    pub resource: PipelineResource,
+    pub byte_offset: String,
+    pub byte_size: String,
+    pub byte_stride: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct VertexInput {
+    pub name: String,
+    pub vertex_buffer: i32,
+    pub byte_offset: u32,
+    pub per_instance: bool,
+    pub instance_rate: i32,
+    pub format: String,
+    pub generic_enabled: bool,
+    pub used: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PipelineViewport {
+    pub enabled: bool,
+    pub x: Option<f32>,
+    pub y: Option<f32>,
+    pub width: Option<f32>,
+    pub height: Option<f32>,
+    pub min_depth: Option<f32>,
+    pub max_depth: Option<f32>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Pipeline {
     pub event_id: u32,
     pub available: bool,
     pub topology: u32,
     pub shaders: Vec<PipelineShader>,
     pub outputs: Vec<PipelineResource>,
+    #[serde(default)]
+    pub index_buffer: Option<PipelineBuffer>,
+    #[serde(default)]
+    pub vertex_buffers: Option<Vec<PipelineBuffer>>,
+    #[serde(default)]
+    pub vertex_inputs: Option<Vec<VertexInput>>,
+    #[serde(default)]
+    pub viewports: Option<Vec<PipelineViewport>>,
 }
 
 #[derive(Deserialize)]
@@ -324,6 +364,30 @@ pub mod test_support {
                 event_id: event,
                 available: true,
                 topology: 5,
+                index_buffer: Some(PipelineBuffer {
+                    resource: PipelineResource {
+                        bound: true,
+                        resource_index: Some(0),
+                        name: "Index".into(),
+                    },
+                    byte_offset: "2".into(),
+                    byte_size: "18446744073709551615".into(),
+                    byte_stride: 2,
+                }),
+                vertex_buffers: Some(vec![]),
+                vertex_inputs: Some(vec![]),
+                viewports: Some(vec![
+                    PipelineViewport {
+                        enabled: true,
+                        x: Some(0.),
+                        y: Some(0.),
+                        width: Some(16.),
+                        height: Some(16.),
+                        min_depth: Some(0.),
+                        max_depth: Some(1.),
+                    };
+                    20
+                ]),
                 ..Default::default()
             })
         }
@@ -355,6 +419,18 @@ mod tests {
     use std::{io::Cursor, sync::Mutex};
 
     const SNAPSHOT: &str = r#"{"type":"snapshot","protocol":1,"api":3,"frame":7,"degraded":false,"actions":[{"event_id":10,"action_id":1,"depth":0,"parent":-1,"flags":0,"indices":0,"instances":0,"name":"pass"},{"event_id":11,"action_id":2,"depth":1,"parent":0,"flags":2,"indices":3,"instances":1,"name":"draw"}],"resource_count":4,"texture_count":2,"buffer_count":1}"#;
+
+    #[test]
+    fn pipeline_keeps_large_buffer_values_and_unavailable_fields() {
+        let json = r#"{"event_id":7,"available":true,"topology":5,"shaders":[],"outputs":[],"index_buffer":{"bound":true,"resource_index":null,"name":"","byte_offset":"18446744073709551615","byte_size":"18446744073709551615","byte_stride":4},"vertex_buffers":[],"vertex_inputs":null,"viewports":[{"enabled":true,"x":null,"y":0,"width":16,"height":16,"min_depth":0,"max_depth":1}]}"#;
+        let pipeline: Pipeline = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            pipeline.index_buffer.unwrap().byte_offset,
+            u64::MAX.to_string()
+        );
+        assert!(pipeline.vertex_inputs.is_none());
+        assert!(pipeline.viewports.unwrap()[0].x.is_none());
+    }
 
     #[test]
     fn decodes_bridge_snapshot_after_foreign_output() {

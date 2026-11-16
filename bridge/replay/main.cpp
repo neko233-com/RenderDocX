@@ -3,6 +3,8 @@
 
 #include <cstdint>
 #include <cstring>
+#include <cmath>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -165,6 +167,17 @@ void write_pipeline(IReplayController *controller, uint32_t event)
     if(found == indices.end() || id == ResourceId()) json_string("", 0);
     else json_string(resources[found->second].name);
   };
+  auto buffer = [&](const BoundVBuffer &binding) {
+    std::cout << '{';
+    resource(binding.resourceId);
+    // Preserve 64-bit values for JavaScript consumers, including upstream sentinels.
+    std::cout << ",\"byte_offset\":\"" << binding.byteOffset << "\",\"byte_size\":\""
+              << binding.byteSize << "\",\"byte_stride\":" << binding.byteStride << '}';
+  };
+  auto number = [](float value) {
+    if(std::isfinite(value)) std::cout << std::setprecision(std::numeric_limits<float>::max_digits10) << value;
+    else std::cout << "null";
+  };
   static const char *names[] = {"vertex", "tess_control", "tess_eval", "geometry", "fragment", "compute", "task", "mesh"};
   std::cout << "{\"event_id\":" << event << ",\"available\":" << (state.IsCaptureLoaded() ? "true" : "false")
             << ",\"topology\":" << uint32_t(state.GetPrimitiveTopology()) << ",\"shaders\":[";
@@ -184,6 +197,54 @@ void write_pipeline(IReplayController *controller, uint32_t event)
     if(i) std::cout << ',';
     std::cout << '{';
     resource(outputs[i].resource);
+    std::cout << '}';
+  }
+  std::cout << "],\"index_buffer\":";
+  buffer(state.GetIBuffer());
+  std::cout << ",\"vertex_buffers\":[";
+  const auto vertex_buffers = state.GetVBuffers();
+  for(size_t i = 0; i < vertex_buffers.size(); ++i)
+  {
+    if(i) std::cout << ',';
+    buffer(vertex_buffers[i]);
+  }
+  std::cout << "],\"vertex_inputs\":";
+  // GetVertexInputs() can return uninitialised trailing attributes for OpenGL.
+  if(!state.IsCaptureLoaded() || state.IsCaptureGL()) std::cout << "null";
+  else
+  {
+    const auto inputs = state.GetVertexInputs();
+    std::cout << '[';
+    for(size_t i = 0; i < inputs.size(); ++i)
+    {
+      if(i) std::cout << ',';
+      const auto &input = inputs[i];
+      std::cout << "{\"name\":"; json_string(input.name);
+      std::cout << ",\"vertex_buffer\":" << input.vertexBuffer << ",\"byte_offset\":" << input.byteOffset
+                << ",\"per_instance\":" << (input.perInstance ? "true" : "false")
+                << ",\"instance_rate\":" << input.instanceRate << ",\"format\":";
+      json_string(input.format.Name());
+      std::cout << ",\"generic_enabled\":" << (input.genericEnabled ? "true" : "false")
+                << ",\"used\":" << (input.used ? "true" : "false") << '}';
+    }
+    std::cout << ']';
+  }
+  size_t count = 0;
+  if(state.IsCaptureD3D11()) count = controller->GetD3D11PipelineState()->rasterizer.viewports.size();
+  else if(state.IsCaptureD3D12()) count = controller->GetD3D12PipelineState()->rasterizer.viewports.size();
+  else if(state.IsCaptureGL()) count = controller->GetGLPipelineState()->rasterizer.viewports.size();
+  else if(state.IsCaptureVK()) count = controller->GetVulkanPipelineState()->viewportScissor.viewportScissors.size();
+  std::cout << ",\"viewports\":[";
+  for(size_t i = 0; i < count; ++i)
+  {
+    if(i) std::cout << ',';
+    const auto viewport = state.GetViewport(uint32_t(i));
+    std::cout << "{\"enabled\":" << (viewport.enabled ? "true" : "false") << ",\"x\":"; number(viewport.x);
+    std::cout << ",\"y\":"; number(viewport.y);
+    std::cout << ",\"width\":"; number(viewport.width);
+    std::cout << ",\"height\":"; number(viewport.height);
+    std::cout << ",\"min_depth\":"; number(viewport.minDepth);
+    std::cout << ",\"max_depth\":"; number(viewport.maxDepth);
     std::cout << '}';
   }
   std::cout << "]}";

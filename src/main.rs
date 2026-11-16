@@ -510,6 +510,22 @@ impl Workspace {
             "パイプライン状態を取得できません",
             "파이프라인 상태를 사용할 수 없습니다",
         );
+        let vertex_buffers_label =
+            self.t("Vertex buffers", "顶点缓冲区", "頂点バッファ", "정점 버퍼");
+        let index_buffer_label = self.t(
+            "Index buffer",
+            "索引缓冲区",
+            "インデックスバッファ",
+            "인덱스 버퍼",
+        );
+        let inputs_label = self.t("Vertex inputs", "顶点输入", "頂点入力", "정점 입력");
+        let viewport_label = self.t("Viewports", "视口", "ビューポート", "뷰포트");
+        let unavailable = self.t("Unavailable", "不可用", "利用不可", "사용할 수 없음");
+        let offset_label = self.t("offset", "偏移", "オフセット", "오프셋");
+        let stride_label = self.t("stride", "步长", "ストライド", "스트라이드");
+        let enabled_label = self.t("enabled", "启用", "有効", "활성");
+        let disabled_label = self.t("disabled", "禁用", "無効", "비활성");
+        let depth_label = self.t("depth", "深度", "深度", "깊이");
         let pipeline = self.pipeline.clone();
         let status = self.status.clone();
         let preview_path = self.preview.as_ref().map(|preview| preview.path.clone());
@@ -761,6 +777,74 @@ impl Workspace {
                             )
                         })
                         .collect::<Vec<_>>();
+                    let index = state
+                        .index_buffer
+                        .as_ref()
+                        .map(|buffer| {
+                            if buffer.resource.bound {
+                                format!(
+                                    "{} · {offset_label} {} · {stride_label} {}",
+                                    buffer.resource.name, buffer.byte_offset, buffer.byte_stride
+                                )
+                            } else {
+                                "—".into()
+                            }
+                        })
+                        .unwrap_or_else(|| unavailable.to_owned());
+                    let vertex_buffers = state.vertex_buffers.as_ref().map(|buffers| {
+                        buffers
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, buffer)| buffer.resource.bound)
+                            .map(|(slot, buffer)| {
+                                format!(
+                                    "{slot}: {} · {offset_label} {} · {stride_label} {}",
+                                    buffer.resource.name, buffer.byte_offset, buffer.byte_stride
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    });
+                    let inputs = state.vertex_inputs.as_ref().map(|inputs| {
+                        inputs
+                            .iter()
+                            .map(|input| {
+                                format!(
+                                    "{} · {} · {} + {}",
+                                    input.name,
+                                    input.format,
+                                    input.vertex_buffer,
+                                    input.byte_offset
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    });
+                    let viewports = state.viewports.as_ref().map(|viewports| {
+                        viewports
+                            .iter()
+                            .enumerate()
+                            .map(|(slot, viewport)| {
+                                let value = |number: Option<f32>| {
+                                    number
+                                        .map(|v| v.to_string())
+                                        .unwrap_or_else(|| "—".to_owned())
+                                };
+                                format!(
+                                    "{slot}: ({}, {}) {} × {} · {} · {depth_label} {}–{}",
+                                    value(viewport.x),
+                                    value(viewport.y),
+                                    value(viewport.width),
+                                    value(viewport.height),
+                                    if viewport.enabled {
+                                        enabled_label
+                                    } else {
+                                        disabled_label
+                                    },
+                                    value(viewport.min_depth),
+                                    value(viewport.max_depth)
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    });
                     view.child(
                         div()
                             .text_sm()
@@ -772,6 +856,51 @@ impl Workspace {
                     .children(shaders.into_iter().map(|line| div().text_sm().child(line)))
                     .child(format!("{outputs_label}: {}", outputs.len()))
                     .children(outputs.into_iter().map(|line| div().text_sm().child(line)))
+                    .child(format!("{index_buffer_label}: {index}"))
+                    .child(format!(
+                        "{vertex_buffers_label}: {}",
+                        vertex_buffers.as_ref().map_or_else(
+                            || unavailable.to_owned(),
+                            |values| values.len().to_string()
+                        )
+                    ))
+                    .children(
+                        vertex_buffers
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|line| div().text_sm().child(line)),
+                    )
+                    .child(format!(
+                        "{inputs_label}: {}",
+                        inputs.as_ref().map_or_else(
+                            || unavailable.to_owned(),
+                            |values| values.len().to_string()
+                        )
+                    ))
+                    .children(
+                        inputs
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|line| div().text_sm().child(line)),
+                    )
+                    .child(format!(
+                        "{viewport_label}: {}",
+                        viewports.as_ref().map_or_else(
+                            || unavailable.to_owned(),
+                            |values| values.len().to_string()
+                        )
+                    ))
+                    .children(
+                        viewports.unwrap_or_default().into_iter().enumerate().map(
+                            |(slot, line)| {
+                                div()
+                                    .id(("pipeline-viewport", slot))
+                                    .test_support()
+                                    .text_sm()
+                                    .child(line)
+                            },
+                        ),
+                    )
                 })
                 .when(self.selected.is_none(), |view| {
                     view.child(div().text_color(rgb(0x9eacc0)).child(empty))
@@ -900,8 +1029,12 @@ impl Workspace {
                     )
                     .child(
                         div()
+                            .id("capture-details-scroll")
+                            .test_support()
                             .w(px(300.))
                             .flex_none()
+                            .min_h_0()
+                            .overflow_y_scroll()
                             .bg(rgb(0x192332))
                             .rounded_lg()
                             .p_4()
@@ -1204,7 +1337,7 @@ fn main() {
 #[cfg(all(test, feature = "ui-tests"))]
 mod ui_tests {
     use super::*;
-    use gpui_kit::{TestAppContext, base::Root, test::TestWindowExt};
+    use gpui_kit::{ScrollDelta, TestAppContext, base::Root, point, test::TestWindowExt};
 
     #[gpui_kit::test]
     fn capture_workspace_back_button_returns_to_home(cx: &mut TestAppContext) {
@@ -1351,7 +1484,20 @@ mod ui_tests {
             let pipeline = view.read(cx).pipeline.as_ref().expect("selected pipeline");
             assert_eq!(pipeline.event_id, 42);
             assert_eq!(pipeline.topology, 5);
+            assert_eq!(pipeline.index_buffer.as_ref().unwrap().byte_offset, "2");
         });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("capture-details-scroll").visible());
+            assert!(!window.find(("pipeline-viewport", 19usize)).visible());
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(-2000.))),
+                cx,
+            );
+            assert!(window.find(("pipeline-viewport", 19usize)).visible());
+        })
+        .unwrap();
         assert_eq!(*events.lock().unwrap(), vec![42]);
         cx.update_window(handle.into(), |_, window, cx| {
             window.click("textures-tab", cx);
