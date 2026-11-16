@@ -135,6 +135,10 @@ fn usage() -> Value {
     capabilities["serve_commands"]
         .as_array_mut()
         .expect("capabilities commands")
+        .push(json!("pick_custom_pixel"));
+    capabilities["serve_commands"]
+        .as_array_mut()
+        .expect("capabilities commands")
         .push(json!("pick_overlay_pixel"));
     capabilities["serve_commands"]
         .as_array_mut()
@@ -2540,7 +2544,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     )),
                 }
             }
-            "pick_pixel" | "pick_overlay_pixel" => {
+            "pick_pixel" | "pick_overlay_pixel" | "pick_custom_pixel" => {
                 let number = |key: &str| {
                     request
                         .get(key)
@@ -2575,8 +2579,25 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                                                 .into(),
                                         ))
                                     }
+                                    Ok(())
+                                        if command == "pick_custom_pixel"
+                                            && !selection.preview_custom_shader =>
+                                    {
+                                        Err((
+                                            "invalid_arguments",
+                                            "Select the custom shader preview".into(),
+                                        ))
+                                    }
                                     Ok(()) => {
-                                        let picked = if command == "pick_overlay_pixel" {
+                                        let picked = if command == "pick_custom_pixel" {
+                                            if selection.preview_overlay.uses_overlay_pixel() {
+                                                event_times = None;
+                                                mesh_selection = None;
+                                            }
+                                            session.pick_custom_pixel(
+                                                event, index, texture, selection, x, y,
+                                            )
+                                        } else if command == "pick_overlay_pixel" {
                                             event_times = None;
                                             mesh_selection = None;
                                             session.pick_overlay_pixel(

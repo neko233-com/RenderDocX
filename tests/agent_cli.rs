@@ -1016,6 +1016,44 @@ fn real_d3d11_mesh_draw_order() {
         "custom pixel {:?}",
         &custom[..3]
     );
+    let raw_custom_source = agent.send(
+        &serde_json::json!({"command":"pick_pixel","index":float_index,"x":0,"y":0}).to_string(),
+    );
+    let custom_pixel = agent.send(&serde_json::json!({"command":"pick_custom_pixel","index":float_index,"x":0,"y":0,"preview_custom_shader":true}).to_string());
+    assert_eq!(custom_pixel["ok"], true, "{custom_pixel}");
+    assert_eq!(
+        custom_pixel["data"]["pixel"]["bits"],
+        raw_custom_source["data"]["pixel"]["bits"]
+    );
+    assert_eq!(
+        custom_pixel["data"]["pixel"]["custom"]["float_values"],
+        serde_json::json!(["1", "0", "1", "1"])
+    );
+    let captured_before = agent.send(
+        &serde_json::json!({"command":"pick_pixel","index":texture_index,"x":0,"y":0}).to_string(),
+    );
+    let combined = agent.send(&serde_json::json!({"command":"pick_custom_pixel","index":texture_index,"x":0,"y":0,"preview_custom_shader":true,"preview_overlay":"quad_overdraw_draw"}).to_string());
+    assert_eq!(combined["ok"], true, "{combined}");
+    assert_eq!(combined["data"]["pixel"]["overlay"], true, "{combined}");
+    assert_eq!(
+        combined["data"]["pixel"]["custom"]["float_values"],
+        serde_json::json!(["1", "0", "1", "1"])
+    );
+    let captured_after = agent.send(
+        &serde_json::json!({"command":"pick_pixel","index":texture_index,"x":0,"y":0}).to_string(),
+    );
+    assert_eq!(
+        captured_before["data"]["pixel"]["bits"], captured_after["data"]["pixel"]["bits"],
+        "combined custom/overlay query must restore replay state"
+    );
+    let missing_selection = agent.send(
+        &serde_json::json!({"command":"pick_custom_pixel","index":float_index,"x":0,"y":0})
+            .to_string(),
+    );
+    assert_eq!(
+        missing_selection["error"]["code"], "invalid_arguments",
+        "{missing_selection}"
+    );
     let failed = agent.send(&serde_json::json!({"command":"custom_shader_build","encoding":5,"entry":"main","source":"not a valid shader"}).to_string());
     assert_eq!(failed["ok"], true, "{failed}");
     assert_eq!(failed["data"]["result"]["compiled"], false, "{failed}");
@@ -1031,6 +1069,11 @@ fn real_d3d11_mesh_draw_order() {
     assert_eq!(&retained[..3], &custom[..3]);
     let cleared = agent.send(r#"{"command":"custom_shader_clear"}"#);
     assert_eq!(cleared["data"]["result"]["active"], false, "{cleared}");
+    let cleared_pixel = agent.send(&serde_json::json!({"command":"pick_custom_pixel","index":float_index,"x":0,"y":0,"preview_custom_shader":true}).to_string());
+    assert_eq!(
+        cleared_pixel["error"]["code"], "replay_pixel_failed",
+        "{cleared_pixel}"
+    );
     let missing = agent.send(&serde_json::json!({"command":"render_texture","index":float_index,"width":4,"height":4,"path":dir.path().join("custom-missing.png"),"preview_custom_shader":true}).to_string());
     assert_eq!(
         missing["error"]["code"], "replay_render_failed",

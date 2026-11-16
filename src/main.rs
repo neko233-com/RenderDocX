@@ -7763,7 +7763,9 @@ impl Workspace {
         );
         cx.notify();
         let task = cx.background_executor().spawn(async move {
-            if selection.preview_overlay.uses_overlay_pixel() {
+            if selection.preview_custom_shader {
+                session.pick_custom_pixel(event, texture_index, &texture, selection, x, y)
+            } else if selection.preview_overlay.uses_overlay_pixel() {
                 session.pick_overlay_pixel(event, texture_index, &texture, selection, x, y)
             } else {
                 session.pick_pixel(event, texture_index, &texture, selection, x, y)
@@ -13297,6 +13299,12 @@ impl Workspace {
                                 .child(format!("({}, {}) · RGBA: {bits}", pixel.x, pixel.y)),
                         )
                         .child(format!("{float_label}: {}", pixel.float_values.join(", ")))
+                        .when_some(pixel.custom, |view, custom| view
+                            .child(div().id("custom-pixel-result").test_support().text_sm().text_color(rgb(0x82aaff)).child(self.t("Custom shader output", "自定义着色器输出", "カスタムシェーダー出力", "사용자 셰이더 출력")))
+                            .child(format!("{float_label}: {}", custom.float_values.join(", ")))
+                            .child(format!("{uint_label}: {:?}", custom.uint_values))
+                            .child(format!("{int_label}: {:?}", custom.int_values)))
+
                         .child(format!("{uint_label}: {:?}", pixel.uint_values))
                         .child(format!("{int_label}: {:?}", pixel.int_values))
                     })
@@ -16037,6 +16045,20 @@ mod ui_tests {
             assert!(
                 view.read(cx).texture_custom_active
                     && view.read(cx).texture_selection.preview_custom_shader
+            )
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            reveal_details(window, "pixel-pick", cx);
+            window.click("pixel-pick", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                view.read(cx)
+                    .pixel
+                    .as_ref()
+                    .is_some_and(|pixel| pixel.custom.is_some())
             )
         });
         cx.update_window(handle.into(), |_, window, cx| {
@@ -19155,6 +19177,30 @@ mod ui_tests {
                     pixel[0] >= 250 && pixel[1] <= 2 && pixel[2] >= 250,
                     "custom GUI preview: {pixel:?}"
                 );
+                cx.update_window(handle.into(), |_, window, cx| {
+                    reveal_details(window, "texture-preview-image", cx);
+                    window.click("texture-preview-image", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx)
+                            .pixel
+                            .as_ref()
+                            .and_then(|pixel| pixel.custom.as_ref())
+                            .is_some_and(|custom| custom.float_values == ["1", "0", "1", "1"])
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "custom GUI pixel did not load: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
                 cx.update_window(handle.into(), |_, window, cx| {
                     reveal_details(window, "texture-custom-clear", cx);
                     window.click("texture-custom-clear", cx);

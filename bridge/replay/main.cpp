@@ -2355,21 +2355,22 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       std::cout << "]}" << std::endl;
       continue;
     }
-    if(command.compare(0, 6, "pixel ") == 0 || command.compare(0, 13, "overlaypixel ") == 0)
+    if(command.compare(0, 6, "pixel ") == 0 || command.compare(0, 13, "overlaypixel ") == 0 || command.compare(0, 12, "custompixel ") == 0)
     {
       const bool overlay_request = command.compare(0, 13, "overlaypixel ") == 0;
+      const bool custom_request = command.compare(0, 12, "custompixel ") == 0;
       if(!selected) { error("Select an event before picking a pixel"); continue; }
-      std::istringstream arguments(command.substr(overlay_request ? 13 : 6));
+      std::istringstream arguments(command.substr(overlay_request ? 13 : custom_request ? 12 : 6));
       std::string index_text, mip_text, slice_text, sample_text, x_text, y_text, cast_text, overlay_text, display_cast_text, extra;
       uint64_t index = 0, mip = 0, slice = 0, sample = 0, x = 0, y = 0, cast = 0, overlay = 0, display_cast = 0;
       if(!(arguments >> index_text >> mip_text >> slice_text >> sample_text >> x_text >> y_text) ||
          !decimal(index_text, index) || !decimal(mip_text, mip) || !decimal(slice_text, slice) ||
          (sample_text != "resolve" && !decimal(sample_text, sample)) || !decimal(x_text, x) || !decimal(y_text, y) || index >= texture_ids.size())
       { error("Invalid pixel request"); continue; }
-      if(overlay_request)
+      if(overlay_request || custom_request)
       {
         if(!(arguments >> cast_text >> overlay_text >> display_cast_text) || !decimal(cast_text,cast) || cast > 9 ||
-           !decimal(overlay_text,overlay) || overlay < 11 || overlay > 14 || !decimal(display_cast_text,display_cast) || display_cast > 9 || (arguments >> extra))
+           !decimal(overlay_text,overlay) || overlay > 14 || (overlay_request && overlay < 11) || !decimal(display_cast_text,display_cast) || display_cast > 9 || (arguments >> extra))
         { error("Invalid overlay pixel request"); continue; }
       }
       else if((arguments >> cast_text) && (!decimal(cast_text, cast) || cast > 9 || (arguments >> extra)))
@@ -2383,11 +2384,13 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       if(x >= width || y >= height || slice >= depth || (sample_text != "resolve" && sample >= texture.samples))
       { error("Pixel selection is out of range"); continue; }
       const uint32_t actual_sample = sample_text == "resolve" ? (texture.samples > 1 ? UINT32_MAX : 0U) : uint32_t(sample);
+      if(custom_request && custom_shader.active == ResourceId()) { error("Custom shader is unavailable"); continue; }
+      const bool overlay_replay = (overlay_request || custom_request) && overlay >= 11 && overlay <= 14;
       ResourceId pixel_resource = texture.id;
       CompType pixel_cast = CompType(cast);
       bool overlay_source = false;
       IReplayOutput *output = nullptr;
-      if(overlay_request)
+      if(overlay_request || custom_request)
       {
         output = replay.controller->CreateOutput(CreateHeadlessWindowingData(1, 1), ReplayOutputType::Texture);
         if(!output) { error("Cannot create a headless texture output"); continue; }
@@ -2396,24 +2399,43 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
         display.typeCast = CompType(display_cast);
         display.subresource = Subresource(uint32_t(mip), uint32_t(slice), actual_sample);
         display.overlay = DebugOverlay(overlay);
+        display.customShaderId = custom_request ? custom_shader.active : ResourceId();
         output->SetTextureDisplay(display);
-        ResourceId overlay_id = output->GetDebugOverlayTexID();
-        if(overlay_id != ResourceId()) { pixel_resource=overlay_id; pixel_cast=CompType::Typeless; overlay_source=true; }
+        if(overlay_replay)
+        {
+          ResourceId overlay_id = output->GetDebugOverlayTexID();
+          if(overlay_id != ResourceId()) { pixel_resource=overlay_id; pixel_cast=CompType::Typeless; overlay_source=true; }
+        }
       }
       PixelValue pixel = replay.controller->PickPixel(pixel_resource, uint32_t(x), uint32_t(y), Subresource(uint32_t(mip), uint32_t(slice), actual_sample), pixel_cast);
-      if(output)
+      PixelValue custom_pixel = {};
+      bool custom_available = false;
+      if(custom_request)
       {
-        output->Shutdown();
+        ResourceId custom_id = output->GetCustomShaderTexID();
+        if(custom_id != ResourceId())
+        {
+          custom_pixel = replay.controller->PickPixel(custom_id, uint32_t(x), uint32_t(y), Subresource(uint32_t(mip), 0, 0), CompType::Typeless);
+          custom_available = true;
+        }
+      }
+      if(output) output->Shutdown();
+      if(overlay_replay)
+      {
         replay.controller->SetFrameEvent(selected_event, true);
         mesh_ready = false; history_ready = false; raw_ready = false; counters_ready = false;
         cached_history = rdcarray<PixelModification>(); raw_cache = bytebuf(); counter_results = rdcarray<CounterResult>();
       }
       result = replay.controller->GetFatalErrorStatus();
       if(!result.OK()) { error(result_message(result)); break; }
+      if(custom_request && !custom_available) { error("Custom shader output is unavailable"); continue; }
       uint32_t bits[4]; std::memcpy(bits, &pixel, sizeof(bits));
+      uint32_t custom_bits[4]; std::memcpy(custom_bits, &custom_pixel, sizeof(custom_bits));
       std::cout << "\nRENDERDOCX/1 {\"type\":\"pixel\",\"event_id\":" << selected_event << ",\"index\":" << index
                 << ",\"mip\":" << mip << ",\"slice\":" << slice << ",\"sample\":" << actual_sample
-                << ",\"x\":" << x << ",\"y\":" << y << ",\"overlay\":" << (overlay_source ? "true" : "false") << ",\"bits\":[" << bits[0] << ',' << bits[1] << ',' << bits[2] << ',' << bits[3] << "]}" << std::endl;
+                << ",\"x\":" << x << ",\"y\":" << y << ",\"overlay\":" << (overlay_source ? "true" : "false") << ",\"bits\":[" << bits[0] << ',' << bits[1] << ',' << bits[2] << ',' << bits[3] << "]";
+      if(custom_request) std::cout << ",\"custom_bits\":[" << custom_bits[0] << ',' << custom_bits[1] << ',' << custom_bits[2] << ',' << custom_bits[3] << ']';
+      std::cout << "}" << std::endl;
       continue;
     }
     if(command.compare(0, 8, "rawpage ") == 0)

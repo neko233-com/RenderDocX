@@ -1016,6 +1016,9 @@ pub struct Pixel {
     /// True when values came from the replay overlay texture rather than the captured texture.
     #[serde(default)]
     pub overlay: bool,
+    /// Custom visualization output, when explicitly requested.
+    #[serde(default)]
+    pub custom: Option<PixelComponents>,
     pub event_id: u32,
     pub index: u32,
     pub mip: u32,
@@ -1473,6 +1476,8 @@ enum Reply {
         bits: [u32; 4],
         #[serde(default)]
         overlay: bool,
+        #[serde(default)]
+        custom_bits: Option<[u32; 4]>,
     },
     TextureStats {
         event_id: u32,
@@ -1878,6 +1883,17 @@ trait Transport: Send {
         _y: u32,
     ) -> Result<Pixel, String> {
         Err("Overlay pixel picking is not supported by this transport".into())
+    }
+    fn pick_custom_pixel(
+        &mut self,
+        _event: u32,
+        _index: u32,
+        _selection: TextureSelection,
+        _sample: u32,
+        _x: u32,
+        _y: u32,
+    ) -> Result<Pixel, String> {
+        Err("Custom shader pixel picking is not supported by this transport".into())
     }
     fn texture_statistics(
         &mut self,
@@ -2627,6 +2643,7 @@ impl Transport for Process {
                 y: actual_y,
                 bits,
                 overlay,
+                custom_bits,
             } if event_id == event
                 && actual == index
                 && mip == selection.mip
@@ -2637,6 +2654,7 @@ impl Transport for Process {
             {
                 Ok(Pixel {
                     overlay,
+                    custom: custom_bits.map(PixelComponents::from),
                     event_id,
                     index,
                     mip,
@@ -2690,6 +2708,7 @@ impl Transport for Process {
                 y: actual_y,
                 bits,
                 overlay,
+                custom_bits,
             } if event_id == event
                 && actual == index
                 && mip == selection.mip
@@ -2700,6 +2719,73 @@ impl Transport for Process {
             {
                 Ok(Pixel {
                     overlay,
+                    custom: custom_bits.map(PixelComponents::from),
+                    event_id,
+                    index,
+                    mip,
+                    slice,
+                    sample,
+                    x,
+                    y,
+                    bits,
+                    float_values: bits.map(|bits| f32::from_bits(bits).to_string()),
+                    uint_values: bits,
+                    int_values: bits.map(|bits| bits as i32),
+                })
+            }
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected pixel response".into()),
+        }
+    }
+    fn pick_custom_pixel(
+        &mut self,
+        event: u32,
+        index: u32,
+        selection: TextureSelection,
+        sample: u32,
+        x: u32,
+        y: u32,
+    ) -> Result<Pixel, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        let requested = selection
+            .sample
+            .map(|sample| sample.to_string())
+            .unwrap_or_else(|| "resolve".into());
+        writeln!(
+            input,
+            "custompixel {index} {} {} {requested} {x} {y} {} {} {}",
+            selection.mip,
+            selection.slice,
+            selection.analysis_type_cast,
+            selection.preview_overlay as u32,
+            selection.preview_type_cast
+        )
+        .and_then(|_| input.flush())
+        .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::Pixel {
+                event_id,
+                index: actual,
+                mip,
+                slice,
+                sample: actual_sample,
+                x: actual_x,
+                y: actual_y,
+                bits,
+                overlay,
+                custom_bits,
+            } if event_id == event
+                && actual == index
+                && mip == selection.mip
+                && slice == selection.slice
+                && actual_sample == sample
+                && actual_x == x
+                && actual_y == y
+                && custom_bits.is_some() =>
+            {
+                Ok(Pixel {
+                    overlay,
+                    custom: custom_bits.map(PixelComponents::from),
                     event_id,
                     index,
                     mip,
@@ -4138,6 +4224,38 @@ impl Session {
         Ok(pixel)
     }
 
+    pub fn pick_custom_pixel(
+        &self,
+        event: u32,
+        index: u32,
+        texture: &Texture,
+        selection: TextureSelection,
+        x: u32,
+        y: u32,
+    ) -> Result<Pixel, String> {
+        selection.validate_pixel(texture, x, y)?;
+        if !selection.preview_custom_shader {
+            return Err("Custom shader preview is not selected".into());
+        }
+        let sample = selection
+            .sample
+            .unwrap_or(if texture.samples > 1 { u32::MAX } else { 0 });
+        let revision = if selection.preview_overlay.uses_overlay_pixel() {
+            self.next_revision()
+        } else {
+            self.revision.load(Ordering::SeqCst)
+        };
+        let mut process = self.process.lock().map_err(|e| e.to_string())?;
+        if self.revision.load(Ordering::SeqCst) != revision {
+            return Err("Replay selection changed".into());
+        }
+        let pixel = process.pick_custom_pixel(event, index, selection, sample, x, y)?;
+        if self.revision.load(Ordering::SeqCst) != revision {
+            return Err("Replay selection changed".into());
+        }
+        Ok(pixel)
+    }
+
     pub fn texture_statistics(
         &self,
         event: u32,
@@ -4922,6 +5040,7 @@ pub mod test_support {
             ];
             Ok(Pixel {
                 overlay: false,
+                custom: None,
                 event_id: event,
                 index,
                 mip: selection.mip,
@@ -4934,6 +5053,24 @@ pub mod test_support {
                 uint_values: bits,
                 int_values: bits.map(|v| v as i32),
             })
+        }
+        fn pick_custom_pixel(
+            &mut self,
+            event: u32,
+            index: u32,
+            selection: TextureSelection,
+            sample: u32,
+            x: u32,
+            y: u32,
+        ) -> Result<Pixel, String> {
+            let mut pixel = self.pick_pixel(event, index, selection, sample, x, y)?;
+            pixel.custom = Some(PixelComponents::from([
+                1.0_f32.to_bits(),
+                0,
+                1.0_f32.to_bits(),
+                1.0_f32.to_bits(),
+            ]));
+            Ok(pixel)
         }
         fn pick_overlay_pixel(
             &mut self,
