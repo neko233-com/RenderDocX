@@ -586,6 +586,8 @@ struct Workspace {
     selected_buffer: Option<usize>,
     buffer_offset: u64,
     buffer_format: Option<renderdocx::buffer_format::ScalarFormat>,
+    buffer_layout: Option<renderdocx::buffer_layout::Layout>,
+    buffer_layout_input: Entity<InputState>,
     buffer_seek: Entity<InputState>,
     buffer_search: Entity<InputState>,
     buffer_search_last: Option<BufferSearchHit>,
@@ -2745,6 +2747,58 @@ impl Workspace {
         .detach();
     }
 
+    fn buffer_page_size(&self) -> u64 {
+        match &self.buffer_layout {
+            Some(layout) => {
+                let stride = layout.stride() as u64;
+                (BUFFER_VIEW_PAGE / stride).max(1) * stride
+            }
+            None => BUFFER_VIEW_PAGE,
+        }
+    }
+
+    fn apply_buffer_layout(&mut self, cx: &mut Context<Self>) {
+        if self.replay_pending || self.resource_pending || self.export_pending {
+            return;
+        }
+        let layout = renderdocx::buffer_layout::Layout::parse(
+            self.buffer_layout_input.read(cx).value().as_ref(),
+        );
+        match layout {
+            Ok(layout) if layout.stride() <= renderdocx::replay::BUFFER_PAGE_LIMIT as usize => {
+                self.buffer_layout = Some(layout);
+                self.buffer_format = None;
+                if let Some(index) = self.selected_buffer {
+                    self.read_buffer(index, self.buffer_offset, cx);
+                }
+            }
+            Ok(_) => {
+                self.status = Some(
+                    self.t(
+                        "A layout row exceeds the buffer page limit.",
+                        "布局单行超过缓冲区分页上限。",
+                        "レイアウトの 1 行がバッファページ上限を超えています。",
+                        "레이아웃 한 행이 버퍼 페이지 한도를 초과합니다.",
+                    )
+                    .to_owned(),
+                );
+                cx.notify();
+            }
+            Err(error) => {
+                self.status = Some(format!(
+                    "{}: {error}",
+                    self.t(
+                        "Invalid or unsupported layout",
+                        "布局无效或尚不支持",
+                        "レイアウトが無効または未対応です",
+                        "레이아웃이 잘못되었거나 지원되지 않습니다"
+                    )
+                ));
+                cx.notify();
+            }
+        }
+    }
+
     fn find_buffer(&mut self, cx: &mut Context<Self>) {
         if self.replay_pending
             || self.resource_pending
@@ -2966,7 +3020,7 @@ impl Workspace {
         let Ok(buffer_index) = u32::try_from(index) else {
             return;
         };
-        let length = (end - offset).min(BUFFER_VIEW_PAGE) as u32;
+        let length = (end - offset).min(self.buffer_page_size()) as u32;
         self.resource_pending = true;
         self.status = Some(
             self.t(
@@ -9567,7 +9621,28 @@ impl Workspace {
                 })
         } else if self.tab == CaptureTab::Buffers {
             let rows = self.buffer_data.as_ref().map(|data| {
-                if let Some(format) = self.buffer_format {
+                if let Some(layout) = &self.buffer_layout {
+                    let mut result = Vec::new();
+                    if let Ok(page) = layout.decode(self.buffer_offset, data) {
+                        for row in page.rows {
+                            let fields = row
+                                .fields
+                                .into_iter()
+                                .map(|field| format!("{}={:?}", field.name, field.values))
+                                .collect::<Vec<_>>()
+                                .join("  ");
+                            result.push(format!("{}  {fields}", row.offset));
+                        }
+                        if !page.trailing_hex.is_empty() {
+                            result.push(format!(
+                                "{}: {}",
+                                self.t("Trailing bytes", "剩余字节", "残りのバイト", "남은 바이트"),
+                                page.trailing_hex
+                            ));
+                        }
+                    }
+                    result
+                } else if let Some(format) = self.buffer_format {
                     let mut result = Vec::new();
                     if let Ok(page) =
                         renderdocx::buffer_format::decode(format, self.buffer_offset, data)
@@ -9610,14 +9685,17 @@ impl Workspace {
                         .px_2()
                         .py_1()
                         .rounded_md()
-                        .bg(rgb(if self.buffer_format.is_none() {
-                            0x4169e1
-                        } else {
-                            0x252f40
-                        }))
+                        .bg(rgb(
+                            if self.buffer_format.is_none() && self.buffer_layout.is_none() {
+                                0x4169e1
+                            } else {
+                                0x252f40
+                            },
+                        ))
                         .child(self.t("Raw", "原始", "生データ", "원시"))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.buffer_format = None;
+                            this.buffer_layout = None;
                             cx.notify();
                         })),
                 );
@@ -9641,6 +9719,7 @@ impl Workspace {
                         .child(format.name())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.buffer_format = Some(format);
+                            this.buffer_layout = None;
                             cx.notify();
                         })),
                 );
@@ -9654,7 +9733,7 @@ impl Workspace {
                         this.read_buffer(
                             index,
                             this.buffer_offset
-                                .saturating_sub(BUFFER_VIEW_PAGE)
+                                .saturating_sub(this.buffer_page_size())
                                 .max(this.buffer_binding_range.map_or(0, |range| range.start)),
                             cx,
                         );
@@ -9678,7 +9757,7 @@ impl Workspace {
                                     .and_then(|b| b.length.parse::<u64>().ok())
                             })
                             .unwrap_or(0);
-                        let offset = this.buffer_offset.saturating_add(BUFFER_VIEW_PAGE);
+                        let offset = this.buffer_offset.saturating_add(this.buffer_page_size());
                         if offset < size {
                             this.read_buffer(index, offset, cx);
                         }
@@ -9748,7 +9827,11 @@ impl Workspace {
                     })
                     .child(format!("{flags_label}: 0x{:08X}", buffer.creation_flags))
                     .child(formats)
-                    .when(self.buffer_format.is_some(), |view| view.child(self.t("Typed offsets are decimal; values start at the current byte offset.", "类型视图的偏移为十进制；值从当前字节偏移开始解码。", "型付き表示のオフセットは 10 進数で、現在のバイト位置からデコードします。", "형식 보기의 오프셋은 10진수이며 현재 바이트 위치부터 디코딩합니다.")))
+                    .child(div().flex().flex_wrap().gap_2()
+                        .child(self.t("Scalar-packed layout", "Scalar 打包布局", "スカラー配置レイアウト", "스칼라 패킹 레이아웃"))
+                        .child(Input::new(&self.buffer_layout_input).id("buffer-layout-input").aria_label(self.t("Scalar-packed layout", "Scalar 打包布局", "スカラー配置レイアウト", "스칼라 패킹 레이아웃")).w(px(300.)))
+                        .child(button("buffer-layout-apply", self.t("Apply layout", "应用布局", "レイアウト適用", "레이아웃 적용"), false, |this, cx| this.apply_buffer_layout(cx), cx)))
+                    .when(self.buffer_format.is_some() || self.buffer_layout.is_some(), |view| view.child(self.t("Typed offsets are decimal; values start at the current byte offset.", "类型视图的偏移为十进制；值从当前字节偏移开始解码。", "型付き表示のオフセットは 10 進数で、現在のバイト位置からデコードします。", "형식 보기의 오프셋은 10진수이며 현재 바이트 위치부터 디코딩합니다.")))
                     .child(
                         div()
                             .flex()
@@ -12433,6 +12516,9 @@ fn main() {
                     let shader_edit_command = cx.new(|cx| InputState::new(window, cx));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let buffer_seek = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let buffer_layout_input = cx.new(|cx| {
+                        InputState::new(window, cx).default_value("float3 position; uint id;")
+                    });
                     let buffer_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
@@ -12501,6 +12587,8 @@ fn main() {
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_format: None,
+                        buffer_layout: None,
+                        buffer_layout_input,
                         buffer_seek,
                         buffer_search,
                         buffer_search_last: None,
@@ -12682,6 +12770,9 @@ mod ui_tests {
                     let shader_edit_command = cx.new(|cx| InputState::new(window, cx));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let buffer_seek = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let buffer_layout_input = cx.new(|cx| {
+                        InputState::new(window, cx).default_value("float3 position; uint id;")
+                    });
                     let buffer_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
@@ -12768,6 +12859,8 @@ mod ui_tests {
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_format: None,
+                        buffer_layout: None,
+                        buffer_layout_input,
                         buffer_seek,
                         buffer_search,
                         buffer_search_last: None,
@@ -13058,6 +13151,9 @@ mod ui_tests {
                     let shader_edit_command = cx.new(|cx| InputState::new(window, cx));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let buffer_seek = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let buffer_layout_input = cx.new(|cx| {
+                        InputState::new(window, cx).default_value("float3 position; uint id;")
+                    });
                     let buffer_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
@@ -13255,6 +13351,8 @@ mod ui_tests {
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_format: None,
+                        buffer_layout: None,
+                        buffer_layout_input,
                         buffer_seek,
                         buffer_search,
                         buffer_search_last: None,
@@ -13748,6 +13846,52 @@ mod ui_tests {
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
+            let y = window.find("buffer-layout-input").bounds().origin.y;
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(400.) - y)),
+                cx,
+            );
+            window.render_frame(cx);
+            window.click("buffer-layout-input", cx);
+            window.press("ctrl-a", cx);
+            window.input("float3 pos; uint id; ushort tail;", cx);
+            window.click("buffer-layout-apply", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let view = view.read(cx);
+            assert_eq!(view.buffer_layout.as_ref().unwrap().stride(), 20);
+            assert_eq!(view.buffer_page_size(), 240);
+            assert_eq!(view.buffer_data.as_ref().unwrap().len(), 240);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let y = window.find("buffer-next").bounds().origin.y;
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(400.) - y)),
+                cx,
+            );
+            window.render_frame(cx);
+            window.click("buffer-next", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(view.read(cx).buffer_offset, 240);
+            assert_eq!(view.read(cx).buffer_data.as_ref().unwrap().len(), 60);
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.buffer_layout = None;
+                view.read_buffer(0, 0, cx);
+            })
+        });
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
             window.scroll(
                 "capture-details-scroll",
                 ScrollDelta::Pixels(point(px(0.), px(2000.))),
@@ -13934,6 +14078,14 @@ mod ui_tests {
             assert_eq!(view.read(cx).buffer_data.as_ref().unwrap().len(), 8);
         });
         cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let y = window.find("buffer-full-resource").bounds().origin.y;
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(400.) - y)),
+                cx,
+            );
+            window.render_frame(cx);
             window.click("buffer-full-resource", cx);
         })
         .unwrap();

@@ -67,7 +67,7 @@ impl ScalarFormat {
             Self::U64 | Self::I64 | Self::F64 => 8,
         }
     }
-    fn value(self, b: &[u8]) -> String {
+    pub(crate) fn value(self, b: &[u8]) -> String {
         match self {
             Self::U8 => b[0].to_string(),
             Self::I8 => (b[0] as i8).to_string(),
