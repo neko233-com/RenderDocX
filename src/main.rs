@@ -6286,11 +6286,69 @@ impl Workspace {
             .as_ref()
             .and_then(|(_, doc)| annotations::bookmarks(doc).ok())
             .unwrap_or_default();
+        let graph_bounds =
+            std::rc::Rc::new(std::cell::Cell::new(Bounds::<gpui::Pixels>::default()));
+        let graph_paint = graph_bounds.clone();
+        let graph_down = graph_bounds.clone();
+        let graph_move = graph_bounds.clone();
+        let graph_scroll = graph_bounds.clone();
+        let background = div()
+            .id("timeline-background")
+            .test_support()
+            .absolute()
+            .size_full()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                    this.timeline.drag_x = Some(f32::from(event.position.x));
+                    if !event.modifiers.alt {
+                        this.scrub_timeline(event.position, graph_down.get(), window, cx);
+                    }
+                }),
+            )
+            .on_mouse_move(
+                cx.listener(move |this, event: &gpui::MouseMoveEvent, window, cx| {
+                    if event.dragging() && this.timeline.drag_x.is_some() {
+                        let x = f32::from(event.position.x);
+                        if event.modifiers.alt {
+                            this.timeline.pan_pixels(
+                                x - this.timeline.drag_x.unwrap(),
+                                f32::from(graph_move.get().size.width),
+                            );
+                            cx.notify();
+                        } else {
+                            this.scrub_timeline(event.position, graph_move.get(), window, cx);
+                        }
+                        this.timeline.drag_x = Some(x);
+                    } else if !event.dragging() {
+                        this.timeline.drag_x = None;
+                    }
+                }),
+            );
         let mut graph = div()
+            .id("timeline-graph")
+            .test_support()
             .relative()
             .w(px(WIDTH as f32))
             .h(px(height))
-            .bg(rgb(0x182434));
+            .bg(rgb(0x182434))
+            .on_prepaint(move |bounds, _, _| graph_paint.set(bounds))
+            .on_scroll(cx.listener(move |this, event: &gpui::ScrollEvent, _, cx| {
+                let bounds = graph_scroll.get();
+                let width = f32::from(bounds.size.width);
+                if width <= 0.0 {
+                    return;
+                }
+                let steps = match event.delta {
+                    gpui::ScrollDelta::Lines(delta) => delta.y,
+                    gpui::ScrollDelta::Pixels(delta) => f32::from(delta.y) / 40.0,
+                };
+                this.timeline
+                    .zoom_at(steps, f32::from(event.position.x - bounds.origin.x) / width);
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .child(background);
         for item in markers {
             let left = position(item.start.max(start));
             let right = position(item.end.min(end))
@@ -6324,6 +6382,7 @@ impl Workspace {
                     .h(px(18.))
                     .overflow_hidden()
                     .cursor_pointer()
+                    .block_mouse_except_scroll()
                     .bg(rgb(color))
                     .text_sm()
                     .child(title)
@@ -6346,6 +6405,7 @@ impl Workspace {
                     .w(px(6.))
                     .h(px(12.))
                     .cursor_pointer()
+                    .block_mouse_except_scroll()
                     .bg(rgb(0x82aaff))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.jump_to_usage(event, window, cx)
@@ -6375,6 +6435,7 @@ impl Workspace {
                     .w(px(4.))
                     .h(px(4.))
                     .cursor_pointer()
+                    .block_mouse_except_scroll()
                     .bg(rgb(kind.color()))
                     .border_1()
                     .border_color(rgb(if kind == renderdocx::timeline::UsageKind::Clear {
@@ -6410,6 +6471,7 @@ impl Workspace {
                     .w(px(4.))
                     .h(px(4.))
                     .cursor_pointer()
+                    .block_mouse_except_scroll()
                     .bg(rgb(if passed { 0x009e73 } else { 0xd55e00 }))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.jump_to_usage(event, window, cx)
@@ -6431,6 +6493,7 @@ impl Workspace {
                     .w(px(4.))
                     .h(px(6.))
                     .cursor_pointer()
+                    .block_mouse_except_scroll()
                     .bg(rgb(0xc3e88d))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.jump_to_usage(event, window, cx)
@@ -6473,7 +6536,7 @@ impl Workspace {
             )
             .on_mouse_move(
                 cx.listener(move |this, event: &gpui::MouseMoveEvent, window, cx| {
-                    if event.dragging() {
+                    if event.dragging() && this.timeline.drag_x.is_some() {
                         let x = f32::from(event.position.x);
                         if event.modifiers.alt {
                             if let Some(previous) = this.timeline.drag_x {
@@ -6515,7 +6578,7 @@ impl Workspace {
                 .child(button("timeline-zoom-out", self.t("Zoom out", "缩小", "縮小", "축소"), false, |this, cx| { this.timeline.zoom(false, this.pipeline.as_ref().map(|p| p.event_id)); cx.notify(); }, cx))
                 .child(button("timeline-load-usage", self.t("Highlight all resource usage", "高亮全部资源使用", "すべてのリソース使用を強調", "전체 리소스 사용 강조"), false, |this, cx| this.load_timeline_usage(cx), cx)))
             .child(format!("{}: {start}–{end} / {}", self.t("Event IDs", "事件 ID", "イベント ID", "이벤트 ID"), self.timeline.model.max_event))
-            .child(self.t("Drag the axis to select actions; Alt-drag pans, scroll zooms. Green: passed · orange-red: failed pixel history · light green: bookmarks.", "拖动坐标轴选择操作；Alt 拖动平移，滚轮缩放。绿：像素通过 · 橙红：像素失败 · 浅绿：书签。", "軸ドラッグで選択、Alt ドラッグで移動、スクロールで拡大縮小。緑：ピクセル成功・橙赤：失敗・薄緑：ブックマーク。", "축 드래그로 선택, Alt 드래그로 이동, 스크롤로 확대/축소. 초록: 픽셀 통과 · 주황 빨강: 실패 · 연두: 북마크."))
+            .child(self.t("Drag the axis or graph background to select actions; Alt-drag pans, scroll zooms. Green: passed · orange-red: failed pixel history · light green: bookmarks.", "拖动坐标轴或图表背景选择操作；Alt 拖动平移，滚轮缩放。绿：像素通过 · 橙红：像素失败 · 浅绿：书签。", "軸またはグラフの背景をドラッグして選択、Alt ドラッグで移動、スクロールで拡大縮小。緑：ピクセル成功・橙赤：失敗・薄緑：ブックマーク。", "축 또는 그래프 배경 드래그로 선택, Alt 드래그로 이동, 스크롤로 확대/축소. 초록: 픽셀 통과 · 주황 빨강: 실패 · 연두: 북마크."))
             .child(div().flex().flex_wrap().gap_2()
                 .child(format!("{}:", self.t("Resource usage", "资源使用", "リソース使用", "리소스 사용")))
                 .child(div().text_color(rgb(0xe69f00)).child(self.t("Read", "读取", "読み取り", "읽기")))
@@ -12865,6 +12928,14 @@ mod ui_tests {
             assert!(window.try_find(("timeline-action", 1usize)).is_none());
             window.click(("timeline-marker", 0usize), cx);
             window.render_frame(cx);
+            window.scroll("timeline-graph", ScrollDelta::Lines(point(0., 15.)), cx);
+        })
+        .unwrap();
+        cx.update(|cx| assert!(view.read(cx).timeline.start > 0));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("timeline-zoom-out", cx);
+            window.render_frame(cx);
             window.scroll("timeline-axis", ScrollDelta::Lines(point(0., 15.)), cx);
         })
         .unwrap();
@@ -12913,6 +12984,17 @@ mod ui_tests {
         .unwrap();
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 77));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let bounds = window.find("timeline-background").bounds();
+            let from = bounds.origin
+                + gpui::point(bounds.size.width - px(5.), bounds.size.height - px(1.));
+            let to = bounds.origin + gpui::point(px(5.), bounds.size.height - px(1.));
+            window.drag(from, to, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 43));
         events.lock().unwrap().clear();
         cx.update(|cx| {
             view.update(cx, |view, cx| {
