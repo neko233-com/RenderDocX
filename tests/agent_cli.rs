@@ -1144,6 +1144,8 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let draw =
         agent.send(&serde_json::json!({"command":"select","event_id":draw_event}).to_string());
     assert_eq!(draw["ok"], true, "{draw}");
+    let pipeline = agent.send(r#"{"command":"pipeline"}"#);
+    assert_eq!(pipeline["data"]["pipeline"]["multiview_count"], 1);
     let descriptors = agent.send(r#"{"command":"descriptors","offset":"0","limit":1}"#);
     assert_eq!(descriptors["ok"], true, "{descriptors}");
     assert_eq!(descriptors["data"]["page"]["event_id"], draw_event);
@@ -1194,6 +1196,12 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     assert_eq!(
         invalid_view["error"]["code"], "replay_mesh_failed",
         "{invalid_view}"
+    );
+    assert!(
+        invalid_view["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("view is out of range")
     );
     let unsupported_stage = agent.send(r#"{"command":"mesh","stage":"mesh_out"}"#);
     assert_eq!(
@@ -1461,6 +1469,14 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let bad_debug =
         agent.send(r#"{"command":"debug_vertex","vertex":4294967295,"instance":0,"index":0}"#);
     assert_eq!(bad_debug["error"]["code"], "replay_debug_failed");
+    let invalid_debug_view =
+        agent.send(r#"{"command":"debug_vertex","vertex":0,"instance":0,"index":0,"view":1}"#);
+    assert!(
+        invalid_debug_view["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("view is out of range")
+    );
     let debug = agent.send(r#"{"command":"debug_vertex","vertex":0,"instance":0,"index":0}"#);
     assert_eq!(debug["ok"], true, "{debug}");
     assert_eq!(debug["data"]["trace"]["event_id"], draw_event);

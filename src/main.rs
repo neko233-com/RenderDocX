@@ -2336,6 +2336,31 @@ impl Workspace {
         .detach();
     }
 
+    fn load_mesh_selection(&mut self, cx: &mut Context<Self>) {
+        let instance = self.vertex_instance.read(cx).value().parse::<u32>();
+        let view = self.vertex_view.read(cx).value().parse::<u32>();
+        match (instance, view) {
+            (Ok(instance), Ok(view)) => {
+                let mut selection = self.mesh.selection;
+                selection.instance = instance;
+                selection.view = view;
+                self.read_mesh(selection, 0, cx);
+            }
+            _ => {
+                self.status = Some(
+                    self.t(
+                        "Enter nonnegative instance and view indices.",
+                        "请输入非负的实例和视图序号。",
+                        "0 以上のインスタンス番号とビュー番号を入力してください。",
+                        "0 이상의 인스턴스 및 뷰 번호를 입력하세요.",
+                    )
+                    .to_owned(),
+                );
+                cx.notify();
+            }
+        }
+    }
+
     fn read_structure(&mut self, path: Vec<u64>, offset: u64, cx: &mut Context<Self>) {
         if self.replay_pending || self.export_pending || self.resource_pending {
             self.status = Some(
@@ -5602,8 +5627,10 @@ impl Workspace {
                 view = view
                     .child(format!("{event_label}: {} · {stage}", info.event_id))
                     .child(format!(
-                        "{instances_label}: {} · View: {}",
-                        info.instance, info.view
+                        "{instances_label}: {} · {}: {}",
+                        info.instance,
+                        self.t("View", "视图", "ビュー", "뷰"),
+                        info.view
                     ))
                     .child(format!("{indices_label}: {}", info.num_indices))
                     .child(format!(
@@ -7110,6 +7137,8 @@ impl Workspace {
                                 )
                             })
                             .when(self.tab == CaptureTab::Mesh, |view| {
+                                let instance_label = self.t("Instance", "实例", "インスタンス", "인스턴스");
+                                let view_label = self.t("View", "视图", "ビュー", "뷰");
                                 view.child(
                                     div()
                                         .flex()
@@ -7117,6 +7146,11 @@ impl Workspace {
                                         .gap_2()
                                         .px_3()
                                         .pb_2()
+                                        .child(instance_label)
+                                        .child(Input::new(&self.vertex_instance).id("mesh-instance").aria_label(instance_label).w(px(80.)))
+                                        .child(view_label)
+                                        .child(Input::new(&self.vertex_view).id("mesh-view").aria_label(view_label).w(px(80.)))
+                                        .child(button("mesh-selection-apply", self.t("Load selection", "加载选择", "選択を読み込む", "선택 불러오기"), false, |this, cx| this.load_mesh_selection(cx), cx))
                                         .child(button(
                                             "mesh-stage",
                                             self.t(
@@ -8536,6 +8570,9 @@ mod ui_tests {
                 assert!(view.status.is_some());
                 view.debug_vertex_selection = Some((0, 0, 0));
                 view.debug_selected_vertex(cx);
+                assert!(!view.resource_pending);
+                assert!(view.status.is_some());
+                view.load_mesh_selection(cx);
                 assert!(!view.resource_pending);
                 assert!(view.status.is_some());
             });

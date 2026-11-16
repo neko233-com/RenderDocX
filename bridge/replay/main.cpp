@@ -657,7 +657,8 @@ void write_pipeline(IReplayController *controller, uint32_t event)
   };
   static const char *names[] = {"vertex", "tess_control", "tess_eval", "geometry", "fragment", "compute", "task", "mesh"};
   std::cout << "{\"event_id\":" << event << ",\"available\":" << (state.IsCaptureLoaded() ? "true" : "false")
-            << ",\"topology\":" << uint32_t(state.GetPrimitiveTopology()) << ",\"shaders\":[";
+            << ",\"topology\":" << uint32_t(state.GetPrimitiveTopology())
+            << ",\"multiview_count\":" << state.MultiviewBroadcastCount() << ",\"shaders\":[";
   for(unsigned i = 0; i < 8; ++i)
   {
     if(i) std::cout << ',';
@@ -997,7 +998,8 @@ int run(const std::string &capture, bool structure_worker)
       { error("Select a draw event before debugging a vertex"); continue; }
       if(vertex >= vertices->second || instance >= instances->second)
       { error("Vertex or instance is out of range"); continue; }
-      if(view != 0) { error("Nonzero debug views cannot yet be verified"); continue; }
+      if(view >= replay.controller->GetPipelineState().MultiviewBroadcastCount())
+      { error("Vertex debug view is out of range"); continue; }
       if(replay.controller->GetPipelineState().GetShader(ShaderStage::Vertex) == ResourceId())
       { error("No vertex shader is bound"); continue; }
       debug.reset();
@@ -1219,9 +1221,8 @@ int run(const std::string &capture, bool structure_worker)
       auto draw = draw_instances.find(selected_event);
       if(!selected || draw == draw_instances.end()) { error("Select a draw or mesh dispatch event first"); continue; }
       if(instance >= draw->second) { error("Mesh instance is out of range"); continue; }
-      // Backends can ignore or silently clamp viewID. Until the actual view count is
-      // exposed by the replay API, do not report a different view as requested.
-      if(view != 0) { error("Nonzero mesh views cannot yet be verified"); continue; }
+      if(view >= replay.controller->GetPipelineState().MultiviewBroadcastCount())
+      { error("Mesh view is out of range"); continue; }
       const GraphicsAPI api = replay.controller->GetAPIProperties().pipelineType;
       if(stage >= 3 && (api == GraphicsAPI::D3D11 || api == GraphicsAPI::OpenGL))
       { error("Task and mesh shader output is unavailable on this replay API"); continue; }

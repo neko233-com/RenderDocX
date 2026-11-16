@@ -853,6 +853,8 @@ pub struct Pipeline {
     pub available: bool,
     pub topology: u32,
     #[serde(default)]
+    pub multiview_count: Option<u32>,
+    #[serde(default)]
     pub restart_enabled: Option<bool>,
     #[serde(default)]
     pub restart_index: Option<u32>,
