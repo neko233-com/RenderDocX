@@ -24,6 +24,8 @@ The texture details view can pick a pixel at explicit top-left coordinates for t
 
 Texture preview and export accept black and white points. The preview uses a headless RenderDoc texture output and applies the range to displayed textures, including compatible 8-bit textures. Export passes the points to `TextureSave`; as in upstream, they apply when saving requires a conversion and may have no effect when an already compatible format bypasses conversion. They do not change pixel picking, statistics, or raw texture data. Arbitrary descriptor swizzle and the full interactive RenderDoc texture display remain unimplemented.
 
+Native preview supports independent RGBA channel toggles, vertical flip and linear-as-gamma display. These controls affect preview only; the existing single-channel selection continues to control export. The default preview behavior remains compatible with earlier replay bridges, while the new options require an updated bridge.
+
 Pixel history lists modifications through the selected event, including fragment test failures and before, shader-output and after values. Select an entry to inspect it or replay its event. History can require substantial GPU replay work, and an empty result can also indicate that the upstream backend could not inspect the pixel.
 
 The same view can calculate RenderDoc's per-channel minimum and maximum and display a histogram for a chosen numeric range and channel. RenderDoc's public minimum/maximum call does not report a separate success status, so its returned values cannot by themselves prove the operation succeeded.

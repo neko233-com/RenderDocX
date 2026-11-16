@@ -877,6 +877,11 @@ pub struct TextureSelection {
     pub analysis_type_cast: u32,
     /// Optional black/white mapping for preview and 8-bit exports.
     pub display_range: Option<[f32; 2]>,
+    /// Native preview-only channel mask. When absent, `channel` selects one channel.
+    pub preview_channels: Option<[bool; 4]>,
+    pub preview_flip_y: bool,
+    /// None uses RenderDoc's default, which is true.
+    pub preview_linear_as_gamma: Option<bool>,
 }
 
 /// Raw data is a whole subresource; a 3D mip contains its complete depth.
@@ -1105,6 +1110,19 @@ pub struct PixelHistoryPage {
 }
 
 impl TextureSelection {
+    pub fn effective_preview_channels(&self) -> [bool; 4] {
+        self.preview_channels.unwrap_or_else(|| {
+            let mut channels = [true, true, true, false];
+            if let Some(channel) = self.channel {
+                channels = [false; 4];
+                if let Some(value) = channels.get_mut(channel as usize) {
+                    *value = true;
+                }
+            }
+            channels
+        })
+    }
+
     pub fn validate(&self, texture: &Texture) -> Result<(), String> {
         let slices = if texture.dimension == 3 {
             texture.depth.checked_shr(self.mip).unwrap_or(0).max(1)
@@ -1948,7 +1966,7 @@ impl Transport for Process {
             .unwrap_or_else(|| "all".into());
         let [black, white] = selection.display_range.unwrap_or([0.0, 1.0]);
         let input = self.input.as_mut().ok_or("Replay session has closed")?;
-        writeln!(
+        write!(
             input,
             "render_texture {index} {} {} {sample} {channel} {} {width} {height} {} {}",
             selection.mip,
@@ -1957,8 +1975,27 @@ impl Transport for Process {
             black.to_bits(),
             white.to_bits()
         )
-        .and_then(|_| input.flush())
         .map_err(|e| e.to_string())?;
+        if selection.preview_channels.is_some()
+            || selection.preview_flip_y
+            || selection.preview_linear_as_gamma.is_some()
+        {
+            let channels = selection.effective_preview_channels();
+            let mask = channels
+                .into_iter()
+                .enumerate()
+                .fold(0u8, |mask, (i, enabled)| mask | (u8::from(enabled) << i));
+            write!(
+                input,
+                " {mask} {} {}",
+                u8::from(selection.preview_flip_y),
+                u8::from(selection.preview_linear_as_gamma.unwrap_or(true))
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        writeln!(input)
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
         let length = width
             .checked_mul(height)
             .and_then(|n| n.checked_mul(3))
@@ -5270,6 +5307,9 @@ mod tests {
             preview_type_cast: 0,
             analysis_type_cast: 0,
             display_range: None,
+            preview_channels: None,
+            preview_flip_y: false,
+            preview_linear_as_gamma: None,
         };
         let raw = RawTextureSelection {
             mip: 2,
@@ -5293,6 +5333,16 @@ mod tests {
                 .is_err()
         );
         assert!(selection.validate(&texture).is_ok());
+        assert_eq!(
+            selection.effective_preview_channels(),
+            [false, false, false, true]
+        );
+        selection.preview_channels = Some([true, false, true, false]);
+        assert_eq!(
+            selection.effective_preview_channels(),
+            [true, false, true, false]
+        );
+        selection.preview_channels = None;
         selection.display_range = Some([1.0, 1.0]);
         assert!(selection.validate(&texture).is_err());
         selection.display_range = Some([f32::NAN, 1.0]);

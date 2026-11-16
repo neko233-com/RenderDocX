@@ -5757,6 +5757,7 @@ impl Workspace {
                     }),
                     _ => None,
                 };
+                self.texture_selection.preview_channels = None;
             }
         }
         self.preview = None;
@@ -5815,6 +5816,59 @@ impl Workspace {
         self.texture_selection.display_range = Some([black, white]);
         self.preview = None;
         self.status = None;
+        cx.notify();
+    }
+
+    fn preview_edit_ready(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            self.status = Some(
+                self.t(
+                    "Wait for the current operation.",
+                    "请等待当前操作完成。",
+                    "現在の処理が完了するまでお待ちください。",
+                    "현재 작업이 끝날 때까지 기다려 주세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return false;
+        }
+        true
+    }
+
+    fn change_preview_channel(&mut self, channel: usize, cx: &mut Context<Self>) {
+        if !self.preview_edit_ready(cx) {
+            return;
+        }
+        let mut channels = self.texture_selection.effective_preview_channels();
+        if let Some(value) = channels.get_mut(channel) {
+            *value = !*value;
+        }
+        self.texture_selection.preview_channels = Some(channels);
+        self.preview = None;
+        cx.notify();
+    }
+
+    fn change_preview_flip(&mut self, cx: &mut Context<Self>) {
+        if !self.preview_edit_ready(cx) {
+            return;
+        }
+        self.texture_selection.preview_flip_y = !self.texture_selection.preview_flip_y;
+        self.preview = None;
+        cx.notify();
+    }
+
+    fn change_preview_gamma(&mut self, cx: &mut Context<Self>) {
+        if !self.preview_edit_ready(cx) {
+            return;
+        }
+        self.texture_selection.preview_linear_as_gamma = Some(
+            !self
+                .texture_selection
+                .preview_linear_as_gamma
+                .unwrap_or(true),
+        );
+        self.preview = None;
         cx.notify();
     }
 
@@ -8520,6 +8574,81 @@ impl Workspace {
                 .child(Input::new(&self.texture_white_point).id("texture-white-point").aria_label(self.t("White point", "白点", "白点", "백점")).w(px(90.)))
                 .child(button("texture-apply-range", self.t("Apply range", "应用范围", "範囲を適用", "범위 적용"), false, |this, cx| this.apply_texture_range(cx), cx)))
             .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t("Preview uses native texture display. Export applies the range only when RenderDoc converts the data.", "预览使用原生纹理显示；导出仅在 RenderDoc 转换数据时应用范围。", "プレビューはネイティブ表示を使用し、書き出しでは変換時のみ範囲が適用されます。", "미리보기는 기본 텍스처 표시를 사용하며 내보내기는 데이터 변환 시에만 범위를 적용합니다.")))
+    }
+
+    fn texture_preview_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let channels = self.texture_selection.effective_preview_channels();
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
+                "Preview channels and display",
+                "预览通道与显示",
+                "プレビューのチャンネルと表示",
+                "미리보기 채널 및 표시",
+            )))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(button(
+                        "texture-preview-red",
+                        "R",
+                        channels[0],
+                        |this, cx| this.change_preview_channel(0, cx),
+                        cx,
+                    ))
+                    .child(button(
+                        "texture-preview-green",
+                        "G",
+                        channels[1],
+                        |this, cx| this.change_preview_channel(1, cx),
+                        cx,
+                    ))
+                    .child(button(
+                        "texture-preview-blue",
+                        "B",
+                        channels[2],
+                        |this, cx| this.change_preview_channel(2, cx),
+                        cx,
+                    ))
+                    .child(button(
+                        "texture-preview-alpha",
+                        "A",
+                        channels[3],
+                        |this, cx| this.change_preview_channel(3, cx),
+                        cx,
+                    ))
+                    .child(button(
+                        "texture-preview-flip",
+                        self.t("Flip Y", "垂直翻转", "上下反転", "상하 반전"),
+                        self.texture_selection.preview_flip_y,
+                        |this, cx| this.change_preview_flip(cx),
+                        cx,
+                    ))
+                    .child(button(
+                        "texture-preview-gamma",
+                        self.t(
+                            "Linear as gamma",
+                            "线性转 Gamma",
+                            "リニアをガンマ表示",
+                            "선형을 감마로 표시",
+                        ),
+                        self.texture_selection
+                            .preview_linear_as_gamma
+                            .unwrap_or(true),
+                        |this, cx| this.change_preview_gamma(cx),
+                        cx,
+                    )),
+            )
+            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
+                "Channel combinations, flip and gamma affect the preview only.",
+                "通道组合、翻转和 Gamma 仅影响预览。",
+                "チャンネルの組み合わせ、反転、ガンマはプレビューのみに影響します。",
+                "채널 조합, 반전 및 감마는 미리보기에만 적용됩니다.",
+            )))
     }
 
     fn capture_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -12072,6 +12201,7 @@ impl Workspace {
                             .child(export)
                             .child(button("texture-export-raw", self.t("Export raw subresource", "导出原始子资源", "生サブリソースを出力", "원시 하위 리소스 내보내기"), false, |this, cx| this.export_texture_raw(cx), cx)),
                     )
+                    .child(self.texture_preview_controls(cx))
                     .child(self.texture_raw_panel(cx))
                     .child(div().text_sm().text_color(rgb(0x91a7c0)).child(pixel_title))
                     .child(
@@ -15937,6 +16067,9 @@ mod ui_tests {
                 preview_type_cast: 0,
                 analysis_type_cast: 0,
                 display_range: None,
+                preview_channels: None,
+                preview_flip_y: false,
+                preview_linear_as_gamma: None,
             }]
         );
         cx.update(|cx| {
@@ -15995,6 +16128,22 @@ mod ui_tests {
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
+            reveal_details(window, "texture-preview-red", cx);
+            window.click("texture-preview-red", cx);
+            reveal_details(window, "texture-preview-flip", cx);
+            window.click("texture-preview-flip", cx);
+            reveal_details(window, "texture-preview-gamma", cx);
+            window.click("texture-preview-gamma", cx);
+        })
+        .unwrap();
+        cx.update(|cx| {
+            let selection = view.read(cx).texture_selection;
+            assert_eq!(selection.preview_channels, Some([true, true, false, false]));
+            assert!(selection.preview_flip_y);
+            assert_eq!(selection.preview_linear_as_gamma, Some(false));
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
             reveal_details(window, "texture-preview", cx);
             window.click("texture-preview", cx);
         })
@@ -16004,6 +16153,7 @@ mod ui_tests {
             selections.lock().unwrap().last().unwrap().display_range,
             Some([0.25, 1.0])
         );
+        assert!(selections.lock().unwrap().last().unwrap().preview_flip_y);
         cx.update(|cx| view.update(cx, |view, cx| view.read_texture_raw_page(0, cx)));
         cx.run_until_parked();
         cx.update(|cx| {

@@ -198,6 +198,16 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint3 id : 
   for(unsigned i = 0; i < 4; ++i) context->ClearRenderTargetView(layered_views[i], layer_colors[i]);
   const float updated_vertices[] = {0, 3, 3, 3, 3, 3, 3};
   context->UpdateSubresource(vertex_buffer, 0, nullptr, updated_vertices, 0, 0);
+  float pattern[4 * 4 * 4] = {};
+  for(unsigned y = 0; y < 4; ++y) for(unsigned x = 0; x < 4; ++x)
+  {
+    const unsigned base = (y * 4 + x) * 4;
+    pattern[base + 0] = y < 2 ? 0.25f : 0.75f;
+    pattern[base + 1] = 0.5f;
+    pattern[base + 2] = y < 2 ? 0.75f : 0.25f;
+    pattern[base + 3] = 1.0f;
+  }
+  context->UpdateSubresource(float_texture, 0, nullptr, pattern, 4 * 4 * sizeof(float), 0);
   context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   const UINT stride = 8, offset = 4;
   context->IASetInputLayout(layout);

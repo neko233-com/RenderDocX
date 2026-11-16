@@ -872,6 +872,58 @@ fn real_d3d11_mesh_draw_order() {
         invalid_range["error"]["code"], "invalid_arguments",
         "{invalid_range}"
     );
+    let render_options = |agent: &mut Agent, path: &std::path::Path, extra: serde_json::Value| {
+        let mut request = serde_json::json!({"command":"render_texture","index":float_index,"width":4,"height":4,"path":path,"preview_linear_as_gamma":false});
+        request
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let response = agent.send(&request.to_string());
+        assert_eq!(response["ok"], true, "{response}");
+        let mut reader =
+            png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path).unwrap()))
+                .read_info()
+                .unwrap();
+        let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut pixels).unwrap();
+        pixels
+    };
+    let normal = render_options(
+        &mut agent,
+        &dir.path().join("normal-options.png"),
+        serde_json::json!({}),
+    );
+    let flipped = render_options(
+        &mut agent,
+        &dir.path().join("flipped-options.png"),
+        serde_json::json!({"preview_flip_y":true}),
+    );
+    assert_ne!(
+        &normal[..3],
+        &normal[36..39],
+        "fixture must vary vertically"
+    );
+    assert_eq!(
+        &normal[..12],
+        &flipped[36..48],
+        "vertical flip must reverse the rows"
+    );
+    let masked = render_options(
+        &mut agent,
+        &dir.path().join("masked-options.png"),
+        serde_json::json!({"preview_channels":[true,false,true,false]}),
+    );
+    assert!(
+        masked[0] > 0 && masked[1] <= 1 && masked[2] > 0,
+        "masked pixel {:?}",
+        &masked[..3]
+    );
+    let gamma = render_options(
+        &mut agent,
+        &dir.path().join("gamma-options.png"),
+        serde_json::json!({"preview_linear_as_gamma":true}),
+    );
+    assert_ne!(gamma[1], normal[1], "gamma display must change mid-grey");
     for command in ["pick_pixel", "texture_statistics", "pixel_history"] {
         let result = agent.send(&serde_json::json!({"command":command,"index":texture_index,"x":0,"y":0,"analysis_type_cast":2}).to_string());
         assert_eq!(result["ok"], true, "{command}: {result}");
