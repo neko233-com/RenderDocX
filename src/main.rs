@@ -2752,6 +2752,9 @@ impl Workspace {
         match &self.buffer_layout {
             Some(layout) => {
                 let stride = layout.stride() as u64;
+                if layout.is_single() {
+                    return stride;
+                }
                 let prefix = layout
                     .repeat_offset()
                     .filter(|_| offset == self.buffer_layout_origin)
@@ -2772,7 +2775,13 @@ impl Workspace {
         }
         let layout = renderdocx::buffer_layout::Layout::parse(
             self.buffer_layout_input.read(cx).value().as_ref(),
-        );
+        )
+        .and_then(|layout| {
+            if let Some(snapshot) = &self.snapshot {
+                layout.validate_graphics_api(snapshot.api)?;
+            }
+            Ok(layout)
+        });
         match layout {
             Ok(layout)
                 if layout
@@ -2854,16 +2863,22 @@ impl Workspace {
         let range_start = range.map_or(0, |range| range.start);
         let end = range.map_or(size, |range| range.end.min(size));
         let mut start = self.buffer_offset.max(range_start);
-        if self.buffer_search_last.as_ref().is_some_and(|hit| {
+        if let Some(hit) = self.buffer_search_last.as_ref().filter(|hit| {
             hit.open_revision == self.open_revision
                 && hit.selection_revision == self.selection_revision
                 && hit.index == index
-                && hit.offset == self.buffer_offset
+                && self
+                    .buffer_layout
+                    .as_ref()
+                    .map_or(Some(hit.offset), |layout| {
+                        layout.page_offset_for_position(self.buffer_layout_origin, hit.offset)
+                    })
+                    == Some(self.buffer_offset)
                 && hit.range_start == range_start
                 && hit.range_end == end
                 && hit.pattern == pattern
         }) {
-            start = start.saturating_add(1);
+            start = hit.offset.saturating_add(1);
         }
         if start > end {
             self.status = Some(
@@ -2920,7 +2935,24 @@ impl Workspace {
                             range_end: end,
                             pattern,
                         });
-                        this.read_buffer(index, offset, cx);
+                        let page_offset =
+                            this.buffer_layout.as_ref().map_or(Some(offset), |layout| {
+                                layout.page_offset_for_position(this.buffer_layout_origin, offset)
+                            });
+                        if let Some(page_offset) = page_offset {
+                            this.read_buffer(index, page_offset, cx);
+                        } else {
+                            this.status = Some(format!(
+                                "{}: {offset}",
+                                this.t(
+                                    "Match is outside the active layout",
+                                    "匹配位于当前布局范围之外",
+                                    "一致は現在のレイアウト範囲外です",
+                                    "일치 항목이 현재 레이아웃 범위 밖입니다"
+                                )
+                            ));
+                            cx.notify();
+                        }
                     }
                     Ok(None) => {
                         this.status = Some(
@@ -2972,7 +3004,26 @@ impl Workspace {
         let offset =
             renderdocx::buffer_binding::parse_offset(self.buffer_seek.read(cx).value().as_ref());
         match offset {
-            Some(offset) if offset >= start && offset <= end => self.read_buffer(index, offset, cx),
+            Some(offset) if offset >= start && offset <= end => {
+                if let Some(page_offset) =
+                    self.buffer_layout.as_ref().map_or(Some(offset), |layout| {
+                        layout.page_offset_for_position(self.buffer_layout_origin, offset)
+                    })
+                {
+                    self.read_buffer(index, page_offset, cx);
+                } else {
+                    self.status = Some(
+                        self.t(
+                            "Offset is outside the active layout.",
+                            "偏移位于当前布局范围之外。",
+                            "オフセットが現在のレイアウト範囲外です。",
+                            "오프셋이 현재 레이아웃 범위 밖입니다.",
+                        )
+                        .to_owned(),
+                    );
+                    cx.notify();
+                }
+            }
             _ => {
                 self.status = Some(self.t("Enter a byte offset within the current range (decimal or 0x hexadecimal).", "请输入当前范围内的字节偏移（十进制或 0x 十六进制）。", "現在の範囲内のバイトオフセットを入力してください（10 進数または 0x 付き 16 進数）。", "현재 범위의 바이트 오프셋을 입력하세요 (10진수 또는 0x 16진수).").to_owned());
                 cx.notify();
@@ -2996,6 +3047,7 @@ impl Workspace {
         }
         if self.selected_buffer != Some(index) {
             self.buffer_binding_range = None;
+            self.buffer_layout_origin = offset;
         }
         self.selected_buffer = Some(index);
         self.buffer_offset = offset;
@@ -3100,6 +3152,7 @@ impl Workspace {
         }
         self.selected_buffer = Some(range.index);
         self.buffer_binding_range = Some(range);
+        self.buffer_layout_origin = range.start;
         self.tab = CaptureTab::Buffers;
         self.read_buffer(range.index, range.start, cx);
     }
@@ -9638,6 +9691,25 @@ impl Workspace {
             let rows = self.buffer_data.as_ref().map(|data| {
                 if let Some(layout) = &self.buffer_layout {
                     let mut result = Vec::new();
+                    if let Some(hit) = self.buffer_search_last.as_ref().filter(|hit| {
+                        hit.open_revision == self.open_revision
+                            && hit.selection_revision == self.selection_revision
+                            && Some(hit.index) == self.selected_buffer
+                            && layout
+                                .page_offset_for_position(self.buffer_layout_origin, hit.offset)
+                                == Some(self.buffer_offset)
+                    }) {
+                        result.push(format!(
+                            "{}: {}",
+                            self.t(
+                                "Match at byte",
+                                "匹配字节偏移",
+                                "一致したバイト位置",
+                                "일치 바이트 위치"
+                            ),
+                            hit.offset
+                        ));
+                    }
                     match layout.decode_at(self.buffer_layout_origin, self.buffer_offset, data) {
                         Ok(page) => {
                             let fixed = page
@@ -9808,6 +9880,13 @@ impl Workspace {
                 false,
                 |this, cx| {
                     if let Some(index) = this.selected_buffer {
+                        if this
+                            .buffer_layout
+                            .as_ref()
+                            .is_some_and(|layout| layout.is_single())
+                        {
+                            return;
+                        }
                         this.read_buffer(
                             index,
                             if this
@@ -9843,6 +9922,13 @@ impl Workspace {
                 false,
                 |this, cx| {
                     if let Some(index) = this.selected_buffer {
+                        if this
+                            .buffer_layout
+                            .as_ref()
+                            .is_some_and(|layout| layout.is_single())
+                        {
+                            return;
+                        }
                         let size = this
                             .buffer_binding_range
                             .map(|range| range.end)
@@ -13994,6 +14080,7 @@ mod ui_tests {
         cx.run_until_parked();
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| {
+                view.snapshot.as_mut().unwrap().api = 3; // Exercise Vulkan-style fixed prefixes.
                 view.buffer_layout_input.update(cx, |input, cx| {
                     input.set_value("uint header; float2 values[];", window, cx)
                 });
@@ -14026,8 +14113,33 @@ mod ui_tests {
         cx.run_until_parked();
         cx.update(|cx| {
             assert_eq!(view.read(cx).buffer_offset, 0);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.buffer_seek
+                    .update(cx, |input, cx| input.set_value("13", window, cx));
+                view.seek_buffer(cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).buffer_offset, 12));
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.buffer_layout_input.update(cx, |input, cx| {
+                    input.set_value("[[single]] float2 value;", window, cx)
+                });
+                view.apply_buffer_layout(cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(view.read(cx).buffer_layout.as_ref().unwrap().is_single());
+            assert_eq!(view.read(cx).buffer_data.as_ref().unwrap().len(), 8);
             view.update(cx, |view, cx| {
                 view.buffer_layout = None;
+                view.snapshot.as_mut().unwrap().api = 0;
                 view.read_buffer(0, 0, cx);
             });
         });

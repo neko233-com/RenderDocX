@@ -97,11 +97,13 @@ pub struct Layout {
     used: usize,
     packing: Packing,
     repeat: Option<Repeat>,
+    single: bool,
 }
 #[derive(Clone, Debug)]
 struct Repeat {
     offset: usize,
     fixed_fields: Vec<Field>,
+    has_fixed_prefix: bool,
 }
 #[derive(Serialize)]
 pub struct FieldValue {
@@ -277,8 +279,19 @@ impl Layout {
         let mut definitions: HashMap<&str, Arc<Layout>> = HashMap::new();
         let mut enums: HashMap<&str, Arc<EnumDefinition>> = HashMap::new();
         let mut last = None;
+        let mut single_definition = false;
         loop {
             let mut flags = false;
+            if tokens.get(i..i + 5).is_some_and(|v| {
+                (v == ["[", "[", "single", "]", "]"] || v == ["[", "[", "fixed", "]", "]"])
+                    && tokens.get(i + 5) == Some(&"struct")
+            }) {
+                if single_definition {
+                    return Err("Only one fixed definition is supported".into());
+                }
+                single_definition = true;
+                i += 5;
+            }
             if tokens.get(i..i + 4).is_some_and(|slice| {
                 slice == ["[", "[", "flags", "]"] || slice == ["[", "[", "mask", "]"]
             }) && tokens.get(i + 4) == Some(&"]")
@@ -326,6 +339,9 @@ impl Layout {
                 definitions.insert(name, layout.clone());
                 last = Some(layout);
                 i = end + 2;
+                if single_definition && i != tokens.len() {
+                    return Err("A fixed struct cannot be used as a variable".into());
+                }
             } else {
                 if tokens.get(i + 2) != Some(&":") || tokens.get(i + 4) != Some(&"{") {
                     return Err("Enum requires an integer base type".into());
@@ -392,11 +408,24 @@ impl Layout {
         }
         if i == tokens.len() {
             return last
-                .map(|layout| (*layout).clone())
+                .map(|layout| {
+                    let mut layout = (*layout).clone();
+                    layout.single = single_definition;
+                    layout
+                })
                 .ok_or_else(|| "Layout must contain fields".into());
         }
-        let body = &tokens[i..];
+        let mut body = &tokens[i..];
+        let single = body.get(..5).is_some_and(|v| {
+            v == ["[", "[", "single", "]", "]"] || v == ["[", "[", "fixed", "]", "]"]
+        });
+        if single {
+            body = &body[5..];
+        }
         if body.ends_with(&["[", "]", ";"]) {
+            if single {
+                return Err("Fixed variables cannot be unbounded arrays".into());
+            }
             let name = *body
                 .get(body.len().saturating_sub(4))
                 .ok_or("Missing array name")?;
@@ -414,11 +443,20 @@ impl Layout {
             layout.repeat = Some(Repeat {
                 offset,
                 fixed_fields: std::mem::take(&mut layout.fields),
+                has_fixed_prefix: body.iter().filter(|token| **token == ";").count() > 1,
             });
             layout.fields.push(field);
             Ok(layout)
         } else {
-            Self::parse_body(body, &definitions, &enums, packing, false)
+            let mut layout = Self::parse_body(body, &definitions, &enums, packing, false)?;
+            if single
+                && (layout.fields.len() != 1
+                    || body.iter().filter(|token| **token == ";").count() != 1)
+            {
+                return Err("A fixed variable must be the only root variable".into());
+            }
+            layout.single = single;
+            Ok(layout)
         }
     }
 
@@ -942,6 +980,7 @@ impl Layout {
             used: cursor,
             packing,
             repeat: None,
+            single: false,
         })
     }
     fn decode_fields(
@@ -1106,6 +1145,41 @@ impl Layout {
         self.repeat.as_ref().map(|repeat| repeat.offset)
     }
 
+    pub fn is_single(&self) -> bool {
+        self.single
+    }
+
+    /// GraphicsAPI values come from the matching RenderDoc replay API.
+    pub fn validate_graphics_api(&self, api: u32) -> Result<(), String> {
+        if matches!(api, 0 | 1)
+            && self
+                .repeat
+                .as_ref()
+                .is_some_and(|repeat| repeat.has_fixed_prefix)
+        {
+            return Err("On D3D an unbounded array must be the only root variable".into());
+        }
+        Ok(())
+    }
+
+    pub fn page_offset_for_position(&self, origin: u64, position: u64) -> Option<u64> {
+        if self.single {
+            return (position >= origin && position < origin.checked_add(self.stride as u64)?)
+                .then_some(origin);
+        }
+        let Some(repeat) = &self.repeat else {
+            return Some(position);
+        };
+        let start = origin.checked_add(repeat.offset as u64)?;
+        if position < origin {
+            None
+        } else if position < start {
+            Some(origin)
+        } else {
+            Some(start + (position - start) / self.stride as u64 * self.stride as u64)
+        }
+    }
+
     pub fn decode(&self, offset: u64, bytes: &[u8]) -> Result<Page, String> {
         self.decode_at(offset, offset, bytes)
     }
@@ -1115,6 +1189,20 @@ impl Layout {
         offset
             .checked_add(bytes.len() as u64)
             .ok_or("Buffer range overflow")?;
+        if self.single {
+            if offset != origin {
+                return Err("A fixed layout must start at its origin".into());
+            }
+            let data = bytes.get(..self.stride).ok_or("Incomplete fixed layout")?;
+            return Ok(Page {
+                packing: self.packing.name(),
+                stride: self.stride.to_string(),
+                fixed: Some(Self::decode_fields(&self.fields, origin, data)?),
+                repeat_offset: None,
+                rows: Vec::new(),
+                trailing_hex: String::new(),
+            });
+        }
         let mut fixed = None;
         let mut repeat_offset = None;
         let mut row_offset = offset;
@@ -1166,6 +1254,47 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fixed_layout_and_repeat_navigation_follow_the_original_origin() {
+        for source in [
+            "[[single]] struct Data { uint x; float y; };",
+            "struct Data { uint x; float y; }; [[fixed]] Data data;",
+        ] {
+            let layout = Layout::parse(source).unwrap();
+            assert!(layout.is_single());
+            let page = layout
+                .decode_at(12, 12, &[1, 0, 0, 0, 0, 0, 128, 63, 99])
+                .unwrap();
+            assert_eq!(page.fixed.unwrap().len(), 2);
+            assert!(page.rows.is_empty());
+            assert_eq!(layout.page_offset_for_position(12, 19), Some(12));
+            assert_eq!(layout.page_offset_for_position(12, 20), None);
+            assert!(layout.decode_at(12, 13, &[0; 8]).is_err());
+            assert!(layout.decode_at(12, 12, &[0; 4]).is_err());
+        }
+        for source in [
+            "[[fixed]] struct S { uint x; }; S s;",
+            "[[single]] uint x; uint y;",
+            "[[single]] float x[];",
+        ] {
+            assert!(Layout::parse(source).is_err(), "{source}");
+        }
+        let layout = Layout::parse("uint header; float2 data[];").unwrap();
+        assert!(layout.validate_graphics_api(0).is_err());
+        assert!(layout.validate_graphics_api(1).is_err());
+        assert!(layout.validate_graphics_api(2).is_ok());
+        assert!(layout.validate_graphics_api(3).is_ok());
+        assert!(
+            Layout::parse("float2 data[];")
+                .unwrap()
+                .validate_graphics_api(0)
+                .is_ok()
+        );
+        assert_eq!(layout.page_offset_for_position(100, 99), None);
+        assert_eq!(layout.page_offset_for_position(100, 103), Some(100));
+        assert_eq!(layout.page_offset_for_position(100, 111), Some(104));
+        assert_eq!(layout.page_offset_for_position(100, 112), Some(112));
+    }
     #[test]
     fn unbounded_root_arrays_keep_the_original_prefix_across_pages() {
         let layout = Layout::parse("#pack(std430) uint header; vec2 data[];").unwrap();

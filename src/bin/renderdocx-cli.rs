@@ -959,6 +959,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         } else {
                             renderdocx::buffer_layout::Layout::parse(text)
                                 .map_err(|error| ("invalid_layout", error))
+                                .and_then(|layout| { layout.validate_graphics_api(snapshot.api).map_err(|error| ("invalid_layout", error))?; Ok(layout) })
                                 .and_then(|layout| session.read_buffer(index, offset, length)
                                     .and_then(|bytes| layout.decode_at(origin, offset, &bytes))
                                     .map(|page| json!({"event_id":event,"index":index,"page":page}))

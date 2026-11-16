@@ -2009,19 +2009,25 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     );
     assert_eq!(agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"0", "length":8, "layout":"float a; [[offset(2)]] float b;"}).to_string())["error"]["code"], "invalid_layout");
     let layout_page = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"4", "length":8, "layout":"#pack(scalar) float2 position;"}).to_string());
-    let repeat = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"0", "length":12, "layout":"uint header; float2 positions[];"}).to_string());
+    let rejected_prefix = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"0", "length":12, "layout":"uint header; float2 positions[];"}).to_string());
+    assert_eq!(
+        rejected_prefix["error"]["code"], "invalid_layout",
+        "{rejected_prefix}"
+    );
+    let repeat = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"4", "length":8, "layout":"float2 positions[];"}).to_string());
     assert_eq!(repeat["data"]["page"]["repeat_offset"], "4", "{repeat}");
     assert_eq!(
         repeat["data"]["page"]["rows"][0]["fields"][0]["values"][0],
         serde_json::json!(["3", "3"]),
         "{repeat}"
     );
-    let repeat_page = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "origin":"0", "offset":"4", "length":8, "layout":"uint header; float2 positions[];"}).to_string());
+    let fixed = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"4", "length":8, "layout":"[[single]] float2 position;"}).to_string());
     assert_eq!(
-        repeat_page["data"]["page"]["rows"][0]["offset"], "4",
-        "{repeat_page}"
+        fixed["data"]["page"]["fixed"][0]["values"][0],
+        serde_json::json!(["3", "3"]),
+        "{fixed}"
     );
-    assert!(repeat_page["data"]["page"].get("fixed").is_none());
+    assert_eq!(fixed["data"]["page"]["rows"], serde_json::json!([]));
     assert_eq!(layout_page["data"]["page"]["stride"], "8", "{layout_page}");
     assert_eq!(
         layout_page["data"]["page"]["rows"][0]["fields"][0]["values"][0],
