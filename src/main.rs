@@ -35,6 +35,21 @@ use std::path::PathBuf;
 
 mod shader_debug;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AutoTextureFitKey {
+    open_revision: u64,
+    selection_revision: u64,
+    texture: usize,
+    mip: u32,
+    slice: u32,
+    sample: Option<u32>,
+    analysis_cast: u32,
+    preview_cast: u32,
+    channels: [bool; 4],
+    custom: bool,
+    shader_revision: u64,
+}
+
 struct TexturePreview {
     path: PathBuf,
     _directory: tempfile::TempDir,
@@ -608,6 +623,10 @@ struct Workspace {
     texture_selection: TextureSelection,
     texture_saved_selection: std::collections::HashMap<usize, (TextureSelection, u64)>,
     texture_custom_revision: u64,
+    texture_auto_fit: bool,
+    texture_auto_fit_generation: u64,
+    texture_auto_fit_scheduled: bool,
+    texture_auto_fit_last: Option<AutoTextureFitKey>,
     texture_black_point: Entity<InputState>,
     texture_white_point: Entity<InputState>,
     texture_hdr_multiplier: Entity<InputState>,
@@ -2920,6 +2939,10 @@ impl Workspace {
                         this.texture_selection = TextureSelection::default();
                         this.texture_saved_selection.clear();
                         this.texture_custom_revision = 0;
+                        this.texture_auto_fit = false;
+                        this.texture_auto_fit_generation =
+                            this.texture_auto_fit_generation.wrapping_add(1);
+                        this.texture_auto_fit_last = None;
                         this.texture_custom_active = false;
                         this.texture_custom_open = false;
                         this.texture_custom_encodings.clear();
@@ -5940,11 +5963,86 @@ impl Workspace {
                 texture.component_type,
                 self.texture_selection.preview_type_cast,
             );
+            self.disable_auto_texture_fit();
             self.set_texture_range(range, window, cx);
         }
     }
 
-    fn fit_texture_range(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn auto_texture_fit_key(&self) -> Option<AutoTextureFitKey> {
+        if !self.texture_auto_fit
+            || self.tab != CaptureTab::Textures
+            || self.session.is_none()
+            || self.pipeline.is_none()
+        {
+            return None;
+        }
+        let selection = self.texture_selection;
+        Some(AutoTextureFitKey {
+            open_revision: self.open_revision,
+            selection_revision: self.selection_revision,
+            texture: self.selected_texture?,
+            mip: selection.mip,
+            slice: selection.slice,
+            sample: selection.sample,
+            analysis_cast: selection.analysis_type_cast,
+            preview_cast: if selection.preview_custom_shader {
+                selection.preview_type_cast
+            } else {
+                0
+            },
+            channels: selection.effective_preview_channels(),
+            custom: selection.preview_custom_shader,
+            shader_revision: if selection.preview_custom_shader {
+                self.texture_custom_revision
+            } else {
+                0
+            },
+        })
+    }
+
+    fn schedule_auto_texture_fit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.texture_auto_fit_scheduled
+            || self.replay_pending
+            || self.resource_pending
+            || self.export_pending
+        {
+            return;
+        }
+        let Some(key) = self.auto_texture_fit_key() else {
+            return;
+        };
+        if self.texture_auto_fit_last == Some(key) {
+            return;
+        }
+        self.texture_auto_fit_scheduled = true;
+        let weak = cx.weak_entity();
+        let handle = window.window_handle();
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    this.texture_auto_fit_scheduled = false;
+                    if this.auto_texture_fit_key() == Some(key)
+                        && !this.replay_pending
+                        && !this.resource_pending
+                        && !this.export_pending
+                    {
+                        this.texture_auto_fit_last = Some(key);
+                        this.fit_texture_range(window, true, cx);
+                    } else {
+                        cx.notify();
+                    }
+                });
+            });
+        });
+    }
+
+    fn disable_auto_texture_fit(&mut self) {
+        self.texture_auto_fit = false;
+        self.texture_auto_fit_generation = self.texture_auto_fit_generation.wrapping_add(1);
+        self.texture_auto_fit_last = None;
+    }
+
+    fn fit_texture_range(&mut self, window: &mut Window, automatic: bool, cx: &mut Context<Self>) {
         if !self.preview_edit_ready(cx) {
             return;
         }
@@ -5998,6 +6096,7 @@ impl Workspace {
         let revision = self.open_revision;
         let selection_revision = self.selection_revision;
         let shader_revision = self.texture_custom_revision;
+        let auto_generation = self.texture_auto_fit_generation;
         let handle = window.window_handle();
         self.resource_pending = true;
         self.status = Some(
@@ -6033,6 +6132,14 @@ impl Workspace {
                         return;
                     }
                     this.resource_pending = false;
+                    if automatic
+                        && (!this.texture_auto_fit
+                            || this.texture_auto_fit_generation != auto_generation)
+                    {
+                        this.status = None;
+                        cx.notify();
+                        return;
+                    }
                     if this.selected_texture != Some(index)
                         || this.texture_selection != selection
                         || this.texture_custom_revision != shader_revision
@@ -6110,6 +6217,7 @@ impl Workspace {
             cx.notify();
             return;
         };
+        self.disable_auto_texture_fit();
         self.texture_selection.display_range = Some([black, white]);
         self.preview = None;
         self.status = None;
@@ -9598,7 +9706,8 @@ impl Workspace {
                 .child(Input::new(&self.texture_white_point).id("texture-white-point").aria_label(self.t("White point", "白点", "白点", "백점")).w(px(90.)))
                 .child(button("texture-apply-range", self.t("Apply range", "应用范围", "範囲を適用", "범위 적용"), false, |this, cx| this.apply_texture_range(cx), cx))
                 .child(Button::new("texture-reset-range").label(self.t("Reset range", "重置范围", "範囲をリセット", "범위 초기화")).secondary().on_click(cx.listener(|this, _, window, cx| this.reset_texture_range(window, cx))))
-                .child(Button::new("texture-fit-range").label(self.t("Fit range", "自适应范围", "範囲を自動調整", "범위 자동 맞춤")).secondary().on_click(cx.listener(|this, _, window, cx| this.fit_texture_range(window, cx))))
+                .child(Button::new("texture-fit-range").label(self.t("Fit range", "自适应范围", "範囲を自動調整", "범위 자동 맞춤")).secondary().on_click(cx.listener(|this, _, window, cx| { this.disable_auto_texture_fit(); this.fit_texture_range(window, false, cx); })))
+                .child(button("texture-auto-fit", self.t("Continuous auto-fit", "持续自动拟合", "継続的に自動調整", "계속 자동 맞춤"), self.texture_auto_fit, |this, cx| { if this.texture_auto_fit { this.disable_auto_texture_fit(); } else { this.texture_auto_fit = true; this.texture_auto_fit_generation = this.texture_auto_fit_generation.wrapping_add(1); this.texture_auto_fit_last = None; } cx.notify(); }, cx))
                 .child(button("texture-reset-range-on-switch", self.t("Reset range on texture change", "切换纹理时重置范围", "テクスチャ変更時に範囲をリセット", "텍스처 변경 시 범위 초기화"), self.settings.texture_reset_range, |this, cx| { this.settings.texture_reset_range = !this.settings.texture_reset_range; this.save(); cx.notify(); }, cx)))
             .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t("Preview uses native texture display. Export applies the range only when RenderDoc converts the data.", "预览使用原生纹理显示；导出仅在 RenderDoc 转换数据时应用范围。", "プレビューはネイティブ表示を使用し、書き出しでは変換時のみ範囲が適用されます。", "미리보기는 기본 텍스처 표시를 사용하며 내보내기는 데이터 변환 시에만 범위를 적용합니다.")))
     }
@@ -15452,6 +15561,7 @@ fn button(
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.snapshot.is_some() {
+            self.schedule_auto_texture_fit(window, cx);
             return self.capture_view(window, cx).into_any_element();
         }
         let title = self.t(
@@ -16360,6 +16470,10 @@ fn main() {
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
                         texture_custom_revision: 0,
+                        texture_auto_fit: false,
+                        texture_auto_fit_generation: 0,
+                        texture_auto_fit_scheduled: false,
+                        texture_auto_fit_last: None,
                         texture_black_point,
                         texture_white_point,
                         texture_hdr_multiplier,
@@ -17128,6 +17242,10 @@ mod ui_tests {
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
                         texture_custom_revision: 0,
+                        texture_auto_fit: false,
+                        texture_auto_fit_generation: 0,
+                        texture_auto_fit_scheduled: false,
+                        texture_auto_fit_last: None,
                         texture_black_point,
                         texture_white_point,
                         texture_hdr_multiplier,
@@ -17703,6 +17821,10 @@ mod ui_tests {
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
                         texture_custom_revision: 0,
+                        texture_auto_fit: false,
+                        texture_auto_fit_generation: 0,
+                        texture_auto_fit_scheduled: false,
+                        texture_auto_fit_last: None,
                         texture_black_point,
                         texture_white_point,
                         texture_hdr_multiplier,
@@ -17965,6 +18087,7 @@ mod ui_tests {
             window.click("texture-0", cx);
             window.render_frame(cx);
             assert!(window.try_find("texture-export-raw").is_some());
+            reveal_details(window, "texture-export", cx);
             window.click("texture-export", cx);
         })
         .unwrap();
@@ -18161,6 +18284,59 @@ mod ui_tests {
             assert_eq!(view.read(cx).texture_black_point.read(cx).value(), "0.25");
             view.update(cx, |view, _| view.texture_selection.display_range = None);
         });
+        cx.update_window(handle.into(), |_, window, cx| {
+            reveal_details(window, "texture-auto-fit", cx);
+            window.click("texture-auto-fit", cx);
+            window.render_frame(cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(view.read(cx).texture_auto_fit);
+            assert_eq!(
+                view.read(cx).texture_selection.display_range,
+                Some([0.25, 0.75]),
+                "scheduled={} last={:?} pending={} status={:?}",
+                view.read(cx).texture_auto_fit_scheduled,
+                view.read(cx).texture_auto_fit_last,
+                view.read(cx).resource_pending,
+                view.read(cx).status
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            reveal_details(window, "texture-preview-red", cx);
+            window.click("texture-preview-red", cx);
+            window.render_frame(cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                view.read(cx).texture_selection.display_range,
+                Some([0.5, 0.75])
+            )
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            reveal_details(window, "texture-next-mip", cx);
+            window.click("texture-next-mip", cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).texture_auto_fit_last.unwrap().mip, 1));
+        cx.update_window(handle.into(), |_, window, cx| {
+            reveal_details(window, "texture-reset-range", cx);
+            window.click("texture-reset-range", cx);
+            view.update(cx, |view, _| {
+                assert!(!view.texture_auto_fit);
+                view.texture_selection.preview_channels = None;
+                view.texture_selection.display_range = None;
+                view.texture_selection.mip = 0;
+            });
+        })
+        .unwrap();
         cx.update_window(handle.into(), |_, window, cx| {
             reveal_details(window, "histogram-analyze", cx);
             window.click("histogram-analyze", cx);
@@ -20126,6 +20302,57 @@ mod ui_tests {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
                 cx.update(|cx| assert!(view.read(cx).texture_selection.display_range.is_some()));
+                cx.update_window(handle.into(), |_, window, cx| {
+                    reveal_details(window, "texture-auto-fit", cx);
+                    window.click("texture-auto-fit", cx);
+                    window.render_frame(cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx).texture_auto_fit_last.is_some()
+                            && !view.read(cx).resource_pending
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real continuous fit did not complete: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    reveal_details(window, "texture-preview-green", cx);
+                    window.click("texture-preview-green", cx);
+                    window.render_frame(cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx)
+                            .texture_auto_fit_last
+                            .is_some_and(|key| !key.channels[1])
+                            && !view.read(cx).resource_pending
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real continuous fit did not refresh: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update(|cx| {
+                    let range = view.read(cx).texture_selection.display_range.unwrap();
+                    assert_eq!(range[0], 1.0);
+                    assert!(range[1] > 1.0);
+                });
                 cx.update_window(handle.into(), |_, window, cx| {
                     reveal_details(window, "texture-reset-range", cx);
                     window.click("texture-reset-range", cx);
