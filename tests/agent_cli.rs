@@ -1137,6 +1137,10 @@ fn real_d3d11_mesh_draw_order() {
         "custom pixel {:?}",
         &custom[..3]
     );
+    let fitted = agent.send(&serde_json::json!({"command":"texture_fit_range","index":float_index,"channels":[true,false,true,false],"preview_custom_shader":true}).to_string());
+    assert_eq!(fitted["ok"], true, "{fitted}");
+    assert_eq!(fitted["data"]["range"][0], 1.0);
+    assert!(fitted["data"]["range"][1].as_f64().unwrap() > 1.0);
     let custom_stats = agent.send(&serde_json::json!({"command":"texture_statistics","index":float_index,"min":0.0,"max":2.0,"channels":[true,false,true,false],"preview_custom_shader":true}).to_string());
     assert_eq!(custom_stats["ok"], true, "{custom_stats}");
     assert_eq!(

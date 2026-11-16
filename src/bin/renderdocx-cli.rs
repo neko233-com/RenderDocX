@@ -139,6 +139,7 @@ fn usage() -> Value {
         .as_array_mut()
         .expect("capabilities commands")
         .extend([
+            json!("texture_fit_range"),
             json!("custom_shader_library_import_directory"),
             json!("custom_shader_library_list"),
             json!("custom_shader_library_get"),
@@ -2565,7 +2566,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     _ => Err(("invalid_arguments", "pixel_history requires a texture index, x/y, decimal-string offset and valid page limit".into())),
                 }
             }
-            "texture_statistics" => {
+            "texture_statistics" | "texture_fit_range" => {
                 let index = request
                     .get("index")
                     .and_then(Value::as_u64)
@@ -2593,6 +2594,9 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                                     {
                                         None
                                     }
+                                    None if command == "texture_fit_range" => {
+                                        Some(selection.effective_preview_channels())
+                                    }
                                     None => Some(std::array::from_fn(|i| {
                                         selection.channel.map_or(
                                             i < texture.component_count as usize,
@@ -2612,7 +2616,12 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                                         };
                                         match selection.validate_pixel(texture, 0, 0).and_then(|_| histogram.validate()) {
                                             Ok(()) => session.texture_statistics(event, index, texture, selection, histogram)
-                                                .map(|stats| json!({"statistics":stats,"selection":selection}))
+                                                .and_then(|stats| {
+                                                    if command == "texture_fit_range" {
+                                                        let range = renderdocx::texture_view::fit_range(&stats, texture.component_type, selection.analysis_type_cast, texture.component_count, channels).map_err(str::to_owned)?;
+                                                        Ok(json!({"range":range,"statistics":stats,"selection":selection}))
+                                                    } else { Ok(json!({"statistics":stats,"selection":selection})) }
+                                                })
                                                 .map_err(|error| ("replay_statistics_failed", error)),
                                             Err(error) => Err(("invalid_arguments", error)),
                                         }

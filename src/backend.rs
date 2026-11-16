@@ -18,6 +18,7 @@ pub struct Settings {
     pub shader_processors: Vec<crate::shader_processor::NamedShaderProcessor>,
     pub texture_per_resource_settings: bool,
     pub texture_per_resource_flip_y: bool,
+    pub texture_reset_range: bool,
 }
 
 impl Default for Settings {
@@ -31,6 +32,7 @@ impl Default for Settings {
             shader_processors: Vec::new(),
             texture_per_resource_settings: true,
             texture_per_resource_flip_y: false,
+            texture_reset_range: false,
         }
     }
 }
@@ -120,12 +122,15 @@ mod tests {
         assert!(settings.shader_processors.is_empty());
         assert!(settings.texture_per_resource_settings);
         assert!(!settings.texture_per_resource_flip_y);
+        assert!(!settings.texture_reset_range);
         let mut updated = settings;
         updated.texture_per_resource_settings = false;
         updated.texture_per_resource_flip_y = true;
+        updated.texture_reset_range = true;
         let reloaded: Settings =
             serde_json::from_str(&serde_json::to_string(&updated).unwrap()).unwrap();
         assert!(!reloaded.texture_per_resource_settings);
         assert!(reloaded.texture_per_resource_flip_y);
+        assert!(reloaded.texture_reset_range);
     }
 }
