@@ -1703,7 +1703,49 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         }
     }
     assert!(steps > 1);
+    assert_eq!(
+        agent.send(r#"{"command":"debug_collect"}"#)["error"]["code"],
+        "debug_already_streamed"
+    );
     assert_eq!(agent.send(r#"{"command":"debug_stop"}"#)["ok"], true);
+    assert_eq!(
+        agent.send(r#"{"command":"debug_compute","group":[1,0,0],"thread":[1,1,0]}"#)["ok"],
+        true
+    );
+    let collected = agent.send(r#"{"command":"debug_collect"}"#);
+    assert_eq!(collected["ok"], true, "{collected}");
+    assert_eq!(collected["data"]["total"], steps);
+    assert_eq!(collected["data"]["position"], 0);
+    let set = agent.send(r#"{"command":"debug_breakpoint","breakpoint":{"kind":"source","file_index":0,"line":7},"enabled":true}"#);
+    assert_eq!(set["ok"], true, "{set}");
+    let run = agent.send(r#"{"command":"debug_navigate","direction":"forward","mode":"run"}"#);
+    assert_eq!(run["data"]["reason"], "breakpoint", "{run}");
+    assert_eq!(run["data"]["location"]["line_start"], 7);
+    let set_earlier = agent.send(r#"{"command":"debug_breakpoint","breakpoint":{"kind":"source","file_index":0,"line":6},"enabled":true}"#);
+    assert_eq!(set_earlier["ok"], true, "{set_earlier}");
+    let reverse = agent.send(r#"{"command":"debug_navigate","direction":"backward","mode":"run"}"#);
+    assert_eq!(reverse["data"]["reason"], "breakpoint", "{reverse}");
+    assert_eq!(reverse["data"]["location"]["line_start"], 6);
+    assert_eq!(
+        agent.send(
+            r#"{"command":"debug_navigate","direction":"forward","mode":"run","event_mask":8}"#
+        )["error"]["code"],
+        "invalid_arguments"
+    );
+    assert_eq!(
+        agent.send(
+            r#"{"command":"debug_navigate","direction":"forward","mode":"source","event_mask":1}"#
+        )["error"]["code"],
+        "invalid_arguments"
+    );
+    assert_eq!(
+        agent.send(&serde_json::json!({"command":"select","event_id":draw_event}).to_string())["ok"],
+        true
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"debug_state"}"#)["error"]["code"],
+        "no_debug_timeline"
+    );
     assert_eq!(agent.send(r#"{"id":3,"command":"close"}"#)["ok"], true);
     assert_eq!(
         agent.send(r#"{"id":4,"command":"snapshot"}"#)["error"]["code"],

@@ -11,6 +11,7 @@ use gpui_kit::{
 };
 use renderdocx::{
     backend::{self, Settings},
+    debug_navigation::DebugNavigator,
     i18n::Language,
     live::{
         CaptureOptions, EnvOperation, EnvSeparator, EnvironmentModification, LaunchConfiguration,
@@ -51,7 +52,7 @@ struct ShaderDebugView {
     context: ShaderDebugContext,
     trace: DebugTrace,
     states: Vec<DebugState>,
-    position: usize,
+    navigator: DebugNavigator,
     disassembly: String,
     source_files: Vec<ShaderSourceFile>,
 }
@@ -108,7 +109,7 @@ fn collect_shader_debug(
             context,
             trace,
             states,
-            position: 0,
+            navigator: DebugNavigator::default(),
             disassembly: shader.disassembly,
             source_files: shader.source_files,
         })
@@ -2402,7 +2403,7 @@ impl Workspace {
             false,
             |this, cx| {
                 if let Some(debug) = &mut this.debug_view {
-                    debug.position = debug.position.saturating_sub(1);
+                    debug.navigator.step(&debug.states, false);
                     cx.notify();
                 }
             },
@@ -2414,14 +2415,80 @@ impl Workspace {
             false,
             |this, cx| {
                 if let Some(debug) = &mut this.debug_view {
-                    if debug.position + 1 < debug.states.len() {
-                        debug.position += 1;
-                        cx.notify();
-                    }
+                    debug.navigator.step(&debug.states, true);
+                    cx.notify();
                 }
             },
             cx,
         );
+        let source_back = button(
+            "shader-source-back",
+            self.t(
+                "Previous source",
+                "上一源码位置",
+                "前のソース位置",
+                "이전 소스 위치",
+            ),
+            false,
+            |this, cx| {
+                if let Some(debug) = &mut this.debug_view {
+                    debug
+                        .navigator
+                        .step_source(&debug.trace, &debug.states, false);
+                    cx.notify();
+                }
+            },
+            cx,
+        );
+        let source_next = button(
+            "shader-source-next",
+            self.t(
+                "Next source",
+                "下一源码位置",
+                "次のソース位置",
+                "다음 소스 위치",
+            ),
+            false,
+            |this, cx| {
+                if let Some(debug) = &mut this.debug_view {
+                    debug
+                        .navigator
+                        .step_source(&debug.trace, &debug.states, true);
+                    cx.notify();
+                }
+            },
+            cx,
+        );
+        let run_back = button(
+            "shader-run-back",
+            self.t("Run backward", "向后运行", "逆方向に実行", "뒤로 실행"),
+            false,
+            |this, cx| {
+                if let Some(debug) = &mut this.debug_view {
+                    debug.navigator.run(&debug.trace, &debug.states, false, 0);
+                    cx.notify();
+                }
+            },
+            cx,
+        );
+        let run_next = button(
+            "shader-run-next",
+            self.t("Run forward", "向前运行", "順方向に実行", "앞으로 실행"),
+            false,
+            |this, cx| {
+                if let Some(debug) = &mut this.debug_view {
+                    debug.navigator.run(&debug.trace, &debug.states, true, 0);
+                    cx.notify();
+                }
+            },
+            cx,
+        );
+        let disassembly_bp = debug
+            .navigator
+            .current_breakpoint(&debug.trace, &debug.states, false);
+        let source_bp = debug
+            .navigator
+            .current_breakpoint(&debug.trace, &debug.states, true);
         let context = match debug.context {
             ShaderDebugContext::Vertex {
                 vertex,
@@ -2477,8 +2544,74 @@ impl Workspace {
                 self.t("Event", "事件", "イベント", "이벤트"),
                 debug.trace.event_id
             ))
-            .child(div().flex().gap_2().child(previous).child(next));
-        if let Some(state) = debug.states.get(debug.position) {
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(run_back)
+                    .child(previous)
+                    .child(next)
+                    .child(run_next)
+                    .child(source_back)
+                    .child(source_next),
+            );
+        for (is_source, breakpoint) in [(false, disassembly_bp), (true, source_bp)] {
+            if let Some(breakpoint) = breakpoint {
+                let enabled = debug.navigator.breakpoints.contains(&breakpoint);
+                let label = match (is_source, enabled) {
+                    (false, false) => self.t(
+                        "Set instruction breakpoint",
+                        "设置指令断点",
+                        "命令にブレークポイント",
+                        "명령 중단점 설정",
+                    ),
+                    (false, true) => self.t(
+                        "Remove instruction breakpoint",
+                        "移除指令断点",
+                        "命令のブレークポイントを削除",
+                        "명령 중단점 제거",
+                    ),
+                    (true, false) => self.t(
+                        "Set source breakpoint",
+                        "设置源码断点",
+                        "ソースにブレークポイント",
+                        "소스 중단점 설정",
+                    ),
+                    (true, true) => self.t(
+                        "Remove source breakpoint",
+                        "移除源码断点",
+                        "ソースのブレークポイントを削除",
+                        "소스 중단점 제거",
+                    ),
+                };
+                view = view.child(button(
+                    if is_source {
+                        "shader-source-breakpoint"
+                    } else {
+                        "shader-instruction-breakpoint"
+                    },
+                    label,
+                    enabled,
+                    move |this, cx| {
+                        if let Some(debug) = &mut this.debug_view {
+                            if let Some(point) = debug.navigator.current_breakpoint(
+                                &debug.trace,
+                                &debug.states,
+                                is_source,
+                            ) {
+                                let enabled = !debug.navigator.breakpoints.contains(&point);
+                                let _ =
+                                    debug.navigator.set_breakpoint(&debug.trace, point, enabled);
+                                cx.notify();
+                            }
+                        }
+                    },
+                    cx,
+                ));
+            }
+        }
+        if let Some(state) = debug.states.get(debug.navigator.position) {
             view = view
                 .child(div().id("vertex-debug-step").test_support().child(format!(
                     "{} {} / {} · {} {} · {} {}",
@@ -7672,19 +7805,39 @@ mod ui_tests {
                             .is_some()
                     );
                     assert!(debug.states.iter().any(|state| !state.changes.is_empty()));
-                    assert_eq!(debug.position, 0);
+                    assert_eq!(debug.navigator.position, 0);
                 });
                 cx.update_window(handle.into(), |_, window, cx| {
                     window.render_frame(cx);
                     window.click("vertex-debug-next", cx);
                 })
                 .unwrap();
-                cx.update(|cx| assert_eq!(view.read(cx).debug_view.as_ref().unwrap().position, 1));
+                cx.update(|cx| {
+                    assert_eq!(
+                        view.read(cx)
+                            .debug_view
+                            .as_ref()
+                            .unwrap()
+                            .navigator
+                            .position,
+                        1
+                    )
+                });
                 cx.update_window(handle.into(), |_, window, cx| {
                     window.click("vertex-debug-previous", cx);
                 })
                 .unwrap();
-                cx.update(|cx| assert_eq!(view.read(cx).debug_view.as_ref().unwrap().position, 0));
+                cx.update(|cx| {
+                    assert_eq!(
+                        view.read(cx)
+                            .debug_view
+                            .as_ref()
+                            .unwrap()
+                            .navigator
+                            .position,
+                        0
+                    )
+                });
                 cx.update_window(handle.into(), |_, window, cx| {
                     window.click("mesh-tab", cx);
                 })
@@ -8175,6 +8328,67 @@ mod ui_tests {
                     assert!(window.find("shader-debug-current-instruction").visible());
                 })
                 .unwrap();
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.scroll(
+                        "capture-details-scroll",
+                        ScrollDelta::Pixels(point(px(0.), px(2000.))),
+                        cx,
+                    );
+                    window.render_frame(cx);
+                    window.click("shader-run-next", cx);
+                    window.click("shader-source-back", cx);
+                })
+                .unwrap();
+                cx.update(|cx| {
+                    let debug = view.read(cx).debug_view.as_ref().unwrap();
+                    let location = debug
+                        .trace
+                        .instruction_info(debug.states[debug.navigator.position].next_instruction)
+                        .unwrap();
+                    assert_eq!(location.line_start, 7);
+                });
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    for _ in 0..30 {
+                        let target = window.find("shader-source-breakpoint");
+                        if target.visible() {
+                            break;
+                        }
+                        let viewport = window.find("capture-details-scroll").bounds();
+                        let delta = if target.bounds().origin.y < viewport.origin.y {
+                            100.0
+                        } else {
+                            -100.0
+                        };
+                        window.scroll(
+                            "capture-details-scroll",
+                            ScrollDelta::Pixels(point(px(0.), px(delta))),
+                            cx,
+                        );
+                    }
+                    window.click("shader-source-breakpoint", cx);
+                    window.scroll(
+                        "capture-details-scroll",
+                        ScrollDelta::Pixels(point(px(0.), px(2000.))),
+                        cx,
+                    );
+                    window.click("shader-run-back", cx);
+                    window.click("shader-run-next", cx);
+                })
+                .unwrap();
+                cx.update(|cx| {
+                    let debug = view.read(cx).debug_view.as_ref().unwrap();
+                    assert_eq!(debug.navigator.breakpoints.len(), 1);
+                    let location = debug
+                        .trace
+                        .instruction_info(debug.states[debug.navigator.position].next_instruction)
+                        .unwrap();
+                    assert_eq!(location.line_start, 7);
+                    assert!(
+                        debug.navigator.position > 0
+                            && debug.navigator.position + 1 < debug.states.len()
+                    );
+                });
             }
             if let Some(fixture) = std::env::var_os("RENDERDOCX_TEST_OPENGL_FIXTURE") {
                 use std::os::windows::process::CommandExt;

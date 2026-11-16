@@ -1,9 +1,11 @@
 use renderdocx::{
     backend::Settings,
+    debug_navigation::{Breakpoint, DebugNavigator, StopReason},
     live::{CaptureOptions, LaunchConfiguration, LiveSession, enumerate},
     replay::{
-        BUFFER_PAGE_LIMIT, ComputeDebugSelection, MeshSelection, Pipeline, PixelDebugSelection,
-        SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session, Snapshot, TextureSelection,
+        BUFFER_PAGE_LIMIT, ComputeDebugSelection, DebugState, DebugTrace, MeshSelection, Pipeline,
+        PixelDebugSelection, SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session, Snapshot,
+        TextureSelection,
     },
 };
 use serde_json::{Value, json};
@@ -19,13 +21,28 @@ enum Invocation {
     Serve(Settings),
 }
 
+struct AgentDebugTimeline {
+    trace: DebugTrace,
+    states: Vec<DebugState>,
+    navigator: DebugNavigator,
+}
+
+impl AgentDebugTimeline {
+    fn response(&self, reason: Option<StopReason>) -> Value {
+        let state = self.navigator.current(&self.states);
+        let location = state.and_then(|state| self.trace.instruction_info(state.next_instruction));
+        json!({"event_id":self.trace.event_id,"stage":self.trace.stage,"position":self.navigator.position,
+            "total":self.states.len(),"state":state,"location":location,"breakpoints":self.navigator.breakpoints,"reason":reason})
+    }
+}
+
 fn usage() -> Value {
     json!({"schema":"renderdocx.cli.v1","ok":true,"commands":[
         {"name":"inspect","arguments":["capture.rdc"],"description":"Open a capture and return its action tree and resource counts."},
         {"name":"select","arguments":["capture.rdc","event_id"],"description":"Replay a capture to an event."},
         {"name":"serve","arguments":[],"description":"Serve sequential JSONL requests using a persistent replay session."},
         {"name":"capabilities","arguments":[],"description":"Describe the commands currently implemented."}
-    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","debug_vertex","debug_pixel","debug_compute","debug_next","debug_stop","vertex_input","mesh","mesh_read","structure","structure_buffer","read_buffer","resource_usage","pick_pixel","pixel_history","texture_statistics","export_texture","close","target_list","target_launch","target_connect","target_connect_pid","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
+    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","debug_vertex","debug_pixel","debug_compute","debug_collect","debug_state","debug_breakpoint","debug_navigate","debug_next","debug_stop","vertex_input","mesh","mesh_read","structure","structure_buffer","read_buffer","resource_usage","pick_pixel","pixel_history","texture_statistics","export_texture","close","target_list","target_launch","target_connect","target_connect_pid","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
 }
 
 fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
@@ -111,6 +128,9 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
     let mut selected_event: Option<u32> = None;
     let mut pipeline: Option<Pipeline> = None;
     let mut mesh_selection: Option<(u32, MeshSelection)> = None;
+    let mut pending_debug: Option<DebugTrace> = None;
+    let mut debug_streamed = false;
+    let mut debug_timeline: Option<AgentDebugTimeline> = None;
     let mut target: Option<LiveSession> = None;
     for line in input.lines() {
         let line = line?;
@@ -656,6 +676,105 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     )),
                 }
             }
+            "debug_collect" => match (&opened, pending_debug.take()) {
+                (None, _) => Err(("no_capture", "No capture is open".into())),
+                (Some(_), None) => {
+                    Err(("no_debug_trace", "Start a shader debug trace first".into()))
+                }
+                (Some(_), Some(trace)) if debug_streamed => {
+                    pending_debug = Some(trace);
+                    Err((
+                        "debug_already_streamed",
+                        "Collect before reading any debug batches".into(),
+                    ))
+                }
+                (Some((session, _)), Some(trace)) => {
+                    let collected = (|| {
+                        let mut states = Vec::new();
+                        loop {
+                            let batch = session.debug_next()?;
+                            if batch.event_id != trace.event_id {
+                                return Err("Debug states belong to a different event".to_owned());
+                            }
+                            states.extend(batch.states);
+                            if batch.finished {
+                                break;
+                            }
+                        }
+                        Ok(AgentDebugTimeline {
+                            trace,
+                            states,
+                            navigator: DebugNavigator::default(),
+                        })
+                    })();
+                    let stopped = session.debug_stop();
+                    match (collected, stopped) {
+                        (Ok(timeline), Ok(())) => {
+                            let value = timeline.response(None);
+                            debug_timeline = Some(timeline);
+                            Ok(value)
+                        }
+                        (Err(error), _) | (_, Err(error)) => Err(("replay_debug_failed", error)),
+                    }
+                }
+            },
+            "debug_state" => match &debug_timeline {
+                Some(timeline) => Ok(timeline.response(None)),
+                None => Err((
+                    "no_debug_timeline",
+                    "Collect a shader debug trace first".into(),
+                )),
+            },
+            "debug_breakpoint" => {
+                let breakpoint = request
+                    .get("breakpoint")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value::<Breakpoint>(value).ok());
+                let enabled = request.get("enabled").and_then(Value::as_bool);
+                match (&mut debug_timeline, breakpoint, enabled) {
+                    (None, _, _) => Err((
+                        "no_debug_timeline",
+                        "Collect a shader debug trace first".into(),
+                    )),
+                    (Some(timeline), Some(breakpoint), Some(enabled)) => timeline
+                        .navigator
+                        .set_breakpoint(&timeline.trace, breakpoint, enabled)
+                        .map(|()| timeline.response(None))
+                        .map_err(|error| ("invalid_arguments", error.into())),
+                    _ => Err((
+                        "invalid_arguments",
+                        "debug_breakpoint requires a breakpoint and enabled boolean".into(),
+                    )),
+                }
+            }
+            "debug_navigate" => {
+                let direction = match request.get("direction").and_then(Value::as_str) {
+                    Some("forward") => Some(true),
+                    Some("backward") => Some(false),
+                    _ => None,
+                };
+                let mode = request.get("mode").and_then(Value::as_str);
+                let mask = match request.get("event_mask") {
+                    None => Some(0),
+                    Some(value) => value
+                        .as_u64()
+                        .and_then(|v| u32::try_from(v).ok())
+                        .filter(|v| v & !7 == 0),
+                };
+                match (&mut debug_timeline, direction, mode, mask) {
+                    (None, _, _, _) => Err(("no_debug_timeline", "Collect a shader debug trace first".into())),
+                    (Some(timeline), Some(forward), Some(mode @ ("instruction" | "source" | "run")), Some(mask))
+                        if mode == "run" || mask == 0 => {
+                        let reason = match mode {
+                            "instruction" => timeline.navigator.step(&timeline.states, forward),
+                            "source" => timeline.navigator.step_source(&timeline.trace, &timeline.states, forward),
+                            _ => timeline.navigator.run(&timeline.trace, &timeline.states, forward, mask),
+                        };
+                        Ok(timeline.response(Some(reason)))
+                    }
+                    _ => Err(("invalid_arguments", "debug_navigate requires direction and mode; event_mask 0-7 is only valid for run".into())),
+                }
+            }
             "debug_next" => match (&opened, selected_event) {
                 (None, _) => Err(("no_capture", "No capture is open".into())),
                 (Some(_), None) => Err(("no_event", "Select a draw before debugging".into())),
@@ -931,6 +1050,30 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
             }
             _ => Err(("invalid_command", "Unknown or missing command".into())),
         };
+        if let Ok(data) = &result {
+            match command {
+                "debug_vertex" | "debug_pixel" | "debug_compute" => {
+                    pending_debug = data
+                        .get("trace")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok());
+                    debug_streamed = false;
+                    debug_timeline = None;
+                }
+                "debug_next" => debug_streamed = true,
+                "select" | "open" | "close" | "quit" | "debug_stop" => {
+                    pending_debug = None;
+                    debug_timeline = None;
+                    debug_streamed = false;
+                }
+                _ => {}
+            }
+        } else if matches!(command, "debug_vertex" | "debug_pixel" | "debug_compute")
+            && matches!(&result, Err(("replay_debug_failed", _)))
+        {
+            // The bridge may have replaced an earlier trace before a failed start.
+            pending_debug = None;
+        }
         let response = match result {
             Ok(data) => json!({"schema":"renderdocx.agent.v1","id":id,"ok":true,"data":data}),
             Err((code, message)) => {
