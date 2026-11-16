@@ -1,7 +1,7 @@
 //! Structured capture lookups for the event browser's `$param` predicates.
 use crate::event_filter::{Filter, ParamQuery, ParameterMatches};
-use crate::replay::{Action, STRUCTURE_PAGE_LIMIT, Session, StructuredNode};
-use std::collections::HashSet;
+use crate::replay::{Action, STRUCTURE_PAGE_LIMIT, Session, StructurePage, StructuredNode};
+use std::collections::{HashMap, HashSet};
 
 /// Resolve every predicate completely or return an error; partial results are never applied.
 pub fn resolve(
@@ -26,30 +26,80 @@ pub fn resolve(
         .filter(|event| event.chunk_index.is_some())
         .map(|event| event.event_id)
         .collect();
+    let mut by_name: HashMap<String, Vec<ParamQuery>> = HashMap::new();
+    for query in &queries {
+        by_name
+            .entry(query.name.clone())
+            .or_default()
+            .push(query.clone());
+    }
+    let mut names: Vec<String> = by_name.keys().cloned().collect();
+    names.sort();
+    let mut fast_available = true;
     for event in events {
-        for query in &queries {
-            if cancelled() {
-                return Err("Event parameter lookup cancelled".into());
+        if cancelled() {
+            return Err("Event parameter lookup cancelled".into());
+        }
+        let mut read =
+            |path: &[u64], offset| session.structure(event, path, offset, STRUCTURE_PAGE_LIMIT);
+        let mut found = HashSet::new();
+        if fast_available {
+            for group in names.chunks(128) {
+                if cancelled() {
+                    return Err("Event parameter lookup cancelled".into());
+                }
+                let Some(results) = session.structure_find(event, group)? else {
+                    fast_available = false;
+                    break;
+                };
+                for (name, item) in group.iter().zip(results) {
+                    let Some(item) = item else { continue };
+                    let path: Vec<u64> = item
+                        .path
+                        .iter()
+                        .map(|index| index.parse::<u64>())
+                        .collect::<Result<_, _>>()
+                        .map_err(|_| "Invalid structured search path")?;
+                    let formatted = if item.node.basic_type == 2 {
+                        None
+                    } else {
+                        Some(format_value(&item.node, item.parent_flags)?.to_lowercase())
+                    };
+                    for query in &by_name[name] {
+                        let matched = if let Some(formatted) = &formatted {
+                            formatted.contains(&query.value)
+                        } else {
+                            array_matches(&mut read, &path, &query.value, &cancelled)?
+                        };
+                        if matched {
+                            found.insert(query.clone());
+                        }
+                    }
+                }
             }
-            if matches_parameter(session, event, query, &cancelled)? {
-                matches
-                    .get_mut(query)
-                    .expect("query inserted")
-                    .insert(event);
-            }
+        }
+        if !fast_available {
+            found = matches_parameters(&mut read, &queries, &cancelled)?;
+        }
+        for query in found {
+            matches
+                .get_mut(&query)
+                .expect("query inserted")
+                .insert(event);
         }
     }
     Ok(matches)
 }
 
-fn matches_parameter(
-    session: &Session,
-    event: u32,
-    query: &ParamQuery,
+fn matches_parameters(
+    read: &mut impl FnMut(&[u64], u64) -> Result<StructurePage, String>,
+    queries: &HashSet<ParamQuery>,
     cancelled: &impl Fn() -> bool,
-) -> Result<bool, String> {
+) -> Result<HashSet<ParamQuery>, String> {
     // FindChildRecursively checks all direct children before descending into each child.
     let mut stack = vec![Vec::<u64>::new()];
+    let mut remaining = queries.clone();
+    let mut matched = HashSet::new();
     while let Some(path) = stack.pop() {
         let mut offset = 0u64;
         let mut children = Vec::new();
@@ -57,7 +107,7 @@ fn matches_parameter(
             if cancelled() {
                 return Err("Event parameter lookup cancelled".into());
             }
-            let page = session.structure(event, &path, offset, STRUCTURE_PAGE_LIMIT)?;
+            let page = read(&path, offset)?;
             let count = page
                 .node
                 .child_count
@@ -70,13 +120,31 @@ fn matches_parameter(
                 let mut child_path = path.clone();
                 child_path.push(offset);
                 offset += 1;
-                if child.name == query.name {
-                    if child.basic_type == 2 {
-                        return array_matches(session, event, &child_path, &query.value, cancelled);
+                let matching_queries: Vec<ParamQuery> = remaining
+                    .iter()
+                    .filter(|query| child.name == query.name)
+                    .cloned()
+                    .collect();
+                if !matching_queries.is_empty() {
+                    let formatted = if child.basic_type == 2 {
+                        None
+                    } else {
+                        Some(format_value(&child, page.node.flags)?.to_lowercase())
+                    };
+                    for query in matching_queries {
+                        let is_match = if let Some(formatted) = &formatted {
+                            formatted.contains(&query.value)
+                        } else {
+                            array_matches(read, &child_path, &query.value, cancelled)?
+                        };
+                        remaining.remove(&query);
+                        if is_match {
+                            matched.insert(query);
+                        }
                     }
-                    return Ok(format_value(&child, page.node.flags)?
-                        .to_lowercase()
-                        .contains(&query.value));
+                    if remaining.is_empty() {
+                        return Ok(matched);
+                    }
                 }
                 if child.child_count != "0" {
                     children.push(child_path);
@@ -88,12 +156,11 @@ fn matches_parameter(
         }
         stack.extend(children.into_iter().rev());
     }
-    Ok(false)
+    Ok(matched)
 }
 
 fn array_matches(
-    session: &Session,
-    event: u32,
+    read: &mut impl FnMut(&[u64], u64) -> Result<StructurePage, String>,
     path: &[u64],
     value: &str,
     cancelled: &impl Fn() -> bool,
@@ -103,7 +170,7 @@ fn array_matches(
         if cancelled() {
             return Err("Event parameter lookup cancelled".into());
         }
-        let page = session.structure(event, path, offset, STRUCTURE_PAGE_LIMIT)?;
+        let page = read(path, offset)?;
         let count = page
             .node
             .child_count
@@ -194,5 +261,90 @@ fn format_value(node: &StructuredNode, parent_flags: u32) -> Result<String, Stri
             Ok(char::from(n).to_string())
         }
         _ => Err("Parameter value formatting is not supported yet".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn node(name: &str, kind: u32, value: Option<&str>, count: usize) -> StructuredNode {
+        StructuredNode {
+            name: name.into(),
+            type_name: "T".into(),
+            basic_type: kind,
+            flags: 0,
+            byte_size: "0".into(),
+            child_count: count.to_string(),
+            value: value.map(str::to_owned),
+            custom_string: None,
+            resource_non_null: None,
+            resource_index: None,
+        }
+    }
+
+    #[test]
+    fn conditions_share_one_traversal_and_direct_children_win_across_pages() {
+        let mut root = vec![node("container", 1, None, 1)];
+        root.extend((0..127).map(|_| node("other", 5, Some("x"), 0)));
+        root.push(node("target", 5, Some("Direct"), 0));
+        let mut data = HashMap::new();
+        data.insert(vec![], root);
+        data.insert(vec![0], vec![node("target", 5, Some("nested"), 0)]);
+        let mut reads = 0;
+        let mut read = |path: &[u64], offset: u64| {
+            reads += 1;
+            let children = &data[path];
+            Ok(StructurePage {
+                event_id: 1,
+                offset: offset.to_string(),
+                path: path.iter().map(u64::to_string).collect(),
+                node: node("parent", 1, None, children.len()),
+                children: children
+                    .iter()
+                    .skip(offset as usize)
+                    .take(STRUCTURE_PAGE_LIMIT as usize)
+                    .cloned()
+                    .collect(),
+                chunk_metadata: None,
+            })
+        };
+        let queries: HashSet<_> = ["direct", "nested", "rect"]
+            .into_iter()
+            .map(|value| ParamQuery {
+                name: "target".into(),
+                value: value.into(),
+            })
+            .collect();
+        let matched = matches_parameters(&mut read, &queries, &|| false).unwrap();
+        assert_eq!(reads, 2); // One shared scan, including the second root page.
+        assert!(matched.iter().any(|q| q.value == "direct"));
+        assert!(matched.iter().any(|q| q.value == "rect"));
+        assert!(!matched.iter().any(|q| q.value == "nested"));
+    }
+
+    #[test]
+    fn cancellation_and_incomplete_pages_never_return_partial_matches() {
+        let query = ParamQuery {
+            name: "a".into(),
+            value: "yes".into(),
+        };
+        let queries = [query].into();
+        let mut calls = 0;
+        let mut read = |_: &[u64], offset: u64| {
+            calls += 1;
+            Ok(StructurePage {
+                event_id: 1,
+                offset: offset.to_string(),
+                path: vec![],
+                node: node("parent", 1, None, 1),
+                children: vec![],
+                chunk_metadata: None,
+            })
+        };
+        assert!(matches_parameters(&mut read, &queries, &|| true).is_err());
+        assert!(matches_parameters(&mut read, &queries, &|| false).is_err());
+        assert_eq!(calls, 1);
     }
 }

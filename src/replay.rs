@@ -135,6 +135,13 @@ pub struct StructuredNode {
     pub resource_index: Option<usize>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct StructuredMatch {
+    pub path: Vec<String>,
+    pub parent_flags: u32,
+    pub node: StructuredNode,
+}
+
 pub const STRUCTURE_PAGE_LIMIT: u32 = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -1348,6 +1355,10 @@ enum Reply {
     RemoteDirectory(crate::live::RemoteDirectory),
     RemoteCopy,
     Structure(StructurePage),
+    StructureFind {
+        event_id: u32,
+        matches: Vec<Option<StructuredMatch>>,
+    },
     Callstack(EventCallstack),
     Mesh(MeshInfo),
     MeshData {
@@ -1849,6 +1860,13 @@ trait Transport: Send {
         _limit: u32,
     ) -> Result<StructurePage, String> {
         Err("Structured event inspection is not supported by this transport".into())
+    }
+    fn structure_find(
+        &mut self,
+        _event: u32,
+        _names: &[String],
+    ) -> Result<Option<Vec<Option<StructuredMatch>>>, String> {
+        Ok(None)
     }
     fn structure_buffer(
         &mut self,
@@ -2629,6 +2647,45 @@ impl Transport for Process {
             }
             Reply::Error { message } => Err(message),
             _ => Err("Unexpected structured event response".into()),
+        }
+    }
+
+    fn structure_find(
+        &mut self,
+        event: u32,
+        names: &[String],
+    ) -> Result<Option<Vec<Option<StructuredMatch>>>, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        write!(input, "structure_find {event}").map_err(|e| e.to_string())?;
+        for name in names {
+            let encoded: String = name.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+            write!(
+                input,
+                " {}",
+                if encoded.is_empty() { "_" } else { &encoded }
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        writeln!(input)
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::StructureFind { event_id, matches }
+                if event_id == event
+                    && matches.len() == names.len()
+                    && matches.iter().zip(names).all(|(item, name)| {
+                        item.as_ref().is_none_or(|item| {
+                            item.node.name == *name
+                                && !item.path.is_empty()
+                                && item.path.iter().all(|n| n.parse::<u64>().is_ok())
+                        })
+                    }) =>
+            {
+                Ok(Some(matches))
+            }
+            Reply::Error { message } if message == "Unknown command" => Ok(None),
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected structured search response".into()),
         }
     }
 
@@ -3841,6 +3898,20 @@ impl Session {
             .lock()
             .map_err(|e| e.to_string())?
             .structure(event, path, offset, limit)
+    }
+
+    pub fn structure_find(
+        &self,
+        event: u32,
+        names: &[String],
+    ) -> Result<Option<Vec<Option<StructuredMatch>>>, String> {
+        if names.is_empty() || names.len() > 128 {
+            return Err("Invalid structured search names".into());
+        }
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .structure_find(event, names)
     }
 
     pub fn structure_buffer(

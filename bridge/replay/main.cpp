@@ -1783,6 +1783,49 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       std::cout << "\"}" << std::endl;
       continue;
     }
+    if(command.compare(0, 15, "structure_find ") == 0)
+    {
+      std::istringstream arguments(command.substr(15));
+      std::string event_text, encoded;
+      uint64_t event = 0;
+      if(!(arguments >> event_text) || !decimal(event_text, event) || event > UINT32_MAX)
+      { error("Invalid structured search event"); continue; }
+      auto found = event_chunks.find(uint32_t(event));
+      if(found == event_chunks.end()) { error("Structured data is unavailable for this event"); continue; }
+      const SDObject *root = replay.controller->GetStructuredFile().chunks[found->second];
+      std::vector<rdcstr> names;
+      bool valid = true;
+      while(arguments >> encoded)
+      {
+        bytebuf bytes;
+        if(!decode_section_hex(encoded, bytes)) { valid = false; break; }
+        names.push_back(bytes.empty() ? rdcstr() : rdcstr((const char *)bytes.data(), bytes.size()));
+      }
+      if(!valid || names.empty() || names.size() > 128) { error("Invalid structured search names"); continue; }
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"structure_find\",\"event_id\":" << event << ",\"matches\":[";
+      for(size_t n = 0; n < names.size(); ++n)
+      {
+        if(n) std::cout << ',';
+        const SDObject *object = root->FindChildRecursively(names[n]);
+        if(!object) { std::cout << "null"; continue; }
+        std::vector<uint64_t> path;
+        for(const SDObject *child = object; child != root; child = child->GetParent())
+        {
+          const SDObject *parent = child->GetParent();
+          size_t index = 0;
+          while(index < parent->NumChildren() && parent->GetChild(index) != child) ++index;
+          path.push_back(uint64_t(index));
+        }
+        std::reverse(path.begin(), path.end());
+        std::cout << "{\"path\":[";
+        for(size_t i = 0; i < path.size(); ++i) { if(i) std::cout << ','; std::cout << '"' << path[i] << '"'; }
+        std::cout << "],\"parent_flags\":" << uint32_t(object->GetParent()->type.flags) << ",\"node\":";
+        write_structured_node(object, resource_indices);
+        std::cout << '}';
+      }
+      std::cout << "]}" << std::endl;
+      continue;
+    }
     if(command.compare(0, 10, "structure ") == 0)
     {
       std::istringstream arguments(command.substr(10));

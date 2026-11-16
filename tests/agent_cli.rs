@@ -275,49 +275,6 @@ fn real_vulkan_mesh_shader_debug_trace() {
     let mut agent = Agent::new(Some(&bridge));
     let opened = agent.send(&serde_json::json!({"command":"open","path":capture}).to_string());
     assert_eq!(opened["ok"], true, "{opened}");
-    let topology_event = opened["data"]["capture"]["actions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|action| action["api_events"].as_array().into_iter().flatten())
-        .find(|event| {
-            event["name"]
-                .as_str()
-                .is_some_and(|name| name.contains("IASetPrimitiveTopology"))
-        })
-        .expect("topology event")["event_id"]
-        .as_u64()
-        .unwrap();
-    let structure = agent
-        .send(&serde_json::json!({"command":"structure","event_id":topology_event}).to_string());
-    let topology = structure["data"]["structure"]["children"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|node| node["name"] == "Topology")
-        .unwrap();
-    let value = topology["custom_string"].as_str().unwrap_or("4");
-    let parameter_filter = agent.send(
-        &serde_json::json!({"command":"filter_events","show_api":true,
-        "expression":format!("$param(Topology: {value})")})
-        .to_string(),
-    );
-    assert_eq!(parameter_filter["ok"], true, "{parameter_filter}");
-    assert!(
-        parameter_filter["data"]["events"]["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item["event_id"] == topology_event && item["direct_match"] == true),
-        "{parameter_filter}"
-    );
-    let unsupported = agent.send(
-        r#"{"command":"filter_events","expression":"$param(pShader: missing)","show_api":true}"#,
-    );
-    assert_eq!(
-        unsupported["error"]["code"], "invalid_filter",
-        "{unsupported}"
-    );
     let actions = opened["data"]["capture"]["actions"]
         .as_array()
         .expect("capture actions");
@@ -497,6 +454,77 @@ fn real_d3d11_mesh_draw_order() {
     let mut agent = Agent::new(bridge.to_str());
     let opened = agent.send(&serde_json::json!({"command":"open","path":capture}).to_string());
     assert_eq!(opened["ok"], true, "{opened}");
+    let topology_event = opened["data"]["capture"]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|action| action["api_events"].as_array().into_iter().flatten())
+        .find(|event| {
+            event["name"]
+                .as_str()
+                .is_some_and(|name| name.contains("IASetPrimitiveTopology"))
+        })
+        .expect("topology event")["event_id"]
+        .as_u64()
+        .unwrap();
+    let structure = agent
+        .send(&serde_json::json!({"command":"structure","event_id":topology_event}).to_string());
+    let topology = structure["data"]["structure"]["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["name"] == "Topology")
+        .unwrap();
+    let settings = renderdocx::backend::Settings {
+        replay_bridge: Some(bridge.clone()),
+        ..Default::default()
+    };
+    let (session, _) =
+        renderdocx::replay::Session::open(&settings, std::path::Path::new(capture)).unwrap();
+    let names = vec!["Topology".to_owned(), "missing_parameter".to_owned()];
+    let found = session
+        .structure_find(topology_event as u32, &names)
+        .unwrap()
+        .expect("new bridge search must be available");
+    assert_eq!(found[0].as_ref().unwrap().node.name, "Topology");
+    assert!(found[1].is_none());
+    drop(session);
+    let value = topology["custom_string"].as_str().unwrap_or("4");
+    let parameter_filter = agent.send(
+        &serde_json::json!({"command":"filter_events","show_api":true,
+        "expression":format!("$param(Topology: {value})")})
+        .to_string(),
+    );
+    assert_eq!(parameter_filter["ok"], true, "{parameter_filter}");
+    assert!(
+        parameter_filter["data"]["events"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["event_id"] == topology_event && item["direct_match"] == true),
+        "{parameter_filter}"
+    );
+    let combined = agent.send(
+        &serde_json::json!({"command":"filter_events","show_api":true,
+        "expression":format!("+$param(Topology: {value}) -$param(missing_parameter: x)")})
+        .to_string(),
+    );
+    assert_eq!(combined["ok"], true, "{combined}");
+    assert!(
+        combined["data"]["events"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["event_id"] == topology_event && item["direct_match"] == true),
+        "{combined}"
+    );
+    let unsupported = agent.send(
+        r#"{"command":"filter_events","expression":"$param(pShader: missing)","show_api":true}"#,
+    );
+    assert_eq!(
+        unsupported["error"]["code"], "invalid_filter",
+        "{unsupported}"
+    );
     let draw = opened["data"]["capture"]["actions"]
         .as_array()
         .unwrap()
