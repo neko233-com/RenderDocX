@@ -26,6 +26,50 @@ enum Invocation {
     Serve(Settings),
 }
 
+fn mesh_filter(request: &serde_json::Map<String, Value>) -> Result<mesh_draw::MeshFilter, String> {
+    let parse = |name: &str| -> Result<Option<u32>, String> {
+        match request.get(name) {
+            None | Some(Value::Null) => Ok(None),
+            Some(value) => value
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .map(Some)
+                .ok_or_else(|| format!("{name} must be an unsigned 32-bit integer")),
+        }
+    };
+    match (parse("meshlet")?, parse("task")?) {
+        (None, None) => Ok(mesh_draw::MeshFilter::All),
+        (Some(id), None) => Ok(mesh_draw::MeshFilter::Meshlet(id)),
+        (None, Some(id)) => Ok(mesh_draw::MeshFilter::Task(id)),
+        _ => Err("Specify at most one of meshlet or task".into()),
+    }
+}
+
+fn mesh_filter_tasks(
+    session: &Session,
+    event: u32,
+    selection: MeshSelection,
+    filter: mesh_draw::MeshFilter,
+) -> Result<Vec<[u32; 3]>, String> {
+    if !matches!(filter, mesh_draw::MeshFilter::Task(_)) {
+        return Ok(Vec::new());
+    }
+    if selection.stage != 4 {
+        return Err("Task filters require mesh output".into());
+    }
+    let task = session.mesh(
+        event,
+        MeshSelection {
+            stage: 3,
+            ..selection
+        },
+    );
+    let restore = session.mesh(event, selection);
+    let tasks = task?.tasks;
+    restore?;
+    Ok(tasks)
+}
+
 struct AgentDebugTimeline {
     trace: DebugTrace,
     states: Vec<DebugState>,
@@ -1109,19 +1153,36 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     .get("count")
                     .and_then(Value::as_u64)
                     .and_then(|v| u32::try_from(v).ok());
-                match (&opened, mesh_selection.as_ref(), offset, count) {
-                    (None, _, _, _) => Err(("no_capture", "No capture is open".into())),
-                    (Some(_), None, _, _) => Err(("no_mesh", "Query mesh data first".into())),
+                match (
+                    &opened,
+                    mesh_selection.as_ref(),
+                    offset,
+                    count,
+                    mesh_filter(&request),
+                ) {
+                    (None, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some(_), None, _, _, _) => Err(("no_mesh", "Query mesh data first".into())),
                     (
                         Some((session, _)),
                         Some((event, selection, info)),
                         Some(offset),
                         Some(count),
-                    ) => mesh_draw::page(info, offset, count, |kind, offset, length| {
-                        session.mesh_read(*event, *selection, kind, offset, length)
-                    })
-                    .map(|page| json!({"event_id":event,"selection":selection,"page":page}))
-                    .map_err(|error| ("replay_mesh_draw_failed", error)),
+                        Ok(filter),
+                    ) => mesh_filter_tasks(session, *event, *selection, filter)
+                        .and_then(|tasks| {
+                            mesh_draw::filtered_page(
+                                info,
+                                &tasks,
+                                filter,
+                                offset,
+                                count,
+                                |kind, offset, length| {
+                                    session.mesh_read(*event, *selection, kind, offset, length)
+                                },
+                            )
+                        })
+                        .map(|page| json!({"event_id":event,"selection":selection,"page":page}))
+                        .map_err(|error| ("replay_mesh_draw_failed", error)),
                     _ => Err((
                         "invalid_arguments",
                         "mesh_draw requires integer offset and count".into(),
@@ -1133,13 +1194,14 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     .get("path")
                     .and_then(Value::as_str)
                     .filter(|s| !s.is_empty());
-                match (&opened, mesh_selection.as_ref(), path) {
-                    (None, _, _) => Err(("no_capture", "No capture is open".into())),
-                    (Some(_), None, _) => Err(("no_mesh", "Query mesh data first".into())),
-                    (Some((session, _)), Some((event, selection, info)), Some(path)) => {
-                        renderdocx::mesh_export::write_csv(std::path::Path::new(path), info, |kind, offset, length| {
-                            session.mesh_read(*event, *selection, kind, offset, length)
-                        }).map(|rows| json!({"event_id":event,"selection":selection,"path":path,"rows":rows}))
+                match (&opened, mesh_selection.as_ref(), path, mesh_filter(&request)) {
+                    (None, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some(_), None, _, _) => Err(("no_mesh", "Query mesh data first".into())),
+                    (Some((session, _)), Some((event, selection, info)), Some(path), Ok(filter)) => {
+                        mesh_filter_tasks(session, *event, *selection, filter).and_then(|tasks|
+                            renderdocx::mesh_export::write_csv_filtered(std::path::Path::new(path), info, &tasks, filter, |kind, offset, length| {
+                                session.mesh_read(*event, *selection, kind, offset, length)
+                            })).map(|rows| json!({"event_id":event,"selection":selection,"path":path,"rows":rows}))
                           .map_err(|error| ("mesh_export_failed", error))
                     }
                     _ => Err(("invalid_arguments", "mesh_draw_export requires a path".into())),

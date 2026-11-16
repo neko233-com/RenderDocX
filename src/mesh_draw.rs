@@ -8,6 +8,107 @@ use std::collections::HashMap;
 
 pub const PAGE_LIMIT: u32 = 64;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MeshFilter {
+    #[default]
+    All,
+    Meshlet(u32),
+    Task(u32),
+}
+
+/// Return the global index-row interval for a meshlet or task dispatch.
+pub fn filter_range(
+    info: &MeshInfo,
+    tasks: &[[u32; 3]],
+    filter: MeshFilter,
+) -> Result<(u32, u32), String> {
+    if filter == MeshFilter::All {
+        return Ok((0, info.num_indices));
+    }
+    if info.stage != 4 {
+        return Err("Meshlet filters require mesh output".into());
+    }
+    let (first, end) = match filter {
+        MeshFilter::All => unreachable!(),
+        MeshFilter::Meshlet(id) => {
+            let index = id
+                .checked_sub(info.meshlet_offset)
+                .ok_or("Meshlet is out of range")? as usize;
+            if index >= info.meshlets.len() {
+                return Err("Meshlet is out of range".into());
+            }
+            (index, index + 1)
+        }
+        MeshFilter::Task(id) => {
+            let index = usize::try_from(id).map_err(|_| "Task is out of range")?;
+            if index >= tasks.len() {
+                return Err("Task is out of range".into());
+            }
+            let mut first = 0usize;
+            for dims in &tasks[..index] {
+                let n = dims
+                    .iter()
+                    .try_fold(1usize, |n, &v| n.checked_mul(v as usize))
+                    .ok_or("Task dispatch size overflow")?;
+                first = first.checked_add(n).ok_or("Task dispatch size overflow")?;
+            }
+            let n = tasks[index]
+                .iter()
+                .try_fold(1usize, |n, &v| n.checked_mul(v as usize))
+                .ok_or("Task dispatch size overflow")?;
+            (
+                first,
+                first.checked_add(n).ok_or("Task dispatch size overflow")?,
+            )
+        }
+    };
+    if end > info.meshlets.len() {
+        return Err("Task dispatch exceeds available meshlets".into());
+    }
+    let mut start = 0u32;
+    let mut total = 0u32;
+    for (index, meshlet) in info.meshlets.iter().enumerate() {
+        if index < first {
+            start = start
+                .checked_add(meshlet.indices)
+                .ok_or("Meshlet index count overflow")?;
+        } else if index < end {
+            total = total
+                .checked_add(meshlet.indices)
+                .ok_or("Meshlet index count overflow")?;
+        }
+    }
+    if start
+        .checked_add(total)
+        .is_none_or(|n| n > info.num_indices)
+    {
+        return Err("Meshlet index counts exceed mesh output".into());
+    }
+    Ok((start, total))
+}
+
+/// Page inside the filtered range while preserving absolute mesh and vertex IDs.
+pub fn filtered_page<F>(
+    info: &MeshInfo,
+    tasks: &[[u32; 3]],
+    filter: MeshFilter,
+    offset: u32,
+    count: u32,
+    read: F,
+) -> Result<DrawPage, String>
+where
+    F: FnMut(&str, u64, u32) -> Result<Vec<u8>, String>,
+{
+    let (start, total) = filter_range(info, tasks, filter)?;
+    if offset > total || count > PAGE_LIMIT {
+        return Err("Invalid mesh draw page".into());
+    }
+    let mut result = page(info, start + offset, count.min(total - offset), read)?;
+    result.offset = offset;
+    result.total = total;
+    Ok(result)
+}
+
 #[derive(Debug, Serialize)]
 pub struct DrawRow {
     pub row: u32,
@@ -181,6 +282,76 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn filters_meshlets_and_task_groups_with_absolute_indices() {
+        use crate::replay::MeshletInfo;
+        let info = MeshInfo {
+            stage: 4,
+            num_indices: 6,
+            meshlets: vec![
+                MeshletInfo {
+                    indices: 2,
+                    vertices: 2,
+                },
+                MeshletInfo {
+                    indices: 1,
+                    vertices: 1,
+                },
+                MeshletInfo {
+                    indices: 3,
+                    vertices: 3,
+                },
+            ],
+            ..Default::default()
+        };
+        let tasks = [[2, 1, 1], [0, 1, 1], [1, 1, 1]];
+        assert_eq!(
+            filter_range(&info, &tasks, MeshFilter::Task(0)).unwrap(),
+            (0, 3)
+        );
+        assert_eq!(
+            filter_range(&info, &tasks, MeshFilter::Task(1)).unwrap(),
+            (3, 0)
+        );
+        assert_eq!(
+            filter_range(&info, &tasks, MeshFilter::Task(2)).unwrap(),
+            (3, 3)
+        );
+        assert_eq!(
+            filter_range(&info, &tasks, MeshFilter::Meshlet(1)).unwrap(),
+            (2, 1)
+        );
+        assert!(filter_range(&info, &tasks, MeshFilter::Meshlet(3)).is_err());
+        assert!(filter_range(&info, &[[u32::MAX, u32::MAX, 2]], MeshFilter::Task(0)).is_err());
+        let page = filtered_page(
+            &info,
+            &tasks,
+            MeshFilter::Task(2),
+            1,
+            64,
+            |_, _, _| unreachable!(),
+        )
+        .unwrap();
+        assert_eq!((page.offset, page.total), (1, 3));
+        assert_eq!(
+            page.rows
+                .iter()
+                .map(|row| (row.row, row.meshlet, row.meshlet_row))
+                .collect::<Vec<_>>(),
+            [(4, Some(2), Some(1)), (5, Some(2), Some(2))]
+        );
+        assert!(
+            filtered_page(
+                &info,
+                &tasks,
+                MeshFilter::Task(2),
+                4,
+                1,
+                |_, _, _| unreachable!()
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn mesh_output_tracks_meshlet_boundaries_without_rebasing_indices() {
         use crate::replay::MeshletInfo;

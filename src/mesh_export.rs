@@ -9,9 +9,23 @@ pub fn write_csv<F>(path: &Path, info: &MeshInfo, mut read: F) -> Result<u32, St
 where
     F: FnMut(&str, u64, u32) -> Result<Vec<u8>, String>,
 {
+    write_csv_filtered(path, info, &[], mesh_draw::MeshFilter::All, &mut read)
+}
+
+pub fn write_csv_filtered<F>(
+    path: &Path,
+    info: &MeshInfo,
+    tasks: &[[u32; 3]],
+    filter: mesh_draw::MeshFilter,
+    mut read: F,
+) -> Result<u32, String>
+where
+    F: FnMut(&str, u64, u32) -> Result<Vec<u8>, String>,
+{
     if !matches!(info.stage, 1 | 2 | 4) {
         return Err("Draw-order export supports VS, GS and mesh output".into());
     }
+    let (_, total) = mesh_draw::filter_range(info, tasks, filter)?;
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -31,8 +45,15 @@ where
         )
         .map_err(|error| format!("Cannot write CSV: {error}"))?;
         let mut offset = 0;
-        while offset < info.num_indices {
-            let page = mesh_draw::page(info, offset, mesh_draw::PAGE_LIMIT, &mut read)?;
+        while offset < total {
+            let page = mesh_draw::filtered_page(
+                info,
+                tasks,
+                filter,
+                offset,
+                mesh_draw::PAGE_LIMIT,
+                &mut read,
+            )?;
             if page.rows.is_empty() {
                 return Err("Mesh export made no progress".into());
             }
@@ -74,7 +95,7 @@ where
     }
     temp.persist_noclobber(path)
         .map_err(|error| format!("Cannot create CSV destination: {}", error.error))?;
-    Ok(info.num_indices)
+    Ok(total)
 }
 
 #[cfg(test)]

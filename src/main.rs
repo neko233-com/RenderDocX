@@ -312,6 +312,8 @@ struct MeshView {
     info: Option<MeshInfo>,
     bytes: Option<Vec<u8>>,
     draw: Option<renderdocx::mesh_draw::DrawPage>,
+    filter: renderdocx::mesh_draw::MeshFilter,
+    task_sizes: Vec<[u32; 3]>,
     offset: u64,
 }
 
@@ -327,6 +329,8 @@ impl Default for MeshView {
             info: None,
             bytes: None,
             draw: None,
+            filter: renderdocx::mesh_draw::MeshFilter::All,
+            task_sizes: Vec::new(),
             offset: 0,
         }
     }
@@ -4969,6 +4973,19 @@ impl Workspace {
         };
         let revision = self.open_revision;
         let selection_revision = self.selection_revision;
+        let filter = if selection == self.mesh.selection
+            && self
+                .mesh
+                .info
+                .as_ref()
+                .is_some_and(|info| info.event_id == event)
+            && selection.stage == 4
+            && kind == MeshBufferKind::Draw
+        {
+            self.mesh.filter
+        } else {
+            renderdocx::mesh_draw::MeshFilter::All
+        };
         self.resource_pending = true;
         self.status = Some(
             self.t(
@@ -4981,18 +4998,36 @@ impl Workspace {
         );
         cx.notify();
         let task = cx.background_executor().spawn(async move {
+            let task_sizes = if selection.stage == 4 && kind == MeshBufferKind::Draw {
+                let result = session.mesh(
+                    event,
+                    MeshSelection {
+                        stage: 3,
+                        ..selection
+                    },
+                );
+                if matches!(filter, renderdocx::mesh_draw::MeshFilter::Task(_)) {
+                    result?.tasks
+                } else {
+                    result.map(|info| info.tasks).unwrap_or_default()
+                }
+            } else {
+                Vec::new()
+            };
             let info = session.mesh(event, selection)?;
             if kind == MeshBufferKind::Draw {
                 let offset = u32::try_from(offset).map_err(|_| "Invalid mesh draw offset")?;
-                let page = renderdocx::mesh_draw::page(
+                let page = renderdocx::mesh_draw::filtered_page(
                     &info,
+                    &task_sizes,
+                    filter,
                     offset,
                     renderdocx::mesh_draw::PAGE_LIMIT,
                     |kind, offset, length| {
                         session.mesh_read(event, selection, kind, offset, length)
                     },
                 )?;
-                return Ok::<_, String>((info, None, Some(page)));
+                return Ok::<_, String>((info, None, Some(page), task_sizes));
             }
             let (bound, buffer, length) = match kind {
                 MeshBufferKind::Vertex => (info.vertex_bound, "vertex", mesh_page_size(&info)),
@@ -5008,7 +5043,7 @@ impl Workspace {
             } else {
                 None
             };
-            Ok::<_, String>((info, bytes, None))
+            Ok::<_, String>((info, bytes, None, task_sizes))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -5018,13 +5053,15 @@ impl Workspace {
                 }
                 this.resource_pending = false;
                 match result {
-                    Ok((info, bytes, draw)) => {
+                    Ok((info, bytes, draw, task_sizes)) => {
                         this.mesh = MeshView {
                             selection,
                             kind,
                             info: Some(info),
                             bytes,
                             draw,
+                            filter,
+                            task_sizes,
                             offset,
                         };
                         this.status = None;
@@ -5075,6 +5112,40 @@ impl Workspace {
                 cx.notify();
             }
         }
+    }
+
+    fn cycle_mesh_filter(&mut self, task_group: bool, cx: &mut Context<Self>) {
+        use renderdocx::mesh_draw::MeshFilter;
+        let Some(info) = self.mesh.info.as_ref() else {
+            return;
+        };
+        if self.resource_pending
+            || self.mesh.selection.stage != 4
+            || self.mesh.kind != MeshBufferKind::Draw
+        {
+            return;
+        }
+        let count = if task_group {
+            self.mesh.task_sizes.len()
+        } else {
+            info.meshlets.len()
+        };
+        if count == 0 {
+            return;
+        }
+        let base = if task_group { 0 } else { info.meshlet_offset };
+        let index = match self.mesh.filter {
+            MeshFilter::Task(id) if task_group => id.checked_add(1),
+            MeshFilter::Meshlet(id) if !task_group => id.checked_add(1),
+            _ => Some(base),
+        };
+        self.mesh.filter =
+            match index.filter(|id| id.checked_sub(base).is_some_and(|i| (i as usize) < count)) {
+                Some(id) if task_group => MeshFilter::Task(id),
+                Some(id) => MeshFilter::Meshlet(id),
+                None => MeshFilter::All,
+            };
+        self.read_mesh(self.mesh.selection, MeshBufferKind::Draw, 0, cx);
     }
 
     fn read_event_callstack(&mut self, resolve: bool, cx: &mut Context<Self>) {
@@ -6133,6 +6204,8 @@ impl Workspace {
         };
         let selection = self.mesh.selection;
         let event = info.event_id;
+        let filter = self.mesh.filter;
+        let task_sizes = self.mesh.task_sizes.clone();
         let Some(destination) = rfd::FileDialog::new()
             .set_file_name("mesh-positions.csv")
             .add_filter("CSV", &["csv"])
@@ -6155,9 +6228,13 @@ impl Workspace {
         cx.notify();
         let task = cx.background_executor().spawn(async move {
             let info = session.mesh(event, selection)?;
-            renderdocx::mesh_export::write_csv(&destination, &info, |kind, offset, length| {
-                session.mesh_read(event, selection, kind, offset, length)
-            })
+            renderdocx::mesh_export::write_csv_filtered(
+                &destination,
+                &info,
+                &task_sizes,
+                filter,
+                |kind, offset, length| session.mesh_read(event, selection, kind, offset, length),
+            )
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -10144,6 +10221,31 @@ impl Workspace {
                 };
                 view = view
                     .child(format!("{event_label}: {} · {stage}", info.event_id))
+                    .when(
+                        self.mesh.kind == MeshBufferKind::Draw && info.stage == 4,
+                        |view| {
+                            use renderdocx::mesh_draw::MeshFilter;
+                            let label = match self.mesh.filter {
+                                MeshFilter::All => self
+                                    .t(
+                                        "All meshlets",
+                                        "全部网格组",
+                                        "すべてのメッシュレット",
+                                        "모든 메시렛",
+                                    )
+                                    .to_owned(),
+                                MeshFilter::Meshlet(id) => format!(
+                                    "{} {id}",
+                                    self.t("Meshlet", "网格组", "メッシュレット", "메시렛")
+                                ),
+                                MeshFilter::Task(id) => format!(
+                                    "{} {id}",
+                                    self.t("Task group", "任务组", "タスクグループ", "태스크 그룹")
+                                ),
+                            };
+                            view.child(label)
+                        },
+                    )
                     .child(format!(
                         "{instances_label}: {} · {}: {}",
                         info.instance,
@@ -12780,6 +12882,9 @@ impl Workspace {
                                         .child(button("mesh-buffer-vertex", self.t("Vertices", "顶点", "頂点", "정점"), self.mesh.kind == MeshBufferKind::Vertex, |this, cx| this.read_mesh(this.mesh.selection, MeshBufferKind::Vertex, 0, cx), cx))
                                         .child(button("mesh-buffer-index", self.t("Indices", "索引", "インデックス", "인덱스"), self.mesh.kind == MeshBufferKind::Index, |this, cx| this.read_mesh(this.mesh.selection, MeshBufferKind::Index, 0, cx), cx))
                                         .child(button("mesh-buffer-draw", self.t("Draw order", "绘制顺序", "描画順", "그리기 순서"), self.mesh.kind == MeshBufferKind::Draw, |this, cx| this.read_mesh(this.mesh.selection, MeshBufferKind::Draw, 0, cx), cx))
+                                        .when(self.mesh.selection.stage == 4 && self.mesh.kind == MeshBufferKind::Draw, |view| view
+                                            .when(self.mesh.info.as_ref().is_some_and(|info| !info.meshlets.is_empty()), |view| view.child(button("mesh-filter-meshlet", self.t("Next meshlet", "下一个网格组", "次のメッシュレット", "다음 메시렛"), matches!(self.mesh.filter, renderdocx::mesh_draw::MeshFilter::Meshlet(_)), |this, cx| this.cycle_mesh_filter(false, cx), cx)))
+                                            .when(!self.mesh.task_sizes.is_empty(), |view| view.child(button("mesh-filter-task", self.t("Next task group", "下一个任务组", "次のタスクグループ", "다음 태스크 그룹"), matches!(self.mesh.filter, renderdocx::mesh_draw::MeshFilter::Task(_)), |this, cx| this.cycle_mesh_filter(true, cx), cx))))
                                         .child(button("mesh-export-csv", self.t("Export positions CSV", "导出位置 CSV", "位置を CSV で書き出す", "위치 CSV 내보내기"), false, |this, cx| this.export_mesh_draw_csv(cx), cx))
                                         .child(button(
                                             "mesh-stage",

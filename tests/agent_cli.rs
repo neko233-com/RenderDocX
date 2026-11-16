@@ -262,6 +262,14 @@ fn real_vulkan_mesh_shader_debug_trace() {
         (Some(1), Some(0))
     );
     assert_eq!(rows[6]["vertex"], 6);
+    let filtered = agent.send(r#"{"command":"mesh_draw","offset":0,"count":64,"meshlet":1}"#);
+    assert_eq!(filtered["ok"], true, "{filtered}");
+    assert_eq!(filtered["data"]["page"]["total"], 6);
+    assert_eq!(filtered["data"]["page"]["rows"][0]["row"], 6);
+    assert_eq!(filtered["data"]["page"]["rows"][0]["meshlet"], 1);
+    let invalid_filter =
+        agent.send(r#"{"command":"mesh_draw","offset":0,"count":1,"meshlet":0,"task":0}"#);
+    assert_eq!(invalid_filter["error"]["code"], "invalid_arguments");
     let first = rows[0]["position"].as_array().unwrap();
     assert!((first[0].as_f64().unwrap() + 0.85).abs() < 0.001);
     assert!((first[1].as_f64().unwrap() - 0.45).abs() < 0.001);
@@ -329,6 +337,19 @@ fn real_vulkan_mesh_shader_debug_trace() {
             .unwrap_or_else(|| panic!("missing {name}: {row}"));
         assert_eq!(field["values"][0], value, "{field}");
     }
+    let mesh = agent.send(r#"{"command":"mesh","stage":"mesh_out","instance":0,"view":0}"#);
+    assert_eq!(mesh["ok"], true, "{mesh}");
+    let task_filtered = agent.send(r#"{"command":"mesh_draw","offset":0,"count":64,"task":0}"#);
+    assert_eq!(task_filtered["ok"], true, "{task_filtered}");
+    assert_eq!(task_filtered["data"]["page"]["total"], 12);
+    assert_eq!(task_filtered["data"]["page"]["rows"][9]["meshlet"], 3);
+    let path = dir.path().join("task-meshlet.csv");
+    let export = agent.send(
+        &serde_json::json!({"command":"mesh_draw_export","path":path,"meshlet":2}).to_string(),
+    );
+    assert_eq!(export["ok"], true, "{export}");
+    assert_eq!(export["data"]["rows"], 3);
+    assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 4);
     agent.quit();
 }
 
