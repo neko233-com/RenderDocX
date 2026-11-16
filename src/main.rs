@@ -14437,7 +14437,11 @@ mod ui_tests {
             view.update(cx, |view, cx| {
                 view.snapshot.as_mut().unwrap().api = 3; // Exercise Vulkan-style fixed prefixes.
                 view.buffer_layout_input.update(cx, |input, cx| {
-                    input.set_value("uint header; float2 values[];", window, cx)
+                    input.set_value(
+                        "struct S { uint header; float2 values[]; }; S root;",
+                        window,
+                        cx,
+                    )
                 });
                 view.apply_buffer_layout(cx);
             });
@@ -14477,7 +14481,7 @@ mod ui_tests {
                 .unwrap()
                 .decode_with_prefix(0, 252, view.buffer_data.as_ref().unwrap(), prefix)
                 .unwrap();
-            assert_eq!(page.fixed.unwrap()[0].name, "header");
+            assert_eq!(page.fixed.unwrap()[0].name, "root.header");
             assert_eq!(page.rows[0].offset, "252");
         });
         cx.update_window(handle.into(), |_, window, cx| {

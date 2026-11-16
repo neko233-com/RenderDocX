@@ -23,6 +23,7 @@ struct Field {
     bit_offset: u32,
     bit_size: Option<u32>,
     count: usize,
+    unbounded: bool,
     offset: usize,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -454,8 +455,13 @@ impl Layout {
                 if tokens.get(end + 1) != Some(&";") {
                     return Err("Expected semicolon after struct".into());
                 }
-                let mut layout =
-                    Self::parse_body(&tokens[body..end], &definitions, &enums, packing, true)?;
+                let mut layout = Self::parse_declarations(
+                    &tokens[body..end],
+                    &definitions,
+                    &enums,
+                    packing,
+                    true,
+                )?;
                 if let Some(override_alignment) =
                     struct_alignment.filter(|alignment| *alignment != 0)
                 {
@@ -546,13 +552,11 @@ impl Layout {
             }
         }
         if i == tokens.len() {
-            return last
-                .map(|layout| {
-                    let mut layout = (*layout).clone();
-                    layout.single = single_definition;
-                    layout
-                })
-                .ok_or_else(|| "Layout must contain fields".into());
+            let mut layout = last
+                .map(|layout| (*layout).clone())
+                .ok_or("Layout must contain fields")?;
+            layout.single = single_definition;
+            return Self::split_repeating(layout, false);
         }
         let mut body = &tokens[i..];
         let single = body.get(..5).is_some_and(|v| {
@@ -561,42 +565,125 @@ impl Layout {
         if single {
             body = &body[5..];
         }
+        let mut layout = Self::parse_declarations(body, &definitions, &enums, packing, false)?;
+        if single
+            && (layout.fields.len() != 1 || body.iter().filter(|token| **token == ";").count() != 1)
+        {
+            return Err("A fixed variable must be the only root variable".into());
+        }
+        layout.single = single;
+        Self::split_repeating(
+            layout,
+            body.iter().filter(|token| **token == ";").count() > 1,
+        )
+    }
+
+    fn parse_declarations<'a>(
+        body: &[&'a str],
+        definitions: &HashMap<&str, Arc<Layout>>,
+        enums: &HashMap<&str, Arc<EnumDefinition>>,
+        packing: Packing,
+        is_struct: bool,
+    ) -> Result<Self, String> {
         if body.ends_with(&["[", "]", ";"]) {
-            if single {
-                return Err("Fixed variables cannot be unbounded arrays".into());
-            }
             let name = *body
                 .get(body.len().saturating_sub(4))
                 .ok_or("Missing array name")?;
             let mut sized = body.to_vec();
             sized.insert(sized.len() - 2, "2");
-            let mut layout = Self::parse_body(&sized, &definitions, &enums, packing, false)?;
-            let mut field = layout.fields.pop().ok_or("Missing repeated field")?;
+            let mut layout = Self::parse_body(&sized, definitions, enums, packing, is_struct)?;
+            let field = layout.fields.last_mut().ok_or("Missing repeated field")?;
             if field.name != name || field.count != 2 || field.bit_size.is_some() {
                 return Err("Invalid unbounded array".into());
             }
-            let offset = field.offset;
-            field.offset = 0;
+            field.unbounded = true;
             field.count = 1;
+            Ok(layout)
+        } else {
+            Self::parse_body(body, definitions, enums, packing, is_struct)
+        }
+    }
+
+    fn contains_unbounded(field: &Field) -> bool {
+        field.unbounded
+            || field
+                .nested
+                .as_ref()
+                .is_some_and(|layout| layout.fields.iter().any(Self::contains_unbounded))
+    }
+
+    fn extract_repeating(
+        fields: &mut Vec<Field>,
+        prefix: &str,
+        base: usize,
+    ) -> Result<Option<(Field, usize, bool)>, String> {
+        if fields
+            .iter()
+            .take(fields.len().saturating_sub(1))
+            .any(Self::contains_unbounded)
+        {
+            return Err("Only the final member can contain an unbounded array".into());
+        }
+        let Some(last) = fields.last_mut() else {
+            return Ok(None);
+        };
+        if last.unbounded {
+            if last
+                .nested
+                .as_ref()
+                .is_some_and(|nested| nested.fields.iter().any(Self::contains_unbounded))
+            {
+                return Err("Nested unbounded arrays are not supported".into());
+            }
+            let mut repeated = fields.pop().unwrap();
+            let offset = base
+                .checked_add(repeated.offset)
+                .ok_or("Layout size overflow")?;
+            repeated.name = format!("{prefix}{}", repeated.name);
+            repeated.offset = 0;
+            repeated.unbounded = false;
+            return Ok(Some((repeated, offset, false)));
+        }
+        if let Some(nested) = &last.nested {
+            if nested.fields.iter().any(Self::contains_unbounded) {
+                if last.count != 1 {
+                    return Err(
+                        "Arrays of structs containing an unbounded array are not supported".into(),
+                    );
+                }
+                let mut fixed = (**nested).clone();
+                let child_prefix = format!("{prefix}{}.", last.name);
+                let child_base = base
+                    .checked_add(last.offset)
+                    .ok_or("Layout size overflow")?;
+                let extracted =
+                    Self::extract_repeating(&mut fixed.fields, &child_prefix, child_base)?;
+                if fixed.fields.is_empty() {
+                    fields.pop();
+                } else {
+                    last.nested = Some(Arc::new(fixed));
+                }
+                return Ok(extracted.map(|(field, offset, _)| (field, offset, true)));
+            }
+        }
+        Ok(None)
+    }
+
+    fn split_repeating(mut layout: Self, root_siblings: bool) -> Result<Self, String> {
+        if let Some((field, offset, nested)) = Self::extract_repeating(&mut layout.fields, "", 0)? {
+            if layout.single {
+                return Err("Fixed layouts cannot contain unbounded arrays".into());
+            }
             layout.stride = field.array_stride;
+            let has_fixed_prefix = nested || root_siblings || !layout.fields.is_empty();
             layout.repeat = Some(Repeat {
                 offset,
                 fixed_fields: std::mem::take(&mut layout.fields),
-                has_fixed_prefix: body.iter().filter(|token| **token == ";").count() > 1,
+                has_fixed_prefix,
             });
             layout.fields.push(field);
-            Ok(layout)
-        } else {
-            let mut layout = Self::parse_body(body, &definitions, &enums, packing, false)?;
-            if single
-                && (layout.fields.len() != 1
-                    || body.iter().filter(|token| **token == ";").count() != 1)
-            {
-                return Err("A fixed variable must be the only root variable".into());
-            }
-            layout.single = single;
-            Ok(layout)
         }
+        Ok(layout)
     }
 
     fn parse_body(
@@ -764,6 +851,7 @@ impl Layout {
                         bit_offset: 0,
                         bit_size: None,
                         count,
+                        unbounded: false,
                         offset: cursor,
                     });
                 }
@@ -1017,6 +1105,7 @@ impl Layout {
                         bit_offset: position as u32,
                         bit_size: Some(bits),
                         count: 1,
+                        unbounded: false,
                         offset: cursor,
                     });
                 }
@@ -1144,6 +1233,7 @@ impl Layout {
                     bit_offset: 0,
                     bit_size: None,
                     count,
+                    unbounded: false,
                     offset: cursor,
                 });
             }
@@ -1650,6 +1740,8 @@ mod tests {
         assert!(layout.validate_graphics_api(1).is_err());
         assert!(layout.validate_graphics_api(2).is_ok());
         assert!(layout.validate_graphics_api(3).is_ok());
+        let implicit = Layout::parse("struct S { uint head; float values[]; };").unwrap();
+        assert!(implicit.validate_graphics_api(0).is_err());
         assert!(
             Layout::parse("float2 data[];")
                 .unwrap()
@@ -1690,7 +1782,7 @@ mod tests {
         );
         assert!(layout.decode_at(0, 9, &bytes[..8]).is_err());
         assert!(layout.decode_at(0, 0, &bytes[..4]).is_err());
-        assert!(Layout::parse("struct S { float v[]; }; S value;").is_err());
+        assert!(Layout::parse("struct S { float v[]; }; S value;").is_ok());
         assert!(Layout::parse("float a[]; uint b;").is_err());
         let structures =
             Layout::parse("struct S { float a; uint b; }; uint header; S data[];").unwrap();
@@ -1702,6 +1794,49 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn nested_unbounded_arrays_preserve_fixed_paths_and_offsets() {
+        let layout = Layout::parse("struct Inner { uint b; float2 pos[]; }; struct Outer { uint a; Inner data; }; Outer root;").unwrap();
+        assert_eq!(layout.repeat_offset(), Some(8));
+        assert_eq!(layout.stride(), 8);
+        assert!(layout.validate_graphics_api(0).is_err());
+        assert!(layout.validate_graphics_api(3).is_ok());
+        let bytes = [
+            1u32.to_le_bytes(),
+            2u32.to_le_bytes(),
+            1f32.to_le_bytes(),
+            2f32.to_le_bytes(),
+            3f32.to_le_bytes(),
+            4f32.to_le_bytes(),
+        ]
+        .concat();
+        let first = layout.decode_at(0, 0, &bytes[..16]).unwrap();
+        let fixed = first.fixed.unwrap();
+        assert_eq!(
+            fixed
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            ["root.a", "root.data.b"]
+        );
+        assert_eq!(fixed[1].values[0][0], "2");
+        assert_eq!(first.rows[0].fields[0].name, "root.data.pos");
+        assert_eq!(first.rows[0].fields[0].values[0], ["1", "2"]);
+        let next = layout
+            .decode_with_prefix(0, 16, &bytes[16..], &bytes[..8])
+            .unwrap();
+        assert_eq!(next.fixed.unwrap()[1].offset, "4");
+        assert_eq!(next.rows[0].fields[0].values[0], ["3", "4"]);
+        for bad in [
+            "struct S { uint n; uint data[]; }; S a; uint b;",
+            "struct S { uint data[]; }; S a[];",
+            "struct S { uint data[]; }; S a[2];",
+            "[[single]] struct S { uint data[]; };",
+        ] {
+            assert!(Layout::parse(bad).is_err(), "{bad}");
+        }
     }
     #[test]
     fn bitfields_follow_upstream_rollover_and_sign_extension() {

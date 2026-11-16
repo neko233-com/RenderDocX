@@ -403,6 +403,19 @@ fn real_opengl_vertex_inputs_include_generic_and_normalized_values() {
         "{later}"
     );
     assert_eq!(later["data"]["page"]["rows"][0]["offset"], "4", "{later}");
+    let nested = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":buffer_index, "origin":"0", "offset":"4", "length":8, "include_fixed":true, "layout":"struct Payload { uint header; uint2 values[]; }; Payload root;"}).to_string());
+    assert_eq!(
+        nested["data"]["page"]["fixed"][0]["name"], "root.header",
+        "{nested}"
+    );
+    assert_eq!(
+        nested["data"]["page"]["fixed"][0]["values"][0][0], header,
+        "{nested}"
+    );
+    assert_eq!(
+        nested["data"]["page"]["rows"][0]["fields"][0]["name"], "root.values",
+        "{nested}"
+    );
     let attributes = selected["data"]["pipeline"]["vertex_inputs"]
         .as_array()
         .unwrap();
