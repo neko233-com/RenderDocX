@@ -1057,6 +1057,9 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
   rdcarray<CounterResult> counter_results;
   uint64_t counter_generation = 0;
   bool counters_ready = false;
+  bool raw_ready = false;
+  uint32_t raw_event = 0, raw_index = 0, raw_mip = 0, raw_slice = 0, raw_sample = 0;
+  bytebuf raw_cache;
 
   std::string command;
   while(std::getline(std::cin, command))
@@ -1528,6 +1531,8 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       if(!result.OK()) { error(result_message(result)); break; }
       mesh_ready = false;
       history_ready = false;
+      raw_ready = false;
+      raw_cache = bytebuf();
       cached_history = rdcarray<PixelModification>();
       if(selected) replay.controller->SetFrameEvent(selected_event, true);
       result = replay.controller->GetFatalErrorStatus();
@@ -1803,6 +1808,7 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
         }
       }
       else replacements.remove(from);
+      raw_ready = false; raw_cache = bytebuf();
       replay.controller->ClearReplayCache();
       replay.controller->SetFrameEvent(selected_event, true);
       result = replay.controller->GetFatalErrorStatus();
@@ -2147,6 +2153,42 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
                 << ",\"x\":" << x << ",\"y\":" << y << ",\"bits\":[" << bits[0] << ',' << bits[1] << ',' << bits[2] << ',' << bits[3] << "]}" << std::endl;
       continue;
     }
+    if(command.compare(0, 8, "rawpage ") == 0)
+    {
+      if(!selected) { error("Select an event before reading textures"); continue; }
+      std::istringstream args(command.substr(8));
+      std::string index_text, mip_text, slice_text, sample_text, offset_text, length_text, extra;
+      uint64_t index = 0, mip = 0, slice = 0, sample = 0, offset = 0, length = 0;
+      if(!(args >> index_text >> mip_text >> slice_text >> sample_text >> offset_text >> length_text) || (args >> extra) ||
+         !decimal(index_text, index) || !decimal(mip_text, mip) || !decimal(slice_text, slice) ||
+         !decimal(sample_text, sample) || !decimal(offset_text, offset) || !decimal(length_text, length) ||
+         index >= texture_ids.size() || length > 65536)
+      { error("Invalid raw texture page request"); continue; }
+      const TextureRef &texture = texture_ids[size_t(index)];
+      if(mip >= texture.mips || slice >= texture.arraysize || sample >= texture.samples ||
+         (texture.dimension == 3 && slice != 0))
+      { error("Raw texture selection is out of range"); continue; }
+      if(!raw_ready || raw_event != selected_event || raw_index != index || raw_mip != mip || raw_slice != slice || raw_sample != sample)
+      {
+        raw_ready = false;
+        raw_cache = bytebuf();
+        raw_cache = replay.controller->GetTextureData(texture.id, Subresource(uint32_t(mip), uint32_t(slice), uint32_t(sample)));
+        result = replay.controller->GetFatalErrorStatus();
+        if(!result.OK()) { error(result_message(result)); break; }
+        if(raw_cache.empty()) { error("Texture data is unavailable"); continue; }
+        raw_ready = true; raw_event = selected_event; raw_index = uint32_t(index); raw_mip = uint32_t(mip);
+        raw_slice = uint32_t(slice); raw_sample = uint32_t(sample);
+      }
+      if(offset > raw_cache.size()) { error("Raw texture offset is out of range"); continue; }
+      const uint64_t count = (std::min)(length, uint64_t(raw_cache.size()) - offset);
+      static const char hex[] = "0123456789abcdef";
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"raw_texture_page\",\"event_id\":" << selected_event
+                << ",\"index\":" << index << ",\"mip\":" << mip << ",\"slice\":" << slice << ",\"sample\":" << sample
+                << ",\"offset\":\"" << offset << "\",\"total\":\"" << raw_cache.size() << "\",\"hex\":\"";
+      for(uint64_t i = 0; i < count; ++i) { const byte b = raw_cache[size_t(offset + i)]; std::cout << hex[b >> 4] << hex[b & 15]; }
+      std::cout << "\"}" << std::endl;
+      continue;
+    }
     if(command.compare(0, 8, "rawsave ") == 0)
     {
       if(!selected) { error("Select an event before exporting textures"); continue; }
@@ -2285,6 +2327,8 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
     debug.reset();
     mesh_ready = false;
     history_ready = false;
+    raw_ready = false;
+    raw_cache = bytebuf();
     cached_history = rdcarray<PixelModification>();
     replay.controller->SetFrameEvent(uint32_t(event), false);
     result = replay.controller->GetFatalErrorStatus();

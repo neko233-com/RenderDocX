@@ -854,6 +854,18 @@ pub struct RawTextureSelection {
     pub slice: u32,
     pub sample: u32,
 }
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RawTexturePage {
+    pub event_id: u32,
+    pub index: u32,
+    pub mip: u32,
+    pub slice: u32,
+    pub sample: u32,
+    pub offset: String,
+    pub total: String,
+    pub hex: String,
+}
 impl RawTextureSelection {
     pub fn validate(&self, texture: &Texture) -> Result<(), String> {
         if self.mip >= texture.mips
@@ -1300,6 +1312,7 @@ enum Reply {
         offset: String,
         hex: String,
     },
+    RawTexturePage(RawTexturePage),
     Shader(ShaderReport),
     ShaderConstants(ShaderConstants),
     ShaderBindings(ShaderBindings),
@@ -1693,6 +1706,16 @@ trait Transport: Send {
         _path: &Path,
     ) -> Result<(), String> {
         Err("Raw texture export is not supported by this transport".into())
+    }
+    fn read_texture_raw(
+        &mut self,
+        _event: u32,
+        _index: u32,
+        _selection: RawTextureSelection,
+        _offset: u64,
+        _length: u32,
+    ) -> Result<RawTexturePage, String> {
+        Err("Raw texture paging is not supported by this transport".into())
     }
     fn read_buffer(&mut self, _index: u32, _offset: u64, _length: u32) -> Result<Vec<u8>, String> {
         Err("Buffer reading is not supported by this transport".into())
@@ -2692,6 +2715,47 @@ impl Transport for Process {
         }
     }
 
+    fn read_texture_raw(
+        &mut self,
+        event: u32,
+        index: u32,
+        selection: RawTextureSelection,
+        offset: u64,
+        length: u32,
+    ) -> Result<RawTexturePage, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(
+            input,
+            "rawpage {index} {} {} {} {offset} {length}",
+            selection.mip, selection.slice, selection.sample
+        )
+        .and_then(|_| input.flush())
+        .map_err(|error| error.to_string())?;
+        match self.read()? {
+            Reply::RawTexturePage(page) => {
+                let total = page
+                    .total
+                    .parse::<u64>()
+                    .map_err(|_| "Invalid raw texture length")?;
+                if page.event_id != event
+                    || page.index != index
+                    || page.mip != selection.mip
+                    || page.slice != selection.slice
+                    || page.sample != selection.sample
+                    || page.offset != offset.to_string()
+                    || offset > total
+                {
+                    return Err("Unexpected raw texture page".into());
+                }
+                let expected = (total - offset).min(u64::from(length)) as u32;
+                decode_buffer_hex(&page.hex, expected)?;
+                Ok(page)
+            }
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected raw texture response".into()),
+        }
+    }
+
     fn read_buffer(&mut self, index: u32, offset: u64, length: u32) -> Result<Vec<u8>, String> {
         let input = self.input.as_mut().ok_or("Replay session has closed")?;
         writeln!(input, "buffer {index} {offset} {length}")
@@ -3216,6 +3280,31 @@ impl Session {
 
     pub fn next_revision(&self) -> u64 {
         self.revision.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    pub fn read_texture_raw(
+        &self,
+        event: u32,
+        index: u32,
+        texture: &Texture,
+        selection: RawTextureSelection,
+        offset: u64,
+        length: u32,
+    ) -> Result<RawTexturePage, String> {
+        selection.validate(texture)?;
+        if length > BUFFER_PAGE_LIMIT || offset.checked_add(u64::from(length)).is_none() {
+            return Err("Invalid raw texture page range".into());
+        }
+        let revision = self.revision.load(Ordering::SeqCst);
+        let mut process = self.process.lock().map_err(|error| error.to_string())?;
+        if self.revision.load(Ordering::SeqCst) != revision {
+            return Err("Replay selection changed".into());
+        }
+        let page = process.read_texture_raw(event, index, selection, offset, length)?;
+        if self.revision.load(Ordering::SeqCst) != revision {
+            return Err("Replay selection changed".into());
+        }
+        Ok(page)
     }
 
     pub fn read_buffer(&self, index: u32, offset: u64, length: u32) -> Result<Vec<u8>, String> {
@@ -4172,6 +4261,33 @@ pub mod test_support {
                 174, 66, 96, 130,
             ];
             std::fs::write(path, PIXEL).map_err(|error| error.to_string())
+        }
+
+        fn read_texture_raw(
+            &mut self,
+            event: u32,
+            index: u32,
+            selection: RawTextureSelection,
+            offset: u64,
+            length: u32,
+        ) -> Result<RawTexturePage, String> {
+            let total = 300u64;
+            if offset > total {
+                return Err("Raw texture offset is out of range".into());
+            }
+            let hex = (offset..offset + (total - offset).min(u64::from(length)))
+                .map(|value| format!("{:02x}", value as u8))
+                .collect();
+            Ok(RawTexturePage {
+                event_id: event,
+                index,
+                mip: selection.mip,
+                slice: selection.slice,
+                sample: selection.sample,
+                offset: offset.to_string(),
+                total: total.to_string(),
+                hex,
+            })
         }
 
         fn read_buffer(

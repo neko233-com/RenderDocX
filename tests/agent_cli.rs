@@ -480,6 +480,10 @@ fn real_opengl_vertex_inputs_include_generic_and_normalized_values() {
             255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255
         ]
     );
+    let first = agent.send(&serde_json::json!({"command":"read_texture_raw", "index":texture, "offset":"0", "length":8}).to_string());
+    assert_eq!(first["data"]["page"]["hex"], "ff0000ff00ff00ff", "{first}");
+    let last = agent.send(&serde_json::json!({"command":"read_texture_raw", "index":texture, "offset":"8", "length":16}).to_string());
+    assert_eq!(last["data"]["page"]["hex"], "0000ffffffff00ff", "{last}");
     let top = agent
         .send(&serde_json::json!({"command":"pick_pixel","index":texture,"x":0,"y":0}).to_string());
     assert_eq!(top["ok"], true, "{top}");
@@ -1824,6 +1828,15 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     assert_eq!(data.len(), 4 * 4 * 2 * 4);
     assert_eq!(&data[..4], &[255, 0, 0, 255]);
     assert_eq!(&data[64..68], &[0, 0, 255, 255]);
+    let volume_page = agent.send(&serde_json::json!({"command":"read_texture_raw", "index":volume_index, "offset":"64", "length":4}).to_string());
+    assert_eq!(
+        volume_page["data"]["whole_mip_volume"], true,
+        "{volume_page}"
+    );
+    assert_eq!(
+        volume_page["data"]["page"]["hex"], "0000ffff",
+        "{volume_page}"
+    );
     let invalid = agent.send(&serde_json::json!({"command":"export_texture_raw", "index":volume_index, "slice":1, "path":dir.path().join("invalid-volume.raw")}).to_string());
     assert_eq!(invalid["error"]["code"], "invalid_arguments", "{invalid}");
     if msaa_samples > 1 {
@@ -1917,6 +1930,30 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     assert_eq!(raw_result["data"]["bytes"], "64");
     let raw_bytes = std::fs::read(&raw_path).unwrap();
     assert_eq!(&raw_bytes[..4], &[255, 255, 0, 255]);
+    let first_page = agent.send(&serde_json::json!({"command":"read_texture_raw", "index":layered_index, "mip":1, "slice":1, "sample":0, "offset":"0", "length":10}).to_string());
+    assert_eq!(first_page["data"]["page"]["total"], "64", "{first_page}");
+    assert_eq!(
+        first_page["data"]["page"]["hex"],
+        raw_bytes[..10]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>(),
+        "{first_page}"
+    );
+    let last_page = agent.send(&serde_json::json!({"command":"read_texture_raw", "index":layered_index, "mip":1, "slice":1, "sample":0, "offset":"60", "length":20}).to_string());
+    assert_eq!(
+        last_page["data"]["page"]["hex"],
+        raw_bytes[60..]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>(),
+        "{last_page}"
+    );
+    let invalid_page = agent.send(&serde_json::json!({"command":"read_texture_raw", "index":layered_index, "mip":1, "slice":1, "offset":"65", "length":1}).to_string());
+    assert_eq!(
+        invalid_page["error"]["code"], "raw_texture_read_failed",
+        "{invalid_page}"
+    );
     assert_eq!(
         agent.send(&raw_request.to_string())["error"]["code"],
         "replay_export_failed"
@@ -2365,6 +2402,9 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         serde_json::json!({"command":"pick_pixel","index":texture_index,"x":8,"y":8}).to_string();
     let original = agent.send(&pick);
     assert_eq!(original["ok"], true, "{original}");
+    let raw_pixel = serde_json::json!({"command":"read_texture_raw", "index":texture_index, "offset":"544", "length":4}).to_string();
+    let raw_before = agent.send(&raw_pixel);
+    assert_eq!(raw_before["ok"], true, "{raw_before}");
     let fragment_report = agent.send(r#"{"command":"shader","stage":"fragment"}"#);
     assert_eq!(fragment_report["ok"], true, "{fragment_report}");
     let replacement_request = serde_json::json!({"command":"shader_apply","stage":"fragment","encoding":5,"entry":"main","flags":fragment_report["data"]["shader"]["compile_flags"],"files":[{"name":"main.hlsl","contents":"#include \"color.hlsl\"\nfloat4 main() : SV_Target { return color(); }"},{"name":"color.hlsl","contents":"#pragma once\nfloat4 color() { return float4(1,0,0,1); }"}]}).to_string();
@@ -2375,6 +2415,12 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     );
     let changed = agent.send(&pick);
     assert_eq!(changed["ok"], true, "{changed}");
+    let raw_changed = agent.send(&raw_pixel);
+    assert_eq!(raw_changed["ok"], true, "{raw_changed}");
+    assert_ne!(
+        raw_before["data"]["page"]["hex"], raw_changed["data"]["page"]["hex"],
+        "shader replacement must invalidate raw cache"
+    );
     assert_ne!(
         changed["data"]["pixel"]["bits"],
         original["data"]["pixel"]["bits"]
@@ -2429,6 +2475,11 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     );
     let restored = agent.send(r#"{"command":"shader_revert","stage":"fragment"}"#);
     assert_eq!(restored["ok"], true, "{restored}");
+    let raw_restored = agent.send(&raw_pixel);
+    assert_eq!(
+        raw_restored["data"]["page"]["hex"], raw_before["data"]["page"]["hex"],
+        "{raw_restored}"
+    );
     assert_eq!(
         agent.send(&pick)["data"]["pixel"]["bits"],
         original["data"]["pixel"]["bits"]

@@ -46,7 +46,7 @@ fn usage() -> Value {
         {"name":"select","arguments":["capture.rdc","event_id"],"description":"Replay a capture to an event."},
         {"name":"serve","arguments":[],"description":"Serve sequential JSONL requests using a persistent replay session."},
         {"name":"capabilities","arguments":[],"description":"Describe the commands currently implemented."}
-    ],"serve_commands":["capabilities","open","snapshot","timeline","timeline_usage","timeline_history","select","pipeline","shader","shader_bindings","shader_binding_read","shader_constants","shader_export","shader_apply","shader_revert","debug_vertex","debug_pixel","debug_compute","debug_collect","debug_state","debug_breakpoint","debug_navigate","debug_next","debug_stop","vertex_input","mesh","mesh_read","mesh_draw","mesh_draw_export","structure","structure_buffer","callstack","read_buffer","decode_buffer","decode_buffer_layout","buffer_formats_list","buffer_format_get","buffer_format_save","buffer_format_delete","export_buffer","export_buffer_csv","find_buffer","resource_usage","resource_rename","annotation_read","annotation_write","dependencies","dependencies_save","descriptors","debug_messages","clear_debug_messages","counter_fetch","counter_page","pick_pixel","pixel_history","texture_statistics","export_texture","export_texture_raw","close","gpu_list","remote_list","remote_download","target_list","target_launch","target_connect","target_connect_pid","target_copy","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"texture_export_formats":["png","dds","jpg","bmp","tga","hdr","exr"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"mesh_draw_page_limit":renderdocx::mesh_draw::PAGE_LIMIT,"shader_binding_page_limit":renderdocx::replay::SHADER_BINDING_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"counter_page_limit":renderdocx::replay::COUNTER_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
+    ],"serve_commands":["capabilities","open","snapshot","timeline","timeline_usage","timeline_history","select","pipeline","shader","shader_bindings","shader_binding_read","shader_constants","shader_export","shader_apply","shader_revert","debug_vertex","debug_pixel","debug_compute","debug_collect","debug_state","debug_breakpoint","debug_navigate","debug_next","debug_stop","vertex_input","mesh","mesh_read","mesh_draw","mesh_draw_export","structure","structure_buffer","callstack","read_buffer","decode_buffer","decode_buffer_layout","buffer_formats_list","buffer_format_get","buffer_format_save","buffer_format_delete","export_buffer","export_buffer_csv","find_buffer","resource_usage","resource_rename","annotation_read","annotation_write","dependencies","dependencies_save","descriptors","debug_messages","clear_debug_messages","counter_fetch","counter_page","pick_pixel","pixel_history","texture_statistics","export_texture","export_texture_raw","read_texture_raw","close","gpu_list","remote_list","remote_download","target_list","target_launch","target_connect","target_connect_pid","target_copy","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"texture_export_formats":["png","dds","jpg","bmp","tga","hdr","exr"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"mesh_draw_page_limit":renderdocx::mesh_draw::PAGE_LIMIT,"shader_binding_page_limit":renderdocx::replay::SHADER_BINDING_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"counter_page_limit":renderdocx::replay::COUNTER_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
 }
 
 fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
@@ -2030,6 +2030,60 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     _ => Err((
                         "invalid_arguments",
                         "pick_pixel requires a texture index and unsigned x/y".into(),
+                    )),
+                }
+            }
+            "read_texture_raw" => {
+                let index = request
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .and_then(|v| u32::try_from(v).ok());
+                let offset = request
+                    .get("offset")
+                    .and_then(Value::as_str)
+                    .and_then(|v| v.parse::<u64>().ok());
+                let length = request
+                    .get("length")
+                    .and_then(Value::as_u64)
+                    .and_then(|v| u32::try_from(v).ok());
+                match (&opened, selected_event, index, offset, length) {
+                    (None, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some(_), None, _, _, _) => {
+                        Err(("no_event", "Select an event before reading textures".into()))
+                    }
+                    (
+                        Some((session, snapshot)),
+                        Some(event),
+                        Some(index),
+                        Some(offset),
+                        Some(length),
+                    ) => {
+                        let selection = serde_json::from_value::<RawTextureSelection>(
+                            Value::Object(request.clone()),
+                        );
+                        if ["channel", "preview_type_cast", "analysis_type_cast"]
+                            .iter()
+                            .any(|key| request.contains_key(*key))
+                        {
+                            Err((
+                                "invalid_arguments",
+                                "Raw reads do not apply channel extraction or type casts".into(),
+                            ))
+                        } else {
+                            match (snapshot.textures.get(index as usize), selection) {
+                            (Some(texture), Ok(selection)) if length <= BUFFER_PAGE_LIMIT && offset.checked_add(u64::from(length)).is_some() => match selection.validate(texture) {
+                                Ok(()) => session.read_texture_raw(event, index, texture, selection, offset, length)
+                                    .map(|page| json!({"page":page,"format_name":texture.format_name,"whole_mip_volume":texture.dimension == 3}))
+                                    .map_err(|error| ("raw_texture_read_failed", error)),
+                                Err(error) => Err(("invalid_arguments", error)),
+                            },
+                            _ => Err(("invalid_arguments", "Invalid texture index or raw selection".into())),
+                        }
+                        }
+                    }
+                    _ => Err((
+                        "invalid_arguments",
+                        "read_texture_raw requires index, decimal-string offset and length".into(),
                     )),
                 }
             }
