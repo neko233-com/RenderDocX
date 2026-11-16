@@ -575,6 +575,10 @@ struct Workspace {
     event_tree: EventTree,
     event_scroll: UniformListScrollHandle,
     event_search: Entity<InputState>,
+    event_annotation_key: Entity<InputState>,
+    _event_annotation_subscription: gpui::Subscription,
+    event_annotation_revision: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    event_annotation_values: std::collections::HashMap<u32, String>,
     event_filter_revision: std::sync::Arc<std::sync::atomic::AtomicU64>,
     event_filter_names_pending: bool,
     event_filter_name: Entity<InputState>,
@@ -1064,6 +1068,8 @@ impl Workspace {
             self.event_filter_names_pending = true;
             self.event_filter_revision
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let key = self.event_annotation_key.read(cx).value().to_string();
+            self.load_event_annotation_column(key, cx);
         }
         let revision = self.open_revision;
         self.status = Some(
@@ -1115,6 +1121,8 @@ impl Workspace {
                     this.event_filter_names_pending = false;
                     let expression = this.event_search.read(cx).value().to_string();
                     this.apply_event_filter(expression, cx);
+                    let key = this.event_annotation_key.read(cx).value().to_string();
+                    this.load_event_annotation_column(key, cx);
                 }
                 cx.notify();
             });
@@ -1428,6 +1436,79 @@ impl Workspace {
                 this.apply_event_filter(expression, cx);
             }
         })
+    }
+
+    fn watch_event_annotation(
+        input: &Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Subscription {
+        cx.subscribe(input, |this, input, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                let key = input.read(cx).value().to_string();
+                this.load_event_annotation_column(key, cx);
+            }
+        })
+    }
+
+    fn load_event_annotation_column(&mut self, key: String, cx: &mut Context<Self>) {
+        use std::sync::atomic::Ordering;
+        let revision = self
+            .event_annotation_revision
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        self.event_annotation_values.clear();
+        if key.is_empty() || self.event_filter_names_pending {
+            cx.notify();
+            return;
+        }
+        let Some((session, (actions, resources))) = self.session.clone().zip(
+            self.snapshot
+                .as_ref()
+                .map(|snapshot| (snapshot.actions.clone(), snapshot.resources.clone())),
+        ) else {
+            cx.notify();
+            return;
+        };
+        let capture_revision = self.open_revision;
+        let generation = self.event_annotation_revision.clone();
+        let language = self.settings.language;
+        let task = cx.background_executor().spawn(async move {
+            renderdocx::event_annotations::display_column(
+                &session,
+                &actions,
+                &resources,
+                language,
+                &key,
+                || generation.load(Ordering::Relaxed) != revision,
+            )
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != capture_revision
+                    || this.event_annotation_revision.load(Ordering::Relaxed) != revision
+                {
+                    return;
+                }
+                match result {
+                    Ok(values) => this.event_annotation_values = values,
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Could not load event annotations",
+                                "无法加载事件注释",
+                                "イベント注釈を読み込めません",
+                                "이벤트 주석을 불러올 수 없습니다"
+                            )
+                        ))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     fn apply_event_filter(&mut self, expression: String, cx: &mut Context<Self>) {
@@ -2593,6 +2674,10 @@ impl Workspace {
             return;
         }
         self.open_revision += 1;
+        self.event_filter_revision
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.event_annotation_revision
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let revision = self.open_revision;
         let previous_remote = self.session.clone().filter(|session| {
             remote
@@ -2671,6 +2756,8 @@ impl Workspace {
                         this.event_filter_names_pending = false;
                         let expression = this.event_search.read(cx).value().to_string();
                         this.apply_event_filter(expression, cx);
+                        let key = this.event_annotation_key.read(cx).value().to_string();
+                        this.load_event_annotation_column(key, cx);
                         this.message_generation += 1;
                         this.message_poll_pending = false;
                         this.refresh_messages();
@@ -4100,6 +4187,8 @@ impl Workspace {
         self.event_filter_names_pending = true;
         self.event_filter_revision
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let key = self.event_annotation_key.read(cx).value().to_string();
+        self.load_event_annotation_column(key, cx);
         let revision = self.open_revision;
         self.status = Some(
             self.t(
@@ -4249,6 +4338,8 @@ impl Workspace {
                 let expression = this.event_search.read(cx).value().to_string();
                 this.event_filter_names_pending = false;
                 this.apply_event_filter(expression, cx);
+                let key = this.event_annotation_key.read(cx).value().to_string();
+                this.load_event_annotation_column(key, cx);
                 cx.notify();
             });
         })
@@ -9576,6 +9667,21 @@ impl Workspace {
                                                     ),
                                             )
                                             .child(div().overflow_hidden().child(name))
+                                            .when_some(
+                                                this.event_annotation_values.get(&event).cloned(),
+                                                |row, value| {
+                                                    row.child(
+                                                        div()
+                                                            .id(SharedString::from(format!(
+                                                                "event-annotation-{event}"
+                                                            )))
+                                                            .test_support()
+                                                            .text_sm()
+                                                            .text_color(rgb(0xb9dca8))
+                                                            .child(value),
+                                                    )
+                                                },
+                                            )
                                             .when(this.event_tree.has_durations(), |row| {
                                                 row.child(
                                                     div()
@@ -12717,6 +12823,9 @@ impl Workspace {
                                 return;
                             }
                             this.open_revision += 1;
+                            this.event_filter_revision.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            this.event_annotation_revision.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            this.event_annotation_values.clear();
                             this.session = None;
                             this.snapshot = None;
                             this.message_generation += 1;
@@ -13266,6 +13375,8 @@ impl Workspace {
                                             div().id(("saved-event-filter", index)).test_support().cursor_pointer().px_2().py_1().bg(rgb(0x252f40)).child(name.clone())
                                                 .on_click(cx.listener(move |this, _, window, cx| this.load_event_filter(&name, window, cx)))
                                         })))
+                                        .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t("Annotation column key (empty hides column)", "注释列键路径（留空隐藏）", "注釈列のキーパス（空欄で非表示）", "주석 열 키 경로 (비우면 숨김)")))
+                                        .child(Input::new(&self.event_annotation_key).id("event-annotation-key").aria_label(self.t("Annotation column key", "注释列键路径", "注釈列のキーパス", "주석 열 키 경로")).w_full())
                                         .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
                                             "Examples: +$action() +$event(EID >= 100), \"draw indexed\"",
                                             "示例：+$action() +$event(EID >= 100)、\"draw indexed\"",
@@ -14243,6 +14354,8 @@ impl Render for Workspace {
                             this.save();
                             let expression = this.event_search.read(cx).value().to_string();
                             this.apply_event_filter(expression, cx);
+                            let key = this.event_annotation_key.read(cx).value().to_string();
+                            this.load_event_annotation_column(key, cx);
                             cx.notify();
                         }))
                 }),
@@ -14291,6 +14404,7 @@ fn main() {
                     let shader_edit_encoding = cx.new(|cx| InputState::new(window, cx));
                     let shader_edit_command = cx.new(|cx| InputState::new(window, cx));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
+                    let event_annotation_key = cx.new(|cx| InputState::new(window, cx));
                     let event_filter_name = cx.new(|cx| InputState::new(window, cx));
                     let event_find = cx.new(|cx| InputState::new(window, cx));
                     let buffer_seek = cx.new(|cx| InputState::new(window, cx).default_value("0"));
@@ -14352,6 +14466,13 @@ fn main() {
                             &event_search,
                             cx,
                         ),
+                        _event_annotation_subscription: Workspace::watch_event_annotation(
+                            &event_annotation_key,
+                            cx,
+                        ),
+                        event_annotation_key,
+                        event_annotation_revision: Default::default(),
+                        event_annotation_values: Default::default(),
                         event_filter_revision: Default::default(),
                         event_filter_names_pending: false,
                         event_search,
@@ -14603,6 +14724,7 @@ mod ui_tests {
                     let shader_edit_encoding = cx.new(|cx| InputState::new(window, cx));
                     let shader_edit_command = cx.new(|cx| InputState::new(window, cx));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
+                    let event_annotation_key = cx.new(|cx| InputState::new(window, cx));
                     let event_find = cx.new(|cx| InputState::new(window, cx));
                     let event_filter_name = cx.new(|cx| InputState::new(window, cx));
                     let buffer_seek = cx.new(|cx| InputState::new(window, cx).default_value("0"));
@@ -14682,6 +14804,13 @@ mod ui_tests {
                             &event_search,
                             cx,
                         ),
+                        _event_annotation_subscription: Workspace::watch_event_annotation(
+                            &event_annotation_key,
+                            cx,
+                        ),
+                        event_annotation_key,
+                        event_annotation_revision: Default::default(),
+                        event_annotation_values: Default::default(),
                         event_filter_revision: Default::default(),
                         event_filter_names_pending: false,
                         event_search,
@@ -15008,6 +15137,7 @@ mod ui_tests {
                     let shader_edit_encoding = cx.new(|cx| InputState::new(window, cx));
                     let shader_edit_command = cx.new(|cx| InputState::new(window, cx));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
+                    let event_annotation_key = cx.new(|cx| InputState::new(window, cx));
                     let event_find = cx.new(|cx| InputState::new(window, cx));
                     let buffer_seek = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let event_filter_name = cx.new(|cx| InputState::new(window, cx));
@@ -15207,6 +15337,13 @@ mod ui_tests {
                             &event_search,
                             cx,
                         ),
+                        _event_annotation_subscription: Workspace::watch_event_annotation(
+                            &event_annotation_key,
+                            cx,
+                        ),
+                        event_annotation_key,
+                        event_annotation_revision: Default::default(),
+                        event_annotation_values: Default::default(),
                         event_filter_revision: Default::default(),
                         event_filter_names_pending: false,
                         event_search,
@@ -16975,6 +17112,38 @@ mod ui_tests {
                 cx.update_window(handle.into(), |_, window, cx| {
                     window.render_frame(cx);
                     assert!(window.find(draw_index).visible());
+                    window.click("event-annotation-key", cx);
+                    window.input("renderdocx.pass", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx)
+                            .event_annotation_values
+                            .get(&draw_event)
+                            .is_some_and(|value| value == "First Pass")
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real annotation column did not load: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    assert!(
+                        window
+                            .find(SharedString::from(format!("event-annotation-{draw_event}")))
+                            .visible()
+                    );
+                    window.click("event-annotation-key", cx);
+                    window.press("ctrl-a", cx);
+                    window.press("backspace", cx);
                 })
                 .unwrap();
                 let api_row = format!("event-api-{action_index}-{api_index}");

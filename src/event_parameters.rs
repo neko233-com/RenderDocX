@@ -7,10 +7,10 @@ use crate::replay::{
 use std::collections::{HashMap, HashSet};
 use unicode_segmentation::UnicodeSegmentation;
 
-struct ResourceContext<'a> {
-    resources: &'a [ResourceInfo],
-    renames: Result<serde_json::Value, String>,
-    language: Language,
+pub(crate) struct ResourceContext<'a> {
+    pub(crate) resources: &'a [ResourceInfo],
+    pub(crate) renames: Result<serde_json::Value, String>,
+    pub(crate) language: Language,
 }
 
 /// Resolve every predicate completely or return an error; partial results are never applied.
@@ -215,7 +215,7 @@ fn array_matches(
     }
 }
 
-fn format_value(
+pub(crate) fn format_value(
     node: &StructuredNode,
     _parent_flags: u32,
     context: &ResourceContext<'_>,

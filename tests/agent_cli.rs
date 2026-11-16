@@ -601,6 +601,16 @@ fn real_d3d11_mesh_draw_order() {
     assert_eq!(raw_annotations["data"]["values"][0]["value"], "First Pass");
     assert_eq!(raw_annotations["data"]["values"][1]["value"], "42");
     assert!(raw_annotations["data"]["values"][2].is_null());
+    let column = agent.send(&serde_json::json!({"command":"filter_events","expression":format!("$event(EID={draw})"),"show_api":true,"annotation_key":"renderdocx.pass"}).to_string());
+    assert_eq!(column["ok"], true, "{column}");
+    assert!(
+        column["data"]["events"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["event_id"] == draw && item["annotation"] == "First Pass"),
+        "{column}"
+    );
     assert!(
         annotated["data"]["events"]["items"]
             .as_array()

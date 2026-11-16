@@ -848,9 +848,13 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         .and_then(|n| usize::try_from(n).ok())
                         .filter(|n| (1..=128).contains(n)),
                 };
-                match (&opened, expression, show_api, offset, limit) {
-                    (None, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
-                    (Some((session, snapshot)), Some(expression), Some(show_api), Some(offset), Some(limit)) => {
+                let annotation_key = match request.get("annotation_key") {
+                    None => Some(None),
+                    Some(value) => value.as_str().map(Some),
+                };
+                match (&opened, expression, show_api, offset, limit, annotation_key) {
+                    (None, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some((session, snapshot)), Some(expression), Some(show_api), Some(offset), Some(limit), Some(annotation_key)) => {
                         let mut tree = EventTree::default();
                         tree.reset(&snapshot.actions);
                         tree.set_show_api(show_api);
@@ -859,7 +863,12 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                             Err(("invalid_filter", error))
                         } else if offset > tree.visible.len() {
                             Err(("invalid_arguments", "Event offset exceeds the filtered item count".into()))
-                        } else {
+                        } else { (|| {
+                            let annotations = match annotation_key {
+                                Some(key) => renderdocx::event_annotations::display_column(session, &snapshot.actions, &snapshot.resources, settings.language, key, || false)
+                                    .map_err(|error| ("replay_event_annotation_failed", error))?,
+                                None => Default::default(),
+                            };
                             let items: Vec<Value> = tree.visible.iter().skip(offset).take(limit).map(|&row| {
                                 let (action_index, api_index) = match tree.row(row).expect("visible row") {
                                     EventRow::Action(action) => (action, None),
@@ -872,12 +881,12 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                                 }).unwrap_or((action.event_id, &action.name));
                                 json!({"action_index":action_index,"api_index":api_index,"event_id":event_id,
                                     "parent_action_index": if action.parent < 0 { None } else { Some(action.parent) },
-                                    "name":name,"direct_match":tree.directly_matches(row),"duration_seconds":tree.duration(event_id),
+                                    "name":name,"direct_match":tree.directly_matches(row),"duration_seconds":tree.duration(event_id),"annotation":annotations.get(&event_id),
                                     "group_range":tree.action_range(row)})
                             }).collect();
-                            Ok(json!({"events":{"expression":expression,"show_api":show_api,"offset":offset.to_string(),
+                            Ok(json!({"events":{"expression":expression,"show_api":show_api,"annotation_key":annotation_key,"offset":offset.to_string(),
                                 "total":tree.visible.len().to_string(),"items":items}}))
-                        }
+                        })() }
                     }
                     _ => Err(("invalid_arguments", "filter_events requires an expression, optional show_api boolean, decimal-string offset, and limit 1–128".into())),
                 }

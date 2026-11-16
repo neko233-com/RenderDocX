@@ -1,7 +1,55 @@
 //! RenderDoc API-event annotations, distinct from bookmarks and notes.
 use crate::event_filter::{AnnotationCondition, AnnotationMatches, AnnotationQuery, Filter};
-use crate::replay::{Action, Session, StructuredNode};
+use crate::i18n::Language;
+use crate::replay::{Action, ResourceInfo, Session, StructuredNode};
 use std::collections::{HashMap, HashSet};
+
+/// Resolve one annotation column completely before exposing it to the caller.
+pub fn display_column(
+    session: &Session,
+    actions: &[Action],
+    resources: &[ResourceInfo],
+    language: Language,
+    key: &str,
+    cancelled: impl Fn() -> bool,
+) -> Result<HashMap<u32, String>, String> {
+    if key.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let context = crate::event_parameters::ResourceContext {
+        resources,
+        language,
+        renames: session
+            .annotation_read("renames")
+            .and_then(|section| section.document()),
+    };
+    let events: HashSet<u32> = actions
+        .iter()
+        .flat_map(|action| action.api_events.iter())
+        .map(|event| event.event_id)
+        .collect();
+    let mut result = HashMap::new();
+    let keys = [key.to_owned()];
+    for event in events {
+        if cancelled() {
+            return Err("Event annotation lookup cancelled".into());
+        }
+        let node = session
+            .annotation_find(event, &keys)?
+            .into_iter()
+            .next()
+            .flatten();
+        if let Some(node) = node {
+            let text = if matches!(node.basic_type, 0..=2) {
+                "{...}".to_owned()
+            } else {
+                crate::event_parameters::format_value(&node, 0, &context)?
+            };
+            result.insert(event, text);
+        }
+    }
+    Ok(result)
+}
 
 pub fn resolve(
     session: &Session,
