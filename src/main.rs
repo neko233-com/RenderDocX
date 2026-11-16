@@ -4513,6 +4513,37 @@ impl Workspace {
         .detach();
     }
 
+    fn step_event(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if self.replay_pending
+            || self.export_pending
+            || self.resource_pending
+            || self.protect_shader_draft(cx)
+        {
+            return;
+        }
+        let Some(event) = self.pipeline.as_ref().map(|pipeline| pipeline.event_id) else {
+            return;
+        };
+        let Some(action) = self.event_tree.step_action(event, forward) else {
+            self.status = Some(
+                self.t(
+                    "No further action in this direction.",
+                    "此方向没有更多动作。",
+                    "この方向にこれ以上のアクションはありません。",
+                    "이 방향에 더 이상의 동작이 없습니다.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        if let Some(position) = self.event_tree.reveal_filtered(action) {
+            self.event_scroll
+                .scroll_to_item(position, gpui::ScrollStrategy::Nearest);
+            self.select_event(action, None, cx);
+        }
+    }
+
     fn find_event(&mut self, forward: bool, cx: &mut Context<Self>) {
         if self.replay_pending
             || self.export_pending
@@ -12781,6 +12812,9 @@ impl Workspace {
                                     |this, cx| this.collect_event_times(cx),
                                     cx,
                                 ))
+                                .child(div().flex().gap_2()
+                                    .child(button("event-step-prev", self.t("Previous action", "上一个动作", "前のアクション", "이전 동작"), false, |this, cx| this.step_event(false, cx), cx))
+                                    .child(button("event-step-next", self.t("Next action", "下一个动作", "次のアクション", "다음 동작"), false, |this, cx| this.step_event(true, cx), cx)))
                                 .child(button(
                                     "event-export",
                                     self.t("Export events", "导出事件", "イベントを書き出す", "이벤트 내보내기"),
@@ -15864,9 +15898,9 @@ mod ui_tests {
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 77));
         cx.update_window(handle.into(), |_, window, cx| {
-            window.click("event-toggle-0", cx);
             window.render_frame(cx);
-            window.click(1usize, cx);
+            reveal_details(window, "event-step-prev", cx);
+            window.click("event-step-prev", cx);
         })
         .unwrap();
         cx.run_until_parked();

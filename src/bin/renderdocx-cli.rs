@@ -64,6 +64,10 @@ fn usage() -> Value {
         .as_array_mut()
         .expect("capabilities commands")
         .push(json!("export_events"));
+    capabilities["serve_commands"]
+        .as_array_mut()
+        .expect("capabilities commands")
+        .push(json!("step_action"));
     capabilities
 }
 
@@ -618,6 +622,41 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         "export_events requires a path and valid optional filter and show_api"
                             .into(),
                     )),
+                }
+            }
+            "step_action" => {
+                let event = match request.get("event_id") {
+                    None => selected_event,
+                    Some(v) => v.as_u64().and_then(|n| u32::try_from(n).ok()),
+                };
+                let filter = match request.get("filter") {
+                    None => Some(""),
+                    Some(v) => v.as_str(),
+                };
+                let forward = match request.get("direction") {
+                    Some(Value::String(s)) if s == "next" => Some(true),
+                    Some(Value::String(s)) if s == "previous" => Some(false),
+                    _ => None,
+                };
+                match (&opened, event, filter, forward) {
+                    (None, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some((_, snapshot)), Some(event), Some(filter), Some(forward)) => {
+                        let known = snapshot.actions.iter().any(|action| action.event_id == event || action.api_events.iter().any(|e| e.event_id == event));
+                        if !known { Err(("invalid_arguments", "Unknown event".into())) }
+                        else {
+                            let mut tree = EventTree::default();
+                            tree.reset(&snapshot.actions);
+                            if let Some(times) = &event_times { tree.set_durations(times.clone()); }
+                            tree.set_filter(filter);
+                            if tree.filter_error() { Err(("invalid_filter", "Invalid or unsupported event filter".into())) }
+                            else {
+                                let action = tree.step_action(event, forward).map(|index|
+                                    json!({"action_index":index,"event_id":snapshot.actions[index].event_id}));
+                                Ok(json!({"action":action}))
+                            }
+                        }
+                    }
+                    _ => Err(("invalid_arguments", "step_action requires a current event and direction next or previous, with an optional filter".into())),
                 }
             }
             "find_event" => {

@@ -33,6 +33,7 @@ pub struct EventTree {
     filter_error: bool,
     actions: Vec<Action>,
     ranges: Vec<Option<crate::event_ranges::ActionRange>>,
+    links: crate::event_step::ActionLinks,
     event_ids: Vec<u32>,
     durations: Option<std::collections::HashMap<u32, f64>>,
     matching_children: Vec<bool>,
@@ -48,6 +49,7 @@ impl EventTree {
         self.action_count = actions.len();
         self.actions = actions.to_vec();
         self.ranges = crate::event_ranges::calculate(actions);
+        self.links = crate::event_step::ActionLinks::from_actions(actions);
         self.marker_names = actions
             .iter()
             .map(|a| a.marker_name.as_deref().unwrap_or("").to_lowercase())
@@ -239,6 +241,19 @@ impl EventTree {
 
     pub fn event_id(&self, row: usize) -> Option<u32> {
         self.event_ids.get(row).copied()
+    }
+
+    pub fn step_action(&self, current_event: u32, forward: bool) -> Option<usize> {
+        let action = self
+            .actions
+            .iter()
+            .position(|a| a.event_id == current_event)
+            .or_else(|| {
+                self.actions
+                    .iter()
+                    .position(|a| a.api_events.iter().any(|e| e.event_id == current_event))
+            })?;
+        self.links.step(action, forward, &self.eligible)
     }
 
     pub fn action_range(&self, row: usize) -> Option<&crate::event_ranges::ActionRange> {

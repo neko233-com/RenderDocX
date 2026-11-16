@@ -11,6 +11,7 @@ pub mod debug_navigation;
 pub mod event_export;
 pub mod event_filter;
 pub mod event_ranges;
+pub mod event_step;
 pub mod event_timing;
 pub mod event_tree;
 pub mod i18n;

@@ -211,6 +211,20 @@ fn real_d3d11_mesh_draw_order() {
     assert_eq!(invalid_page["error"]["code"], "invalid_arguments");
     let selected = agent.send(&serde_json::json!({"command":"select","event_id":draw}).to_string());
     assert_eq!(selected["ok"], true, "{selected}");
+    let stepped = agent.send(r#"{"command":"step_action","direction":"previous"}"#);
+    assert_eq!(stepped["ok"], true, "{stepped}");
+    if let Some(event) = stepped["data"]["action"]["event_id"].as_u64() {
+        assert_ne!(event, draw);
+        assert!(
+            opened["data"]["capture"]["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["event_id"] == event)
+        );
+    }
+    let invalid_step = agent.send(r#"{"command":"step_action","direction":"sideways"}"#);
+    assert_eq!(invalid_step["error"]["code"], "invalid_arguments");
     let mesh = agent.send(r#"{"command":"mesh","stage":"vs_out"}"#);
     assert_eq!(mesh["ok"], true, "{mesh}");
     let page = agent.send(r#"{"command":"mesh_draw","offset":0,"count":3}"#);
