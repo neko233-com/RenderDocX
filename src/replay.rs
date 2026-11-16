@@ -288,6 +288,16 @@ pub mod test_support {
             self.0.lock().map_err(|e| e.to_string())?.push(event);
             Ok(())
         }
+
+        fn save_texture(&mut self, _index: u32, path: &Path) -> Result<(), String> {
+            const PIXEL: &[u8] = &[
+                137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0,
+                1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 112,
+                104, 56, 240, 31, 0, 5, 4, 2, 128, 60, 158, 3, 128, 0, 0, 0, 0, 73, 69, 78, 68,
+                174, 66, 96, 130,
+            ];
+            std::fs::write(path, PIXEL).map_err(|error| error.to_string())
+        }
     }
 
     pub fn recording_session() -> (Session, Arc<Mutex<Vec<u32>>>) {

@@ -2,7 +2,7 @@
 
 RenderDocX is an in-progress Rust + GPUI desktop frontend for [RenderDoc](https://github.com/baldurk/renderdoc). Its goal is a clearer, more usable graphics-debugging experience while retaining RenderDoc's capture, replay, and file semantics.
 
-**Status: early prototype, not a replacement for RenderDoc.** The Rust workspace can open an `.rdc` with its version-matched replay helper, browse the action hierarchy and texture metadata, request event replay, and export textures to PNG without overwriting existing files. Detailed inspection is still performed in `qrenderdoc`. `.cap` files and application launch use upstream tools; launch passes the target ident from `renderdoccmd` to `qrenderdoc --targetcontrol`. Starting these processes does not establish that the target connection or capture succeeded.
+**Status: early prototype, not a replacement for RenderDoc.** The Rust workspace can open an `.rdc` with its version-matched replay helper, browse the action hierarchy and texture metadata, request event replay, preview a texture, and export it to PNG without overwriting existing files. Preview and export currently use RenderDoc's default 8-bit PNG mapping. Detailed inspection is still performed in `qrenderdoc`. `.cap` files and application launch use upstream tools; launch passes the target ident from `renderdoccmd` to `qrenderdoc --targetcontrol`. Starting these processes does not establish that the target connection or capture succeeded.
 
 The interface detects the system language on startup and supports English, Simplified Chinese, Japanese, and Korean, with a manual language override. Its settings are stored in the operating system's user configuration directory.
 
@@ -38,7 +38,7 @@ Unity's built-in RenderDoc integration can load RenderDoc in the Editor and capt
 
 This repository includes a RenderDoc source snapshot identifying itself as version 1.48. The supplied snapshot had no Git history. Its files were compared to upstream `v1.x` commit [`5ad608809c9028da9f5c5082397cb6afe9c8dd17`](https://github.com/baldurk/renderdoc/commit/5ad608809c9028da9f5c5082397cb6afe9c8dd17): 5,979 initially tracked files and 50 initially ignored upstream files, including binaries, matched their upstream Git blob IDs. The project README and `.gitignore` differ; upstream GitHub metadata was moved to inactive reference locations. This is file-level evidence, not recovered Git ancestry. The existing capture/replay core and Qt frontend are retained; they have not been translated to Rust. The upstream README is preserved at [docs/README.renderdoc-upstream.md](docs/README.renderdoc-upstream.md), and upstream GitHub workflows under `docs/upstream-github-workflows/`.
 
-The native event browser, texture metadata browser, and event replay are initial implementations. Texture pixels and mesh views, broader resource and pipeline inspection, target control, remote capture, extensions, accessibility, and full RenderDoc GUI parity remain incomplete. See [docs/renderdocx-roadmap.md](docs/renderdocx-roadmap.md).
+The native event browser, texture preview, and event replay are initial implementations. Full texture inspection and mesh views, broader resource and pipeline inspection, target control, remote capture, extensions, accessibility, and full RenderDoc GUI parity remain incomplete. See [docs/renderdocx-roadmap.md](docs/renderdocx-roadmap.md).
 
 ## Verification
 

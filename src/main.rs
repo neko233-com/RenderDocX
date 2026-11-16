@@ -5,8 +5,8 @@ use gpui_kit::component::{
     theme::{Theme, ThemeMode},
 };
 use gpui_kit::{
-    App, Bounds, Context, SharedString, Window, WindowBounds, WindowOptions, div, prelude::*, px,
-    rgb, size, uniform_list,
+    App, Bounds, Context, SharedString, Window, WindowBounds, WindowOptions, div, img, prelude::*,
+    px, rgb, size, uniform_list,
 };
 use renderdocx::{
     backend::{self, Settings},
@@ -14,6 +14,11 @@ use renderdocx::{
     replay::{Session, Snapshot},
 };
 use std::path::PathBuf;
+
+struct TexturePreview {
+    path: PathBuf,
+    _directory: tempfile::TempDir,
+}
 
 struct Workspace {
     settings: Settings,
@@ -28,6 +33,7 @@ struct Workspace {
     selection_revision: u64,
     replay_pending: bool,
     export_pending: bool,
+    preview: Option<TexturePreview>,
 }
 
 impl Workspace {
@@ -118,6 +124,7 @@ impl Workspace {
                         this.show_textures = false;
                         this.replay_pending = false;
                         this.export_pending = false;
+                        this.preview = None;
                         this.status = None;
                     }
                     Err(error) => {
@@ -166,6 +173,7 @@ impl Workspace {
         let revision = session.next_revision();
         self.selection_revision = revision;
         self.replay_pending = true;
+        self.preview = None;
         let open_revision = self.open_revision;
         self.status = Some(
             self.t(
@@ -286,6 +294,83 @@ impl Workspace {
         .detach();
     }
 
+    fn preview_texture(&mut self, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending || self.selected.is_none() {
+            self.status = Some(
+                self.t(
+                    "Select an event and wait for replay to finish before previewing.",
+                    "请先选择事件并等待回放完成，再预览纹理。",
+                    "イベントを選択し、リプレイ完了後にプレビューしてください。",
+                    "이벤트를 선택하고 리플레이가 끝난 뒤 미리 보세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let (Some(session), Some(index)) = (self.session.clone(), self.selected_texture) else {
+            return;
+        };
+        let Ok(texture_index) = u32::try_from(index) else {
+            return;
+        };
+        let revision = self.open_revision;
+        self.preview = None;
+        self.export_pending = true;
+        self.status = Some(
+            self.t(
+                "Loading texture preview…",
+                "正在加载纹理预览…",
+                "テクスチャのプレビューを読み込み中…",
+                "텍스처 미리 보기를 불러오는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
+            let path = directory.path().join("preview.png");
+            session.export_texture(texture_index, &path)?;
+            Ok::<_, String>(TexturePreview {
+                path,
+                _directory: directory,
+            })
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision {
+                    return;
+                }
+                this.export_pending = false;
+                if this.selected_texture != Some(index) {
+                    this.status = None;
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok(preview) => {
+                        this.preview = Some(preview);
+                        this.status = None;
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Texture preview failed",
+                                "纹理预览失败",
+                                "テクスチャをプレビューできません",
+                                "텍스처 미리 보기 실패"
+                            )
+                        ))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn capture_view(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let snapshot = self
             .snapshot
@@ -366,6 +451,13 @@ impl Workspace {
             "텍스처 상세",
         );
         let export_label = self.t("Export PNG", "导出 PNG", "PNG を書き出す", "PNG 내보내기");
+        let preview_label = self.t("Preview", "预览", "プレビュー", "미리 보기");
+        let preview_note = self.t(
+            "8-bit PNG with RenderDoc's default mapping.",
+            "8 位 PNG，使用 RenderDoc 默认映射。",
+            "RenderDoc の既定のマッピングによる 8 ビット PNG。",
+            "RenderDoc 기본 매핑을 사용한 8비트 PNG입니다.",
+        );
         let export_note = self.t(
             "Existing files are never replaced.",
             "不会覆盖已有文件。",
@@ -396,6 +488,7 @@ impl Workspace {
         );
         let instances_label = self.t("Instances", "实例", "インスタンス", "인스턴스");
         let status = self.status.clone();
+        let preview_path = self.preview.as_ref().map(|preview| preview.path.clone());
 
         let list = if self.show_textures {
             uniform_list(
@@ -435,6 +528,7 @@ impl Workspace {
                                     .child(div().text_color(rgb(0x91a7c0)).child(dimensions))
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.selected_texture = Some(index);
+                                        this.preview = None;
                                         cx.notify();
                                     })),
                             )
@@ -497,6 +591,13 @@ impl Workspace {
                 |this, cx| this.export_texture(cx),
                 cx,
             );
+            let preview = button(
+                "texture-preview",
+                preview_label,
+                false,
+                |this, cx| this.preview_texture(cx),
+                cx,
+            );
             div()
                 .flex()
                 .flex_col()
@@ -533,8 +634,31 @@ impl Workspace {
                         texture.component_count,
                         texture.component_byte_width
                     ))
-                    .child(export)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(preview)
+                            .child(export),
+                    )
                     .child(div().text_sm().text_color(rgb(0x91a7c0)).child(export_note))
+                    .when_some(preview_path, |view, path| {
+                        view.child(
+                            div()
+                                .id("texture-preview-image")
+                                .test_support()
+                                .w_full()
+                                .h(px(180.))
+                                .child(img(path).size_full().object_fit(gpui::ObjectFit::Contain)),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0x91a7c0))
+                                .child(preview_note),
+                        )
+                    })
                 })
                 .when(self.selected_texture.is_none(), |view| {
                     view.child(div().text_color(rgb(0x9eacc0)).child(texture_empty))
@@ -583,6 +707,7 @@ impl Workspace {
                             this.selected = None;
                             this.replay_pending = false;
                             this.export_pending = false;
+                            this.preview = None;
                             this.status = None;
                             cx.notify();
                         },
@@ -696,7 +821,7 @@ fn button(
     accent: bool,
     callback: impl Fn(&mut Workspace, &mut Context<Workspace>) + 'static,
     cx: &mut Context<Workspace>,
-) -> impl IntoElement {
+) -> Button {
     let button = Button::new(id)
         .label(title)
         .on_click(cx.listener(move |this, _, _, cx| callback(this, cx)));
@@ -966,6 +1091,7 @@ fn main() {
                         selection_revision: 0,
                         replay_pending: false,
                         export_pending: false,
+                        preview: None,
                     });
                     if let Some(path) = initial_capture {
                         entity.update(cx, |view, cx| view.open(path, cx));
@@ -1018,6 +1144,7 @@ mod ui_tests {
                         selection_revision: 0,
                         replay_pending: false,
                         export_pending: false,
+                        preview: None,
                     })
                 },
             )
@@ -1095,6 +1222,7 @@ mod ui_tests {
                         selection_revision: 0,
                         replay_pending: false,
                         export_pending: false,
+                        preview: None,
                     })
                 },
             )
@@ -1131,5 +1259,25 @@ mod ui_tests {
             assert_eq!(view.read(cx).selected_texture, Some(0));
         });
         assert_eq!(*events.lock().unwrap(), vec![42]);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("texture-preview", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let view = view.read(cx);
+            assert!(!view.export_pending);
+            assert!(
+                view.preview
+                    .as_ref()
+                    .is_some_and(|preview| preview.path.is_file())
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("texture-preview-image").visible());
+            assert!(window.find("texture-preview-image").bounds().size.height > px(0.));
+        })
+        .unwrap();
     }
 }
