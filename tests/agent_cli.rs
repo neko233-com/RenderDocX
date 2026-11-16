@@ -557,6 +557,31 @@ fn real_d3d11_mesh_draw_order() {
             .any(|item| item["event_id"] == shader_event && item["direct_match"] == true),
         "{shader_filter}"
     );
+    let clear_event = opened["data"]["capture"]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|action| action["api_events"].as_array().into_iter().flatten())
+        .find(|event| {
+            event["name"]
+                .as_str()
+                .is_some_and(|name| name.contains("ClearRenderTargetView"))
+        })
+        .expect("clear event")["event_id"]
+        .as_u64()
+        .unwrap();
+    let color_filter = agent.send(
+        r#"{"command":"filter_events","expression":"$param(ColorRGBA: 0.25)","show_api":true}"#,
+    );
+    assert_eq!(color_filter["ok"], true, "{color_filter}");
+    assert!(
+        color_filter["data"]["events"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["event_id"] == clear_event && item["direct_match"] == true),
+        "{color_filter}"
+    );
     let draw = opened["data"]["capture"]["actions"]
         .as_array()
         .unwrap()

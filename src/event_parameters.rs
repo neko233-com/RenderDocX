@@ -217,7 +217,7 @@ fn array_matches(
 
 fn format_value(
     node: &StructuredNode,
-    parent_flags: u32,
+    _parent_flags: u32,
     context: &ResourceContext<'_>,
 ) -> Result<String, String> {
     if node.basic_type == 12 {
@@ -260,9 +260,7 @@ fn format_value(
             Ok(result.trim().to_owned())
         }
         6 | 7 => {
-            if (node.flags | parent_flags) & 0x200 != 0 {
-                return Err("Offset parameter formatting depends on display preferences".into());
-            }
+            // RenderDocX currently uses RenderDoc's default Auto offset/size mode.
             let n = scalar()?
                 .parse::<u64>()
                 .map_err(|_| "Invalid unsigned parameter")?;
@@ -276,6 +274,7 @@ fn format_value(
             })
         }
         8 => scalar(),
+        9 => format_float(&scalar()?),
         10 => match scalar()?.as_str() {
             "true" => Ok("True".into()),
             "false" => Ok("False".into()),
@@ -289,6 +288,48 @@ fn format_value(
         }
         _ => Err("Parameter value formatting is not supported yet".into()),
     }
+}
+
+/// RenderDoc's default Formatter configuration: 2–5 decimal places and
+/// scientific notation outside [1e-5, 1e7].
+fn format_float(value: &str) -> Result<String, String> {
+    let value = value
+        .parse::<f64>()
+        .map_err(|_| "Invalid floating-point parameter")?;
+    if value.is_nan() {
+        return Ok("nan".into());
+    }
+    if value.is_infinite() {
+        return Ok(if value.is_sign_negative() {
+            "-inf"
+        } else {
+            "inf"
+        }
+        .into());
+    }
+    if value == 0.0 {
+        return Ok("0.00".into());
+    }
+    if value.abs() < 0.00001 || value.abs() > 10_000_000.0 {
+        let scientific = format!("{value:.5E}");
+        let (mantissa, exponent) = scientific
+            .split_once('E')
+            .ok_or("Invalid formatted exponent")?;
+        let exponent = exponent
+            .parse::<i32>()
+            .map_err(|_| "Invalid formatted exponent")?;
+        return Ok(format!(
+            "{mantissa}E{}{abs:02}",
+            if exponent < 0 { '-' } else { '+' },
+            abs = exponent.unsigned_abs()
+        ));
+    }
+    let mut result = format!("{value:.5}");
+    let min_length = result.find('.').ok_or("Invalid formatted float")? + 3;
+    while result.len() > min_length && result.ends_with('0') {
+        result.pop();
+    }
+    Ok(result)
 }
 
 fn resource_name(node: &StructuredNode, context: &ResourceContext<'_>) -> Result<String, String> {
@@ -482,5 +523,36 @@ mod tests {
             resource_name(&value, &context).unwrap(),
             format!("{}...", "a".repeat(63))
         );
+    }
+
+    #[test]
+    fn default_numeric_format_matches_renderdoc_thresholds_and_offsets() {
+        let context = ResourceContext {
+            resources: &[],
+            renames: Ok(serde_json::json!({})),
+            language: Language::English,
+        };
+        for (input, expected) in [
+            ("0", "0.00"),
+            ("0.25", "0.25"),
+            ("1", "1.00"),
+            ("0.00001", "0.00001"),
+            ("0.000001", "1.00000E-06"),
+            ("10000000", "10000000.00"),
+            ("10000001", "1.00000E+07"),
+            ("-0.125", "-0.125"),
+            ("inf", "inf"),
+            ("-inf", "-inf"),
+            ("nan", "nan"),
+        ] {
+            assert_eq!(format_float(input).unwrap(), expected, "{input}");
+        }
+        let mut offset = node("offset", 7, Some("16777216"), 0);
+        offset.flags = 0x200;
+        assert_eq!(format_value(&offset, 0, &context).unwrap(), "0x01000000");
+        offset.value = Some("65535".into());
+        assert_eq!(format_value(&offset, 0, &context).unwrap(), "UINT16_MAX");
+        offset.value = Some("123".into());
+        assert_eq!(format_value(&offset, 0, &context).unwrap(), "123");
     }
 }
