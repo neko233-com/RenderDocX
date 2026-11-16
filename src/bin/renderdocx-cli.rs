@@ -131,6 +131,10 @@ fn usage() -> Value {
     capabilities["serve_commands"]
         .as_array_mut()
         .expect("capabilities commands")
+        .push(json!("render_texture"));
+    capabilities["serve_commands"]
+        .as_array_mut()
+        .expect("capabilities commands")
         .push(json!("event_annotation_find"));
     capabilities["serve_commands"]
         .as_array_mut()
@@ -2644,6 +2648,57 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     _ => Err((
                         "invalid_arguments",
                         "export_texture_raw requires a texture index and path".into(),
+                    )),
+                }
+            }
+            "render_texture" => {
+                let index = request
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .and_then(|n| u32::try_from(n).ok());
+                let width = request
+                    .get("width")
+                    .and_then(Value::as_u64)
+                    .and_then(|n| u32::try_from(n).ok())
+                    .filter(|n| *n > 0);
+                let height = request
+                    .get("height")
+                    .and_then(Value::as_u64)
+                    .and_then(|n| u32::try_from(n).ok())
+                    .filter(|n| *n > 0);
+                let path = request
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .filter(|path| !path.is_empty());
+                match (&opened, selected_event, index, width, height, path) {
+                    (None, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some(_), None, _, _, _, _) => {
+                        Err(("no_event", "Select an event before rendering".into()))
+                    }
+                    (
+                        Some((session, snapshot)),
+                        Some(event),
+                        Some(index),
+                        Some(width),
+                        Some(height),
+                        Some(path),
+                    ) => {
+                        let selection = serde_json::from_value::<TextureSelection>(Value::Object(
+                            request.clone(),
+                        ));
+                        match (snapshot.textures.get(index as usize), selection) {
+                            (Some(texture), Ok(selection)) => match selection.validate(texture) {
+                                Ok(()) => session.render_texture_png(index, selection, width, height, PathBuf::from(path).as_path())
+                                    .map(|_| json!({"index":index,"event_id":event,"path":path,"width":width,"height":height,"selection":selection}))
+                                    .map_err(|error| ("replay_render_failed", error)),
+                                Err(error) => Err(("invalid_arguments", error)),
+                            },
+                            _ => Err(("invalid_arguments", "Invalid texture index or selection".into())),
+                        }
+                    }
+                    _ => Err((
+                        "invalid_arguments",
+                        "render_texture requires index, path, width and height".into(),
                     )),
                 }
             }

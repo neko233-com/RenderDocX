@@ -2397,6 +2397,47 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       std::cout << "\nRENDERDOCX/1 {\"type\":\"texture_saved\",\"index\":" << index << "}" << std::endl;
       continue;
     }
+    if(command.compare(0, 15, "render_texture ") == 0)
+    {
+      if(!selected) { error("Select an event before rendering textures"); continue; }
+      std::istringstream arguments(command.substr(15));
+      std::string i_text, mip_text, slice_text, sample_text, channel_text, cast_text, width_text, height_text, black_text, white_text, extra;
+      uint64_t index=0, mip=0, slice=0, sample=0, channel=0, cast=0, width=0, height=0, black_bits=0, white_bits=0;
+      if(!(arguments >> i_text >> mip_text >> slice_text >> sample_text >> channel_text >> cast_text >> width_text >> height_text >> black_text >> white_text) || (arguments >> extra) ||
+         !decimal(i_text,index) || index >= texture_ids.size() || !decimal(mip_text,mip) || !decimal(slice_text,slice) ||
+         (sample_text != "resolve" && !decimal(sample_text,sample)) || (channel_text != "all" && !decimal(channel_text,channel)) ||
+         !decimal(cast_text,cast) || cast > 9 || !decimal(width_text,width) || !decimal(height_text,height) ||
+         width == 0 || height == 0 || width > INT32_MAX || height > INT32_MAX || width * height > UINT32_MAX / 3 ||
+         !decimal(black_text,black_bits) || black_bits > UINT32_MAX || !decimal(white_text,white_bits) || white_bits > UINT32_MAX)
+      { error("Invalid texture render request"); continue; }
+      const TextureRef &texture = texture_ids[size_t(index)];
+      const uint64_t depth = texture.dimension == 3 ? (mip < 32 ? (std::max)(1U, texture.depth >> uint32_t(mip)) : 1U) : texture.arraysize;
+      if(mip >= texture.mips || slice >= depth || (sample_text != "resolve" && sample >= texture.samples) ||
+         (channel_text != "all" && channel >= texture.components))
+      { error("Texture selection is out of range"); continue; }
+      float black=0.0f, white=1.0f;
+      const uint32_t b=uint32_t(black_bits), w=uint32_t(white_bits);
+      std::memcpy(&black,&b,sizeof(black)); std::memcpy(&white,&w,sizeof(white));
+      if(!std::isfinite(black) || !std::isfinite(white) || black >= white) { error("Invalid texture display range"); continue; }
+      IReplayOutput *output = replay.controller->CreateOutput(CreateHeadlessWindowingData(int32_t(width), int32_t(height)), ReplayOutputType::Texture);
+      if(!output) { error("Cannot create a headless texture output"); continue; }
+      TextureDisplay display;
+      display.resourceId=texture.id; display.typeCast=CompType(cast);
+      display.subresource=Subresource(uint32_t(mip), uint32_t(slice), sample_text == "resolve" ? TextureDisplay::ResolveSamples : uint32_t(sample));
+      display.rangeMin=black; display.rangeMax=white; display.scale=-1.0f;
+      if(channel_text != "all") { display.red=channel==0; display.green=channel==1; display.blue=channel==2; display.alpha=channel==3; }
+      output->SetTextureDisplay(display); output->Display();
+      bytebuf pixels = output->ReadbackOutputTexture();
+      output->Shutdown();
+      result = replay.controller->GetFatalErrorStatus();
+      if(!result.OK()) { error(result_message(result)); break; }
+      if(pixels.size() != width * height * 3) { error("Unexpected texture render output size"); continue; }
+      static const char hex[] = "0123456789abcdef";
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"texture_rendered\",\"index\":" << index << ",\"width\":" << width << ",\"height\":" << height << ",\"hex\":\"";
+      for(byte value : pixels) std::cout << hex[value >> 4] << hex[value & 15];
+      std::cout << "\"}" << std::endl;
+      continue;
+    }
     if(command.compare(0, 6, "save2 ") == 0 || command.compare(0, 6, "save3 ") == 0 || command.compare(0, 6, "save4 ") == 0)
     {
       const bool ranged = command.compare(0, 6, "save4 ") == 0;

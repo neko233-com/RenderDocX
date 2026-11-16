@@ -1343,6 +1343,12 @@ enum Reply {
     TextureSaved {
         index: u32,
     },
+    TextureRendered {
+        index: u32,
+        width: u32,
+        height: u32,
+        hex: String,
+    },
     BufferData {
         index: u32,
         offset: String,
@@ -1743,6 +1749,15 @@ trait Transport: Send {
     ) -> Result<(), String> {
         Err("Texture export is not supported by this transport".into())
     }
+    fn render_texture(
+        &mut self,
+        _index: u32,
+        _selection: TextureSelection,
+        _width: u32,
+        _height: u32,
+    ) -> Result<Vec<u8>, String> {
+        Err("Texture rendering is not supported by this transport".into())
+    }
     fn save_texture_raw(
         &mut self,
         _index: u32,
@@ -1916,6 +1931,54 @@ trait Transport: Send {
 }
 
 impl Transport for Process {
+    fn render_texture(
+        &mut self,
+        index: u32,
+        selection: TextureSelection,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>, String> {
+        let sample = selection
+            .sample
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "resolve".into());
+        let channel = selection
+            .channel
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "all".into());
+        let [black, white] = selection.display_range.unwrap_or([0.0, 1.0]);
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(
+            input,
+            "render_texture {index} {} {} {sample} {channel} {} {width} {height} {} {}",
+            selection.mip,
+            selection.slice,
+            selection.preview_type_cast,
+            black.to_bits(),
+            white.to_bits()
+        )
+        .and_then(|_| input.flush())
+        .map_err(|e| e.to_string())?;
+        let length = width
+            .checked_mul(height)
+            .and_then(|n| n.checked_mul(3))
+            .ok_or("Texture render dimensions overflow")?;
+        match self.read()? {
+            Reply::TextureRendered {
+                index: returned,
+                width: actual_width,
+                height: actual_height,
+                hex,
+            } if returned == index && actual_width == width && actual_height == height => {
+                decode_buffer_hex(&hex, length)
+            }
+            Reply::Error { message } if message == "Unknown command" => {
+                Err("Texture rendering requires a newer replay bridge".into())
+            }
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected texture render response".into()),
+        }
+    }
     fn dependencies(&mut self) -> Result<CaptureDependencies, String> {
         let stamp = self
             .capture_stamp
@@ -4027,6 +4090,71 @@ impl Session {
         self.export_texture_selected(index, TextureSelection::default(), destination)
     }
 
+    /// Render the native texture viewer to an RGB PNG without replacing an existing file.
+    pub fn render_texture_png(
+        &self,
+        index: u32,
+        selection: TextureSelection,
+        width: u32,
+        height: u32,
+        destination: &Path,
+    ) -> Result<(), String> {
+        if width == 0
+            || height == 0
+            || width > i32::MAX as u32
+            || height > i32::MAX as u32
+            || width
+                .checked_mul(height)
+                .and_then(|n| n.checked_mul(3))
+                .is_none()
+            || selection
+                .display_range
+                .is_some_and(|[min, max]| !min.is_finite() || !max.is_finite() || min >= max)
+        {
+            return Err("Invalid texture render dimensions or range".into());
+        }
+        let pixels = self
+            .process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .render_texture(index, selection, width, height)?;
+        let expected = width
+            .checked_mul(height)
+            .and_then(|n| n.checked_mul(3))
+            .ok_or("Texture render dimensions overflow")? as usize;
+        if pixels.len() != expected {
+            return Err("Invalid texture render data".into());
+        }
+        let parent = destination
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let temporary = tempfile::Builder::new()
+            .prefix(".renderdocx-preview-")
+            .suffix(".png")
+            .tempfile_in(parent)
+            .map_err(|e| format!("Cannot create temporary preview: {e}"))?;
+        {
+            let mut output =
+                std::io::BufWriter::new(temporary.reopen().map_err(|e| e.to_string())?);
+            let mut encoder = png::Encoder::new(&mut output, width, height);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
+            writer
+                .write_image_data(&pixels)
+                .map_err(|e| e.to_string())?;
+            writer.finish().map_err(|e| e.to_string())?;
+            output
+                .flush()
+                .map_err(|e| format!("Cannot write texture preview: {e}"))?;
+        }
+        temporary
+            .persist_noclobber(destination)
+            .map_err(|e| format!("Cannot publish texture preview: {}", e.error))?;
+        Ok(())
+    }
+
     pub fn export_texture_selected(
         &self,
         index: u32,
@@ -4131,6 +4259,16 @@ pub mod test_support {
         Option<TimelineHistory>,
     );
     impl Transport for RecordingTransport {
+        fn render_texture(
+            &mut self,
+            _index: u32,
+            selection: TextureSelection,
+            width: u32,
+            height: u32,
+        ) -> Result<Vec<u8>, String> {
+            self.1.lock().map_err(|e| e.to_string())?.push(selection);
+            Ok(vec![128; (width as usize) * (height as usize) * 3])
+        }
         fn counter_fetch(&mut self, ids: &[u32]) -> Result<CounterFetch, String> {
             if ids != [1] {
                 return Err("Unexpected counter".into());

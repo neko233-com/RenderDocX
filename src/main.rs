@@ -7349,7 +7349,8 @@ impl Workspace {
         let task = cx.background_executor().spawn(async move {
             let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
             let path = directory.path().join("preview.png");
-            session.export_texture_selected(texture_index, selection, &path)?;
+            // The preview widget is 180 logical pixels high; render at 2x for HiDPI.
+            session.render_texture_png(texture_index, selection, 512, 360, &path)?;
             Ok::<_, String>(TexturePreview {
                 path,
                 _directory: directory,
@@ -8518,7 +8519,7 @@ impl Workspace {
                 .child(Input::new(&self.texture_black_point).id("texture-black-point").aria_label(self.t("Black point", "黑点", "黒点", "흑점")).w(px(90.)))
                 .child(Input::new(&self.texture_white_point).id("texture-white-point").aria_label(self.t("White point", "白点", "白点", "백점")).w(px(90.)))
                 .child(button("texture-apply-range", self.t("Apply range", "应用范围", "範囲を適用", "범위 적용"), false, |this, cx| this.apply_texture_range(cx), cx)))
-            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t("The range applies when RenderDoc converts texture data for export; already compatible formats may bypass conversion.", "仅在 RenderDoc 导出时转换纹理数据才应用范围；已兼容的格式可能跳过转换。", "範囲は RenderDoc が書き出し用に変換する場合に適用され、互換形式では変換を省くことがあります。", "범위는 RenderDoc이 내보내기용으로 변환할 때 적용되며 호환 형식은 변환을 건너뛸 수 있습니다.")))
+            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t("Preview uses native texture display. Export applies the range only when RenderDoc converts the data.", "预览使用原生纹理显示；导出仅在 RenderDoc 转换数据时应用范围。", "プレビューはネイティブ表示を使用し、書き出しでは変換時のみ範囲が適用されます。", "미리보기는 기본 텍스처 표시를 사용하며 내보내기는 데이터 변환 시에만 범위를 적용합니다.")))
     }
 
     fn capture_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -8935,10 +8936,10 @@ impl Workspace {
         let export_label = self.t("Export PNG", "导出 PNG", "PNG を書き出す", "PNG 내보내기");
         let preview_label = self.t("Preview", "预览", "プレビュー", "미리 보기");
         let preview_note = self.t(
-            "8-bit PNG with RenderDoc's default mapping.",
-            "8 位 PNG，使用 RenderDoc 默认映射。",
-            "RenderDoc の既定のマッピングによる 8 ビット PNG。",
-            "RenderDoc 기본 매핑을 사용한 8비트 PNG입니다.",
+            "Native RenderDoc texture display, rendered to RGB.",
+            "使用 RenderDoc 原生纹理显示，输出为 RGB。",
+            "RenderDoc のネイティブテクスチャ表示を RGB で描画。",
+            "RenderDoc 기본 텍스처 표시를 RGB로 렌더링합니다.",
         );
         let export_note = self.t(
             "Existing files are never replaced.",
@@ -17507,6 +17508,30 @@ mod ui_tests {
                     }
                 });
                 cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    reveal_details(window, "texture-preview", cx);
+                    window.click("texture-preview", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx)
+                            .preview
+                            .as_ref()
+                            .is_some_and(|preview| preview.path.is_file())
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "native texture preview did not load: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
                     window.scroll(
                         "capture-details-scroll",
                         ScrollDelta::Pixels(point(px(0.), px(-700.))),
@@ -18022,23 +18047,7 @@ mod ui_tests {
                     assert!(debug.disassembly.contains("ps_4_0"));
                 });
                 cx.update_window(handle.into(), |_, window, cx| {
-                    for _ in 0..30 {
-                        let target = window.find("pixel-debug-start");
-                        if target.visible() {
-                            break;
-                        }
-                        let viewport = window.find("capture-details-scroll").bounds();
-                        let delta = if target.bounds().origin.y < viewport.origin.y {
-                            100.0
-                        } else {
-                            -100.0
-                        };
-                        window.scroll(
-                            "capture-details-scroll",
-                            ScrollDelta::Pixels(point(px(0.), px(delta))),
-                            cx,
-                        );
-                    }
+                    reveal_details(window, "pixel-debug-start", cx);
                     let input = view.read(cx).pixel_debug_view.clone();
                     input.update(cx, |input, cx| input.set_value("", window, cx));
                     window.click("pixel-debug-start", cx);

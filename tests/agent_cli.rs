@@ -819,6 +819,33 @@ fn real_d3d11_mesh_draw_order() {
             .unwrap()
             .starts_with(b"\x89PNG\r\n\x1a\n")
     );
+    let render_path = dir.path().join("native-preview.png");
+    let clear_selected =
+        agent.send(&serde_json::json!({"command":"select","event_id":clear_event}).to_string());
+    assert_eq!(clear_selected["ok"], true, "{clear_selected}");
+    let render = agent.send(&serde_json::json!({"command":"render_texture","index":texture_index,"width":16,"height":16,"path":render_path,"display_range":[0.25,0.75]}).to_string());
+    assert_eq!(render["ok"], true, "{render}");
+    let mut rendered = png::Decoder::new(std::io::BufReader::new(
+        std::fs::File::open(&render_path).unwrap(),
+    ))
+    .read_info()
+    .unwrap();
+    assert_eq!((rendered.info().width, rendered.info().height), (16, 16));
+    let mut rendered_pixels = vec![0; rendered.output_buffer_size().unwrap()];
+    let rendered_info = rendered.next_frame(&mut rendered_pixels).unwrap();
+    assert_eq!(rendered_info.color_type, png::ColorType::Rgb);
+    let pixel = &rendered_pixels[(15 * 16 + 15) * 3..(15 * 16 + 15) * 3 + 3];
+    assert!(
+        pixel[0] <= 3 && pixel[1] > 100 && pixel[2] >= 250,
+        "rendered pixel: {pixel:?}"
+    );
+    let duplicate = agent.send(&serde_json::json!({"command":"render_texture","index":texture_index,"width":16,"height":16,"path":render_path}).to_string());
+    assert_eq!(duplicate["error"]["code"], "replay_render_failed");
+    let invalid_render = agent.send(&serde_json::json!({"command":"render_texture","index":texture_index,"width":0,"height":16,"path":dir.path().join("invalid-render.png")}).to_string());
+    assert_eq!(invalid_render["error"]["code"], "invalid_arguments");
+    let reselected =
+        agent.send(&serde_json::json!({"command":"select","event_id":scissor_draw}).to_string());
+    assert_eq!(reselected["ok"], true, "{reselected}");
     let float_index = opened["data"]["capture"]["textures"]
         .as_array()
         .unwrap()
