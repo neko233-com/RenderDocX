@@ -2497,15 +2497,18 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       std::cout << "\"}" << std::endl;
       continue;
     }
-    if(command.compare(0, 6, "save2 ") == 0 || command.compare(0, 6, "save3 ") == 0 || command.compare(0, 6, "save4 ") == 0)
+    if(command.compare(0, 6, "save2 ") == 0 || command.compare(0, 6, "save3 ") == 0 || command.compare(0, 6, "save4 ") == 0 || command.compare(0, 6, "save5 ") == 0)
     {
-      const bool ranged = command.compare(0, 6, "save4 ") == 0;
+      const bool options = command.compare(0, 6, "save5 ") == 0;
+      const bool ranged = options || command.compare(0, 6, "save4 ") == 0;
       const bool extended = ranged || command.compare(0, 6, "save3 ") == 0;
       if(!selected) { error("Select an event before saving textures"); continue; }
       std::istringstream arguments(command.substr(6));
       std::string index_text, mip_text, slice_text, sample_text, channel_text, encoded, cast_text, format_text, black_text, white_text, extra;
       uint64_t index = 0, mip = 0, slice = 0, sample = 0, channel = 0, cast = 0, file_type = uint64_t(FileType::PNG);
       float black = 0.0f, white = 1.0f;
+      uint64_t all_mips=0, slices=0, grid_width=1, samples_array=0, alpha=3, quality=90;
+      float alpha_color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
       if(!(arguments >> index_text >> mip_text >> slice_text >> sample_text >> channel_text >> encoded) ||
          !decimal(index_text, index) || !decimal(mip_text, mip) || !decimal(slice_text, slice) ||
          (sample_text != "resolve" && !decimal(sample_text, sample)) ||
@@ -2525,6 +2528,25 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
           std::memcpy(&black, &b, sizeof(black)); std::memcpy(&white, &w, sizeof(white));
           if(!std::isfinite(black) || !std::isfinite(white) || black >= white)
           { error("Invalid texture display range"); continue; }
+        }
+        if(options)
+        {
+          std::string mips_text, slices_text, grid_text, samples_text, alpha_text, quality_text, color_text;
+          if(!(arguments >> mips_text >> slices_text >> grid_text >> samples_text >> alpha_text >> quality_text) ||
+             !decimal(mips_text, all_mips) || all_mips > 1 || !decimal(slices_text, slices) || slices > 3 ||
+             !decimal(grid_text, grid_width) || grid_width == 0 || grid_width > INT32_MAX ||
+             !decimal(samples_text, samples_array) || samples_array > 1 || !decimal(alpha_text, alpha) || alpha > 3 ||
+             !decimal(quality_text, quality) || quality < 1 || quality > 100)
+          { error("Invalid texture export options"); continue; }
+          bool valid_color = true;
+          for(size_t i=0; i<4; ++i)
+          {
+            uint64_t bits=0;
+            if(!(arguments >> color_text) || !decimal(color_text,bits) || bits > UINT32_MAX) { valid_color=false; break; }
+            const uint32_t value=uint32_t(bits); std::memcpy(&alpha_color[i],&value,sizeof(float));
+            if(!std::isfinite(alpha_color[i]) || alpha_color[i] < 0.0f || alpha_color[i] > 1.0f) { valid_color=false; break; }
+          }
+          if(!valid_color) { error("Invalid texture export color"); continue; }
         }
         if(arguments >> extra) { error("Invalid texture cast or file type"); continue; }
       }
@@ -2550,8 +2572,15 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       save.resourceId = texture.id;
       save.typeCast = CompType(cast);
       save.destType = FileType(file_type);
-      save.mip = int32_t(mip);
-      save.slice.sliceIndex = int32_t(slice);
+      save.mip = all_mips ? -1 : int32_t(mip);
+      save.slice.sliceIndex = slices ? -1 : int32_t(slice);
+      save.slice.slicesAsGrid = slices == 2;
+      save.slice.sliceGridWidth = int32_t(grid_width);
+      save.slice.cubeCruciform = slices == 3;
+      save.sample.mapToArray = samples_array != 0;
+      save.alpha = AlphaMapping(alpha);
+      save.alphaCol = FloatVector(alpha_color[0],alpha_color[1],alpha_color[2],alpha_color[3]);
+      save.jpegQuality = int(quality);
       save.sample.sampleIndex = sample_text == "resolve" ? TextureSampleMapping::ResolveSamples : uint32_t(sample);
       save.channelExtract = channel_text == "all" ? -1 : int(channel);
       save.comp.blackPoint = black;

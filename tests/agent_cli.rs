@@ -852,6 +852,91 @@ fn real_d3d11_mesh_draw_order() {
         .iter()
         .position(|texture| texture["format_name"] == "R32G32B32A32_FLOAT")
         .unwrap();
+    let layered_index = opened["data"]["capture"]["textures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|texture| {
+            texture["width"] == 8
+                && texture["height"] == 8
+                && texture["array_size"] == 2
+                && texture["mips"] == 2
+        })
+        .expect("layered texture");
+    let grid_path = dir.path().join("slice-grid.png");
+    let grid = agent.send(&serde_json::json!({"command":"export_texture","index":layered_index,"path":grid_path,"export":{"slices":"grid","grid_width":2}}).to_string());
+    assert_eq!(grid["ok"], true, "{grid}");
+    let mut grid_reader = png::Decoder::new(std::io::BufReader::new(
+        std::fs::File::open(&grid_path).unwrap(),
+    ))
+    .read_info()
+    .unwrap();
+    assert_eq!(
+        (grid_reader.info().width, grid_reader.info().height),
+        (16, 8)
+    );
+    let mut grid_data = vec![0; grid_reader.output_buffer_size().unwrap()];
+    let grid_info = grid_reader.next_frame(&mut grid_data).unwrap();
+    let components = match grid_info.color_type {
+        png::ColorType::Rgb => 3,
+        png::ColorType::Rgba => 4,
+        other => panic!("unexpected grid format {other:?}"),
+    };
+    assert!(
+        grid_data[0] >= 250 && grid_data[1] <= 2 && grid_data[2] <= 2,
+        "first grid pixel {:?}",
+        &grid_data[..components]
+    );
+    let second = 8 * components;
+    assert!(
+        grid_data[second] <= 2 && grid_data[second + 1] <= 2 && grid_data[second + 2] >= 250,
+        "second grid pixel {:?}",
+        &grid_data[second..second + components]
+    );
+    let dds_path = dir.path().join("all-mips.dds");
+    let dds = agent.send(&serde_json::json!({"command":"export_texture","index":layered_index,"path":dds_path,"format":"dds","export":{"all_mips":true,"slices":"all"}}).to_string());
+    assert_eq!(dds["ok"], true, "{dds}");
+    let dds_bytes = std::fs::read(&dds_path).unwrap();
+    assert_eq!(&dds_bytes[..4], b"DDS ");
+    assert_eq!(
+        u32::from_le_bytes(dds_bytes[28..32].try_into().unwrap()),
+        2,
+        "DDS mip count"
+    );
+    let invalid_export = agent.send(&serde_json::json!({"command":"export_texture","index":layered_index,"path":dir.path().join("invalid-export.png"),"export":{"grid_width":0}}).to_string());
+    assert_eq!(
+        invalid_export["error"]["code"], "invalid_arguments",
+        "{invalid_export}"
+    );
+    let strip_index = opened["data"]["capture"]["textures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|texture| texture["dimension"] == 1 && texture["width"] == 16)
+        .expect("1D strip");
+    let bmp_path = dir.path().join("blended.bmp");
+    let blended = agent.send(&serde_json::json!({"command":"export_texture","index":strip_index,"path":bmp_path,"format":"bmp","export":{"alpha":"blend_to_color","alpha_color":[0.0,0.0,1.0,1.0]}}).to_string());
+    assert_eq!(blended["ok"], true, "{blended}");
+    let bmp = std::fs::read(&bmp_path).unwrap();
+    assert_eq!(&bmp[..2], b"BM");
+    let bmp_offset = u32::from_le_bytes(bmp[10..14].try_into().unwrap()) as usize;
+    assert!(
+        (125..=128).contains(&bmp[bmp_offset])
+            && bmp[bmp_offset + 1] <= 1
+            && bmp[bmp_offset + 2] <= 1,
+        "BMP blue blended pixel {:?}",
+        &bmp[bmp_offset..bmp_offset + 3]
+    );
+    let low_path = dir.path().join("quality-low.jpg");
+    let high_path = dir.path().join("quality-high.jpg");
+    for (path, quality) in [(&low_path, 10), (&high_path, 100)] {
+        let result = agent.send(&serde_json::json!({"command":"export_texture","index":layered_index,"path":path,"format":"jpg","export":{"jpeg_quality":quality}}).to_string());
+        assert_eq!(result["ok"], true, "{result}");
+    }
+    let low = std::fs::read(&low_path).unwrap();
+    let high = std::fs::read(&high_path).unwrap();
+    assert!(low.starts_with(&[0xff, 0xd8]) && high.starts_with(&[0xff, 0xd8]));
+    assert_ne!(low, high, "JPEG quality must affect encoding");
     let mapped_path = dir.path().join("mapped.png");
     let mapped = agent.send(&serde_json::json!({"command":"export_texture","index":float_index,"path":mapped_path,"display_range":[0.25,0.75]}).to_string());
     assert_eq!(mapped["ok"], true, "{mapped}");

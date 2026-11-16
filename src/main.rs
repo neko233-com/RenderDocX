@@ -610,6 +610,9 @@ struct Workspace {
     texture_white_point: Entity<InputState>,
     texture_hdr_multiplier: Entity<InputState>,
     texture_background: Entity<InputState>,
+    texture_export_grid: Entity<InputState>,
+    texture_export_quality: Entity<InputState>,
+    texture_export_color: Entity<InputState>,
     texture_raw_page: Option<renderdocx::replay::RawTexturePage>,
     texture_raw_seek: Entity<InputState>,
     texture_raw_search: Entity<InputState>,
@@ -5946,6 +5949,99 @@ impl Workspace {
         cx.notify();
     }
 
+    fn update_export_options(&mut self, action: u8, cx: &mut Context<Self>) {
+        use renderdocx::texture_export::{AlphaMapping, SliceLayout};
+        if !self.preview_edit_ready(cx) {
+            return;
+        }
+        let mut options = self.texture_selection.export;
+        let valid = match action {
+            0 => {
+                options.all_mips = !options.all_mips;
+                true
+            }
+            1 => {
+                options.samples_as_array = !options.samples_as_array;
+                true
+            }
+            2 => {
+                options.slices = SliceLayout::Selected;
+                true
+            }
+            3 => {
+                options.slices = SliceLayout::All;
+                true
+            }
+            4 => match self.texture_export_grid.read(cx).value().parse::<u32>() {
+                Ok(width) if width > 0 && width <= i32::MAX as u32 => {
+                    options.grid_width = width;
+                    options.slices = SliceLayout::Grid;
+                    true
+                }
+                _ => false,
+            },
+            5 => {
+                options.slices = SliceLayout::Cubemap;
+                true
+            }
+            6 => {
+                options.alpha = AlphaMapping::Preserve;
+                true
+            }
+            7 => {
+                options.alpha = AlphaMapping::Discard;
+                true
+            }
+            8 => {
+                options.alpha = AlphaMapping::BlendToCheckerboard;
+                true
+            }
+            9 => {
+                let input = self.texture_export_color.read(cx).value().to_string();
+                let text = input.trim().strip_prefix('#').unwrap_or(input.trim());
+                match (text.len() == 6)
+                    .then(|| u32::from_str_radix(text, 16).ok())
+                    .flatten()
+                {
+                    Some(rgb) => {
+                        options.alpha = AlphaMapping::BlendToColor;
+                        options.alpha_color = [
+                            ((rgb >> 16) & 255) as f32 / 255.0,
+                            ((rgb >> 8) & 255) as f32 / 255.0,
+                            (rgb & 255) as f32 / 255.0,
+                            1.0,
+                        ];
+                        true
+                    }
+                    None => false,
+                }
+            }
+            10 => match self.texture_export_quality.read(cx).value().parse::<u32>() {
+                Ok(quality) if (1..=100).contains(&quality) => {
+                    options.jpeg_quality = quality;
+                    true
+                }
+                _ => false,
+            },
+            _ => false,
+        };
+        if valid {
+            self.texture_selection.export = options;
+            self.status = None;
+        } else {
+            self.status = Some(
+                self.t(
+                    "Enter a valid grid width, JPEG quality (1–100), or color (#RRGGBB).",
+                    "请输入有效的网格宽度、JPEG 质量（1–100）或颜色（#RRGGBB）。",
+                    "有効なグリッド幅、JPEG 品質（1–100）、色（#RRGGBB）を入力してください。",
+                    "올바른 격자 너비, JPEG 품질 (1–100) 또는 색상 (#RRGGBB)을 입력하세요.",
+                )
+                .to_owned(),
+            );
+        }
+        cx.notify();
+    }
+
     fn change_preview_transform(
         &mut self,
         scale: Option<f32>,
@@ -8786,6 +8882,170 @@ impl Workspace {
                 .child(Input::new(&self.texture_white_point).id("texture-white-point").aria_label(self.t("White point", "白点", "白点", "백점")).w(px(90.)))
                 .child(button("texture-apply-range", self.t("Apply range", "应用范围", "範囲を適用", "범위 적용"), false, |this, cx| this.apply_texture_range(cx), cx)))
             .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t("Preview uses native texture display. Export applies the range only when RenderDoc converts the data.", "预览使用原生纹理显示；导出仅在 RenderDoc 转换数据时应用范围。", "プレビューはネイティブ表示を使用し、書き出しでは変換時のみ範囲が適用されます。", "미리보기는 기본 텍스처 표시를 사용하며 내보내기는 데이터 변환 시에만 범위를 적용합니다.")))
+    }
+
+    fn texture_export_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        use renderdocx::texture_export::{AlphaMapping, SliceLayout};
+        let opts = self.texture_selection.export;
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
+                "Export mapping",
+                "导出映射",
+                "書き出しマッピング",
+                "내보내기 매핑",
+            )))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(button(
+                        "export-all-mips",
+                        self.t("All mips", "全部 mip", "全 mip", "모든 mip"),
+                        opts.all_mips,
+                        |this, cx| this.update_export_options(0, cx),
+                        cx,
+                    ))
+                    .child(button(
+                        "export-sample-array",
+                        self.t(
+                            "Samples as slices",
+                            "采样展开为切片",
+                            "サンプルをスライスへ",
+                            "샘플을 슬라이스로",
+                        ),
+                        opts.samples_as_array,
+                        |this, cx| this.update_export_options(1, cx),
+                        cx,
+                    ))
+                    .child(button(
+                        "export-slice-selected",
+                        self.t(
+                            "Selected slice",
+                            "当前切片",
+                            "選択スライス",
+                            "선택 슬라이스",
+                        ),
+                        opts.slices == SliceLayout::Selected,
+                        |this, cx| this.update_export_options(2, cx),
+                        cx,
+                    ))
+                    .child(button(
+                        "export-slice-all",
+                        self.t("All slices", "全部切片", "全スライス", "모든 슬라이스"),
+                        opts.slices == SliceLayout::All,
+                        |this, cx| this.update_export_options(3, cx),
+                        cx,
+                    ))
+                    .child(
+                        Input::new(&self.texture_export_grid)
+                            .id("export-grid-width")
+                            .aria_label(self.t("Grid width", "网格宽度", "グリッド幅", "격자 너비"))
+                            .w(px(65.)),
+                    )
+                    .child(button(
+                        "export-slice-grid",
+                        self.t(
+                            "Slice grid",
+                            "切片网格",
+                            "スライスグリッド",
+                            "슬라이스 격자",
+                        ),
+                        opts.slices == SliceLayout::Grid,
+                        |this, cx| this.update_export_options(4, cx),
+                        cx,
+                    ))
+                    .child(button(
+                        "export-slice-cube",
+                        self.t("Cubemap cross", "立方体十字图", "キューブ十字", "큐브 십자"),
+                        opts.slices == SliceLayout::Cubemap,
+                        |this, cx| this.update_export_options(5, cx),
+                        cx,
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(button(
+                        "export-alpha-preserve",
+                        self.t("Preserve alpha", "保留 Alpha", "Alpha を保持", "알파 유지"),
+                        opts.alpha == AlphaMapping::Preserve,
+                        |this, cx| this.update_export_options(6, cx),
+                        cx,
+                    ))
+                    .child(button(
+                        "export-alpha-discard",
+                        self.t("Discard alpha", "丢弃 Alpha", "Alpha を破棄", "알파 버리기"),
+                        opts.alpha == AlphaMapping::Discard,
+                        |this, cx| this.update_export_options(7, cx),
+                        cx,
+                    ))
+                    .child(button(
+                        "export-alpha-checker",
+                        self.t(
+                            "Blend checkerboard",
+                            "混合棋盘格",
+                            "市松に合成",
+                            "체커보드 합성",
+                        ),
+                        opts.alpha == AlphaMapping::BlendToCheckerboard,
+                        |this, cx| this.update_export_options(8, cx),
+                        cx,
+                    ))
+                    .child(
+                        Input::new(&self.texture_export_color)
+                            .id("export-alpha-color")
+                            .aria_label(self.t(
+                                "Alpha blend color",
+                                "Alpha 混合颜色",
+                                "Alpha 合成色",
+                                "알파 합성 색상",
+                            ))
+                            .w(px(100.)),
+                    )
+                    .child(button(
+                        "export-alpha-color-apply",
+                        self.t("Blend color", "混合颜色", "色に合成", "색상 합성"),
+                        opts.alpha == AlphaMapping::BlendToColor,
+                        |this, cx| this.update_export_options(9, cx),
+                        cx,
+                    ))
+                    .child(
+                        Input::new(&self.texture_export_quality)
+                            .id("export-jpeg-quality")
+                            .aria_label(self.t(
+                                "JPEG quality",
+                                "JPEG 质量",
+                                "JPEG 品質",
+                                "JPEG 품질",
+                            ))
+                            .w(px(60.)),
+                    )
+                    .child(button(
+                        "export-jpeg-apply",
+                        self.t(
+                            "Apply JPEG quality",
+                            "应用 JPEG 质量",
+                            "JPEG 品質を適用",
+                            "JPEG 품질 적용",
+                        ),
+                        false,
+                        |this, cx| this.update_export_options(10, cx),
+                        cx,
+                    )),
+            )
+            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
+                "RenderDoc may adapt mapping to the texture and output format.",
+                "RenderDoc 可能根据纹理和输出格式调整映射。",
+                "RenderDoc はテクスチャと形式に応じてマッピングを調整する場合があります。",
+                "RenderDoc은 텍스처와 출력 형식에 맞게 매핑을 조정할 수 있습니다.",
+            )))
+            .into_any_element()
     }
 
     fn texture_background_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -12688,6 +12948,7 @@ impl Workspace {
                             .child(export)
                             .child(button("texture-export-raw", self.t("Export raw subresource", "导出原始子资源", "生サブリソースを出力", "원시 하위 리소스 내보내기"), false, |this, cx| this.export_texture_raw(cx), cx)),
                     )
+                    .child(self.texture_export_controls(cx))
                     .child(self.texture_preview_controls(cx))
                     .child(self.texture_raw_panel(cx))
                     .child(div().text_sm().text_color(rgb(0x91a7c0)).child(pixel_title))
@@ -15124,6 +15385,12 @@ fn main() {
                         cx.new(|cx| InputState::new(window, cx).default_value("32"));
                     let texture_background =
                         cx.new(|cx| InputState::new(window, cx).default_value("#000000"));
+                    let texture_export_grid =
+                        cx.new(|cx| InputState::new(window, cx).default_value("1"));
+                    let texture_export_quality =
+                        cx.new(|cx| InputState::new(window, cx).default_value("90"));
+                    let texture_export_color =
+                        cx.new(|cx| InputState::new(window, cx).default_value("#000000"));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_debug_primitive = cx.new(|cx| InputState::new(window, cx));
                     let pixel_debug_view = cx.new(|cx| InputState::new(window, cx));
@@ -15189,6 +15456,9 @@ fn main() {
                         texture_white_point,
                         texture_hdr_multiplier,
                         texture_background,
+                        texture_export_grid,
+                        texture_export_quality,
+                        texture_export_color,
                         texture_raw_page: None,
                         texture_raw_seek,
                         texture_raw_search,
@@ -15398,6 +15668,28 @@ mod ui_tests {
             reveal_details(window, "texture-background-checker", cx);
             window.click("texture-background-checker", cx);
             assert!(view.read(cx).texture_selection.preview_background.is_none());
+            reveal_details(window, "export-all-mips", cx);
+            window.click("export-all-mips", cx);
+            assert!(view.read(cx).texture_selection.export.all_mips);
+            window.click("export-all-mips", cx);
+            view.update(cx, |view, cx| {
+                view.texture_export_grid
+                    .update(cx, |input, cx| input.set_value("2", window, cx))
+            });
+            reveal_details(window, "export-slice-grid", cx);
+            window.click("export-slice-grid", cx);
+            assert_eq!(view.read(cx).texture_selection.export.grid_width, 2);
+            assert_eq!(
+                view.read(cx).texture_selection.export.slices,
+                renderdocx::texture_export::SliceLayout::Grid
+            );
+            window.click("export-slice-selected", cx);
+            view.update(cx, |view, cx| {
+                view.texture_export_grid
+                    .update(cx, |input, cx| input.set_value("1", window, cx))
+            });
+            window.click("export-slice-grid", cx);
+            window.click("export-slice-selected", cx);
             reveal_details(window, "texture-overlay-1", cx);
             window.click("texture-overlay-1", cx);
         })
@@ -15624,6 +15916,12 @@ mod ui_tests {
                         cx.new(|cx| InputState::new(window, cx).default_value("32"));
                     let texture_background =
                         cx.new(|cx| InputState::new(window, cx).default_value("#000000"));
+                    let texture_export_grid =
+                        cx.new(|cx| InputState::new(window, cx).default_value("1"));
+                    let texture_export_quality =
+                        cx.new(|cx| InputState::new(window, cx).default_value("90"));
+                    let texture_export_color =
+                        cx.new(|cx| InputState::new(window, cx).default_value("#000000"));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_debug_primitive = cx.new(|cx| InputState::new(window, cx));
                     let pixel_debug_view = cx.new(|cx| InputState::new(window, cx));
@@ -15708,6 +16006,9 @@ mod ui_tests {
                         texture_white_point,
                         texture_hdr_multiplier,
                         texture_background,
+                        texture_export_grid,
+                        texture_export_quality,
+                        texture_export_color,
                         texture_raw_page: None,
                         texture_raw_seek,
                         texture_raw_search,
@@ -16051,6 +16352,12 @@ mod ui_tests {
                         cx.new(|cx| InputState::new(window, cx).default_value("32"));
                     let texture_background =
                         cx.new(|cx| InputState::new(window, cx).default_value("#000000"));
+                    let texture_export_grid =
+                        cx.new(|cx| InputState::new(window, cx).default_value("1"));
+                    let texture_export_quality =
+                        cx.new(|cx| InputState::new(window, cx).default_value("90"));
+                    let texture_export_color =
+                        cx.new(|cx| InputState::new(window, cx).default_value("#000000"));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_debug_primitive = cx.new(|cx| InputState::new(window, cx));
                     let pixel_debug_view = cx.new(|cx| InputState::new(window, cx));
@@ -16255,6 +16562,9 @@ mod ui_tests {
                         texture_white_point,
                         texture_hdr_multiplier,
                         texture_background,
+                        texture_export_grid,
+                        texture_export_quality,
+                        texture_export_color,
                         texture_raw_page: None,
                         texture_raw_seek,
                         texture_raw_search,
@@ -16723,6 +17033,7 @@ mod ui_tests {
                 preview_hdr_multiplier: None,
                 preview_decode_yuv: false,
                 preview_background: None,
+                export: Default::default(),
             }]
         );
         cx.update(|cx| {
@@ -18263,11 +18574,7 @@ mod ui_tests {
                 cx.update_window(handle.into(), |_, window, cx| {
                     window.click("textures-tab", cx);
                     window.click(SharedString::from(format!("texture-{color_index}")), cx);
-                    window.scroll(
-                        "capture-details-scroll",
-                        ScrollDelta::Pixels(point(px(0.), px(-800.))),
-                        cx,
-                    );
+                    reveal_details(window, "pixel-pick", cx);
                     window.click("pixel-pick", cx);
                 })
                 .unwrap();

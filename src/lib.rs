@@ -34,3 +34,5 @@ pub mod timeline;
 pub mod vertex_input;
 
 pub mod texture_view;
+
+pub mod texture_export;

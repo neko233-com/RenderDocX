@@ -2743,7 +2743,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                             }
                         };
                         match (snapshot.textures.get(index as usize), selection, format) {
-                            (Some(texture), Ok(selection), Ok(format)) => match selection.validate(texture) {
+                            (Some(texture), Ok(selection), Ok(format)) => match selection.validate(texture).and_then(|_| selection.export.validate()) {
                                 Ok(()) => session.export_texture_as(index, selection, format, PathBuf::from(path).as_path())
                                     .map(|_| json!({"index":index,"event_id":event,"path":path,"selection":selection,"format":format}))
                                     .map_err(|error| ("replay_export_failed", error)),

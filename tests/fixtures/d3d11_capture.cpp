@@ -216,7 +216,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint3 id : 
   }
   context->UpdateSubresource(float_texture, 0, nullptr, pattern, 4 * 4 * sizeof(float), 0);
   unsigned char strip_pixels[16 * 4] = {};
-  for(unsigned x = 0; x < 16; ++x) { strip_pixels[x * 4] = (unsigned char)(x * 16); strip_pixels[x * 4 + 3] = 255; }
+  for(unsigned x = 0; x < 16; ++x) { strip_pixels[x * 4] = (unsigned char)(x * 16); strip_pixels[x * 4 + 3] = 128; }
   context->UpdateSubresource(strip_texture, 0, nullptr, strip_pixels, sizeof(strip_pixels), 0);
   context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   const UINT stride = 8, offset = 4;

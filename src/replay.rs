@@ -895,6 +895,7 @@ pub struct TextureSelection {
     pub preview_decode_yuv: bool,
     /// sRGB RGBA background; None and [0,0,0,0] select the upstream checkerboard.
     pub preview_background: Option<[f32; 4]>,
+    pub export: crate::texture_export::TextureExportOptions,
 }
 
 /// Raw data is a whole subresource; a 3D mip contains its complete depth.
@@ -2951,7 +2952,36 @@ impl Transport for Process {
             encoded.push(HEX[(byte & 15) as usize] as char);
         }
         let input = self.input.as_mut().ok_or("Replay session has closed")?;
-        let command = if let Some([black, white]) = selection.display_range {
+        selection.export.validate()?;
+        let command = if selection.export != crate::texture_export::TextureExportOptions::default()
+        {
+            let options = selection.export;
+            let [black, white] = selection.display_range.unwrap_or([0.0, 1.0]);
+            let sample = selection
+                .sample
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "resolve".into());
+            let channel = selection
+                .channel
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "all".into());
+            let [r, g, b, a] = options.alpha_color.map(f32::to_bits);
+            format!(
+                "save5 {index} {} {} {sample} {channel} {encoded} {} {} {} {} {} {} {} {} {} {} {r} {g} {b} {a}",
+                selection.mip,
+                selection.slice,
+                selection.preview_type_cast,
+                format.wire(),
+                black.to_bits(),
+                white.to_bits(),
+                u8::from(options.all_mips),
+                options.slices as u32,
+                options.grid_width,
+                u8::from(options.samples_as_array),
+                options.alpha as u32,
+                options.jpeg_quality
+            )
+        } else if let Some([black, white]) = selection.display_range {
             if !black.is_finite() || !white.is_finite() || black >= white {
                 return Err("Invalid texture display range".into());
             }
@@ -4287,6 +4317,7 @@ impl Session {
         format: TextureExportFormat,
         destination: &Path,
     ) -> Result<(), String> {
+        selection.export.validate()?;
         if selection.mip > i32::MAX as u32
             || selection.slice > i32::MAX as u32
             || selection.channel.is_some_and(|v| v > i32::MAX as u32)
@@ -5395,6 +5426,7 @@ mod tests {
             preview_hdr_multiplier: None,
             preview_decode_yuv: false,
             preview_background: None,
+            export: Default::default(),
         };
         let raw = RawTextureSelection {
             mip: 2,
