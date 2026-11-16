@@ -6286,6 +6286,13 @@ impl Workspace {
             .as_ref()
             .and_then(|(_, doc)| annotations::bookmarks(doc).ok())
             .unwrap_or_default();
+        let mut nearest_events: Vec<u32> = if history.is_empty() {
+            usage.iter().map(|(event, _)| *event).collect()
+        } else {
+            history.iter().map(|(event, _)| *event).collect()
+        };
+        nearest_events.sort_unstable();
+        nearest_events.dedup();
         let graph_bounds =
             std::rc::Rc::new(std::cell::Cell::new(Bounds::<gpui::Pixels>::default()));
         let graph_paint = graph_bounds.clone();
@@ -6300,9 +6307,25 @@ impl Workspace {
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                    let bounds = graph_down.get();
+                    let y = f32::from(event.position.y - bounds.origin.y);
+                    if !event.modifiers.alt && y >= height - 54.0 && y < height - 18.0 {
+                        this.timeline.drag_x = None;
+                        if let Some(event_id) = renderdocx::timeline::event_at(
+                            this.timeline.start,
+                            this.timeline.end,
+                            f32::from(event.position.x - bounds.origin.x),
+                            f32::from(bounds.size.width),
+                        )
+                        .and_then(|id| renderdocx::timeline::nearest_highlight(&nearest_events, id))
+                        {
+                            this.jump_to_usage(event_id, window, cx);
+                        }
+                        return;
+                    }
                     this.timeline.drag_x = Some(f32::from(event.position.x));
                     if !event.modifiers.alt {
-                        this.scrub_timeline(event.position, graph_down.get(), window, cx);
+                        this.scrub_timeline(event.position, bounds, window, cx);
                     }
                 }),
             )
@@ -6579,6 +6602,7 @@ impl Workspace {
                 .child(button("timeline-load-usage", self.t("Highlight all resource usage", "高亮全部资源使用", "すべてのリソース使用を強調", "전체 리소스 사용 강조"), false, |this, cx| this.load_timeline_usage(cx), cx)))
             .child(format!("{}: {start}–{end} / {}", self.t("Event IDs", "事件 ID", "イベント ID", "이벤트 ID"), self.timeline.model.max_event))
             .child(self.t("Drag the axis or graph background to select actions; Alt-drag pans, scroll zooms. Green: passed · orange-red: failed pixel history · light green: bookmarks.", "拖动坐标轴或图表背景选择操作；Alt 拖动平移，滚轮缩放。绿：像素通过 · 橙红：像素失败 · 浅绿：书签。", "軸またはグラフの背景をドラッグして選択、Alt ドラッグで移動、スクロールで拡大縮小。緑：ピクセル成功・橙赤：失敗・薄緑：ブックマーク。", "축 또는 그래프 배경 드래그로 선택, Alt 드래그로 이동, 스크롤로 확대/축소. 초록: 픽셀 통과 · 주황 빨강: 실패 · 연두: 북마크."))
+            .child(self.t("Click the highlight band to jump to the nearest history or usage event.", "点击高亮区域可跳转到最近的像素历史或资源使用事件。", "強調表示領域をクリックすると最も近い履歴または使用イベントへ移動します。", "강조 영역을 클릭하면 가장 가까운 기록 또는 사용 이벤트로 이동합니다."))
             .child(div().flex().flex_wrap().gap_2()
                 .child(format!("{}:", self.t("Resource usage", "资源使用", "リソース使用", "리소스 사용")))
                 .child(div().text_color(rgb(0xe69f00)).child(self.t("Read", "读取", "読み取り", "읽기")))
@@ -12995,11 +13019,21 @@ mod ui_tests {
         .unwrap();
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 43));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let bounds = window.find("timeline-background").bounds();
+            let hit = bounds.origin + gpui::point(px(412.), bounds.size.height - px(43.));
+            window.drag(hit, hit, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 41));
         events.lock().unwrap().clear();
         cx.update(|cx| {
             view.update(cx, |view, cx| {
                 view.selected = None;
                 view.pipeline = None;
+                view.event_tree.set_show_api(false);
                 cx.notify();
             })
         });

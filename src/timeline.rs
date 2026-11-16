@@ -155,6 +155,18 @@ impl Timeline {
     }
 }
 
+/// Mirrors TimelineBar's lower-bound selection, including its tie and end behavior.
+/// The input must be sorted by event ID.
+pub fn nearest_highlight(events: &[u32], event: u32) -> Option<u32> {
+    let index = events.partition_point(|id| *id < event);
+    let next = *events.get(index)?;
+    if index > 0 && event - events[index - 1] < next - event {
+        Some(events[index - 1])
+    } else {
+        Some(next)
+    }
+}
+
 /// Maps a pointer position onto the inclusive event-ID range.
 pub fn event_at(start: u32, end: u32, x: f32, width: f32) -> Option<u32> {
     if start > end || !x.is_finite() || !width.is_finite() || width <= 0.0 {
@@ -190,6 +202,20 @@ mod tests {
             api_events: vec![],
         }
     }
+    #[test]
+    fn nearest_highlight_matches_upstream_boundaries() {
+        assert_eq!(nearest_highlight(&[], 0), None);
+        assert_eq!(nearest_highlight(&[10, 20], 0), Some(10));
+        assert_eq!(nearest_highlight(&[10, 20], 14), Some(10));
+        assert_eq!(nearest_highlight(&[10, 20], 15), Some(20));
+        assert_eq!(nearest_highlight(&[10, 20], 20), Some(20));
+        assert_eq!(nearest_highlight(&[10, 20], 21), None);
+        assert_eq!(
+            nearest_highlight(&[0, u32::MAX], u32::MAX - 1),
+            Some(u32::MAX)
+        );
+    }
+
     #[test]
     fn pointer_mapping_clamps_and_handles_large_event_ranges() {
         assert_eq!(event_at(0, u32::MAX, 0.0, 100.0), Some(0));
