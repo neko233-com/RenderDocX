@@ -210,6 +210,7 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
 {
   const APIProperties api = controller->GetAPIProperties();
   const FrameDescription frame = controller->GetFrameInfo();
+  const rdcarray<DebugMessage> replay_messages = controller->GetDebugMessages();
   const SDFile &structured = controller->GetStructuredFile();
   const auto &roots = controller->GetRootActions();
   std::vector<PendingAction> pending;
@@ -217,7 +218,67 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
 
   std::cout << "\nRENDERDOCX/1 {\"type\":\"snapshot\",\"protocol\":1,\"api\":" << uint32_t(api.pipelineType)
             << ",\"frame\":" << frame.frameNumber << ",\"degraded\":"
-            << (api.degraded ? "true" : "false") << ",\"actions\":[";
+            << (api.degraded ? "true" : "false")
+            << ",\"frame_info\":{\"file_offset\":\"" << frame.fileOffset
+            << "\",\"uncompressed_size\":\"" << frame.uncompressedFileSize
+            << "\",\"compressed_size\":\"" << frame.compressedFileSize
+            << "\",\"persistent_size\":\"" << frame.persistentSize
+            << "\",\"initial_data_size\":\"" << frame.initDataSize
+            << "\",\"capture_time\":\"" << frame.captureTime
+            << "\",\"contains_annotations\":" << (frame.containsAnnotations ? "true" : "false") << "}"
+            << ",\"debug_messages\":[";
+  bool first_message = true;
+  auto write_messages = [&](const rdcarray<DebugMessage> &messages) {
+    for(const DebugMessage &message : messages)
+    {
+      if(!first_message) std::cout << ',';
+      first_message = false;
+      std::cout << "{\"event_id\":" << message.eventId << ",\"category\":" << uint32_t(message.category)
+                << ",\"severity\":" << uint32_t(message.severity) << ",\"source\":" << uint32_t(message.source)
+                << ",\"message_id\":" << message.messageID << ",\"description\":";
+      json_string(message.description);
+      std::cout << '}';
+    }
+  };
+  write_messages(frame.debugMessages);
+  write_messages(replay_messages);
+  std::cout << "],\"frame_statistics\":{\"recorded\":" << (frame.stats.recorded ? "true" : "false");
+  if(frame.stats.recorded)
+  {
+    const FrameStatistics &stats = frame.stats;
+    auto array = [](const rdcarray<uint32_t> &values) {
+      std::cout << '[';
+      for(size_t i = 0; i < values.size(); ++i) { if(i) std::cout << ','; std::cout << values[i]; }
+      std::cout << ']';
+    };
+    auto bind = [](const auto &value) {
+      std::cout << "{\"calls\":" << value.calls << ",\"sets\":" << value.sets << ",\"nulls\":" << value.nulls;
+    };
+    auto simple_bind = [&](const auto &value) { bind(value); std::cout << '}'; };
+    auto redundant_bind = [&](const auto &value) { bind(value); std::cout << ",\"redundants\":" << value.redundants << '}'; };
+    std::cout << ",\"draws\":{\"calls\":" << stats.draws.calls << ",\"instanced\":" << stats.draws.instanced
+              << ",\"indirect\":" << stats.draws.indirect << ",\"counts\":";
+    array(stats.draws.counts);
+    std::cout << "},\"dispatches\":{\"calls\":" << stats.dispatches.calls << ",\"indirect\":" << stats.dispatches.indirect << '}';
+    std::cout << ",\"indices\":"; simple_bind(stats.indices);
+    std::cout << ",\"layouts\":"; simple_bind(stats.layouts);
+    std::cout << ",\"vertices\":"; bind(stats.vertices); std::cout << ",\"bindslots\":"; array(stats.vertices.bindslots); std::cout << '}';
+    std::cout << ",\"updates\":{\"calls\":" << stats.updates.calls << ",\"clients\":" << stats.updates.clients << ",\"servers\":" << stats.updates.servers << ",\"types\":";
+    array(stats.updates.types); std::cout << ",\"sizes\":"; array(stats.updates.sizes); std::cout << '}';
+    std::cout << ",\"constants\":[";
+    for(size_t i = 0; i < stats.constants.size(); ++i) { if(i) std::cout << ','; const auto &v=stats.constants[i]; bind(v); std::cout << ",\"bindslots\":"; array(v.bindslots); std::cout << ",\"sizes\":"; array(v.sizes); std::cout << '}'; }
+    std::cout << "],\"samplers\":[";
+    for(size_t i = 0; i < stats.samplers.size(); ++i) { if(i) std::cout << ','; const auto &v=stats.samplers[i]; bind(v); std::cout << ",\"bindslots\":"; array(v.bindslots); std::cout << '}'; }
+    std::cout << "],\"resources\":[";
+    for(size_t i = 0; i < stats.resources.size(); ++i) { if(i) std::cout << ','; const auto &v=stats.resources[i]; bind(v); std::cout << ",\"types\":"; array(v.types); std::cout << ",\"bindslots\":"; array(v.bindslots); std::cout << '}'; }
+    std::cout << "],\"shaders\":[";
+    for(size_t i = 0; i < stats.shaders.size(); ++i) { if(i) std::cout << ','; redundant_bind(stats.shaders[i]); }
+    std::cout << "],\"blends\":"; redundant_bind(stats.blends);
+    std::cout << ",\"depths\":"; redundant_bind(stats.depths);
+    std::cout << ",\"rasters\":"; bind(stats.rasters); std::cout << ",\"redundants\":" << stats.rasters.redundants << ",\"viewports\":"; array(stats.rasters.viewports); std::cout << ",\"rects\":"; array(stats.rasters.rects); std::cout << '}';
+    std::cout << ",\"outputs\":"; bind(stats.outputs); std::cout << ",\"bindslots\":"; array(stats.outputs.bindslots); std::cout << '}';
+  }
+  std::cout << "},\"actions\":[";
   size_t index = 0;
   while(!pending.empty())
   {

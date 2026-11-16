@@ -1,7 +1,8 @@
 //! Navigation over the ordered states returned by RenderDoc's shader debugger.
-use crate::replay::{DebugState, DebugTrace, InstructionSourceInfo};
+use crate::replay::{DebugState, DebugTrace, DebugVariable, InstructionSourceInfo};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 
 const DEBUG_BREAK: u32 = 0x4; // ShaderEvents::DebugBreak
 
@@ -26,6 +27,7 @@ pub enum StopReason {
 pub struct DebugNavigator {
     pub position: usize,
     pub breakpoints: BTreeSet<Breakpoint>,
+    variables_cache: RefCell<Option<(usize, BTreeMap<String, DebugVariable>)>>,
 }
 
 fn location<'a>(trace: &'a DebugTrace, state: &DebugState) -> Option<&'a InstructionSourceInfo> {
@@ -43,6 +45,47 @@ fn source_key(info: &InstructionSourceInfo) -> (i32, u32, u32, u32, u32) {
 }
 
 impl DebugNavigator {
+    /// Reconstruct mutable variables from RenderDoc's ordered change stream.
+    pub fn variables(&self, states: &[DebugState]) -> Vec<DebugVariable> {
+        if states.is_empty() {
+            return Vec::new();
+        }
+        let mut cache = self.variables_cache.borrow_mut();
+        if cache.is_none() {
+            let mut variables = BTreeMap::new();
+            let first = &states[0];
+            for change in &first.changes {
+                if !change.after.name.is_empty() {
+                    variables.insert(change.after.name.clone(), change.after.clone());
+                }
+            }
+            *cache = Some((0, variables));
+        }
+        let (position, variables) = cache.as_mut().unwrap();
+        let target = self.position.min(states.len() - 1);
+        while *position < target {
+            *position += 1;
+            for change in &states[*position].changes {
+                if change.after.name.is_empty() {
+                    variables.remove(&change.before.name);
+                } else {
+                    variables.insert(change.after.name.clone(), change.after.clone());
+                }
+            }
+        }
+        while *position > target {
+            for change in states[*position].changes.iter().rev() {
+                if change.before.name.is_empty() {
+                    variables.remove(&change.after.name);
+                } else {
+                    variables.insert(change.before.name.clone(), change.before.clone());
+                }
+            }
+            *position -= 1;
+        }
+        variables.values().cloned().collect()
+    }
+
     pub fn current<'a>(&self, states: &'a [DebugState]) -> Option<&'a DebugState> {
         states.get(self.position)
     }
@@ -228,6 +271,49 @@ mod tests {
             })
             .collect();
         (trace, states)
+    }
+
+    #[test]
+    fn reconstructs_variables_while_navigating_both_directions() {
+        let (_, mut states) = fixture();
+        let var = |name: &str, value: &str| DebugVariable {
+            name: name.into(),
+            rows: 1,
+            columns: 1,
+            variable_type: 0,
+            flags: 0,
+            value_hex: value.into(),
+            members: vec![],
+        };
+        let change = |before, after| crate::replay::DebugChange { before, after };
+        states[0].changes = vec![change(var("", ""), var("a", "01"))];
+        states[1].changes = vec![
+            change(var("a", "01"), var("a", "02")),
+            change(var("", ""), var("b", "03")),
+        ];
+        states[2].changes = vec![change(var("a", "02"), var("", ""))];
+        let mut nav = DebugNavigator::default();
+        let values = |nav: &DebugNavigator| {
+            nav.variables(&states)
+                .into_iter()
+                .map(|v| (v.name, v.value_hex))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(values(&nav), vec![("a".into(), "01".into())]);
+        nav.step(&states, true);
+        assert_eq!(
+            values(&nav),
+            vec![("a".into(), "02".into()), ("b".into(), "03".into())]
+        );
+        nav.step(&states, true);
+        assert_eq!(values(&nav), vec![("b".into(), "03".into())]);
+        nav.step(&states, false);
+        assert_eq!(
+            values(&nav),
+            vec![("a".into(), "02".into()), ("b".into(), "03".into())]
+        );
+        nav.step(&states, false);
+        assert_eq!(values(&nav), vec![("a".into(), "01".into())]);
     }
 
     #[test]

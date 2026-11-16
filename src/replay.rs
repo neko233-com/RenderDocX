@@ -132,6 +132,12 @@ pub struct Snapshot {
     pub api: u32,
     pub frame: u32,
     pub degraded: bool,
+    #[serde(default)]
+    pub frame_info: Option<FrameInfo>,
+    #[serde(default)]
+    pub debug_messages: Vec<DebugMessage>,
+    #[serde(default)]
+    pub frame_statistics: Option<serde_json::Value>,
     pub actions: Vec<Action>,
     pub resource_count: usize,
     pub texture_count: usize,
@@ -142,6 +148,27 @@ pub struct Snapshot {
     pub textures: Vec<Texture>,
     #[serde(default)]
     pub buffers: Vec<Buffer>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FrameInfo {
+    pub file_offset: String,
+    pub uncompressed_size: String,
+    pub compressed_size: String,
+    pub persistent_size: String,
+    pub initial_data_size: String,
+    pub capture_time: String,
+    pub contains_annotations: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DebugMessage {
+    pub event_id: u32,
+    pub category: u32,
+    pub severity: u32,
+    pub source: u32,
+    pub message_id: u32,
+    pub description: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -260,6 +260,8 @@ enum CaptureTab {
     Mesh,
     VertexInput,
     Resources,
+    Messages,
+    Statistics,
 }
 #[derive(Clone, Copy)]
 enum TextureField {
@@ -311,6 +313,7 @@ struct Workspace {
     compute_group: Entity<InputState>,
     compute_thread: Entity<InputState>,
     selected_resource: Option<usize>,
+    selected_message: Option<usize>,
     usage_page: Option<ResourceUsagePage>,
     open_revision: u64,
     selection_revision: u64,
@@ -846,6 +849,7 @@ impl Workspace {
                         this.debug_vertex_selection = None;
                         this.debug_view = None;
                         this.selected_resource = None;
+                        this.selected_message = None;
                         this.usage_page = None;
                         this.replay_pending = false;
                         this.export_pending = false;
@@ -2628,6 +2632,23 @@ impl Workspace {
                     self.t("Call stack", "调用栈", "呼び出し履歴", "호출 스택"),
                     state.callstack.join(" → ")
                 ))
+                .child(self.t(
+                    "Mutable variables",
+                    "可变变量",
+                    "可変変数",
+                    "변경 가능한 변수",
+                ))
+                .children(
+                    debug
+                        .navigator
+                        .variables(&debug.states)
+                        .iter()
+                        .map(|variable| {
+                            div()
+                                .text_sm()
+                                .child(shader_debug::display_variable(variable))
+                        }),
+                )
                 .child(self.t("Variable changes", "变量变化", "変数の変化", "변수 변경"))
                 .children(state.changes.iter().map(|change| {
                     div().text_sm().child(format!(
@@ -2829,6 +2850,17 @@ impl Workspace {
             _ => Vec::new(),
         };
         let count = match self.tab {
+            CaptureTab::Statistics => snapshot
+                .frame_statistics
+                .as_ref()
+                .map(|value| {
+                    serde_json::to_string_pretty(value)
+                        .unwrap_or_default()
+                        .lines()
+                        .count()
+                })
+                .unwrap_or(0),
+            CaptureTab::Messages => snapshot.debug_messages.len(),
             CaptureTab::Resources => self.resource_visible.len(),
             CaptureTab::VertexInput => self.input_page.as_ref().map_or(0, |page| page.rows.len()),
             CaptureTab::Mesh => mesh_lines.len(),
@@ -3096,7 +3128,70 @@ impl Workspace {
         let status = self.status.clone();
         let preview_path = self.preview.as_ref().map(|preview| preview.path.clone());
 
-        let list = if self.tab == CaptureTab::Resources {
+        let list = if self.tab == CaptureTab::Statistics {
+            let lines: std::sync::Arc<Vec<String>> = std::sync::Arc::new(
+                snapshot
+                    .frame_statistics
+                    .as_ref()
+                    .and_then(|value| serde_json::to_string_pretty(value).ok())
+                    .map(|value| value.lines().map(str::to_owned).collect())
+                    .unwrap_or_default(),
+            );
+            uniform_list(
+                "capture-statistics",
+                count,
+                cx.processor(move |_, range: std::ops::Range<usize>, _, _| {
+                    range
+                        .filter_map(|i| lines.get(i))
+                        .map(|line| div().h(px(24.)).px_3().child(line.clone()))
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .flex_1()
+            .into_any_element()
+        } else if self.tab == CaptureTab::Messages {
+            uniform_list(
+                "capture-messages",
+                count,
+                cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                    range
+                        .filter_map(|index| {
+                            let message = this.snapshot.as_ref()?.debug_messages.get(index)?;
+                            let event = message.event_id;
+                            let severity = match message.severity {
+                                0 => this.t("High", "高", "高", "높음"),
+                                1 => this.t("Medium", "中", "中", "중간"),
+                                2 => this.t("Low", "低", "低", "낮음"),
+                                3 => this.t("Info", "信息", "情報", "정보"),
+                                _ => this.t("Unknown", "未知", "不明", "알 수 없음"),
+                            };
+                            let text = format!("{severity} · E{event} · {}", message.description);
+                            Some(
+                                div()
+                                    .id(("debug-message", index))
+                                    .test_support()
+                                    .h(px(32.))
+                                    .px_3()
+                                    .overflow_hidden()
+                                    .cursor_pointer()
+                                    .child(text)
+                                    .bg(rgb(if this.selected_message == Some(index) {
+                                        0x304c7c
+                                    } else {
+                                        0x192332
+                                    }))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.selected_message = Some(index);
+                                        cx.notify();
+                                    })),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .flex_1()
+            .into_any_element()
+        } else if self.tab == CaptureTab::Resources {
             let visible = std::sync::Arc::new(self.resource_visible.clone());
             uniform_list(
                 "capture-resources",
@@ -3617,7 +3712,104 @@ impl Workspace {
             .into_any_element()
         };
 
-        let detail_view = if self.tab == CaptureTab::Resources {
+        let detail_view = if self.tab == CaptureTab::Statistics {
+            div().p_3().flex().flex_col().gap_2()
+                .child(self.t("Frame statistics", "帧统计", "フレーム統計", "프레임 통계"))
+                .child(self.t("Values come from RenderDoc's recorded frame statistics. If recorded is false, the capture has no statistics.", "数据来自 RenderDoc 记录的帧统计；recorded 为 false 表示捕获文件没有统计数据。", "RenderDoc が記録した統計です。recorded が false の場合は利用できません。", "RenderDoc에서 기록한 통계입니다. recorded가 false이면 통계를 사용할 수 없습니다."))
+        } else if self.tab == CaptureTab::Messages {
+            let info = snapshot.frame_info.as_ref();
+            let message = self
+                .selected_message
+                .and_then(|i| snapshot.debug_messages.get(i));
+            let mut detail = div()
+                .p_3()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(self.t("Frame information", "帧信息", "フレーム情報", "프레임 정보"))
+                .child(format!(
+                    "{}: {}",
+                    self.t("Frame", "帧", "フレーム", "프레임"),
+                    if snapshot.frame == u32::MAX {
+                        self.t("Unavailable", "不可用", "利用不可", "사용할 수 없음")
+                            .to_owned()
+                    } else {
+                        snapshot.frame.to_string()
+                    }
+                ))
+                .child(format!(
+                    "{}: {}",
+                    self.t(
+                        "Capture time (UTC epoch)",
+                        "捕获时间（UTC 时间戳）",
+                        "キャプチャ時刻 (UTC)",
+                        "캡처 시간 (UTC)"
+                    ),
+                    info.map_or("—", |v| v.capture_time.as_str())
+                ))
+                .child(format!(
+                    "{}: {}",
+                    self.t(
+                        "Compressed bytes",
+                        "压缩后字节数",
+                        "圧縮サイズ",
+                        "압축 크기"
+                    ),
+                    info.map_or("—", |v| v.compressed_size.as_str())
+                ))
+                .child(format!(
+                    "{}: {}",
+                    self.t(
+                        "Uncompressed bytes",
+                        "解压后字节数",
+                        "展開サイズ",
+                        "압축 해제 크기"
+                    ),
+                    info.map_or("—", |v| v.uncompressed_size.as_str())
+                ))
+                .child(self.t(
+                    "Messages collected when opening the capture",
+                    "打开捕获时收集的消息",
+                    "キャプチャを開いた際のメッセージ",
+                    "캡처를 열 때 수집된 메시지",
+                ));
+            if let Some(message) = message {
+                let event = message.event_id;
+                detail = detail
+                    .child(format!(
+                        "{}: {} · ID: {} · {}: {} · {}: {} · {}: {}",
+                        self.t("Event", "事件", "イベント", "이벤트"),
+                        event,
+                        message.message_id,
+                        self.t("Category", "类别", "カテゴリ", "범주"),
+                        message.category,
+                        self.t("Severity", "严重程度", "重大度", "심각도"),
+                        message.severity,
+                        self.t("Source", "来源", "ソース", "출처"),
+                        message.source
+                    ))
+                    .child(message.description.clone());
+                if event != 0 {
+                    detail = detail.child(
+                        div()
+                            .id("message-event")
+                            .test_support()
+                            .cursor_pointer()
+                            .text_color(rgb(0x91cfff))
+                            .child(self.t(
+                                "Go to event",
+                                "跳转到事件",
+                                "イベントへ移動",
+                                "이벤트로 이동",
+                            ))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.jump_to_usage(event, window, cx)
+                            })),
+                    );
+                }
+            }
+            detail
+        } else if self.tab == CaptureTab::Resources {
             let heading = self.t(
                 "RESOURCE INSPECTOR",
                 "资源检查器",
@@ -5146,6 +5338,31 @@ impl Workspace {
                                         },
                                         cx,
                                     ))
+                                    .child(button(
+                                        "messages-tab",
+                                        self.t(
+                                            "Messages",
+                                            "调试消息",
+                                            "デバッグメッセージ",
+                                            "디버그 메시지",
+                                        ),
+                                        self.tab == CaptureTab::Messages,
+                                        |this, cx| {
+                                            this.tab = CaptureTab::Messages;
+                                            cx.notify();
+                                        },
+                                        cx,
+                                    ))
+                                    .child(button(
+                                        "statistics-tab",
+                                        self.t("Statistics", "统计", "統計", "통계"),
+                                        self.tab == CaptureTab::Statistics,
+                                        |this, cx| {
+                                            this.tab = CaptureTab::Statistics;
+                                            cx.notify();
+                                        },
+                                        cx,
+                                    ))
                                     .child(
                                         div()
                                             .self_center()
@@ -6277,6 +6494,7 @@ fn main() {
                         compute_group,
                         compute_thread,
                         selected_resource: None,
+                        selected_message: None,
                         usage_page: None,
                         open_revision: 0,
                         selection_revision: 0,
@@ -6370,6 +6588,9 @@ mod ui_tests {
                             api: 3,
                             frame: 2,
                             degraded: false,
+                            frame_info: None,
+                            debug_messages: Vec::new(),
+                            frame_statistics: None,
                             actions: Vec::new(),
                             resource_count: 0,
                             texture_count: 0,
@@ -6419,6 +6640,7 @@ mod ui_tests {
                         compute_group,
                         compute_thread,
                         selected_resource: None,
+                        selected_message: None,
                         usage_page: None,
                         open_revision: 0,
                         selection_revision: 0,
@@ -6594,6 +6816,9 @@ mod ui_tests {
                             api: 0,
                             frame: 2,
                             degraded: false,
+                            frame_info: None,
+                            debug_messages: Vec::new(),
+                            frame_statistics: None,
                             actions: vec![
                                 renderdocx::replay::Action {
                                     event_id: 42,
@@ -6745,6 +6970,7 @@ mod ui_tests {
                         compute_group,
                         compute_thread,
                         selected_resource: None,
+                        selected_message: None,
                         usage_page: None,
                         open_revision: 0,
                         selection_revision: 0,

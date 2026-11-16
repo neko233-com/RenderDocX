@@ -32,7 +32,7 @@ impl AgentDebugTimeline {
         let state = self.navigator.current(&self.states);
         let location = state.and_then(|state| self.trace.instruction_info(state.next_instruction));
         json!({"event_id":self.trace.event_id,"stage":self.trace.stage,"position":self.navigator.position,
-            "total":self.states.len(),"state":state,"location":location,"breakpoints":self.navigator.breakpoints,"reason":reason})
+            "total":self.states.len(),"state":state,"mutable_variables":self.navigator.variables(&self.states),"location":location,"breakpoints":self.navigator.breakpoints,"reason":reason})
     }
 }
 
