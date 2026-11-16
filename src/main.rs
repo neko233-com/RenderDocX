@@ -13880,7 +13880,7 @@ mod ui_tests {
             window.click("buffer-layout-input", cx);
             window.press("ctrl-a", cx);
             window.input(
-                "[[packed(r10g10b10a2_unorm)]] uint4 color; [[row_major]] float2x2 transform;",
+                "struct V { float2 p; uint id; }; V v; ushort q[2]; uint end;",
                 cx,
             );
             window.click("buffer-layout-apply", cx);

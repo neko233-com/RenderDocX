@@ -1,7 +1,10 @@
 //! A deliberately restricted, scalar-packed subset of RenderDoc buffer declarations.
 use crate::{buffer_format::ScalarFormat, packed_format::PackedFormat};
 use serde::Serialize;
-use std::collections::HashSet;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 #[derive(Clone, Debug)]
 struct Field {
@@ -11,6 +14,7 @@ struct Field {
     matrix_rows: usize,
     row_major: bool,
     packed: Option<PackedFormat>,
+    nested: Option<Arc<Layout>>,
     count: usize,
     offset: usize,
 }
@@ -18,6 +22,8 @@ struct Field {
 pub struct Layout {
     fields: Vec<Field>,
     stride: usize,
+    alignment: usize,
+    used: usize,
 }
 #[derive(Serialize)]
 pub struct FieldValue {
@@ -78,7 +84,7 @@ fn tokens(source: &str) -> Result<Vec<&str>, String> {
             while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                 i += 1;
             }
-        } else if b"#()[];".contains(&bytes[i]) {
+        } else if b"#()[];{}".contains(&bytes[i]) {
             i += 1;
         } else {
             return Err("Unsupported format syntax".into());
@@ -120,18 +126,55 @@ impl Layout {
     }
 
     pub fn parse(source: &str) -> Result<Self, String> {
-        let t = tokens(source)?;
+        let tokens = tokens(source)?;
+        let mut i = 0;
+        if tokens.first() == Some(&"#") {
+            if tokens.get(..5) != Some(&["#", "pack", "(", "scalar", ")"][..]) {
+                return Err("Only #pack(scalar) is supported".into());
+            }
+            i = 5;
+        }
+        let mut definitions: HashMap<&str, Arc<Layout>> = HashMap::new();
+        let mut last = None;
+        while tokens.get(i) == Some(&"struct") {
+            let name = *tokens.get(i + 1).ok_or("Missing struct name")?;
+            if !name
+                .bytes()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
+                || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                || base_type(name).is_some()
+                || definitions.contains_key(name)
+                || tokens.get(i + 2) != Some(&"{")
+            {
+                return Err("Invalid or duplicate struct definition".into());
+            }
+            let body = i + 3;
+            let end = (body..tokens.len())
+                .find(|&n| tokens[n] == "}")
+                .ok_or("Unterminated struct")?;
+            if tokens.get(end + 1) != Some(&";") {
+                return Err("Expected semicolon after struct".into());
+            }
+            let layout = Arc::new(Self::parse_body(&tokens[body..end], &definitions)?);
+            definitions.insert(name, layout.clone());
+            last = Some(layout);
+            i = end + 2;
+        }
+        if i == tokens.len() {
+            return last
+                .map(|layout| (*layout).clone())
+                .ok_or_else(|| "Layout must contain fields".into());
+        }
+        Self::parse_body(&tokens[i..], &definitions)
+    }
+
+    fn parse_body(t: &[&str], definitions: &HashMap<&str, Arc<Layout>>) -> Result<Self, String> {
         let mut i = 0;
         let mut fields = Vec::new();
         let mut names = HashSet::new();
         let mut cursor = 0usize;
         let mut alignment = 1usize;
-        if t.first() == Some(&"#") {
-            if t.get(..5) != Some(&["#", "pack", "(", "scalar", ")"][..]) {
-                return Err("Only #pack(scalar) is supported".into());
-            }
-            i = 5;
-        }
         while i < t.len() {
             let mut specified_offset = None;
             let mut padding = false;
@@ -192,6 +235,68 @@ impl Layout {
             if unsigned {
                 typename = *t.get(i).ok_or("Missing unsigned type")?;
                 i += 1;
+            }
+            if let Some(nested) = definitions.get(typename) {
+                if unsigned || normalization.is_some() || packed_name.is_some() || major.is_some() {
+                    return Err("Unsupported annotation or qualifier on struct field".into());
+                }
+                let name = *t.get(i).ok_or("Missing field name")?;
+                i += 1;
+                if !name
+                    .bytes()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
+                    || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                    || (!padding && !names.insert(name))
+                {
+                    return Err("Invalid or duplicate field name".into());
+                }
+                let mut count = 1usize;
+                if t.get(i) == Some(&"[") {
+                    count = t
+                        .get(i + 1)
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .filter(|n| *n > 0)
+                        .ok_or("Array size must be a positive integer")?;
+                    if t.get(i + 2) != Some(&"]") {
+                        return Err("Invalid array declaration".into());
+                    }
+                    i += 3;
+                }
+                if t.get(i) != Some(&";") {
+                    return Err("Expected semicolon".into());
+                }
+                i += 1;
+                if !padding {
+                    alignment = alignment.max(nested.alignment);
+                }
+                cursor = align(cursor, nested.alignment).ok_or("Layout size overflow")?;
+                if let Some(offset) = specified_offset {
+                    if offset < cursor {
+                        return Err("Explicit offset overlaps earlier data".into());
+                    }
+                    cursor = offset;
+                }
+                let size = nested
+                    .stride
+                    .checked_mul(count)
+                    .and_then(|v| v.checked_sub(nested.stride - nested.used))
+                    .ok_or("Layout size overflow")?;
+                if !padding {
+                    fields.push(Field {
+                        name: name.to_owned(),
+                        format: ScalarFormat::Bool,
+                        components: 1,
+                        matrix_rows: 1,
+                        row_major: false,
+                        packed: None,
+                        nested: Some(nested.clone()),
+                        count,
+                        offset: cursor,
+                    });
+                }
+                cursor = cursor.checked_add(size).ok_or("Layout size overflow")?;
+                continue;
             }
             let alias = match typename {
                 "uintten" => Some(("r10g10b10a2_uint", ScalarFormat::U32, 4)),
@@ -328,6 +433,7 @@ impl Layout {
                     matrix_rows,
                     row_major,
                     packed,
+                    nested: None,
                     count,
                     offset: cursor,
                 });
@@ -338,7 +444,12 @@ impl Layout {
             return Err("Layout must contain fields".into());
         }
         let stride = align(cursor, alignment).ok_or("Layout size overflow")?;
-        Ok(Self { fields, stride })
+        Ok(Self {
+            fields,
+            stride,
+            alignment,
+            used: cursor,
+        })
     }
     pub fn decode(&self, offset: u64, bytes: &[u8]) -> Result<Page, String> {
         offset
@@ -349,18 +460,42 @@ impl Layout {
         for (index, bytes) in chunks.by_ref().enumerate() {
             let row_offset = offset + (index * self.stride) as u64;
             let mut fields = Vec::new();
-            for field in &self.fields {
+            let mut pending = Vec::new();
+            for field in self.fields.iter().rev() {
+                pending.push((field, 0usize, String::new()));
+            }
+            while let Some((field, parent, prefix)) = pending.pop() {
+                let name = if prefix.is_empty() {
+                    field.name.clone()
+                } else {
+                    format!("{prefix}.{}", field.name)
+                };
+                let field_start = parent + field.offset;
+                if let Some(nested) = &field.nested {
+                    for item in (0..field.count).rev() {
+                        let prefix = if field.count > 1 {
+                            format!("{name}[{item}]")
+                        } else {
+                            name.clone()
+                        };
+                        let start = field_start + item * nested.stride;
+                        for child in nested.fields.iter().rev() {
+                            pending.push((child, start, prefix.clone()));
+                        }
+                    }
+                    continue;
+                }
                 let width = field.format.width();
                 let mut values = Vec::new();
                 for item in 0..field.count {
                     if let Some(packed) = field.packed {
-                        let start = field.offset + item * 4;
+                        let start = field_start + item * 4;
                         values.push(packed.decode(u32::from_le_bytes(
                             bytes[start..start + 4].try_into().unwrap(),
                         )));
                         continue;
                     }
-                    let base = field.offset + item * field.matrix_rows * field.components * width;
+                    let base = field_start + item * field.matrix_rows * field.components * width;
                     let mut components = Vec::new();
                     for row in 0..field.matrix_rows {
                         for column in 0..field.components {
@@ -376,8 +511,8 @@ impl Layout {
                     values.push(components);
                 }
                 fields.push(FieldValue {
-                    name: field.name.clone(),
-                    offset: (row_offset + field.offset as u64).to_string(),
+                    name,
+                    offset: (row_offset + field_start as u64).to_string(),
                     matrix_rows: (field.matrix_rows > 1).then_some(field.matrix_rows),
                     matrix_columns: (field.matrix_rows > 1).then_some(field.components),
                     row_major: (field.matrix_rows > 1).then_some(field.row_major),
@@ -405,6 +540,57 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn nested_struct_arrays_follow_scalar_trailing_overlap() {
+        let source =
+            "struct A { float3 pos; ubyte tag; }; struct B { A a[2]; ushort flag; }; B root;";
+        let layout = Layout::parse(source).unwrap();
+        assert_eq!(layout.stride(), 32);
+        let mut bytes = vec![0; 32];
+        bytes[12] = 1;
+        bytes[28] = 2;
+        bytes[30] = 7;
+        let page = layout.decode(100, &bytes).unwrap();
+        let fields = &page.rows[0].fields;
+        assert_eq!(
+            fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            [
+                "root.a[0].pos",
+                "root.a[0].tag",
+                "root.a[1].pos",
+                "root.a[1].tag",
+                "root.flag"
+            ]
+        );
+        assert_eq!(
+            fields.iter().map(|f| f.offset.as_str()).collect::<Vec<_>>(),
+            ["100", "112", "116", "128", "130"]
+        );
+        assert_eq!(fields[3].values[0][0], "2");
+        assert_eq!(fields[4].values[0][0], "7");
+        assert_eq!(
+            Layout::parse("struct A { uint a; }; struct B { A a; }; ")
+                .unwrap()
+                .stride(),
+            4
+        );
+        let unaligned =
+            Layout::parse("struct A { ushort x; ubyte y; }; [[offset(1)]] A a;").unwrap();
+        assert_eq!(unaligned.stride(), 4);
+        let page = unaligned.decode(0, &[0, 2, 0, 3]).unwrap();
+        assert_eq!(page.rows[0].fields[0].values[0][0], "2");
+        assert_eq!(page.rows[0].fields[1].values[0][0], "3");
+        for bad in [
+            "struct A { A self; };",
+            "struct A { B b; }; struct B { uint x; };",
+            "struct A { uint x; }; struct A { uint y; };",
+            "struct A { uint x; }; A a[];",
+            "struct A { uint x; }; [[unorm]] A a;",
+        ] {
+            assert!(Layout::parse(bad).is_err(), "{bad}");
+        }
+    }
+
     #[test]
     fn packed_layouts_use_four_byte_stride_and_preserve_array_elements() {
         let layout = Layout::parse(
@@ -512,7 +698,7 @@ mod tests {
             "float x[];",
             "#pack(std140) float x;",
             "float x; float x;",
-            "struct S {float x;};",
+            "struct S {};",
             "/*",
         ] {
             assert!(Layout::parse(bad).is_err(), "{bad}");

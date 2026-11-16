@@ -1929,6 +1929,16 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     };
     let content = agent.send(&read("4", 8));
     assert_eq!(content["data"]["hex"], "0000404000004040", "{content}");
+    let nested = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"4", "length":8, "layout":"struct V { float2 pos; }; V vertex;"}).to_string());
+    assert_eq!(
+        nested["data"]["page"]["rows"][0]["fields"][0]["name"], "vertex.pos",
+        "{nested}"
+    );
+    assert_eq!(
+        nested["data"]["page"]["rows"][0]["fields"][0]["values"][0],
+        serde_json::json!(["3", "3"]),
+        "{nested}"
+    );
     let packed = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"4", "length":4, "layout":"[[packed(r10g10b10a2_uint)]] uint4 packed;"}).to_string());
     assert_eq!(
         packed["data"]["page"]["rows"][0]["fields"][0]["packed"], "r10g10b10a2_uint",
