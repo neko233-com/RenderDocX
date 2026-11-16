@@ -23,6 +23,13 @@ pub enum StopReason {
     Boundary,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceStep {
+    Into,
+    Over,
+    Out,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DebugNavigator {
     pub position: usize,
@@ -185,6 +192,17 @@ impl DebugNavigator {
         states: &[DebugState],
         forward: bool,
     ) -> StopReason {
+        self.step_source_mode(trace, states, forward, SourceStep::Into)
+    }
+
+    /// Follow ShaderViewer's source stepping rules using the original call stack.
+    pub fn step_source_mode(
+        &mut self,
+        trace: &DebugTrace,
+        states: &[DebugState],
+        forward: bool,
+        mode: SourceStep,
+    ) -> StopReason {
         let old = self
             .current(states)
             .and_then(|state| location(trace, state))
@@ -193,18 +211,109 @@ impl DebugNavigator {
         if old.is_none() {
             return self.step(states, forward);
         }
+        let old_stack = self.current(states).unwrap().callstack.clone();
+        let first_source = states
+            .iter()
+            .position(|state| {
+                location(trace, state)
+                    .is_some_and(|info| info.file_index >= 0 && info.line_start > 0)
+            })
+            .unwrap_or(0);
+        if !forward && self.position == first_source {
+            return StopReason::Boundary;
+        }
+        let mut reason = StopReason::Boundary;
         while self.advance(states, forward) {
             let state = &states[self.position];
             if self.hit(trace, state) {
-                return StopReason::Breakpoint;
+                reason = StopReason::Breakpoint;
+                break;
             }
-            if location(trace, state).is_some_and(|info| {
-                info.file_index >= 0 && info.line_start > 0 && Some(source_key(info)) != old
-            }) {
-                return StopReason::Source;
+            if (!forward && self.position <= first_source)
+                || (forward && self.position + 1 == states.len())
+            {
+                break;
+            }
+            let Some(info) = location(trace, state) else {
+                continue;
+            };
+            if info.file_index < 0 || Some(source_key(info)) == old {
+                continue;
+            }
+            let stack = &state.callstack;
+            let prefix_changed = old_stack.iter().zip(stack).any(|(a, b)| a != b);
+            if mode == SourceStep::Into
+                || old_stack.is_empty()
+                || stack.is_empty()
+                || stack.len() < old_stack.len()
+                || prefix_changed
+                || (mode == SourceStep::Over && stack == &old_stack)
+            {
+                reason = StopReason::Source;
+                break;
             }
         }
-        StopReason::Boundary
+        if !forward {
+            self.rewind_source_location(trace, states, mode);
+        }
+        reason
+    }
+
+    fn rewind_source_location(
+        &mut self,
+        trace: &DebugTrace,
+        states: &[DebugState],
+        mode: SourceStep,
+    ) {
+        let Some(current) = self.current(states) else {
+            return;
+        };
+        let Some(info) = location(trace, current) else {
+            return;
+        };
+        let key = source_key(info);
+        let stack = current.callstack.clone();
+        let mut starts = BTreeSet::new();
+        let mut previous = None;
+        for info in &trace.instructions {
+            if info.file_index < 0 {
+                continue;
+            }
+            let current = source_key(info);
+            if previous != Some(current) && current == key {
+                starts.insert(info.instruction);
+            }
+            previous = Some(current);
+        }
+        while self.position > 0 {
+            if mode == SourceStep::Over
+                && !starts.is_empty()
+                && starts.contains(&states[self.position].next_instruction)
+            {
+                break;
+            }
+            let prev = &states[self.position - 1];
+            let same_line = location(trace, prev).is_some_and(|info| source_key(info) == key);
+            if mode == SourceStep::Over && !starts.is_empty() {
+                if (stack == prev.callstack
+                    || (!prev.callstack.is_empty() && stack.len() > prev.callstack.len()))
+                    && !same_line
+                {
+                    break;
+                }
+            } else if !same_line {
+                break;
+            }
+            self.position -= 1;
+            if location(trace, &states[self.position]).is_some_and(|info| {
+                info.disassembly_line > 0
+                    && self.breakpoints.contains(&Breakpoint::Disassembly {
+                        line: info.disassembly_line,
+                    })
+            }) {
+                break;
+            }
+        }
     }
 
     /// Run past the current state and stop at a breakpoint, selected ShaderEvents, or an end.
@@ -257,6 +366,7 @@ mod tests {
     fn fixture() -> (DebugTrace, Vec<DebugState>) {
         let trace = serde_json::from_value(serde_json::json!({"event_id":1,"stage":5,"inputs":[],"constant_blocks":[],"read_only_resources":[],"read_write_resources":[],"samplers":[],"instructions":[
             {"instruction":0,"disassembly_line":1,"file_index":0,"line_start":3,"line_end":3,"column_start":0,"column_end":0,"source_variables":[]},
+            {"instruction":1,"disassembly_line":1,"file_index":0,"line_start":3,"line_end":3,"column_start":0,"column_end":0,"source_variables":[]},
             {"instruction":2,"disassembly_line":3,"file_index":0,"line_start":4,"line_end":4,"column_start":0,"column_end":0,"source_variables":[]},
             {"instruction":3,"disassembly_line":4,"file_index":-1,"line_start":0,"line_end":0,"column_start":0,"column_end":0,"source_variables":[]},
             {"instruction":4,"disassembly_line":5,"file_index":0,"line_start":5,"line_end":5,"column_start":0,"column_end":0,"source_variables":[]}
@@ -314,6 +424,108 @@ mod tests {
         );
         nav.step(&states, false);
         assert_eq!(values(&nav), vec![("a".into(), "01".into())]);
+    }
+
+    #[test]
+    fn source_over_and_out_follow_callstacks_and_breakpoints() {
+        let (mut trace, _) = fixture();
+        trace.instructions = (0..9)
+            .map(|i| {
+                serde_json::from_value(serde_json::json!({
+            "instruction":i,"disassembly_line":i+1,"file_index":0,"line_start":10+i,"line_end":10+i,
+            "column_start":0,"column_end":0,"source_variables":[]
+        })).unwrap()
+            })
+            .collect();
+        let stacks: &[&[&str]] = &[
+            &["A"],
+            &["A", "B"],
+            &["A", "B"],
+            &["A"],
+            &["A"],
+            &["A", "C"],
+            &["A"],
+            &[],
+            &["A"],
+        ];
+        let states: Vec<DebugState> = stacks
+            .iter()
+            .enumerate()
+            .map(|(i, stack)| DebugState {
+                step: i as u32,
+                next_instruction: i as u32,
+                flags: 0,
+                callstack: stack.iter().map(|name| (*name).to_owned()).collect(),
+                changes: vec![],
+            })
+            .collect();
+        let mut nav = DebugNavigator::default();
+        assert_eq!(
+            nav.step_source_mode(&trace, &states, true, SourceStep::Over),
+            StopReason::Source
+        );
+        assert_eq!(nav.position, 3);
+        assert_eq!(
+            nav.step_source_mode(&trace, &states, false, SourceStep::Over),
+            StopReason::Boundary
+        );
+        assert_eq!(nav.position, 0);
+        nav.position = 1;
+        assert_eq!(
+            nav.step_source_mode(&trace, &states, true, SourceStep::Out),
+            StopReason::Source
+        );
+        assert_eq!(nav.position, 3);
+        nav.position = 0;
+        nav.set_breakpoint(&trace, Breakpoint::Disassembly { line: 3 }, true)
+            .unwrap();
+        assert_eq!(
+            nav.step_source_mode(&trace, &states, true, SourceStep::Over),
+            StopReason::Breakpoint
+        );
+        assert_eq!(nav.position, 2);
+        nav.breakpoints.clear();
+        nav.position = 6;
+        assert_eq!(
+            nav.step_source_mode(&trace, &states, true, SourceStep::Out),
+            StopReason::Source
+        );
+        assert_eq!(nav.position, 7);
+    }
+
+    #[test]
+    fn source_step_out_stops_when_inline_callstack_changes_at_equal_depth() {
+        let (trace, mut states) = fixture();
+        states[0].callstack = vec!["root".into(), "old".into()];
+        states[1].callstack = states[0].callstack.clone();
+        states[2].callstack = vec!["root".into(), "new".into()];
+        let mut nav = DebugNavigator::default();
+        assert_eq!(
+            nav.step_source_mode(&trace, &states, true, SourceStep::Out),
+            StopReason::Source
+        );
+        assert_eq!(nav.position, 2);
+    }
+
+    #[test]
+    fn backward_step_over_rewinds_to_start_of_source_block() {
+        let (mut trace, mut states) = fixture();
+        trace.instructions = (0..5).map(|i| {
+            let line = if i == 2 { 11 } else { 10 + i };
+            serde_json::from_value(serde_json::json!({"instruction":i,"disassembly_line":i+1,"file_index":0,
+                "line_start":line,"line_end":line,"column_start":0,"column_end":0,"source_variables":[]})).unwrap()
+        }).collect();
+        for (i, state) in states.iter_mut().enumerate() {
+            state.next_instruction = i as u32;
+            state.callstack = vec!["main".into()];
+        }
+        let mut nav = DebugNavigator::default();
+        nav.position = 3;
+        assert_eq!(
+            nav.step_source_mode(&trace, &states, false, SourceStep::Over),
+            StopReason::Source
+        );
+        assert_eq!(nav.position, 1);
     }
 
     #[test]

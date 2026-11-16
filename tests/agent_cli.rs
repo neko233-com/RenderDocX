@@ -1780,6 +1780,13 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let reverse = agent.send(r#"{"command":"debug_navigate","direction":"backward","mode":"run"}"#);
     assert_eq!(reverse["data"]["reason"], "breakpoint", "{reverse}");
     assert_eq!(reverse["data"]["location"]["line_start"], 6);
+    for mode in ["over", "out"] {
+        let step = agent.send(
+            &serde_json::json!({"command":"debug_navigate","direction":"forward","mode":mode})
+                .to_string(),
+        );
+        assert_eq!(step["ok"], true, "{step}");
+    }
     assert_eq!(
         agent.send(
             r#"{"command":"debug_navigate","direction":"forward","mode":"run","event_mask":8}"#

@@ -11,7 +11,7 @@ use gpui_kit::{
 };
 use renderdocx::{
     backend::{self, Settings},
-    debug_navigation::DebugNavigator,
+    debug_navigation::{DebugNavigator, SourceStep},
     i18n::Language,
     live::{
         CaptureOptions, EnvOperation, EnvSeparator, EnvironmentModification, LaunchConfiguration,
@@ -2867,7 +2867,133 @@ impl Workspace {
                     .child(next)
                     .child(run_next)
                     .child(source_back)
-                    .child(source_next),
+                    .child(source_next)
+                    .children(
+                        [
+                            (
+                                "shader-over-back",
+                                self.t(
+                                    "Step over backward",
+                                    "向后跳过",
+                                    "逆方向にステップオーバー",
+                                    "뒤로 건너뛰기",
+                                ),
+                                false,
+                                SourceStep::Over,
+                            ),
+                            (
+                                "shader-over-forward",
+                                self.t("Step over", "单步跳过", "ステップオーバー", "건너뛰기"),
+                                true,
+                                SourceStep::Over,
+                            ),
+                            (
+                                "shader-out-back",
+                                self.t(
+                                    "Step out backward",
+                                    "向后跳出",
+                                    "逆方向にステップアウト",
+                                    "뒤로 나가기",
+                                ),
+                                false,
+                                SourceStep::Out,
+                            ),
+                            (
+                                "shader-out-forward",
+                                self.t("Step out", "单步跳出", "ステップアウト", "나가기"),
+                                true,
+                                SourceStep::Out,
+                            ),
+                        ]
+                        .into_iter()
+                        .map(|(id, label, forward, mode)| {
+                            button(
+                                id,
+                                label,
+                                false,
+                                move |this, cx| {
+                                    if let Some(debug) = &mut this.debug_view {
+                                        debug.navigator.step_source_mode(
+                                            &debug.trace,
+                                            &debug.states,
+                                            forward,
+                                            mode,
+                                        );
+                                        cx.notify();
+                                    }
+                                },
+                                cx,
+                            )
+                        }),
+                    )
+                    .children(
+                        [
+                            (
+                                "shader-sample-back",
+                                self.t(
+                                    "Previous sample/load",
+                                    "向后运行到采样/加载",
+                                    "前のサンプル/ロード",
+                                    "이전 샘플/로드",
+                                ),
+                                false,
+                                1,
+                            ),
+                            (
+                                "shader-sample-forward",
+                                self.t(
+                                    "Next sample/load",
+                                    "向前运行到采样/加载",
+                                    "次のサンプル/ロード",
+                                    "다음 샘플/로드",
+                                ),
+                                true,
+                                1,
+                            ),
+                            (
+                                "shader-nan-back",
+                                self.t(
+                                    "Previous NaN/Inf",
+                                    "向后运行到 NaN/Inf",
+                                    "前の NaN/Inf",
+                                    "이전 NaN/Inf",
+                                ),
+                                false,
+                                2,
+                            ),
+                            (
+                                "shader-nan-forward",
+                                self.t(
+                                    "Next NaN/Inf",
+                                    "向前运行到 NaN/Inf",
+                                    "次の NaN/Inf",
+                                    "다음 NaN/Inf",
+                                ),
+                                true,
+                                2,
+                            ),
+                        ]
+                        .into_iter()
+                        .map(|(id, label, forward, mask)| {
+                            button(
+                                id,
+                                label,
+                                false,
+                                move |this, cx| {
+                                    if let Some(debug) = &mut this.debug_view {
+                                        debug.navigator.run(
+                                            &debug.trace,
+                                            &debug.states,
+                                            forward,
+                                            mask,
+                                        );
+                                        cx.notify();
+                                    }
+                                },
+                                cx,
+                            )
+                        }),
+                    ),
             );
         for (is_source, breakpoint) in [(false, disassembly_bp), (true, source_bp)] {
             if let Some(breakpoint) = breakpoint {

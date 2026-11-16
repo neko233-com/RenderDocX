@@ -483,12 +483,12 @@ pub struct InstructionSourceInfo {
 }
 
 impl DebugTrace {
-    /// Upstream records sparse ranges: an entry applies until the next entry.
+    /// Match ShaderViewer's lower-bound lookup, including its first-entry fallback.
     pub fn instruction_info(&self, instruction: u32) -> Option<&InstructionSourceInfo> {
         self.instructions
             .iter()
-            .rev()
-            .find(|entry| entry.instruction <= instruction)
+            .find(|entry| entry.instruction >= instruction)
+            .or_else(|| self.instructions.first())
     }
 }
 
@@ -2658,7 +2658,7 @@ mod tests {
     const SNAPSHOT: &str = r#"{"type":"snapshot","protocol":1,"api":3,"frame":7,"degraded":false,"actions":[{"event_id":10,"action_id":1,"depth":0,"parent":-1,"flags":0,"indices":0,"instances":0,"name":"pass"},{"event_id":11,"action_id":2,"depth":1,"parent":0,"flags":2,"indices":3,"instances":1,"name":"draw"}],"resource_count":4,"texture_count":2,"buffer_count":1}"#;
 
     #[test]
-    fn sparse_instruction_mappings_cover_ranges_without_inventing_earlier_entries() {
+    fn instruction_mapping_matches_upstream_lower_bound_and_fallback() {
         let trace: DebugTrace = serde_json::from_value(serde_json::json!({
             "event_id":1,"stage":5,"inputs":[],"constant_blocks":[],"read_only_resources":[],"read_write_resources":[],"samplers":[],
             "instructions":[
@@ -2666,11 +2666,11 @@ mod tests {
                 {"instruction":7,"disassembly_line":12,"file_index":0,"line_start":4,"line_end":4,"column_start":1,"column_end":5,"source_variables":[]}
             ]
         })).unwrap();
-        assert!(trace.instruction_info(2).is_none());
+        assert_eq!(trace.instruction_info(2).unwrap().disassembly_line, 8);
         assert_eq!(trace.instruction_info(3).unwrap().disassembly_line, 8);
-        assert_eq!(trace.instruction_info(6).unwrap().disassembly_line, 8);
+        assert_eq!(trace.instruction_info(6).unwrap().disassembly_line, 12);
         assert_eq!(trace.instruction_info(7).unwrap().disassembly_line, 12);
-        assert_eq!(trace.instruction_info(9).unwrap().disassembly_line, 12);
+        assert_eq!(trace.instruction_info(9).unwrap().disassembly_line, 8);
     }
 
     #[test]

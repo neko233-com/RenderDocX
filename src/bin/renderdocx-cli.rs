@@ -1,6 +1,6 @@
 use renderdocx::{
     backend::Settings,
-    debug_navigation::{Breakpoint, DebugNavigator, StopReason},
+    debug_navigation::{Breakpoint, DebugNavigator, SourceStep, StopReason},
     live::{CaptureOptions, LaunchConfiguration, LiveSession, enumerate},
     replay::{
         BUFFER_PAGE_LIMIT, ComputeDebugSelection, DebugState, DebugTrace, MeshSelection, Pipeline,
@@ -763,11 +763,13 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                 };
                 match (&mut debug_timeline, direction, mode, mask) {
                     (None, _, _, _) => Err(("no_debug_timeline", "Collect a shader debug trace first".into())),
-                    (Some(timeline), Some(forward), Some(mode @ ("instruction" | "source" | "run")), Some(mask))
+                    (Some(timeline), Some(forward), Some(mode @ ("instruction" | "source" | "over" | "out" | "run")), Some(mask))
                         if mode == "run" || mask == 0 => {
                         let reason = match mode {
                             "instruction" => timeline.navigator.step(&timeline.states, forward),
                             "source" => timeline.navigator.step_source(&timeline.trace, &timeline.states, forward),
+                            "over" => timeline.navigator.step_source_mode(&timeline.trace, &timeline.states, forward, SourceStep::Over),
+                            "out" => timeline.navigator.step_source_mode(&timeline.trace, &timeline.states, forward, SourceStep::Out),
                             _ => timeline.navigator.run(&timeline.trace, &timeline.states, forward, mask),
                         };
                         Ok(timeline.response(Some(reason)))
