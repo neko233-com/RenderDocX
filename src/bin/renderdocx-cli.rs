@@ -42,7 +42,7 @@ fn usage() -> Value {
         {"name":"select","arguments":["capture.rdc","event_id"],"description":"Replay a capture to an event."},
         {"name":"serve","arguments":[],"description":"Serve sequential JSONL requests using a persistent replay session."},
         {"name":"capabilities","arguments":[],"description":"Describe the commands currently implemented."}
-    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","shader_export","debug_vertex","debug_pixel","debug_compute","debug_collect","debug_state","debug_breakpoint","debug_navigate","debug_next","debug_stop","vertex_input","mesh","mesh_read","structure","structure_buffer","read_buffer","resource_usage","resource_rename","annotation_read","annotation_write","descriptors","debug_messages","clear_debug_messages","counter_fetch","counter_page","pick_pixel","pixel_history","texture_statistics","export_texture","close","target_list","target_launch","target_connect","target_connect_pid","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"counter_page_limit":renderdocx::replay::COUNTER_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
+    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","shader_export","shader_apply","shader_revert","debug_vertex","debug_pixel","debug_compute","debug_collect","debug_state","debug_breakpoint","debug_navigate","debug_next","debug_stop","vertex_input","mesh","mesh_read","structure","structure_buffer","read_buffer","resource_usage","resource_rename","annotation_read","annotation_write","descriptors","debug_messages","clear_debug_messages","counter_fetch","counter_page","pick_pixel","pixel_history","texture_statistics","export_texture","close","target_list","target_launch","target_connect","target_connect_pid","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"counter_page_limit":renderdocx::replay::COUNTER_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
 }
 
 fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
@@ -825,6 +825,73 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     _ => Err((
                         "invalid_arguments",
                         "shader requires a valid stage and optional target_index".into(),
+                    )),
+                }
+            }
+            "shader_apply" | "shader_revert" => {
+                let stage = request
+                    .get("stage")
+                    .and_then(Value::as_str)
+                    .and_then(|stage| SHADER_STAGES.iter().position(|name| *name == stage));
+                let encoding = request
+                    .get("encoding")
+                    .and_then(Value::as_u64)
+                    .and_then(|v| u32::try_from(v).ok());
+                let entry = request
+                    .get("entry")
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.is_empty() && !v.contains('\0'));
+                let source = match (request.get("source"), request.get("source_hex")) {
+                    (Some(Value::String(text)), None) => Some(text.as_bytes().to_vec()),
+                    (None, Some(Value::String(hex))) if hex.len() % 2 == 0 && hex.is_ascii() => hex
+                        .as_bytes()
+                        .chunks_exact(2)
+                        .map(|pair| {
+                            let digit = |b: u8| (b as char).to_digit(16);
+                            Some((digit(pair[0])? * 16 + digit(pair[1])?) as u8)
+                        })
+                        .collect::<Option<Vec<_>>>(),
+                    _ => None,
+                };
+                match (&opened, selected_event, stage) {
+                    (None, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some(_), None, _) => {
+                        Err(("no_event", "Select an event before editing a shader".into()))
+                    }
+                    (Some((session, _)), Some(event), Some(stage))
+                        if command == "shader_revert" =>
+                    {
+                        session
+                            .shader_edit(event, stage as u32, None)
+                            .map(|edit| {
+                                pipeline = Some(edit.pipeline.clone());
+                                mesh_selection = None;
+                                json!({"edit":edit})
+                            })
+                            .map_err(|error| ("shader_edit_failed", error))
+                    }
+                    (Some((session, _)), Some(event), Some(stage)) => match (
+                        encoding, entry, source,
+                    ) {
+                        (Some(encoding), Some(entry), Some(source)) if !source.is_empty() => {
+                            session
+                                .shader_edit(event, stage as u32, Some((encoding, entry, &source)))
+                                .map(|edit| {
+                                    pipeline = Some(edit.pipeline.clone());
+                                    mesh_selection = None;
+                                    json!({"edit":edit})
+                                })
+                                .map_err(|error| ("shader_edit_failed", error))
+                        }
+                        _ => Err((
+                            "invalid_arguments",
+                            "shader_apply requires encoding, entry and either source or source_hex"
+                                .into(),
+                        )),
+                    },
+                    _ => Err((
+                        "invalid_arguments",
+                        "shader edit requires a valid stage".into(),
                     )),
                 }
             }

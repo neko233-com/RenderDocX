@@ -80,6 +80,16 @@ struct ShaderDebugView {
     source_files: Vec<ShaderSourceFile>,
 }
 
+struct ShaderEditor {
+    stage: usize,
+    event: u32,
+    filename: String,
+    baseline: String,
+    baseline_entry: String,
+    baseline_encoding: String,
+    input: Entity<TextareaState>,
+}
+
 fn parse_debug_triplet(value: &str) -> Option<[u32; 3]> {
     let mut parts = value.split(',').map(|part| part.trim().parse::<u32>().ok());
     let result = [parts.next()??, parts.next()??, parts.next()??];
@@ -477,8 +487,12 @@ struct Workspace {
     resource_pending: bool,
     selected_shader: Option<usize>,
     shader_data: Option<ShaderReport>,
+    shader_report_stale: bool,
     shader_source: Option<usize>,
     shader_source_page: usize,
+    shader_editor: Option<ShaderEditor>,
+    shader_edit_entry: Entity<InputState>,
+    shader_edit_encoding: Entity<InputState>,
     structure: StructureView,
     mesh: MeshView,
     input_page: Option<InputPage>,
@@ -546,6 +560,32 @@ impl Workspace {
         }
     }
 
+    fn shader_editor_dirty(&self, cx: &Context<Self>) -> bool {
+        self.shader_editor.as_ref().is_some_and(|editor| {
+            editor.input.read(cx).value().as_ref() != editor.baseline
+                || self.shader_edit_entry.read(cx).value().as_ref() != editor.baseline_entry
+                || self.shader_edit_encoding.read(cx).value().as_ref() != editor.baseline_encoding
+        })
+    }
+
+    fn protect_shader_draft(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.shader_editor_dirty(cx) {
+            return false;
+        }
+        self.tab = CaptureTab::Shaders;
+        self.status = Some(
+            self.t(
+                "Apply or discard the shader draft first.",
+                "请先应用或放弃着色器草稿。",
+                "シェーダーの下書きを適用または破棄してください。",
+                "먼저 셰이더 초안을 적용하거나 취소하세요.",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        true
+    }
+
     fn may_close_window(&mut self, cx: &mut Context<Self>) -> bool {
         if self.resource_pending || self.replay_pending || self.export_pending {
             self.status = Some(
@@ -558,6 +598,9 @@ impl Workspace {
                 .to_owned(),
             );
             cx.notify();
+            return false;
+        }
+        if self.protect_shader_draft(cx) {
             return false;
         }
         if self.annotation_dirty(cx) {
@@ -1413,6 +1456,9 @@ impl Workspace {
     }
 
     fn open(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.protect_shader_draft(cx) {
+            return;
+        }
         if self.annotation_dirty(cx) {
             self.status = Some(
                 self.t(
@@ -1499,6 +1545,7 @@ impl Workspace {
                         this.resource_pending = false;
                         this.selected_shader = None;
                         this.shader_data = None;
+                        this.shader_editor = None;
                         this.structure = StructureView::default();
                         this.mesh = MeshView::default();
                         this.input_page = None;
@@ -1558,6 +1605,10 @@ impl Workspace {
     }
 
     fn select_event(&mut self, index: usize, api_index: Option<usize>, cx: &mut Context<Self>) {
+        if self.protect_shader_draft(cx) {
+            return;
+        }
+        self.shader_editor = None;
         if self.export_pending || self.resource_pending {
             self.status = Some(
                 self.t(
@@ -1744,6 +1795,9 @@ impl Workspace {
     }
 
     fn read_shader(&mut self, stage: usize, target: Option<u32>, cx: &mut Context<Self>) {
+        if self.protect_shader_draft(cx) {
+            return;
+        }
         if self.replay_pending || self.export_pending || self.resource_pending {
             self.status = Some(
                 self.t(
@@ -1777,6 +1831,7 @@ impl Workspace {
             return;
         }
         if self.selected_shader != Some(stage) || self.shader_data.is_none() {
+            self.shader_editor = None;
             self.shader_source = None;
             self.shader_source_page = 0;
         }
@@ -1807,6 +1862,7 @@ impl Workspace {
                 match result {
                     Ok(report) if report.event_id == event => {
                         this.shader_data = Some(report);
+                        this.shader_report_stale = false;
                         this.status = None;
                     }
                     Ok(_) => {
@@ -1830,6 +1886,195 @@ impl Workspace {
                                 "셰이더 확인 실패"
                             )
                         ));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn begin_shader_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.protect_shader_draft(cx) {
+            return;
+        }
+        let (Some(stage), Some(report)) = (self.selected_shader, self.shader_data.as_ref()) else {
+            return;
+        };
+        let file = self
+            .shader_source
+            .and_then(|index| report.source_files.get(index));
+        let baseline = file.map(|file| file.contents.clone()).unwrap_or_default();
+        let filename = file.map(|file| file.filename.clone()).unwrap_or_default();
+        let encoding = report
+            .source_encoding
+            .filter(|encoding| report.target_encodings.contains(encoding))
+            .or_else(|| {
+                report
+                    .target_encodings
+                    .iter()
+                    .copied()
+                    .find(|value| matches!(value, 2 | 5 | 9))
+            })
+            .or_else(|| report.target_encodings.first().copied())
+            .unwrap_or(0);
+        let entry = report
+            .source_entry
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&report.entry_point)
+            .to_owned();
+        let event = report.event_id;
+        self.shader_edit_entry
+            .update(cx, |input, cx| input.set_value(entry.clone(), window, cx));
+        self.shader_edit_encoding.update(cx, |input, cx| {
+            input.set_value(encoding.to_string(), window, cx)
+        });
+        let input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .default_value(baseline.clone())
+                .auto_grow(8, 24)
+        });
+        self.shader_editor = Some(ShaderEditor {
+            stage,
+            event,
+            filename,
+            baseline,
+            baseline_entry: entry,
+            baseline_encoding: encoding.to_string(),
+            input,
+        });
+        cx.notify();
+    }
+
+    fn edit_shader(&mut self, revert: bool, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            return;
+        }
+        let (Some(session), Some(stage), Some(event)) = (
+            self.session.clone(),
+            self.selected_shader,
+            self.pipeline.as_ref().map(|pipeline| pipeline.event_id),
+        ) else {
+            return;
+        };
+        let replacement = if revert {
+            None
+        } else {
+            let Some(editor) = self
+                .shader_editor
+                .as_ref()
+                .filter(|editor| editor.stage == stage && editor.event == event)
+            else {
+                return;
+            };
+            let Ok(encoding) = self.shader_edit_encoding.read(cx).value().parse::<u32>() else {
+                self.status = Some(
+                    self.t(
+                        "Enter a valid shader encoding.",
+                        "请输入有效的着色器编码。",
+                        "有効なシェーダーエンコーディングを入力してください。",
+                        "올바른 셰이더 인코딩을 입력하세요.",
+                    )
+                    .to_owned(),
+                );
+                cx.notify();
+                return;
+            };
+            Some((
+                encoding,
+                self.shader_edit_entry.read(cx).value().to_string(),
+                editor.input.read(cx).value().to_string(),
+            ))
+        };
+        self.resource_pending = true;
+        let revision = self.open_revision;
+        self.status = Some(
+            self.t(
+                "Updating shader replacement…",
+                "正在更新着色器替换…",
+                "シェーダー置換を更新中…",
+                "셰이더 교체를 업데이트하는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            let request = replacement
+                .as_ref()
+                .map(|(encoding, entry, source)| (*encoding, entry.as_str(), source.as_bytes()));
+            session
+                .shader_edit(event, stage as u32, request)
+                .map(|edit| (edit, replacement))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision {
+                    return;
+                }
+                this.resource_pending = false;
+                match result {
+                    Ok((edit, replacement)) => {
+                        this.pipeline = Some(edit.pipeline);
+                        this.shader_report_stale = true;
+                        this.mesh = MeshView::default();
+                        this.input_page = None;
+                        this.debug_view = None;
+                        this.preview = None;
+                        this.pixel = None;
+                        this.pixel_history = None;
+                        this.statistics = None;
+                        this.descriptor_page = None;
+                        this.counter_page = None;
+                        this.buffer_data = None;
+                        if edit.applied {
+                            if let (Some(editor), Some((encoding, entry, source))) =
+                                (this.shader_editor.as_mut(), replacement)
+                            {
+                                editor.baseline = source;
+                                editor.baseline_entry = entry;
+                                editor.baseline_encoding = encoding.to_string();
+                            }
+                        }
+                        let label = if revert {
+                            this.t(
+                                "Shader replacement removed",
+                                "已还原着色器",
+                                "シェーダー置換を解除しました",
+                                "셰이더 교체를 되돌렸습니다",
+                            )
+                        } else if edit.applied {
+                            this.t(
+                                "Shader replacement applied",
+                                "已应用着色器替换",
+                                "シェーダー置換を適用しました",
+                                "셰이더 교체를 적용했습니다",
+                            )
+                        } else {
+                            this.t(
+                                "Shader compilation failed",
+                                "着色器编译失败",
+                                "シェーダーのコンパイルに失敗しました",
+                                "셰이더 컴파일 실패",
+                            )
+                        };
+                        this.status = Some(if edit.diagnostics.is_empty() {
+                            label.to_owned()
+                        } else {
+                            format!("{label}: {}", edit.diagnostics)
+                        });
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Shader edit failed",
+                                "着色器编辑失败",
+                                "シェーダー編集に失敗しました",
+                                "셰이더 편집 실패"
+                            )
+                        ))
                     }
                 }
                 cx.notify();
@@ -6196,6 +6441,9 @@ impl Workspace {
                         .children(inputs.into_iter().map(|line| div().text_sm().child(line)))
                         .child(format!("{shader_outputs_label}: {}", outputs.len()))
                         .children(outputs.into_iter().map(|line| div().text_sm().child(line)));
+                    if self.shader_report_stale {
+                        view = view.child(self.t("Shader details predate the replacement; select the stage again to refresh.", "着色器详情早于本次替换；请重新选择阶段以刷新。", "シェーダーの詳細は置換前のものです。ステージを再選択して更新してください。", "셰이더 상세 정보가 교체 이전 상태입니다. 단계를 다시 선택하여 새로 고치세요."));
+                    }
                     let mut selectors = div().flex().flex_wrap().gap_2().child(button(
                         "shader-show-disassembly",
                         disasm_label,
@@ -6250,6 +6498,23 @@ impl Workspace {
                         |this, cx| this.export_shader_text(cx),
                         cx,
                     ));
+                    let edit_label = self.t("Edit source", "编辑源码", "ソースを編集", "소스 편집");
+                    view = view.child(div().flex().flex_wrap().gap_2()
+                        .child(div().id("shader-edit-begin").test_support().cursor_pointer().px_3().py_2().rounded_md().bg(rgb(0x252f40)).child(edit_label).on_click(cx.listener(|this, _, window, cx| this.begin_shader_edit(window, cx))))
+                        .child(button("shader-edit-revert", self.t("Revert replacement", "还原替换", "置換を元に戻す", "교체 되돌리기"), false, |this, cx| this.edit_shader(true, cx), cx)));
+                    if let Some(editor) = &self.shader_editor {
+                        let entry_label = self.t("Entry point", "入口函数", "エントリーポイント", "진입점");
+                        let encoding_label = self.t("Encoding ID", "编码 ID", "エンコーディング ID", "인코딩 ID");
+                        view = view.child(format!("{}: {}", edit_label, editor.filename))
+                            .child(self.t("Replacements affect this replay session only. Supply complete source accepted by the device; includes are not assembled automatically.", "替换仅作用于当前回放会话。请提供设备支持的完整源码；不会自动合并 include。", "置換はこのリプレイセッションにのみ適用されます。デバイスが受け入れる完全なソースを指定してください。include は自動結合されません。", "교체는 현재 리플레이 세션에만 적용됩니다. 장치가 허용하는 전체 소스를 입력하세요. include는 자동으로 합쳐지지 않습니다."))
+                            .child(format!("{}: {:?}", self.t("Supported encoding IDs", "支持的编码 ID", "対応エンコーディング ID", "지원 인코딩 ID"), shader.target_encodings))
+                            .child(div().flex().flex_wrap().gap_2().child(entry_label).child(Input::new(&self.shader_edit_entry).id("shader-edit-entry").aria_label(entry_label).w(px(150.)))
+                                .child(encoding_label).child(Input::new(&self.shader_edit_encoding).id("shader-edit-encoding").aria_label(encoding_label).w(px(80.))))
+                            .child(Textarea::new(&editor.input).aria_label(edit_label))
+                            .child(div().flex().gap_2()
+                                .child(button("shader-edit-apply", self.t("Compile and apply", "编译并应用", "コンパイルして適用", "컴파일 및 적용"), true, |this, cx| this.edit_shader(false, cx), cx))
+                                .child(button("shader-edit-discard", self.t("Discard draft", "放弃草稿", "下書きを破棄", "초안 버리기"), false, |this, cx| { if !this.resource_pending { this.shader_editor = None; cx.notify(); } }, cx)));
+                    }
                     if let Some(file) = self
                         .shader_source
                         .and_then(|index| shader.source_files.get(index))
@@ -7126,6 +7391,7 @@ impl Workspace {
                                 cx.notify();
                                 return;
                             }
+                            if this.protect_shader_draft(cx) { return; }
                             if this.annotation_dirty(cx) {
                                 this.status = Some(this.t("Save or discard the comment draft first.", "请先保存或放弃注释草稿。", "コメントを保存または破棄してください。", "먼저 댓글을 저장하거나 취소하세요.").to_owned());
                                 this.tab = CaptureTab::Annotations;
@@ -7147,6 +7413,7 @@ impl Workspace {
                             this.resource_pending = false;
                             this.buffer_data = None;
                             this.shader_data = None;
+                            this.shader_editor = None;
                             this.structure = StructureView::default();
                             this.mesh = MeshView::default();
                             this.input_page = None;
@@ -8557,6 +8824,8 @@ fn main() {
                     let vertex_instance =
                         cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let vertex_view = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let shader_edit_entry = cx.new(|cx| InputState::new(window, cx));
+                    let shader_edit_encoding = cx.new(|cx| InputState::new(window, cx));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
@@ -8628,8 +8897,12 @@ fn main() {
                         resource_pending: false,
                         selected_shader: None,
                         shader_data: None,
+                        shader_report_stale: false,
                         shader_source: None,
                         shader_source_page: 0,
+                        shader_editor: None,
+                        shader_edit_entry,
+                        shader_edit_encoding,
                         structure: StructureView::default(),
                         mesh: MeshView::default(),
                         input_page: None,
@@ -8724,6 +8997,8 @@ mod ui_tests {
                     let vertex_instance =
                         cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let vertex_view = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let shader_edit_entry = cx.new(|cx| InputState::new(window, cx));
+                    let shader_edit_encoding = cx.new(|cx| InputState::new(window, cx));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
@@ -8812,8 +9087,12 @@ mod ui_tests {
                         resource_pending: false,
                         selected_shader: None,
                         shader_data: None,
+                        shader_report_stale: false,
                         shader_source: None,
                         shader_source_page: 0,
+                        shader_editor: None,
+                        shader_edit_entry,
+                        shader_edit_encoding,
                         structure: StructureView::default(),
                         mesh: MeshView::default(),
                         input_page: None,
@@ -9036,6 +9315,8 @@ mod ui_tests {
                     let vertex_instance =
                         cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let vertex_view = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let shader_edit_entry = cx.new(|cx| InputState::new(window, cx));
+                    let shader_edit_encoding = cx.new(|cx| InputState::new(window, cx));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
@@ -9229,8 +9510,12 @@ mod ui_tests {
                         resource_pending: false,
                         selected_shader: None,
                         shader_data: None,
+                        shader_report_stale: false,
                         shader_source: None,
                         shader_source_page: 0,
+                        shader_editor: None,
+                        shader_edit_entry,
+                        shader_edit_encoding,
                         structure: StructureView::default(),
                         mesh: MeshView::default(),
                         input_page: None,
@@ -9531,6 +9816,17 @@ mod ui_tests {
             assert_eq!(view.read(cx).shader_source_page, 0);
             window.click(("shader-source-file", 1usize), cx);
             assert_eq!(view.read(cx).shader_source, Some(1));
+            window.click("shader-edit-begin", cx);
+            let entry = view.read(cx).shader_edit_entry.clone();
+            entry.update(cx, |entry, cx| entry.set_value("changed", window, cx));
+            view.update(cx, |view, cx| {
+                assert!(view.shader_editor_dirty(cx));
+                let selected = view.selected;
+                view.select_event(2, None, cx);
+                assert_eq!(view.selected, selected);
+                assert!(view.shader_editor.is_some());
+                view.shader_editor = None;
+            });
             window.click("shader-show-disassembly", cx);
             window.click("shader-next-target", cx);
         })

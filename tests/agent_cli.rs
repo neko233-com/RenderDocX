@@ -1667,6 +1667,35 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let selected_history = agent
         .send(&serde_json::json!({"command":"select","event_id":history_draw_event}).to_string());
     assert_eq!(selected_history["ok"], true, "{selected_history}");
+    let pick =
+        serde_json::json!({"command":"pick_pixel","index":texture_index,"x":8,"y":8}).to_string();
+    let original = agent.send(&pick);
+    assert_eq!(original["ok"], true, "{original}");
+    let replacement = agent.send(&serde_json::json!({"command":"shader_apply","stage":"fragment","encoding":5,"entry":"main","source":"float4 main() : SV_Target { return float4(1,0,0,1); }"}).to_string());
+    assert_eq!(
+        replacement["data"]["edit"]["applied"], true,
+        "{replacement}"
+    );
+    let changed = agent.send(&pick);
+    assert_eq!(changed["ok"], true, "{changed}");
+    assert_ne!(
+        changed["data"]["pixel"]["bits"],
+        original["data"]["pixel"]["bits"]
+    );
+    let restored = agent.send(r#"{"command":"shader_revert","stage":"fragment"}"#);
+    assert_eq!(restored["ok"], true, "{restored}");
+    assert_eq!(
+        agent.send(&pick)["data"]["pixel"]["bits"],
+        original["data"]["pixel"]["bits"]
+    );
+    let failed = agent.send(&serde_json::json!({"command":"shader_apply","stage":"fragment","encoding":5,"entry":"main","source":"invalid shader"}).to_string());
+    assert_eq!(failed["data"]["edit"]["applied"], false, "{failed}");
+    assert!(
+        !failed["data"]["edit"]["diagnostics"]
+            .as_str()
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         agent.send(r#"{"command":"mesh","stage":"vs_out"}"#)["ok"],
         true

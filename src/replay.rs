@@ -465,6 +465,21 @@ pub struct ShaderReport {
     pub debug_status: Option<String>,
     #[serde(default)]
     pub source_files: Vec<ShaderSourceFile>,
+    #[serde(default)]
+    pub target_encodings: Vec<u32>,
+    #[serde(default)]
+    pub source_encoding: Option<u32>,
+    #[serde(default)]
+    pub source_entry: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ShaderEdit {
+    pub event_id: u32,
+    pub stage: u32,
+    pub applied: bool,
+    pub diagnostics: String,
+    pub pipeline: Pipeline,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -895,6 +910,7 @@ enum Reply {
         hex: String,
     },
     Shader(ShaderReport),
+    ShaderEdit(ShaderEdit),
     DebugStarted(DebugTrace),
     DebugStates(DebugStates),
     DebugStopped,
@@ -1216,6 +1232,14 @@ trait Transport: Send {
     }
     fn shader(&mut self, _stage: u32, _target: Option<u32>) -> Result<ShaderReport, String> {
         Err("Shader inspection is not supported by this transport".into())
+    }
+    fn shader_edit(
+        &mut self,
+        _event: u32,
+        _stage: u32,
+        _replacement: Option<(u32, &str, &[u8])>,
+    ) -> Result<ShaderEdit, String> {
+        Err("Shader editing is not supported by this transport".into())
     }
     fn debug_vertex(
         &mut self,
@@ -1889,6 +1913,47 @@ impl Transport for Process {
         }
     }
 
+    fn shader_edit(
+        &mut self,
+        event: u32,
+        stage: u32,
+        replacement: Option<(u32, &str, &[u8])>,
+    ) -> Result<ShaderEdit, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        if let Some((encoding, entry, source)) = replacement {
+            let hex = |bytes: &[u8]| {
+                const DIGITS: &[u8; 16] = b"0123456789abcdef";
+                let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+                for &byte in bytes {
+                    encoded.push(DIGITS[(byte >> 4) as usize] as char);
+                    encoded.push(DIGITS[(byte & 15) as usize] as char);
+                }
+                encoded
+            };
+            writeln!(
+                input,
+                "shader_apply {event} {stage} {encoding} {} {}",
+                hex(entry.as_bytes()),
+                hex(source)
+            )
+        } else {
+            writeln!(input, "shader_revert {event} {stage}")
+        }
+        .and_then(|_| input.flush())
+        .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::ShaderEdit(edit)
+                if edit.event_id == event
+                    && edit.stage == stage
+                    && edit.pipeline.event_id == event =>
+            {
+                Ok(edit)
+            }
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected shader edit response".into()),
+        }
+    }
+
     fn debug_vertex(
         &mut self,
         vertex: u32,
@@ -2312,6 +2377,27 @@ impl Session {
             .lock()
             .map_err(|e| e.to_string())?
             .shader(stage, target)
+    }
+
+    pub fn shader_edit(
+        &self,
+        event: u32,
+        stage: u32,
+        replacement: Option<(u32, &str, &[u8])>,
+    ) -> Result<ShaderEdit, String> {
+        if stage as usize >= SHADER_STAGES.len() {
+            return Err("Invalid shader stage".into());
+        }
+        if replacement.is_some_and(|(_, entry, source)| {
+            entry.is_empty() || entry.contains('\0') || source.is_empty()
+        }) {
+            return Err("Shader entry point and source must be nonempty".into());
+        }
+        self.next_revision();
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .shader_edit(event, stage, replacement)
     }
 
     pub fn debug_vertex(
@@ -2877,6 +2963,9 @@ pub mod test_support {
                 debuggable: None,
                 source_debug_info: None,
                 debug_status: None,
+                target_encodings: vec![2, 5],
+                source_encoding: Some(5),
+                source_entry: Some("main".into()),
                 source_files: vec![
                     ShaderSourceFile {
                         filename: "fixture.hlsl".into(),

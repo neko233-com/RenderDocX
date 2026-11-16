@@ -19,7 +19,7 @@ The frame information, replay debug messages and recorded frame statistics are a
 
 The initial mesh output viewer can page vertex bytes or index bytes and decode 8-, 16- and 32-bit raw indices; it shows base vertex separately and does not yet reconstruct the complete draw-ordered geometry viewer. Its GPU-backed index-switch UI test is present but has not been run for this change.
 
-The shader inspector can switch between disassembly and captured source files, displaying source in 200-line pages. The CLI's shader report exposes complete source contents, and both GUI and CLI can export a complete source file or disassembly without replacing an existing file. Source editing, compilation and replacement workflows remain outstanding.
+The shader inspector can switch between disassembly and captured source files, displaying source in 200-line pages. The CLI's shader report exposes complete source contents, and both GUI and CLI can export a complete source file or disassembly without replacing an existing file. GUI and CLI support session-scoped compilation, shader replacement and revert through RenderDoc. A D3D11 HLSL CLI test verifies changed pixels, revert and compile errors. Multi-file include resolution, external compilers, persistent edits in the capture, broader graphics APIs and end-to-end GUI editing validation remain outstanding.
 
 An initial descriptor inspector pages the selected event's descriptor accesses or fixed-size stores through RenderDoc, including logical locations, resource references and sampler fields. Variable-sized store enumeration, richer typed presentation and cross-API descriptor validation remain outstanding.
 

@@ -97,6 +97,33 @@ struct DebugTraceScope
   }
 };
 
+struct ShaderReplacementScope
+{
+  IReplayController *controller;
+  std::map<ResourceId, ResourceId> replacements;
+  ~ShaderReplacementScope()
+  {
+    for(const auto &entry : replacements)
+    {
+      controller->RemoveReplacement(entry.first);
+      controller->FreeTargetResource(entry.second);
+    }
+  }
+  ResourceId original(ResourceId id) const
+  {
+    for(const auto &entry : replacements) if(entry.second == id) return entry.first;
+    return id;
+  }
+  void remove(ResourceId id)
+  {
+    auto it = replacements.find(id);
+    if(it == replacements.end()) return;
+    controller->RemoveReplacement(id);
+    controller->FreeTargetResource(it->second);
+    replacements.erase(it);
+  }
+};
+
 void write_debug_variable(const ShaderVariable &variable)
 {
   std::cout << "{\"name\":"; json_string(variable.name);
@@ -811,6 +838,7 @@ int run(const std::string &capture, bool structure_worker)
   replay.controller = opened.second;
   if(!replay.controller) { error("RenderDoc returned no replay controller"); return 1; }
   DebugTraceScope debug{replay.controller};
+  ShaderReplacementScope replacements{replay.controller};
   if(!structure_worker) { replay.file->Shutdown(); replay.file = nullptr; }
   std::set<uint32_t> event_ids;
   std::vector<TextureRef> texture_ids;
@@ -1373,6 +1401,59 @@ int run(const std::string &capture, bool structure_worker)
       std::cout << "]}" << std::endl;
       continue;
     }
+    if(command.compare(0, 13, "shader_apply ") == 0 || command.compare(0, 14, "shader_revert ") == 0)
+    {
+      const bool applying = command.compare(0, 13, "shader_apply ") == 0;
+      std::istringstream args(command.substr(applying ? 13 : 14));
+      std::string event_text, stage_text, encoding_text, entry_text, source_text, extra;
+      uint64_t requested_event = 0, stage_index = 0, encoding = 0;
+      if(!(args >> event_text >> stage_text) || !decimal(event_text, requested_event) || requested_event > UINT32_MAX || !decimal(stage_text, stage_index) || stage_index >= 8 ||
+         (applying && (!(args >> encoding_text >> entry_text >> source_text) || !decimal(encoding_text, encoding) || encoding >= uint32_t(ShaderEncoding::Count))) || (args >> extra))
+      { error("Invalid shader replacement request"); continue; }
+      if(!selected) { error("Select an event before editing a shader"); continue; }
+      if(requested_event != selected_event) { error("Shader edit event changed"); continue; }
+      const ShaderStage stage = ShaderStage(stage_index);
+      const PipeState &state = replay.controller->GetPipelineState();
+      const ResourceId from = replacements.original(state.GetShader(stage));
+      if(from == ResourceId()) { error("No shader is bound to this stage"); continue; }
+      rdcstr diagnostics;
+      bool compiled = false;
+      if(applying)
+      {
+        bytebuf entry_bytes, source_bytes;
+        if(!decode_section_hex(entry_text, entry_bytes) || entry_bytes.empty() ||
+           !decode_section_hex(source_text, source_bytes) || source_bytes.empty() ||
+           std::find(entry_bytes.begin(), entry_bytes.end(), byte(0)) != entry_bytes.end())
+        { error("Invalid shader entry point or source bytes"); continue; }
+        const auto encodings = replay.controller->GetTargetShaderEncodings();
+        if(std::find(encodings.begin(), encodings.end(), ShaderEncoding(encoding)) == encodings.end())
+        { error("Shader encoding is not supported by the replay device"); continue; }
+        const ShaderReflection *reflection = state.GetShaderReflection(stage);
+        if(!reflection) { error("Shader reflection is unavailable"); continue; }
+        ShaderCompileFlags flags = reflection->debugInfo.compileFlags;
+        const rdcstr entry((const char *)entry_bytes.data(), entry_bytes.size());
+        auto built = replay.controller->BuildTargetShader(entry, ShaderEncoding(encoding), source_bytes, flags, stage);
+        diagnostics = built.second;
+        compiled = built.first != ResourceId();
+        replacements.remove(from);
+        if(compiled)
+        {
+          replay.controller->ReplaceResource(from, built.first);
+          replacements.replacements[from] = built.first;
+        }
+      }
+      else replacements.remove(from);
+      replay.controller->ClearReplayCache();
+      replay.controller->SetFrameEvent(selected_event, true);
+      result = replay.controller->GetFatalErrorStatus();
+      if(!result.OK()) { error(result_message(result)); break; }
+      mesh_ready = false; history_ready = false; cached_history = rdcarray<PixelModification>();
+      counters_ready = false; counter_results = rdcarray<CounterResult>();
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"shader_edit\",\"event_id\":" << selected_event
+                << ",\"stage\":" << stage_index << ",\"applied\":" << (compiled ? "true" : "false") << ",\"diagnostics\":";
+      json_string(diagnostics); std::cout << ",\"pipeline\":"; write_pipeline(replay.controller, selected_event); std::cout << "}" << std::endl;
+      continue;
+    }
     if(command.compare(0, 7, "shader ") == 0)
     {
       std::istringstream arguments(command.substr(7));
@@ -1405,6 +1486,12 @@ int run(const std::string &capture, bool structure_worker)
                 << ",\"source_debug_info\":" << (reflection->debugInfo.sourceDebugInformation ? "true" : "false")
                 << ",\"debug_status\":";
       json_string(reflection->debugInfo.debugStatus);
+      std::cout << ",\"source_encoding\":" << uint32_t(reflection->debugInfo.encoding) << ",\"source_entry\":";
+      json_string(reflection->debugInfo.entrySourceName);
+      std::cout << ",\"target_encodings\":[";
+      const auto encodings = replay.controller->GetTargetShaderEncodings();
+      for(size_t i = 0; i < encodings.size(); ++i) { if(i) std::cout << ','; std::cout << uint32_t(encodings[i]); }
+      std::cout << ']';
       std::cout << ",\"source_files\":[";
       for(size_t i = 0; i < reflection->debugInfo.files.size(); ++i)
       {
@@ -1666,6 +1753,7 @@ int run(const std::string &capture, bool structure_worker)
     write_pipeline(replay.controller, uint32_t(event));
     std::cout << "}" << std::endl;
   }
+  debug.reset();
   return 0;
 }
 } // namespace
