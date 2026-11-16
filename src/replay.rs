@@ -28,6 +28,10 @@ pub struct Action {
     pub vertex_offset: Option<u32>,
     #[serde(default)]
     pub instance_offset: Option<u32>,
+    #[serde(default)]
+    pub dispatch_groups: Option<[u32; 3]>,
+    #[serde(default)]
+    pub dispatch_threads: Option<[u32; 3]>,
     pub name: String,
     #[serde(default)]
     pub api_events: Vec<ApiEvent>,
@@ -286,6 +290,8 @@ pub struct ShaderReport {
     pub read_only_resources: usize,
     pub read_write_resources: usize,
     pub samplers: usize,
+    #[serde(default)]
+    pub dispatch_threads: Option<[u32; 3]>,
 }
 
 /// RenderDoc variable data as raw native-endian ShaderValue bytes, including nested members.
@@ -342,6 +348,12 @@ pub struct PixelDebugSelection {
     pub sample: Option<u32>,
     pub primitive: Option<u32>,
     pub view: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub struct ComputeDebugSelection {
+    pub group: [u32; 3],
+    pub thread: [u32; 3],
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -940,6 +952,9 @@ trait Transport: Send {
     fn debug_pixel(&mut self, _selection: PixelDebugSelection) -> Result<DebugTrace, String> {
         Err("Shader debugging is not supported by this transport".into())
     }
+    fn debug_compute(&mut self, _selection: ComputeDebugSelection) -> Result<DebugTrace, String> {
+        Err("Shader debugging is not supported by this transport".into())
+    }
     fn debug_next(&mut self) -> Result<DebugStates, String> {
         Err("Shader debugging is not supported by this transport".into())
     }
@@ -1454,6 +1469,20 @@ impl Transport for Process {
         }
     }
 
+    fn debug_compute(&mut self, selection: ComputeDebugSelection) -> Result<DebugTrace, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        let [gx, gy, gz] = selection.group;
+        let [tx, ty, tz] = selection.thread;
+        writeln!(input, "debug_compute {gx} {gy} {gz} {tx} {ty} {tz}")
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::DebugStarted(trace) if trace.stage == 5 => Ok(trace),
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected shader debug response".into()),
+        }
+    }
+
     fn debug_next(&mut self) -> Result<DebugStates, String> {
         let input = self.input.as_mut().ok_or("Replay session has closed")?;
         writeln!(input, "debug_next")
@@ -1764,6 +1793,13 @@ impl Session {
             .lock()
             .map_err(|e| e.to_string())?
             .debug_pixel(selection)
+    }
+
+    pub fn debug_compute(&self, selection: ComputeDebugSelection) -> Result<DebugTrace, String> {
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .debug_compute(selection)
     }
 
     pub fn debug_next(&self) -> Result<DebugStates, String> {
@@ -2291,6 +2327,7 @@ pub mod test_support {
                 read_only_resources: 0,
                 read_write_resources: 0,
                 samplers: 0,
+                dispatch_threads: None,
             })
         }
     }

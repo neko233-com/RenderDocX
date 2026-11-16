@@ -304,7 +304,13 @@ fn agent_jsonl_session_has_correlated_errors_and_clean_shutdown() {
     assert_eq!(reply["schema"], "renderdocx.agent.v1");
     assert_eq!(reply["id"], 17);
     assert_eq!(reply["error"]["code"], "no_capture");
-    for command in ["debug_vertex", "debug_pixel", "debug_next", "debug_stop"] {
+    for command in [
+        "debug_vertex",
+        "debug_pixel",
+        "debug_compute",
+        "debug_next",
+        "debug_stop",
+    ] {
         assert_eq!(
             agent.send(&serde_json::json!({"command":command}).to_string())["error"]["code"],
             "no_capture"
@@ -1588,6 +1594,77 @@ fn real_d3d11_capture_is_inspected_and_selected() {
                 && entry["tests"]["scissor_clipped"] == true),
         "{clipped}"
     );
+    let dispatch = capture_data["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|action| {
+            action["name"]
+                .as_str()
+                .is_some_and(|name| name.contains("Dispatch"))
+        })
+        .expect("compute dispatch");
+    assert_eq!(dispatch["dispatch_groups"], serde_json::json!([2, 1, 1]));
+    let dispatch_event = dispatch["event_id"].as_u64().unwrap();
+    assert_eq!(
+        agent.send(&serde_json::json!({"command":"select","event_id":dispatch_event}).to_string())
+            ["ok"],
+        true
+    );
+    let shader = agent.send(r#"{"command":"shader","stage":"compute"}"#);
+    assert_eq!(shader["ok"], true, "{shader}");
+    assert_eq!(
+        shader["data"]["shader"]["dispatch_threads"],
+        serde_json::json!([2, 2, 1])
+    );
+    for (group, thread) in [
+        ([2, 0, 0], [0, 0, 0]),
+        ([0, 0, 0], [2, 0, 0]),
+        ([0, 0, 0], [0, 0, 1]),
+    ] {
+        let invalid = agent.send(
+            &serde_json::json!({"command":"debug_compute","group":group,"thread":thread})
+                .to_string(),
+        );
+        assert_eq!(invalid["error"]["code"], "replay_debug_failed", "{invalid}");
+    }
+    assert_eq!(
+        agent.send(r#"{"command":"debug_compute","group":[0,0],"thread":[0,0,0]}"#)["error"]["code"],
+        "invalid_arguments"
+    );
+    let compute = agent.send(r#"{"command":"debug_compute","group":[1,0,0],"thread":[1,1,0]}"#);
+    assert_eq!(compute["ok"], true, "{compute}");
+    assert_eq!(compute["data"]["trace"]["stage"], 5);
+    assert_eq!(compute["data"]["trace"]["event_id"], dispatch_event);
+    let inputs = compute["data"]["trace"]["inputs"].as_array().unwrap();
+    for (name, expected) in [
+        ("vThreadGroupID", "010000000000000000000000"),
+        ("vThreadIDInGroup", "010000000100000000000000"),
+        ("vThreadID", "030000000100000000000000"),
+    ] {
+        let value = inputs
+            .iter()
+            .find(|input| input["name"] == name)
+            .expect(name);
+        assert!(
+            value["value_hex"].as_str().unwrap().starts_with(expected),
+            "{value}"
+        );
+    }
+    let mut steps = 0;
+    loop {
+        let batch = agent.send(r#"{"command":"debug_next"}"#);
+        assert_eq!(batch["ok"], true, "{batch}");
+        for state in batch["data"]["batch"]["states"].as_array().unwrap() {
+            assert_eq!(state["step"], steps);
+            steps += 1;
+        }
+        if batch["data"]["batch"]["finished"] == true {
+            break;
+        }
+    }
+    assert!(steps > 1);
+    assert_eq!(agent.send(r#"{"command":"debug_stop"}"#)["ok"], true);
     assert_eq!(agent.send(r#"{"id":3,"command":"close"}"#)["ok"], true);
     assert_eq!(
         agent.send(r#"{"id":4,"command":"snapshot"}"#)["error"]["code"],

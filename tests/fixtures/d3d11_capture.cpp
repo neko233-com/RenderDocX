@@ -123,6 +123,23 @@ int wmain(int argc, wchar_t **argv)
   if(SUCCEEDED(hr)) hr = device->CreatePixelShader(history_code->GetBufferPointer(), history_code->GetBufferSize(), nullptr, &history_shader);
   if(FAILED(hr)) { std::cerr << "Could not create history shader"; return 21; }
   history_code->Release();
+  const char *compute_source = "RWStructuredBuffer<uint> output : register(u0); [numthreads(2,2,1)] void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint3 id : SV_DispatchThreadID) { output[id.x + id.y * 4] = 42 + group.x * 100 + thread.x + thread.y * 10; }";
+  ID3DBlob *compute_code = nullptr;
+  ID3D11ComputeShader *compute_shader = nullptr;
+  hr = compile(compute_source, strlen(compute_source), nullptr, nullptr, nullptr, "main", "cs_5_0", 0, 0, &compute_code, nullptr);
+  if(SUCCEEDED(hr)) hr = device->CreateComputeShader(compute_code->GetBufferPointer(), compute_code->GetBufferSize(), nullptr, &compute_shader);
+  if(FAILED(hr)) { std::cerr << "Could not create compute shader"; return 24; }
+  compute_code->Release();
+  D3D11_BUFFER_DESC compute_desc = {};
+  compute_desc.ByteWidth = 32; compute_desc.Usage = D3D11_USAGE_DEFAULT;
+  compute_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+  compute_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+  compute_desc.StructureByteStride = sizeof(uint32_t);
+  ID3D11Buffer *compute_buffer = nullptr;
+  ID3D11UnorderedAccessView *compute_uav = nullptr;
+  hr = device->CreateBuffer(&compute_desc, nullptr, &compute_buffer);
+  if(SUCCEEDED(hr)) hr = device->CreateUnorderedAccessView(compute_buffer, nullptr, &compute_uav);
+  if(FAILED(hr)) { std::cerr << "Could not create compute output"; return 25; }
   D3D11_RASTERIZER_DESC raster_desc = {};
   raster_desc.FillMode = D3D11_FILL_SOLID; raster_desc.CullMode = D3D11_CULL_NONE; raster_desc.DepthClipEnable = TRUE;
   ID3D11RasterizerState *history_rasterizer = nullptr;
@@ -176,6 +193,9 @@ int wmain(int argc, wchar_t **argv)
   context->RSSetState(scissor_rasterizer);
   context->RSSetScissorRects(1, &clipped);
   context->DrawIndexed(3, 0, 0);
+  context->CSSetShader(compute_shader, nullptr, 0);
+  context->CSSetUnorderedAccessViews(0, 1, &compute_uav, nullptr);
+  context->Dispatch(2, 1, 1);
   context->Flush();
   if(!api->EndFrameCapture(device, nullptr)) { std::cerr << "Capture did not complete"; return 10; }
   if(api->GetNumCaptures() == 0) { std::cerr << "No capture was recorded"; return 11; }
@@ -188,6 +208,7 @@ int wmain(int argc, wchar_t **argv)
   for(auto *layer_view : layered_views) layer_view->Release();
   for(auto *volume_view : volume_views) volume_view->Release();
   if(msaa_view) msaa_view->Release(); if(msaa_texture) msaa_texture->Release();
+  compute_uav->Release(); compute_buffer->Release(); compute_shader->Release();
   scissor_rasterizer->Release(); history_rasterizer->Release(); history_shader->Release(); volume->Release(); integer_view->Release(); integer_texture->Release(); layered->Release(); index_buffer->Release(); vertex_buffer->Release(); layout->Release(); vertex->Release(); pixel->Release(); view->Release(); texture->Release(); context->Release(); device->Release();
   return 0;
 }

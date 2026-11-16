@@ -167,7 +167,8 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
                     std::vector<TextureRef> &texture_ids, std::vector<BufferRef> &buffer_ids,
                     std::map<uint32_t, uint32_t> &event_chunks,
                     std::map<uint32_t, uint32_t> &draw_instances,
-                    std::map<uint32_t, uint32_t> &draw_vertices)
+                    std::map<uint32_t, uint32_t> &draw_vertices,
+                    std::map<uint32_t, const ActionDescription *> &dispatch_actions)
 {
   const APIProperties api = controller->GetAPIProperties();
   const FrameDescription frame = controller->GetFrameInfo();
@@ -192,6 +193,8 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
               << ",\"instances\":" << action.numInstances
               << ",\"base_vertex\":" << action.baseVertex << ",\"index_offset\":" << action.indexOffset
               << ",\"vertex_offset\":" << action.vertexOffset << ",\"instance_offset\":" << action.instanceOffset
+              << ",\"dispatch_groups\":[" << action.dispatchDimension[0] << ',' << action.dispatchDimension[1] << ',' << action.dispatchDimension[2] << ']'
+              << ",\"dispatch_threads\":[" << action.dispatchThreadsDimension[0] << ',' << action.dispatchThreadsDimension[1] << ',' << action.dispatchThreadsDimension[2] << ']'
               << ",\"name\":";
     json_string(action.GetName(structured));
     std::cout << ",\"api_events\":[";
@@ -221,6 +224,8 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
       draw_instances.emplace(action.eventId, (std::max)(1U, action.numInstances));
     if(action.flags & ActionFlags::Drawcall)
       draw_vertices.emplace(action.eventId, action.numIndices);
+    if(action.flags & ActionFlags::Dispatch)
+      dispatch_actions.emplace(action.eventId, &action);
     for(size_t i = action.children.size(); i > 0; --i)
       pending.push_back({&action.children[i - 1], node.depth + 1, static_cast<int64_t>(index)});
     ++index;
@@ -612,7 +617,8 @@ int run(const std::string &capture, bool structure_worker)
   std::map<uint32_t, uint32_t> event_chunks;
   std::map<uint32_t, uint32_t> draw_instances;
   std::map<uint32_t, uint32_t> draw_vertices;
-  write_snapshot(replay.controller, event_ids, texture_ids, buffer_ids, event_chunks, draw_instances, draw_vertices);
+  std::map<uint32_t, const ActionDescription *> dispatch_actions;
+  write_snapshot(replay.controller, event_ids, texture_ids, buffer_ids, event_chunks, draw_instances, draw_vertices, dispatch_actions);
   std::map<ResourceId, size_t> resource_indices;
   const auto &resources = replay.controller->GetResources();
   for(size_t i = 0; i < resources.size(); ++i) resource_indices.emplace(resources[i].resourceId, i);
@@ -634,6 +640,7 @@ int run(const std::string &capture, bool structure_worker)
     // operations to mutate that state between ContinueDebug calls.
     if(debug.trace && command != "debug_next" && command != "debug_stop" &&
        command.compare(0, 13, "debug_vertex ") != 0 && command.compare(0, 12, "debug_pixel ") != 0 &&
+       command.compare(0, 14, "debug_compute ") != 0 &&
        command.compare(0, 7, "select ") != 0)
     { error("Stop the shader debug trace before other replay operations"); continue; }
     if(command.compare(0, 13, "debug_vertex ") == 0)
@@ -693,6 +700,42 @@ int run(const std::string &capture, bool structure_worker)
       if(!debug.trace || !debug.trace->debugger)
       { debug.reset(); error("RenderDoc could not create a pixel debug trace"); continue; }
       if(debug.trace->stage != ShaderStage::Pixel)
+      { debug.reset(); error("RenderDoc returned a different shader stage"); continue; }
+      write_debug_trace(selected_event, *debug.trace);
+      continue;
+    }
+    if(command.compare(0, 14, "debug_compute ") == 0)
+    {
+      std::istringstream arguments(command.substr(14));
+      std::string text[6], extra;
+      rdcfixedarray<uint32_t, 3> group, thread;
+      bool valid = true;
+      for(size_t i = 0; i < 6; ++i)
+      {
+        uint64_t value = 0;
+        if(!(arguments >> text[i]) || !decimal(text[i], value) || value > UINT32_MAX) { valid = false; break; }
+        if(i < 3) group[i] = uint32_t(value); else thread[i - 3] = uint32_t(value);
+      }
+      if(!valid || (arguments >> extra)) { error("Invalid compute debug request"); continue; }
+      auto action = dispatch_actions.find(selected_event);
+      if(!selected || action == dispatch_actions.end()) { error("Select a compute dispatch event first"); continue; }
+      const PipeState &state = replay.controller->GetPipelineState();
+      if(state.GetShader(ShaderStage::Compute) == ResourceId()) { error("No compute shader is bound"); continue; }
+      const ShaderReflection *reflection = state.GetShaderReflection(ShaderStage::Compute);
+      if(!reflection) { error("Compute shader reflection is unavailable"); continue; }
+      const auto &groups = action->second->dispatchDimension;
+      const auto &threads = action->second->dispatchThreadsDimension[0] == 0
+                                ? reflection->dispatchThreadsDimension : action->second->dispatchThreadsDimension;
+      for(size_t i = 0; i < 3; ++i)
+        if(groups[i] == 0 || threads[i] == 0 || group[i] >= groups[i] || thread[i] >= threads[i]) valid = false;
+      if(!valid) { error("Compute group or thread is out of range or its dimensions are unavailable"); continue; }
+      debug.reset(); debug_finished = false; mesh_ready = false;
+      debug.trace = replay.controller->DebugThread(group, thread);
+      result = replay.controller->GetFatalErrorStatus();
+      if(!result.OK()) { error(result_message(result)); break; }
+      if(!debug.trace || !debug.trace->debugger)
+      { debug.reset(); error("RenderDoc could not create a compute debug trace"); continue; }
+      if(debug.trace->stage != ShaderStage::Compute)
       { debug.reset(); error("RenderDoc returned a different shader stage"); continue; }
       write_debug_trace(selected_event, *debug.trace);
       continue;
@@ -949,6 +992,10 @@ int run(const std::string &capture, bool structure_worker)
       std::cout << "\nRENDERDOCX/1 {\"type\":\"shader\",\"event_id\":" << selected_event << ",\"stage\":" << stage_index << ",\"entry_point\":";
       json_string(reflection->entryPoint);
       std::cout << ",\"encoding\":" << uint32_t(reflection->encoding) << ",\"target\":"; json_string(target);
+      std::cout << ",\"dispatch_threads\":";
+      if(stage == ShaderStage::Compute)
+        std::cout << '[' << reflection->dispatchThreadsDimension[0] << ',' << reflection->dispatchThreadsDimension[1] << ',' << reflection->dispatchThreadsDimension[2] << ']';
+      else std::cout << "null";
       std::cout << ",\"targets\":[";
       for(size_t i = 0; i < targets.size(); ++i) { if(i) std::cout << ','; json_string(targets[i]); }
       std::cout << "],\"disassembly\":"; json_string(disassembly);

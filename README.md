@@ -24,6 +24,8 @@ Select a vertex-input row and choose **Debug vertex** to collect a RenderDoc ver
 
 The texture view can also debug a pixel of the selected draw at the entered top-left coordinates, or debug a selected pixel-history fragment when its event is the current event. The latter passes the recorded primitive and sample to RenderDoc; view remains unspecified. The selected texture is not necessarily bound to the draw, and backend selector support varies. Both views collect the complete trace before displaying it, which can take substantial time and memory. Source mapping, interactive breakpoints and other shader stages remain to be implemented. Real D3D11 fixture coverage checks the desktop interactions; other APIs and engines are not yet validated for these workflows.
 
+For a compute dispatch, select the compute shader and enter the workgroup and group-local thread coordinates to inspect its trace. RenderDoc's recorded dispatch dimensions and shader reflection determine the valid range; unavailable dimensions and out-of-range coordinates are rejected. A real D3D11 fixture exercises nonzero group and thread coordinates. Other APIs, indirect dispatches and engine workflows are not yet validated.
+
 The interface detects the system language on startup and supports English, Simplified Chinese, Japanese, and Korean, with a manual language override. Its settings are stored in the operating system's user configuration directory.
 
 ## Build and run

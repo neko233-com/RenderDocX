@@ -161,6 +161,8 @@ mod tests {
             index_offset: Some(0),
             vertex_offset: Some(0),
             instance_offset: Some(0),
+            dispatch_groups: None,
+            dispatch_threads: None,
             name: String::new(),
             api_events: Vec::new(),
         }

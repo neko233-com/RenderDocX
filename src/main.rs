@@ -17,7 +17,7 @@ use renderdocx::{
         LiveSession, capture_directory, capture_notice, enumerate, parse_target_pid,
     },
     replay::{
-        DebugState, DebugTrace, HistogramRequest, MeshInfo, MeshSelection,
+        ComputeDebugSelection, DebugState, DebugTrace, HistogramRequest, MeshInfo, MeshSelection,
         PIXEL_HISTORY_PAGE_LIMIT, Pipeline, Pixel, PixelDebugSelection, PixelHistoryPage,
         RESOURCE_USAGE_PAGE_LIMIT, ResourceUsagePage, SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session,
         ShaderReport, Snapshot, StructurePage, StructuredNode, TextureSelection, TextureStatistics,
@@ -44,6 +44,7 @@ enum ShaderDebugContext {
         index: u32,
     },
     Pixel(PixelDebugSelection),
+    Compute(ComputeDebugSelection),
 }
 
 struct ShaderDebugView {
@@ -54,6 +55,16 @@ struct ShaderDebugView {
     disassembly: String,
 }
 
+fn parse_debug_triplet(value: &str) -> Option<[u32; 3]> {
+    let mut parts = value.split(',').map(|part| part.trim().parse::<u32>().ok());
+    let result = [parts.next()??, parts.next()??, parts.next()??];
+    if parts.next().is_some() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
 fn collect_shader_debug(
     session: &Session,
     event: u32,
@@ -62,6 +73,7 @@ fn collect_shader_debug(
     let stage = match context {
         ShaderDebugContext::Vertex { .. } => 0,
         ShaderDebugContext::Pixel(_) => 4,
+        ShaderDebugContext::Compute(_) => 5,
     };
     let shader = session.shader(stage, None)?;
     if shader.event_id != event {
@@ -74,6 +86,7 @@ fn collect_shader_debug(
             index,
         } => session.debug_vertex(vertex, instance, index, 0)?,
         ShaderDebugContext::Pixel(selection) => session.debug_pixel(selection)?,
+        ShaderDebugContext::Compute(selection) => session.debug_compute(selection)?,
     };
     let collected = (|| {
         if trace.event_id != event {
@@ -292,6 +305,8 @@ struct Workspace {
     input_page: Option<InputPage>,
     debug_vertex_selection: Option<(u32, u32, u32)>,
     debug_view: Option<ShaderDebugView>,
+    compute_group: Entity<InputState>,
+    compute_thread: Entity<InputState>,
     selected_resource: Option<usize>,
     usage_page: Option<ResourceUsagePage>,
     open_revision: u64,
@@ -1312,6 +1327,28 @@ impl Workspace {
             view: None,
         };
         self.start_shader_debug(ShaderDebugContext::Pixel(selection), cx);
+    }
+
+    fn debug_compute_thread(&mut self, cx: &mut Context<Self>) {
+        let group = parse_debug_triplet(&self.compute_group.read(cx).value());
+        let thread = parse_debug_triplet(&self.compute_thread.read(cx).value());
+        let (Some(group), Some(thread)) = (group, thread) else {
+            self.status = Some(
+                self.t(
+                    "Enter three comma-separated nonnegative integers for each coordinate.",
+                    "每组坐标请输入三个以逗号分隔的非负整数。",
+                    "各座標にカンマ区切りの非負整数を3つ入力してください。",
+                    "각 좌표에 쉼표로 구분된 음이 아닌 정수 세 개를 입력하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        self.start_shader_debug(
+            ShaderDebugContext::Compute(ComputeDebugSelection { group, thread }),
+            cx,
+        );
     }
 
     fn start_shader_debug(&mut self, context: ShaderDebugContext, cx: &mut Context<Self>) {
@@ -2414,6 +2451,13 @@ impl Workspace {
                     .view
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "—".into())
+            ),
+            ShaderDebugContext::Compute(selection) => format!(
+                "{} {:?} · {} {:?}",
+                self.t("Group", "工作组", "ワークグループ", "워크그룹"),
+                selection.group,
+                self.t("Thread", "组内线程", "グループ内スレッド", "그룹 내 스레드"),
+                selection.thread
             ),
         };
         let mut view = div()
@@ -3695,6 +3739,33 @@ impl Workspace {
                 }))
         } else if self.tab == CaptureTab::Shaders {
             let report = self.shader_data.clone();
+            let compute_selected = self.selected_shader == Some(5) && report.is_some();
+            let dispatch_action = detail.as_ref().filter(|action| {
+                self.pipeline
+                    .as_ref()
+                    .is_some_and(|pipeline| pipeline.event_id == action.event_id)
+            });
+            let groups = dispatch_action.and_then(|action| action.dispatch_groups);
+            let threads = dispatch_action
+                .and_then(|action| action.dispatch_threads)
+                .filter(|dimensions| dimensions[0] != 0)
+                .or_else(|| report.as_ref().and_then(|shader| shader.dispatch_threads));
+            let groups = groups
+                .map(|value| format!("{value:?}"))
+                .unwrap_or_else(|| "—".into());
+            let threads = threads
+                .map(|value| format!("{value:?}"))
+                .unwrap_or_else(|| "—".into());
+            let compute_panel = if compute_selected
+                && self
+                    .debug_view
+                    .as_ref()
+                    .is_some_and(|debug| matches!(debug.context, ShaderDebugContext::Compute(_)))
+            {
+                self.shader_debug_panel(cx)
+            } else {
+                None
+            };
             let target_button = button(
                 "shader-next-target",
                 next_target,
@@ -3731,6 +3802,71 @@ impl Workspace {
                         .text_color(rgb(0x82aaff))
                         .child(shader_details),
                 )
+                .when(compute_selected, |view| {
+                    let group_label = self.t(
+                        "Group ID (x,y,z)",
+                        "工作组 ID（x,y,z）",
+                        "ワークグループ ID (x,y,z)",
+                        "워크그룹 ID (x,y,z)",
+                    );
+                    let thread_label = self.t(
+                        "Thread ID in group (x,y,z)",
+                        "组内线程 ID（x,y,z）",
+                        "グループ内スレッド ID (x,y,z)",
+                        "그룹 내 스레드 ID (x,y,z)",
+                    );
+                    view.child(format!(
+                        "{}: {} · {}: {}",
+                        self.t(
+                            "Group counts",
+                            "工作组数量",
+                            "ワークグループ数",
+                            "워크그룹 수"
+                        ),
+                        groups,
+                        self.t(
+                            "Threads per group",
+                            "每组线程数",
+                            "グループごとのスレッド数",
+                            "그룹당 스레드 수"
+                        ),
+                        threads
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .items_center()
+                            .child(div().child(group_label))
+                            .child(
+                                Input::new(&self.compute_group)
+                                    .id("compute-debug-group")
+                                    .aria_label(group_label)
+                                    .w(px(120.)),
+                            )
+                            .child(div().child(thread_label))
+                            .child(
+                                Input::new(&self.compute_thread)
+                                    .id("compute-debug-thread")
+                                    .aria_label(thread_label)
+                                    .w(px(120.)),
+                            )
+                            .child(button(
+                                "compute-debug-start",
+                                self.t(
+                                    "Debug thread",
+                                    "调试线程",
+                                    "スレッドをデバッグ",
+                                    "스레드 디버깅",
+                                ),
+                                true,
+                                |this, cx| this.debug_compute_thread(cx),
+                                cx,
+                            )),
+                    )
+                })
+                .when_some(compute_panel, |view, panel| view.child(panel))
                 .when_some(report, |view, shader| {
                     let inputs = shader
                         .inputs
@@ -5841,6 +5977,10 @@ fn main() {
                     let stats_min = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_x = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let compute_group =
+                        cx.new(|cx| InputState::new(window, cx).default_value("0,0,0"));
+                    let compute_thread =
+                        cx.new(|cx| InputState::new(window, cx).default_value("0,0,0"));
                     let pixel_y = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let entity = cx.new(|cx| Workspace {
                         settings,
@@ -5886,6 +6026,8 @@ fn main() {
                         input_page: None,
                         debug_vertex_selection: None,
                         debug_view: None,
+                        compute_group,
+                        compute_thread,
                         selected_resource: None,
                         usage_page: None,
                         open_revision: 0,
@@ -5965,6 +6107,10 @@ mod ui_tests {
                     let stats_min = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_x = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let compute_group =
+                        cx.new(|cx| InputState::new(window, cx).default_value("0,0,0"));
+                    let compute_thread =
+                        cx.new(|cx| InputState::new(window, cx).default_value("0,0,0"));
                     let pixel_y = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     cx.new(|cx| Workspace {
                         settings: Settings::default(),
@@ -6022,6 +6168,8 @@ mod ui_tests {
                         input_page: None,
                         debug_vertex_selection: None,
                         debug_view: None,
+                        compute_group,
+                        compute_thread,
                         selected_resource: None,
                         usage_page: None,
                         open_revision: 0,
@@ -6183,6 +6331,10 @@ mod ui_tests {
                     let stats_min = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_x = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let compute_group =
+                        cx.new(|cx| InputState::new(window, cx).default_value("0,0,0"));
+                    let compute_thread =
+                        cx.new(|cx| InputState::new(window, cx).default_value("0,0,0"));
                     let pixel_y = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     cx.new(|cx| Workspace {
                         settings: Settings::default(),
@@ -6207,6 +6359,8 @@ mod ui_tests {
                                     index_offset: Some(0),
                                     vertex_offset: Some(0),
                                     instance_offset: Some(0),
+                                    dispatch_groups: None,
+                                    dispatch_threads: None,
                                     name: "Draw".into(),
                                     api_events: vec![
                                         renderdocx::replay::ApiEvent {
@@ -6235,6 +6389,8 @@ mod ui_tests {
                                     index_offset: Some(0),
                                     vertex_offset: Some(0),
                                     instance_offset: Some(0),
+                                    dispatch_groups: None,
+                                    dispatch_threads: None,
                                     name: "Child".into(),
                                     api_events: Vec::new(),
                                 },
@@ -6250,6 +6406,8 @@ mod ui_tests {
                                     index_offset: Some(0),
                                     vertex_offset: Some(0),
                                     instance_offset: Some(0),
+                                    dispatch_groups: None,
+                                    dispatch_threads: None,
                                     name: "Next".into(),
                                     api_events: Vec::new(),
                                 },
@@ -6336,6 +6494,8 @@ mod ui_tests {
                         input_page: None,
                         debug_vertex_selection: None,
                         debug_view: None,
+                        compute_group,
+                        compute_thread,
                         selected_resource: None,
                         usage_page: None,
                         open_revision: 0,
@@ -6957,6 +7117,13 @@ mod ui_tests {
                     .find(|(_, action)| action.name.contains("DrawIndexed"))
                     .map(|(index, action)| (index, action.event_id))
                     .expect("captured indexed draw");
+                let (dispatch_index, dispatch_event) = real_snapshot
+                    .actions
+                    .iter()
+                    .enumerate()
+                    .find(|(_, action)| action.name.contains("Dispatch"))
+                    .map(|(index, action)| (index, action.event_id))
+                    .expect("captured compute dispatch");
                 let (history_draw_index, history_draw_event) = real_snapshot
                     .actions
                     .iter()
@@ -7726,6 +7893,124 @@ mod ui_tests {
                     );
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.click("events-tab", cx);
+                    window.click("event-filter", cx);
+                    window.press("ctrl-a", cx);
+                    window.input("Dispatch", cx);
+                })
+                .unwrap();
+                cx.run_until_parked();
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    window.click(dispatch_index, cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx)
+                            .pipeline
+                            .as_ref()
+                            .is_some_and(|pipeline| pipeline.event_id == dispatch_event)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "compute dispatch selection did not complete"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.click("shaders-tab", cx);
+                    window.click("shader-5", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx).shader_data.as_ref().is_some_and(|shader| {
+                            shader.event_id == dispatch_event && shader.stage == 5
+                        })
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "compute shader did not load: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update(|cx| {
+                    assert_eq!(
+                        view.read(cx).shader_data.as_ref().unwrap().dispatch_threads,
+                        Some([2, 2, 1])
+                    )
+                });
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.scroll(
+                        "capture-details-scroll",
+                        ScrollDelta::Pixels(point(px(0.), px(2000.))),
+                        cx,
+                    );
+                    window.render_frame(cx);
+                    window.click("compute-debug-group", cx);
+                    window.press("ctrl-a", cx);
+                    window.input("1,0", cx);
+                    window.click("compute-debug-start", cx);
+                })
+                .unwrap();
+                cx.update(|cx| assert!(view.read(cx).status.is_some()));
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.click("compute-debug-group", cx);
+                    window.press("ctrl-a", cx);
+                    window.input("1,0,0", cx);
+                    window.click("compute-debug-thread", cx);
+                    window.press("ctrl-a", cx);
+                    window.input("1,1,0", cx);
+                    window.click("compute-debug-start", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx).debug_view.as_ref().is_some_and(|debug| {
+                            matches!(debug.context, ShaderDebugContext::Compute(_))
+                        })
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "compute debug did not finish: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update(|cx| {
+                    let debug = view.read(cx).debug_view.as_ref().unwrap();
+                    let ShaderDebugContext::Compute(selection) = debug.context else {
+                        panic!("expected compute trace")
+                    };
+                    assert_eq!(selection.group, [1, 0, 0]);
+                    assert_eq!(selection.thread, [1, 1, 0]);
+                    assert_eq!(debug.trace.event_id, dispatch_event);
+                    assert_eq!(debug.trace.stage, 5);
+                    assert!(debug.states.len() > 1);
+                    assert!(
+                        debug
+                            .trace
+                            .inputs
+                            .iter()
+                            .any(|input| input.name == "vThreadID"
+                                && input.value_hex.starts_with("030000000100000000000000"))
+                    );
+                });
             }
             if let Some(fixture) = std::env::var_os("RENDERDOCX_TEST_OPENGL_FIXTURE") {
                 use std::os::windows::process::CommandExt;
