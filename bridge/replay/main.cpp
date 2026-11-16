@@ -1034,6 +1034,7 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
   const auto &resources = replay.controller->GetResources();
   for(size_t i = 0; i < resources.size(); ++i) resource_indices.emplace(resources[i].resourceId, i);
   bool selected = false;
+  bool symbols_initialised = false;
   uint32_t selected_event = 0;
   bool debug_finished = false;
   bool mesh_ready = false;
@@ -1067,9 +1068,58 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       std::cout << "]}" << std::endl;
       continue;
     }
+    if(command.compare(0, 10, "callstack ") == 0)
+    {
+      std::istringstream args(command.substr(10));
+      std::string event_text, resolve_text, extra;
+      uint64_t event = 0, resolve = 0;
+      if(!(args >> event_text >> resolve_text) || !decimal(event_text, event) || event > UINT32_MAX ||
+         !decimal(resolve_text, resolve) || resolve > 1 || (args >> extra))
+      { error("Invalid callstack request"); continue; }
+      auto found = event_chunks.find(uint32_t(event));
+      const SDFile &structured = replay.controller->GetStructuredFile();
+      if(found == event_chunks.end() || found->second >= structured.chunks.size() || !structured.chunks[found->second])
+      { error("Callstack is unavailable for this event"); continue; }
+      ICaptureAccess *access = replay.remote;
+      if(!access)
+      {
+        if(!replay.file)
+        {
+          replay.file = RENDERDOC_OpenCaptureFile();
+          if(!replay.file) { error("Could not open capture for symbol resolution"); continue; }
+          ResultDetails opened = replay.file->OpenFile(capture.c_str(), "rdc", nullptr);
+          if(!opened.OK()) { std::string message = result_message(opened); replay.file->Shutdown(); replay.file = nullptr; error(message); continue; }
+        }
+        access = replay.file;
+      }
+      const auto &stack = structured.chunks[found->second]->metadata.callstack;
+      const bool available = access->HasCallstacks();
+      if(resolve && available && !stack.empty() && !symbols_initialised)
+      {
+        ResultDetails init = access->InitResolver(false, nullptr);
+        if(!init.OK()) { error(result_message(init)); continue; }
+        symbols_initialised = true;
+      }
+      rdcarray<rdcstr> symbols;
+      if(resolve && symbols_initialised && !stack.empty()) symbols = access->GetResolve(stack);
+      const bool resolved = resolve && symbols_initialised && !stack.empty() && symbols.size() == stack.size();
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"callstack\",\"event_id\":" << event
+                << ",\"available\":" << (available ? "true" : "false")
+                << ",\"resolved\":" << (resolved ? "true" : "false") << ",\"frames\":[";
+      for(size_t i = 0; i < stack.size(); ++i)
+      {
+        if(i) std::cout << ',';
+        std::cout << "{\"address\":\"" << stack[i] << "\",\"symbol\":";
+        if(resolved) json_string(symbols[i]); else std::cout << "null";
+        std::cout << '}';
+      }
+      std::cout << "]}" << std::endl;
+      continue;
+    }
     if(command.compare(0, 13, "section_read ") == 0 || command.compare(0, 14, "section_write ") == 0)
     {
       const bool writing = command.compare(0, 14, "section_write ") == 0;
+      if(writing && replay.file) { replay.file->Shutdown(); replay.file = nullptr; symbols_initialised = false; }
       std::istringstream arguments(command.substr(writing ? 14 : 13));
       std::string name, expected, payload, extra;
       if(!(arguments >> name) || (name != "notes" && name != "bookmarks" && name != "renames" && name != "edits") ||

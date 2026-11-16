@@ -1369,7 +1369,7 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         "{api_select}"
     );
     assert_eq!(
-        agent.send(r#"{"id":12,"command":"select","event_id":4294967295}"#)["error"]["code"],
+        agent.send(r#"{"id":12,"command":"select","event_id":4294967295u32}"#)["error"]["code"],
         "replay_select_failed"
     );
     let request =
@@ -2360,6 +2360,7 @@ fn real_remote_replay_loopback() {
     let output = Command::new(fixture)
         .arg(bridge.parent().unwrap().join("renderdoc.dll"))
         .arg(dir.path().join("frame"))
+        .arg("--callstacks")
         .creation_flags(0x08000000)
         .output()
         .unwrap();
@@ -2411,6 +2412,25 @@ fn real_remote_replay_loopback() {
     let selected =
         agent.send(&serde_json::json!({"command":"select", "event_id":event}).to_string());
     assert_eq!(selected["ok"], true, "{selected}");
+    let stack =
+        agent.send(&serde_json::json!({"command":"callstack", "event_id":event}).to_string());
+    assert_eq!(stack["ok"], true, "{stack}");
+    assert_eq!(stack["data"]["callstack"]["available"], true);
+    assert!(
+        !stack["data"]["callstack"]["frames"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{stack}"
+    );
+    assert_eq!(stack["data"]["callstack"]["resolved"], false);
+    assert_eq!(
+        agent.send(
+            &serde_json::json!({"command":"callstack", "event_id":4294967295u32}).to_string()
+        )["error"]["code"],
+        "replay_callstack_failed"
+    );
+
     let update = opened["data"]["capture"]["actions"]
         .as_array()
         .unwrap()
@@ -2441,6 +2461,15 @@ fn real_remote_replay_loopback() {
     assert_eq!(data["ok"], true, "{data}");
     assert_eq!(data["data"]["hex"], "0000000000004040");
     assert_eq!(agent.send(r#"{"command":"close"}"#)["ok"], true);
+    let local_open = agent.send(&serde_json::json!({"command":"open", "path":capture}).to_string());
+    assert_eq!(local_open["ok"], true, "{local_open}");
+    let local_stack =
+        agent.send(&serde_json::json!({"command":"callstack", "event_id":event}).to_string());
+    assert_eq!(local_stack["ok"], true, "{local_stack}");
+    assert_eq!(
+        local_stack["data"]["callstack"]["frames"],
+        stack["data"]["callstack"]["frames"]
+    );
     agent.quit();
 }
 

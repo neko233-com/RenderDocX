@@ -200,6 +200,7 @@ struct StructureView {
     offset: u64,
     bytes: Option<Vec<u8>>,
     bytes_offset: u64,
+    callstack: Option<renderdocx::replay::EventCallstack>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3532,6 +3533,72 @@ impl Workspace {
         }
     }
 
+    fn read_event_callstack(&mut self, resolve: bool, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            return;
+        }
+        let Some(event) = self.pipeline.as_ref().map(|pipeline| pipeline.event_id) else {
+            self.status = Some(
+                self.t(
+                    "Select an event first.",
+                    "请先选择事件。",
+                    "最初にイベントを選択してください。",
+                    "먼저 이벤트를 선택하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let revision = self.open_revision;
+        let selection_revision = self.selection_revision;
+        self.resource_pending = true;
+        self.status = Some(
+            self.t(
+                "Loading event call stack…",
+                "正在加载事件调用栈…",
+                "イベントの呼び出し履歴を読み込み中…",
+                "이벤트 호출 스택을 불러오는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx
+            .background_executor()
+            .spawn(async move { session.callstack(event, resolve) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision || this.selection_revision != selection_revision {
+                    return;
+                }
+                this.resource_pending = false;
+                match result {
+                    Ok(stack) => {
+                        this.structure.callstack = Some(stack);
+                        this.status = None;
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Could not load call stack",
+                                "无法加载调用栈",
+                                "呼び出し履歴を読み込めません",
+                                "호출 스택을 불러올 수 없습니다"
+                            )
+                        ));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn read_structure(&mut self, path: Vec<u64>, offset: u64, cx: &mut Context<Self>) {
         if self.replay_pending || self.export_pending || self.resource_pending {
             self.status = Some(
@@ -3594,6 +3661,7 @@ impl Workspace {
                             offset,
                             bytes: None,
                             bytes_offset: 0,
+                            callstack: None,
                         };
                         this.status = None;
                     }
@@ -7310,6 +7378,40 @@ impl Workspace {
                 .when(self.structure.page.is_none(), |view| {
                     view.child(pending_label)
                 })
+                .when_some(self.structure.callstack.as_ref(), |view, stack| {
+                    let title = self.t(
+                        "EVENT CALL STACK",
+                        "事件调用栈",
+                        "イベントの呼び出し履歴",
+                        "이벤트 호출 스택",
+                    );
+                    let empty = self.t(
+                        "No call stack for this event.",
+                        "此事件没有调用栈。",
+                        "このイベントに呼び出し履歴はありません。",
+                        "이 이벤트에 호출 스택이 없습니다.",
+                    );
+                    view.child(div().text_sm().text_color(rgb(0x82aaff)).child(title))
+                        .when(stack.frames.is_empty(), |v| v.child(empty))
+                        .children(stack.frames.iter().enumerate().map(|(index, frame)| {
+                            let address = frame
+                                .address
+                                .parse::<u64>()
+                                .map(|v| format!("0x{v:016X}"))
+                                .unwrap_or_else(|_| frame.address.clone());
+                            let label = frame
+                                .symbol
+                                .as_ref()
+                                .filter(|s| !s.is_empty())
+                                .map(|s| format!("{address}  {s}"))
+                                .unwrap_or(address);
+                            div()
+                                .id(("event-callstack-frame", index))
+                                .test_support()
+                                .text_sm()
+                                .child(label)
+                        }))
+                })
                 .children(bytes_lines.into_iter().enumerate().map(|(index, line)| {
                     div()
                         .id(("structure-bytes-line", index))
@@ -9527,6 +9629,8 @@ impl Workspace {
                                         .gap_2()
                                         .px_3()
                                         .pb_2()
+                                        .child(button("callstack-load", self.t("Call stack", "调用栈", "呼び出し履歴", "호출 스택"), false, |this, cx| this.read_event_callstack(false, cx), cx))
+                                        .child(button("callstack-resolve", self.t("Resolve symbols", "解析符号", "シンボルを解決", "심볼 확인"), false, |this, cx| this.read_event_callstack(true, cx), cx))
                                         .child(button(
                                             "structure-parent",
                                             parent_label,
@@ -11791,6 +11895,30 @@ mod ui_tests {
             assert_eq!(page.event_id, 41);
             assert_eq!(page.children[0].name, "Topology");
             assert_eq!(page.children.len(), 128);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("callstack-load", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let stack = view.read(cx).structure.callstack.as_ref().unwrap();
+            assert_eq!(stack.event_id, 41);
+            assert_eq!(stack.frames[0].address, "4660");
+            assert!(!stack.resolved);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("callstack-resolve", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                view.read(cx).structure.callstack.as_ref().unwrap().frames[0]
+                    .symbol
+                    .as_deref(),
+                Some("fixture::draw")
+            )
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.click("structure-next", cx)

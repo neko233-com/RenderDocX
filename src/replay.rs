@@ -48,6 +48,20 @@ pub struct ApiEvent {
     pub name: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct EventCallstack {
+    pub event_id: u32,
+    pub available: bool,
+    pub resolved: bool,
+    pub frames: Vec<EventCallstackFrame>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct EventCallstackFrame {
+    pub address: String,
+    pub symbol: Option<String>,
+}
+
 /// A page of direct children in RenderDoc's structured capture data.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StructurePage {
@@ -1137,6 +1151,7 @@ enum Reply {
     DebugStates(DebugStates),
     DebugStopped,
     Structure(StructurePage),
+    Callstack(EventCallstack),
     Mesh(MeshInfo),
     MeshData {
         event_id: u32,
@@ -1560,6 +1575,9 @@ trait Transport: Send {
     }
     fn debug_stop(&mut self) -> Result<(), String> {
         Err("Shader debugging is not supported by this transport".into())
+    }
+    fn callstack(&mut self, _event: u32, _resolve: bool) -> Result<EventCallstack, String> {
+        Err("Event callstack inspection is not supported by this transport".into())
     }
     fn structure(
         &mut self,
@@ -2119,6 +2137,38 @@ impl Transport for Process {
             return Err("Capture changed while reading structured data".into());
         }
         Ok(bytes)
+    }
+
+    fn callstack(&mut self, event: u32, resolve: bool) -> Result<EventCallstack, String> {
+        let stamp = self
+            .capture_stamp
+            .clone()
+            .ok_or("Capture identity is unavailable")?;
+        if capture_stamp(&self.capture).as_ref() != Some(&stamp) {
+            return Err("Capture changed since it was opened".into());
+        }
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(input, "callstack {event} {}", u8::from(resolve))
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        let reply = self.read()?;
+        if capture_stamp(&self.capture).as_ref() != Some(&stamp) {
+            return Err("Capture changed while reading the callstack".into());
+        }
+        match reply {
+            Reply::Callstack(stack)
+                if stack.event_id == event
+                    && stack
+                        .frames
+                        .iter()
+                        .all(|f| f.address.parse::<u64>().is_ok())
+                    && (!stack.resolved || stack.frames.iter().all(|f| f.symbol.is_some())) =>
+            {
+                Ok(stack)
+            }
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected event callstack response".into()),
+        }
     }
 
     fn structure(
@@ -2941,6 +2991,13 @@ impl Session {
             .mesh_read(event, selection, kind, offset, length)
     }
 
+    pub fn callstack(&self, event: u32, resolve: bool) -> Result<EventCallstack, String> {
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .callstack(event, resolve)
+    }
+
     pub fn structure(
         &self,
         event: u32,
@@ -3243,6 +3300,18 @@ pub mod test_support {
                 .skip(usize::try_from(offset).unwrap_or(usize::MAX))
                 .take(length as usize)
                 .collect())
+        }
+
+        fn callstack(&mut self, event: u32, resolve: bool) -> Result<EventCallstack, String> {
+            Ok(EventCallstack {
+                event_id: event,
+                available: true,
+                resolved: resolve,
+                frames: vec![EventCallstackFrame {
+                    address: "4660".into(),
+                    symbol: resolve.then(|| "fixture::draw".into()),
+                }],
+            })
         }
 
         fn structure(

@@ -19,7 +19,7 @@ static std::string utf8(const wchar_t *text)
 
 int wmain(int argc, wchar_t **argv)
 {
-  if(argc != 3) { std::cerr << "Expected renderdoc.dll and capture path template"; return 2; }
+  if(argc != 3 && !(argc == 4 && std::wstring(argv[3]) == L"--callstacks")) { std::cerr << "Expected renderdoc.dll, capture path template and optional --callstacks"; return 2; }
   HMODULE renderdoc = LoadLibraryW(argv[1]);
   if(!renderdoc) { std::cerr << "Could not load RenderDoc"; return 3; }
   auto get_api = reinterpret_cast<pRENDERDOC_GetAPI>(GetProcAddress(renderdoc, "RENDERDOC_GetAPI"));
@@ -29,6 +29,8 @@ int wmain(int argc, wchar_t **argv)
   const std::string path = utf8(argv[2]);
   if(path.empty()) { std::cerr << "Invalid capture path"; return 5; }
   api->SetCaptureFilePathTemplate(path.c_str());
+  if(argc == 4 && !api->SetCaptureOptionU32(eRENDERDOC_Option_CaptureCallstacks, 1))
+  { std::cerr << "Could not enable callstacks"; return 5; }
 
   HMODULE d3d = LoadLibraryW(L"d3d11.dll");
   auto create = d3d ? reinterpret_cast<decltype(&D3D11CreateDevice)>(GetProcAddress(d3d, "D3D11CreateDevice")) : nullptr;
