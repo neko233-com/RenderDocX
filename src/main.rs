@@ -2501,7 +2501,12 @@ impl Workspace {
                 annotations::shader_editors(&document)?;
                 Ok(document)
             });
-            Ok::<_, String>((session, snapshot, renames, edits))
+            let bookmarks = session.annotation_read("bookmarks").and_then(|section| {
+                let document = section.document()?;
+                annotations::bookmarks(&document)?;
+                Ok((section, document))
+            });
+            Ok::<_, String>((session, snapshot, renames, edits, bookmarks))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -2510,7 +2515,7 @@ impl Workspace {
                     return;
                 }
                 match result {
-                    Ok((session, snapshot, renames, edits)) => {
+                    Ok((session, snapshot, renames, edits, bookmarks)) => {
                         // Invalidate work started against the old session while this open was pending.
                         this.open_revision += 1;
                         this.capture = Some(capture);
@@ -2562,6 +2567,13 @@ impl Workspace {
                             }
                             Err(error) => Some(error),
                         };
+                        let bookmarks_error = match bookmarks {
+                            Ok(value) => {
+                                this.annotations.bookmarks = Some(value);
+                                None
+                            }
+                            Err(error) => Some(error),
+                        };
                         this.refresh_resources();
                         this.usage_page = None;
                         this.replay_pending = false;
@@ -2571,17 +2583,21 @@ impl Workspace {
                         this.pixel_history = None;
                         this.history_selected = None;
                         this.statistics = None;
-                        this.status = rename_error.or(edits_error).map(|error| {
-                            format!(
-                                "{}: {error}",
-                                this.t(
-                                    "Could not load capture metadata",
-                                    "无法加载捕获元数据",
-                                    "キャプチャのメタデータを読み込めません",
-                                    "캡처 메타데이터를 불러올 수 없습니다"
-                                )
-                            )
-                        });
+                        this.status =
+                            rename_error
+                                .or(edits_error)
+                                .or(bookmarks_error)
+                                .map(|error| {
+                                    format!(
+                                        "{}: {error}",
+                                        this.t(
+                                            "Could not load capture metadata",
+                                            "无法加载捕获元数据",
+                                            "キャプチャのメタデータを読み込めません",
+                                            "캡처 메타데이터를 불러올 수 없습니다"
+                                        )
+                                    )
+                                });
                     }
                     Err(error) => {
                         if replacing_remote {
@@ -3801,6 +3817,11 @@ impl Workspace {
             self.timeline.usage = None;
         }
         self.selected_resource = Some(index);
+        let load_full_usage = self
+            .timeline
+            .usage
+            .as_ref()
+            .is_none_or(|usage| usage.index != resource_index);
         self.resource_pending = true;
         let revision = self.open_revision;
         self.status = Some(
@@ -3814,7 +3835,9 @@ impl Workspace {
         );
         cx.notify();
         let task = cx.background_executor().spawn(async move {
-            session.resource_usage(resource_index, offset, RESOURCE_USAGE_PAGE_LIMIT)
+            let page = session.resource_usage(resource_index, offset, RESOURCE_USAGE_PAGE_LIMIT)?;
+            let full_usage = load_full_usage.then(|| session.timeline_usage(resource_index));
+            Ok::<_, String>((page, full_usage))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -3829,9 +3852,24 @@ impl Workspace {
                     return;
                 }
                 match result {
-                    Ok(page) => {
+                    Ok((page, full_usage)) => {
                         this.usage_page = Some(page);
-                        this.status = None;
+                        this.status = match full_usage {
+                            Some(Ok(usage)) => {
+                                this.timeline.usage = Some(usage);
+                                None
+                            }
+                            Some(Err(error)) => Some(format!(
+                                "{}: {error}",
+                                this.t(
+                                    "Could not load full resource usage",
+                                    "无法加载完整资源使用记录",
+                                    "すべてのリソース使用履歴を読み込めません",
+                                    "전체 리소스 사용 기록을 불러올 수 없습니다"
+                                )
+                            )),
+                            None => None,
+                        };
                     }
                     Err(error) => {
                         this.status = Some(format!(
@@ -6477,7 +6515,7 @@ impl Workspace {
                 .child(button("timeline-zoom-out", self.t("Zoom out", "缩小", "縮小", "축소"), false, |this, cx| { this.timeline.zoom(false, this.pipeline.as_ref().map(|p| p.event_id)); cx.notify(); }, cx))
                 .child(button("timeline-load-usage", self.t("Highlight all resource usage", "高亮全部资源使用", "すべてのリソース使用を強調", "전체 리소스 사용 강조"), false, |this, cx| this.load_timeline_usage(cx), cx)))
             .child(format!("{}: {start}–{end} / {}", self.t("Event IDs", "事件 ID", "イベント ID", "이벤트 ID"), self.timeline.model.max_event))
-            .child(self.t("Drag the axis to select actions; Alt-drag pans, scroll zooms. Green: passed · orange-red: failed pixel history · light green: loaded bookmarks.", "拖动坐标轴选择操作；Alt 拖动平移，滚轮缩放。绿：像素通过 · 橙红：像素失败 · 浅绿：已加载书签。", "軸ドラッグで選択、Alt ドラッグで移動、スクロールで拡大縮小。緑：ピクセル成功・橙赤：失敗・薄緑：読込済みブックマーク。", "축 드래그로 선택, Alt 드래그로 이동, 스크롤로 확대/축소. 초록: 픽셀 통과 · 주황 빨강: 실패 · 연두: 불러온 북마크."))
+            .child(self.t("Drag the axis to select actions; Alt-drag pans, scroll zooms. Green: passed · orange-red: failed pixel history · light green: bookmarks.", "拖动坐标轴选择操作；Alt 拖动平移，滚轮缩放。绿：像素通过 · 橙红：像素失败 · 浅绿：书签。", "軸ドラッグで選択、Alt ドラッグで移動、スクロールで拡大縮小。緑：ピクセル成功・橙赤：失敗・薄緑：ブックマーク。", "축 드래그로 선택, Alt 드래그로 이동, 스크롤로 확대/축소. 초록: 픽셀 통과 · 주황 빨강: 실패 · 연두: 북마크."))
             .child(div().flex().flex_wrap().gap_2()
                 .child(format!("{}:", self.t("Resource usage", "资源使用", "リソース使用", "리소스 사용")))
                 .child(div().text_color(rgb(0xe69f00)).child(self.t("Read", "读取", "読み取り", "읽기")))
@@ -13677,7 +13715,13 @@ mod ui_tests {
         })
         .unwrap();
         cx.run_until_parked();
-        cx.update(|cx| assert_eq!(view.read(cx).usage_page.as_ref().unwrap().entries.len(), 2));
+        cx.update(|cx| {
+            assert_eq!(view.read(cx).usage_page.as_ref().unwrap().entries.len(), 2);
+            assert_eq!(
+                view.read(cx).timeline.usage.as_ref().unwrap().entries.len(),
+                140
+            );
+        });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             window.click(("resource-derived", 0usize), cx);
