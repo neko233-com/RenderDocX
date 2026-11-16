@@ -174,6 +174,7 @@ fn usage() -> Value {
         .expect("capabilities commands")
         .push(json!("mesh_attributes_export"));
     capabilities["task_payload_page_limit"] = json!(renderdocx::task_payload::PAGE_LIMIT);
+    capabilities["texture_overlays"] = json!(renderdocx::texture_overlay::TextureOverlay::ALL);
     capabilities
 }
 
@@ -2688,12 +2689,23 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         ));
                         match (snapshot.textures.get(index as usize), selection) {
                             (Some(texture), Ok(selection)) => match selection.validate(texture) {
-                                Ok(()) => session.render_texture_png(index, selection, width, height, PathBuf::from(path).as_path())
+                                Ok(()) => {
+                                    if selection.preview_overlay
+                                        != renderdocx::texture_overlay::TextureOverlay::None
+                                    {
+                                        event_times = None;
+                                        mesh_selection = None;
+                                    }
+                                    session.render_texture_png(index, selection, width, height, PathBuf::from(path).as_path())
                                     .map(|_| json!({"index":index,"event_id":event,"path":path,"width":width,"height":height,"selection":selection}))
-                                    .map_err(|error| ("replay_render_failed", error)),
+                                    .map_err(|error| ("replay_render_failed", error))
+                                }
                                 Err(error) => Err(("invalid_arguments", error)),
                             },
-                            _ => Err(("invalid_arguments", "Invalid texture index or selection".into())),
+                            _ => Err((
+                                "invalid_arguments",
+                                "Invalid texture index or selection".into(),
+                            )),
                         }
                     }
                     _ => Err((

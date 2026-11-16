@@ -5872,6 +5872,19 @@ impl Workspace {
         cx.notify();
     }
 
+    fn change_preview_overlay(
+        &mut self,
+        overlay: renderdocx::texture_overlay::TextureOverlay,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.preview_edit_ready(cx) {
+            return;
+        }
+        self.texture_selection.preview_overlay = overlay;
+        self.preview = None;
+        cx.notify();
+    }
+
     fn export_buffer(&mut self, cx: &mut Context<Self>) {
         if self.replay_pending
             || self.export_pending
@@ -7389,6 +7402,17 @@ impl Workspace {
         self.texture_raw_page = None;
         self.texture_raw_last = None;
         self.pixel = None;
+        if selection.preview_overlay != renderdocx::texture_overlay::TextureOverlay::None {
+            self.event_tree.clear_durations();
+            self.counter_page = None;
+            self.descriptor_page = None;
+            self.mesh.info = None;
+            self.mesh.bytes = None;
+            self.mesh.draw = None;
+            self.pixel_history = None;
+            self.history_selected = None;
+            self.timeline.history = None;
+        }
         self.export_pending = true;
         self.status = Some(
             self.t(
@@ -8649,6 +8673,39 @@ impl Workspace {
                 "チャンネルの組み合わせ、反転、ガンマはプレビューのみに影響します。",
                 "채널 조합, 반전 및 감마는 미리보기에만 적용됩니다.",
             )))
+            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
+                "Debug overlay (may replay the capture)",
+                "调试叠加层（可能重新回放捕获）",
+                "デバッグオーバーレイ（再リプレイする場合があります）",
+                "디버그 오버레이 (캡처를 다시 재생할 수 있음)",
+            )))
+            .child(
+                div().flex().flex_wrap().gap_2().children(
+                    renderdocx::texture_overlay::TextureOverlay::ALL
+                        .into_iter()
+                        .map(|overlay| {
+                            div()
+                                .id(SharedString::from(format!(
+                                    "texture-overlay-{}",
+                                    overlay as u32
+                                )))
+                                .test_support()
+                                .cursor_pointer()
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .bg(rgb(if self.texture_selection.preview_overlay == overlay {
+                                    0x4169e1
+                                } else {
+                                    0x252f40
+                                }))
+                                .child(overlay.label(self.settings.language))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.change_preview_overlay(overlay, cx)
+                                }))
+                        }),
+                ),
+            )
     }
 
     fn capture_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -16070,6 +16127,7 @@ mod ui_tests {
                 preview_channels: None,
                 preview_flip_y: false,
                 preview_linear_as_gamma: None,
+                preview_overlay: renderdocx::texture_overlay::TextureOverlay::None,
             }]
         );
         cx.update(|cx| {
@@ -16134,6 +16192,8 @@ mod ui_tests {
             window.click("texture-preview-flip", cx);
             reveal_details(window, "texture-preview-gamma", cx);
             window.click("texture-preview-gamma", cx);
+            reveal_details(window, "texture-overlay-1", cx);
+            window.click("texture-overlay-1", cx);
         })
         .unwrap();
         cx.update(|cx| {
@@ -16141,6 +16201,10 @@ mod ui_tests {
             assert_eq!(selection.preview_channels, Some([true, true, false, false]));
             assert!(selection.preview_flip_y);
             assert_eq!(selection.preview_linear_as_gamma, Some(false));
+            assert_eq!(
+                selection.preview_overlay,
+                renderdocx::texture_overlay::TextureOverlay::Drawcall
+            );
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
@@ -16154,6 +16218,10 @@ mod ui_tests {
             Some([0.25, 1.0])
         );
         assert!(selections.lock().unwrap().last().unwrap().preview_flip_y);
+        assert_eq!(
+            selections.lock().unwrap().last().unwrap().preview_overlay,
+            renderdocx::texture_overlay::TextureOverlay::Drawcall
+        );
         cx.update(|cx| view.update(cx, |view, cx| view.read_texture_raw_page(0, cx)));
         cx.run_until_parked();
         cx.update(|cx| {
@@ -16832,12 +16900,7 @@ mod ui_tests {
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 43));
         assert_eq!(*events.lock().unwrap(), vec![42, 77, 43]);
-        cx.update(|cx| {
-            assert_eq!(
-                view.read(cx).timeline.history.as_ref().unwrap().events,
-                [41, 42]
-            )
-        });
+        cx.update(|cx| assert!(view.read(cx).timeline.history.is_none()));
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(

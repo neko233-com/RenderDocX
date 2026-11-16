@@ -924,6 +924,39 @@ fn real_d3d11_mesh_draw_order() {
         serde_json::json!({"preview_linear_as_gamma":true}),
     );
     assert_ne!(gamma[1], normal[1], "gamma display must change mid-grey");
+    let before_overlay = agent.send(
+        &serde_json::json!({"command":"pick_pixel","index":texture_index,"x":15,"y":15})
+            .to_string(),
+    );
+    assert_eq!(before_overlay["ok"], true, "{before_overlay}");
+    let clear_overlay_path = dir.path().join("clear-before-overlay.png");
+    let clear_overlay = agent.send(&serde_json::json!({"command":"render_texture","index":texture_index,"width":16,"height":16,"path":clear_overlay_path,"preview_overlay":"clear_before_draw"}).to_string());
+    assert_eq!(clear_overlay["ok"], true, "{clear_overlay}");
+    let after_overlay = agent.send(
+        &serde_json::json!({"command":"pick_pixel","index":texture_index,"x":15,"y":15})
+            .to_string(),
+    );
+    assert_eq!(
+        after_overlay["data"]["pixel"]["bits"], before_overlay["data"]["pixel"]["bits"],
+        "overlay must restore the selected replay state: {after_overlay}"
+    );
+    let base_path = dir.path().join("overlay-baseline.png");
+    let baseline = agent.send(&serde_json::json!({"command":"render_texture","index":texture_index,"width":16,"height":16,"path":base_path}).to_string());
+    assert_eq!(baseline["ok"], true, "{baseline}");
+    let draw_path = dir.path().join("draw-overlay.png");
+    let draw_overlay = agent.send(&serde_json::json!({"command":"render_texture","index":texture_index,"width":16,"height":16,"path":draw_path,"preview_overlay":"drawcall"}).to_string());
+    assert_eq!(draw_overlay["ok"], true, "{draw_overlay}");
+    assert_ne!(std::fs::read(&base_path).unwrap(), std::fs::read(&draw_path).unwrap(), "draw overlay must affect the rendered image");
+    let unsupported_overlay = agent.send(&serde_json::json!({"command":"render_texture","index":float_index,"width":4,"height":4,"path":dir.path().join("missing-overlay.png"),"preview_overlay":"drawcall"}).to_string());
+    assert_eq!(
+        unsupported_overlay["error"]["code"], "replay_render_failed",
+        "{unsupported_overlay}"
+    );
+    let invalid_overlay = agent.send(&serde_json::json!({"command":"render_texture","index":texture_index,"width":16,"height":16,"path":dir.path().join("invalid-overlay.png"),"preview_overlay":"unknown"}).to_string());
+    assert_eq!(
+        invalid_overlay["error"]["code"], "invalid_arguments",
+        "{invalid_overlay}"
+    );
     for command in ["pick_pixel", "texture_statistics", "pixel_history"] {
         let result = agent.send(&serde_json::json!({"command":command,"index":texture_index,"x":0,"y":0,"analysis_type_cast":2}).to_string());
         assert_eq!(result["ok"], true, "{command}: {result}");

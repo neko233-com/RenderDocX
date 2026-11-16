@@ -26,6 +26,8 @@ Texture preview and export accept black and white points. The preview uses a hea
 
 Native preview supports independent RGBA channel toggles, vertical flip and linear-as-gamma display. These controls affect preview only; the existing single-channel selection continues to control export. The default preview behavior remains compatible with earlier replay bridges, while the new options require an updated bridge.
 
+The native preview also exposes RenderDoc's texture debug overlays. Overlay rendering can replay the selected event; RenderDocX restores that event and invalidates dependent cached results afterward. A D3D11 capture verifies draw highlighting, clear-before-draw restoration and rejection of an unavailable overlay. Other overlay modes, graphics APIs and engines still need real-capture validation.
+
 Pixel history lists modifications through the selected event, including fragment test failures and before, shader-output and after values. Select an entry to inspect it or replay its event. History can require substantial GPU replay work, and an empty result can also indicate that the upstream backend could not inspect the pixel.
 
 The same view can calculate RenderDoc's per-channel minimum and maximum and display a histogram for a chosen numeric range and channel. RenderDoc's public minimum/maximum call does not report a separate success status, so its returned values cannot by themselves prove the operation succeeded.

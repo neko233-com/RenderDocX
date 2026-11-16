@@ -882,6 +882,7 @@ pub struct TextureSelection {
     pub preview_flip_y: bool,
     /// None uses RenderDoc's default, which is true.
     pub preview_linear_as_gamma: Option<bool>,
+    pub preview_overlay: crate::texture_overlay::TextureOverlay,
 }
 
 /// Raw data is a whole subresource; a 3D mip contains its complete depth.
@@ -1979,6 +1980,7 @@ impl Transport for Process {
         if selection.preview_channels.is_some()
             || selection.preview_flip_y
             || selection.preview_linear_as_gamma.is_some()
+            || selection.preview_overlay != crate::texture_overlay::TextureOverlay::None
         {
             let channels = selection.effective_preview_channels();
             let mask = channels
@@ -1992,6 +1994,10 @@ impl Transport for Process {
                 u8::from(selection.preview_linear_as_gamma.unwrap_or(true))
             )
             .map_err(|e| e.to_string())?;
+            if selection.preview_overlay != crate::texture_overlay::TextureOverlay::None {
+                write!(input, " {}", selection.preview_overlay as u32)
+                    .map_err(|e| e.to_string())?;
+            }
         }
         writeln!(input)
             .and_then(|_| input.flush())
@@ -4150,6 +4156,9 @@ impl Session {
         {
             return Err("Invalid texture render dimensions or range".into());
         }
+        if selection.preview_overlay != crate::texture_overlay::TextureOverlay::None {
+            self.next_revision();
+        }
         let pixels = self
             .process
             .lock()
@@ -5310,6 +5319,7 @@ mod tests {
             preview_channels: None,
             preview_flip_y: false,
             preview_linear_as_gamma: None,
+            preview_overlay: crate::texture_overlay::TextureOverlay::None,
         };
         let raw = RawTextureSelection {
             mip: 2,

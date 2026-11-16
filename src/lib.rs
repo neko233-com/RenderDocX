@@ -29,5 +29,6 @@ pub mod shader_export;
 pub mod shader_processor;
 pub mod shader_source;
 pub mod task_payload;
+pub mod texture_overlay;
 pub mod timeline;
 pub mod vertex_input;
