@@ -846,6 +846,30 @@ pub struct TextureSelection {
     pub analysis_type_cast: u32,
 }
 
+/// Raw data is a whole subresource; a 3D mip contains its complete depth.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct RawTextureSelection {
+    pub mip: u32,
+    pub slice: u32,
+    pub sample: u32,
+}
+impl RawTextureSelection {
+    pub fn validate(&self, texture: &Texture) -> Result<(), String> {
+        if self.mip >= texture.mips
+            || self.sample >= texture.samples
+            || (texture.dimension == 3 && self.slice != 0)
+            || (texture.dimension != 3 && self.slice >= texture.array_size)
+        {
+            return Err(
+                "Raw texture subresource is out of range; 3D exports contain the entire mip volume"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+}
+
 /// Values match FileType in the version-matched RenderDoc replay API.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -1661,6 +1685,14 @@ trait Transport: Send {
         _path: &Path,
     ) -> Result<(), String> {
         Err("Texture export is not supported by this transport".into())
+    }
+    fn save_texture_raw(
+        &mut self,
+        _index: u32,
+        _selection: RawTextureSelection,
+        _path: &Path,
+    ) -> Result<(), String> {
+        Err("Raw texture export is not supported by this transport".into())
     }
     fn read_buffer(&mut self, _index: u32, _offset: u64, _length: u32) -> Result<Vec<u8>, String> {
         Err("Buffer reading is not supported by this transport".into())
@@ -2627,6 +2659,36 @@ impl Transport for Process {
             Reply::TextureSaved { index: saved } if saved == index => Ok(()),
             Reply::Error { message } => Err(message),
             _ => Err("Unexpected texture export response".into()),
+        }
+    }
+
+    fn save_texture_raw(
+        &mut self,
+        index: u32,
+        selection: RawTextureSelection,
+        path: &Path,
+    ) -> Result<(), String> {
+        let path = path
+            .to_str()
+            .ok_or("Texture output path is not valid UTF-8")?;
+        let mut encoded = String::with_capacity(path.len() * 2);
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for &byte in path.as_bytes() {
+            encoded.push(HEX[(byte >> 4) as usize] as char);
+            encoded.push(HEX[(byte & 15) as usize] as char);
+        }
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(
+            input,
+            "rawsave {index} {} {} {} {encoded}",
+            selection.mip, selection.slice, selection.sample
+        )
+        .and_then(|_| input.flush())
+        .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::TextureSaved { index: saved } if saved == index => Ok(()),
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected raw texture export response".into()),
         }
     }
 
@@ -3630,6 +3692,38 @@ impl Session {
         Ok(())
     }
 
+    /// Export native subresource bytes without replacing an existing file.
+    pub fn export_texture_raw(
+        &self,
+        index: u32,
+        selection: RawTextureSelection,
+        destination: &Path,
+    ) -> Result<(), String> {
+        let parent = destination
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let temporary = tempfile::Builder::new()
+            .prefix(".renderdocx-raw-")
+            .suffix(".bin")
+            .tempfile_in(parent)
+            .map_err(|error| format!("Cannot create temporary export: {error}"))?
+            .into_temp_path();
+        let revision = self.revision.load(Ordering::SeqCst);
+        let mut process = self.process.lock().map_err(|error| error.to_string())?;
+        if self.revision.load(Ordering::SeqCst) != revision {
+            return Err("Replay selection changed".into());
+        }
+        process.save_texture_raw(index, selection, temporary.as_ref())?;
+        if self.revision.load(Ordering::SeqCst) != revision {
+            return Err("Replay selection changed".into());
+        }
+        temporary
+            .persist_noclobber(destination)
+            .map_err(|error| format!("Cannot publish raw texture export: {}", error.error))?;
+        Ok(())
+    }
+
     pub fn select(&self, event: u32, revision: u64) -> Result<bool, String> {
         Ok(self.select_pipeline(event, revision)?.is_some())
     }
@@ -4366,6 +4460,27 @@ mod tests {
             preview_type_cast: 0,
             analysis_type_cast: 0,
         };
+        let raw = RawTextureSelection {
+            mip: 2,
+            slice: 0,
+            sample: 0,
+        };
+        assert!(raw.validate(&texture).is_ok());
+        assert!(
+            RawTextureSelection { slice: 1, ..raw }
+                .validate(&texture)
+                .is_err()
+        );
+        assert!(
+            RawTextureSelection { sample: 1, ..raw }
+                .validate(&texture)
+                .is_err()
+        );
+        assert!(
+            RawTextureSelection { mip: 4, ..raw }
+                .validate(&texture)
+                .is_err()
+        );
         assert!(selection.validate(&texture).is_ok());
         selection.preview_type_cast = 10;
         assert!(selection.validate(&texture).is_err());

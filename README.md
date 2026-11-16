@@ -72,7 +72,7 @@ On Windows x64, `./scripts/test-windows.ps1` builds the matching core and helper
 
 The included RenderDoc source is MIT licensed. See [LICENSE.md](LICENSE.md) and [third-party acknowledgements](docs/credits_acknowledgements.rst). Rust dependencies have their own licenses.
 
-Texture export supports PNG, DDS, JPG, BMP, TGA, HDR and EXR through the matching RenderDoc replay bridge. The desktop chooses the format from the filename extension; the Agent CLI accepts an explicit `format`. Raw texture data export and descriptor swizzle are not yet implemented.
+Texture export supports PNG, DDS, JPG, BMP, TGA, HDR and EXR through the matching RenderDoc replay bridge. The desktop chooses the format from the filename extension; the Agent CLI accepts an explicit `format`. Raw subresource bytes can also be exported without channel extraction or type conversion; 3D exports contain the whole mip volume. Descriptor swizzle is not yet implemented.
 
 The workspace can upload a local capture to a RenderDoc remote replay server and inspect it through the native replay proxy. Enter the replay server address in the remote address field and choose **Replay capture on remote server**. Remote target discovery and replay are separate services and may use different ports. Annotation files remain local; structured-buffer export uses a separate local structured-data processor. Windows D3D11 loopback has been tested; cross-machine and other graphics API support remain unverified.
 

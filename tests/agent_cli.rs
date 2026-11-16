@@ -468,6 +468,18 @@ fn real_opengl_vertex_inputs_include_generic_and_normalized_values() {
     let saved = agent.send(&serde_json::json!({"command":"export_texture", "index":texture, "path":dds, "format":"dds"}).to_string());
     assert_eq!(saved["ok"], true, "{saved}");
     assert!(std::fs::read(dds).unwrap().starts_with(b"DDS "));
+    let raw = dir.path().join("gl.raw");
+    let exported = agent.send(
+        &serde_json::json!({"command":"export_texture_raw", "index":texture, "path":raw})
+            .to_string(),
+    );
+    assert_eq!(exported["ok"], true, "{exported}");
+    assert_eq!(
+        std::fs::read(raw).unwrap(),
+        [
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255
+        ]
+    );
     let top = agent
         .send(&serde_json::json!({"command":"pick_pixel","index":texture,"x":0,"y":0}).to_string());
     assert_eq!(top["ok"], true, "{top}");
@@ -1804,6 +1816,16 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         serde_json::json!(["0", "0", "1", "1"])
     );
     assert_eq!(volume_stats["data"]["statistics"]["histogram"][255], 16);
+    let volume_raw = dir.path().join("volume.raw");
+    let exported_volume = agent.send(&serde_json::json!({"command":"export_texture_raw", "index":volume_index, "path":volume_raw}).to_string());
+    assert_eq!(exported_volume["ok"], true, "{exported_volume}");
+    assert_eq!(exported_volume["data"]["whole_mip_volume"], true);
+    let data = std::fs::read(&volume_raw).unwrap();
+    assert_eq!(data.len(), 4 * 4 * 2 * 4);
+    assert_eq!(&data[..4], &[255, 0, 0, 255]);
+    assert_eq!(&data[64..68], &[0, 0, 255, 255]);
+    let invalid = agent.send(&serde_json::json!({"command":"export_texture_raw", "index":volume_index, "slice":1, "path":dir.path().join("invalid-volume.raw")}).to_string());
+    assert_eq!(invalid["error"]["code"], "invalid_arguments", "{invalid}");
     if msaa_samples > 1 {
         println!("D3D11 MSAA statistics sample count: {msaa_samples}");
         let msaa = opened["data"]["capture"]["textures"]
@@ -1816,6 +1838,14 @@ fn real_d3d11_capture_is_inspected_and_selected() {
                     && texture["samples"] == msaa_samples
             })
             .expect("multisampled texture");
+        let raw_msaa = dir.path().join("sample0.raw");
+        let raw_sample = agent.send(&serde_json::json!({"command":"export_texture_raw", "index":msaa, "sample":0, "path":raw_msaa}).to_string());
+        assert_eq!(raw_sample["ok"], true, "{raw_sample}");
+        let raw_sample_bytes = std::fs::read(raw_msaa).unwrap();
+        assert_eq!(raw_sample_bytes.len(), 4 * 4 * 4);
+        for (actual, expected) in raw_sample_bytes[..4].iter().zip([64u8, 128, 191, 255]) {
+            assert!(actual.abs_diff(expected) <= 1);
+        }
         let single = agent.send(&serde_json::json!({"command":"texture_statistics","index":msaa,"sample":0,"channels":[true,false,false,false]}).to_string());
         let resolved = agent.send(&serde_json::json!({"command":"texture_statistics","index":msaa,"channels":[true,false,false,false]}).to_string());
         assert_eq!(single["ok"], true, "{single}");
@@ -1880,6 +1910,23 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let mut layer_pixels = vec![0; layer_reader.output_buffer_size().unwrap()];
     layer_reader.next_frame(&mut layer_pixels).unwrap();
     assert_eq!(&layer_pixels[..3], &[255, 255, 0]);
+    let raw_path = dir.path().join("层级 原始.raw");
+    let raw_request = serde_json::json!({"command":"export_texture_raw", "index":layered_index, "path":raw_path, "mip":1, "slice":1, "sample":0});
+    let raw_result = agent.send(&raw_request.to_string());
+    assert_eq!(raw_result["ok"], true, "{raw_result}");
+    assert_eq!(raw_result["data"]["bytes"], "64");
+    let raw_bytes = std::fs::read(&raw_path).unwrap();
+    assert_eq!(&raw_bytes[..4], &[255, 255, 0, 255]);
+    assert_eq!(
+        agent.send(&raw_request.to_string())["error"]["code"],
+        "replay_export_failed"
+    );
+    assert_eq!(std::fs::read(&raw_path).unwrap(), raw_bytes);
+    let invalid_raw = agent.send(&serde_json::json!({"command":"export_texture_raw", "index":layered_index, "path":dir.path().join("bad.raw"), "channel":0}).to_string());
+    assert_eq!(
+        invalid_raw["error"]["code"], "invalid_arguments",
+        "{invalid_raw}"
+    );
     let layered_dds = dir.path().join("layered.dds");
     let selected_dds = agent.send(&serde_json::json!({"command":"export_texture", "index":layered_index, "path":layered_dds, "format":"dds", "mip":1, "slice":1, "sample":0}).to_string());
     assert_eq!(selected_dds["ok"], true, "{selected_dds}");

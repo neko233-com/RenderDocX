@@ -6,6 +6,8 @@
 #include <cstring>
 #include <cwchar>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -2143,6 +2145,48 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       std::cout << "\nRENDERDOCX/1 {\"type\":\"pixel\",\"event_id\":" << selected_event << ",\"index\":" << index
                 << ",\"mip\":" << mip << ",\"slice\":" << slice << ",\"sample\":" << actual_sample
                 << ",\"x\":" << x << ",\"y\":" << y << ",\"bits\":[" << bits[0] << ',' << bits[1] << ',' << bits[2] << ',' << bits[3] << "]}" << std::endl;
+      continue;
+    }
+    if(command.compare(0, 8, "rawsave ") == 0)
+    {
+      if(!selected) { error("Select an event before exporting textures"); continue; }
+      std::istringstream arguments(command.substr(8));
+      std::string index_text, mip_text, slice_text, sample_text, encoded, extra;
+      uint64_t index = 0, mip = 0, slice = 0, sample = 0;
+      if(!(arguments >> index_text >> mip_text >> slice_text >> sample_text >> encoded) || (arguments >> extra) ||
+         !decimal(index_text, index) || !decimal(mip_text, mip) || !decimal(slice_text, slice) ||
+         !decimal(sample_text, sample) || index >= texture_ids.size())
+      { error("Invalid raw texture selection"); continue; }
+      const TextureRef &texture = texture_ids[size_t(index)];
+      if(mip >= texture.mips || slice >= texture.arraysize || sample >= texture.samples ||
+         (texture.dimension == 3 && slice != 0))
+      { error("Raw texture selection is out of range"); continue; }
+      bytebuf path_bytes;
+      if(!decode_section_hex(encoded, path_bytes) || path_bytes.empty() ||
+         std::find(path_bytes.begin(), path_bytes.end(), byte(0)) != path_bytes.end())
+      { error("Invalid output path"); continue; }
+      const std::string path(path_bytes.begin(), path_bytes.end());
+      const bytebuf bytes = replay.controller->GetTextureData(texture.id, Subresource(uint32_t(mip), uint32_t(slice), uint32_t(sample)));
+      result = replay.controller->GetFatalErrorStatus();
+      if(!result.OK()) { error(result_message(result)); break; }
+      if(bytes.empty()) { error("Texture data is unavailable"); continue; }
+      try
+      {
+        std::ofstream file(std::filesystem::u8path(path), std::ios::binary | std::ios::trunc);
+        if(!file) { error("Cannot open raw texture output"); continue; }
+        size_t cursor = 0;
+        while(cursor < bytes.size())
+        {
+          const size_t count = (std::min)(bytes.size() - cursor, size_t(16U * 1024U * 1024U));
+          file.write(reinterpret_cast<const char *>(bytes.data() + cursor), std::streamsize(count));
+          if(!file) break;
+          cursor += count;
+        }
+        file.close();
+        if(!file) { error("Cannot write raw texture output"); continue; }
+      }
+      catch(const std::exception &) { error("Cannot write raw texture output"); continue; }
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"texture_saved\",\"index\":" << index << "}" << std::endl;
       continue;
     }
     if(command.compare(0, 6, "save2 ") == 0 || command.compare(0, 6, "save3 ") == 0)

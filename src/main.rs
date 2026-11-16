@@ -5320,6 +5320,133 @@ impl Workspace {
         .detach();
     }
 
+    fn export_texture_raw(&mut self, cx: &mut Context<Self>) {
+        if self.replay_pending
+            || self.export_pending
+            || self.resource_pending
+            || self.selected.is_none()
+        {
+            self.status = Some(
+                self.t(
+                    "Select an event and wait for replay before exporting.",
+                    "请先选择事件并等待回放完成再导出。",
+                    "イベントを選択し、リプレイ完了後に書き出してください。",
+                    "이벤트를 선택하고 재생이 끝난 뒤 내보내세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let (Some(session), Some(index)) = (self.session.clone(), self.selected_texture) else {
+            return;
+        };
+        let Some(texture) = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.textures.get(index))
+        else {
+            return;
+        };
+        if texture.samples > 1 && self.texture_selection.sample.is_none() {
+            self.status = Some(
+                self.t(
+                    "Select an individual sample for raw export.",
+                    "原始数据导出需要选择单个采样。",
+                    "生データの書き出しには個別のサンプルを選択してください。",
+                    "원시 데이터를 내보내려면 개별 샘플을 선택하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let selection = renderdocx::replay::RawTextureSelection {
+            mip: self.texture_selection.mip,
+            slice: self.texture_selection.slice,
+            sample: self.texture_selection.sample.unwrap_or(0),
+        };
+        if selection.validate(texture).is_err() {
+            self.status = Some(
+                if texture.dimension == 3 && selection.slice != 0 {
+                    self.t(
+                        "For a 3D texture, select slice 0 to export the entire mip volume.",
+                        "3D 纹理请选择切片 0，导出整个 mip 体积。",
+                        "3D テクスチャではスライス 0 を選択し、mip 全体を書き出します。",
+                        "3D 텍스처는 슬라이스 0을 선택하여 전체 mip 볼륨을 내보내세요.",
+                    )
+                } else {
+                    self.t(
+                        "Raw texture selection is out of range.",
+                        "原始纹理子资源选择超出范围。",
+                        "生テクスチャの選択範囲が無効です。",
+                        "원시 텍스처 선택 범위가 올바르지 않습니다.",
+                    )
+                }
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let Ok(index) = u32::try_from(index) else {
+            return;
+        };
+        let Some(destination) = rfd::FileDialog::new()
+            .set_file_name("texture.raw")
+            .add_filter("Raw", &["raw", "bin"])
+            .save_file()
+        else {
+            return;
+        };
+        let label = destination.display().to_string();
+        let revision = self.open_revision;
+        self.export_pending = true;
+        self.status = Some(
+            self.t(
+                "Exporting raw texture…",
+                "正在导出原始纹理…",
+                "生テクスチャを書き出し中…",
+                "원시 텍스처를 내보내는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx
+            .background_executor()
+            .spawn(async move { session.export_texture_raw(index, selection, &destination) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision {
+                    return;
+                }
+                this.export_pending = false;
+                this.status = Some(match result {
+                    Ok(()) => format!(
+                        "{}: {label}",
+                        this.t(
+                            "Raw texture exported",
+                            "原始纹理已导出",
+                            "生テクスチャを書き出しました",
+                            "원시 텍스처를 내보냈습니다"
+                        )
+                    ),
+                    Err(error) => format!(
+                        "{}: {error}",
+                        this.t(
+                            "Raw texture export failed",
+                            "原始纹理导出失败",
+                            "生テクスチャを書き出せません",
+                            "원시 텍스처 내보내기 실패"
+                        )
+                    ),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn export_texture(&mut self, cx: &mut Context<Self>) {
         if self.replay_pending
             || self.export_pending
@@ -10693,8 +10820,10 @@ impl Workspace {
                             .flex_wrap()
                             .gap_2()
                             .child(preview)
-                            .child(export),
+                            .child(export)
+                            .child(button("texture-export-raw", self.t("Export raw subresource", "导出原始子资源", "生サブリソースを出力", "원시 하위 리소스 내보내기"), false, |this, cx| this.export_texture_raw(cx), cx)),
                     )
+                    .child(self.t("Raw export uses native bytes without channel extraction or type casts; 3D exports contain the whole mip volume.", "原始导出保留原生字节，不应用通道提取或类型转换；3D 导出包含整个 mip 体积。", "生データはチャンネル抽出や型変換を行わず、3D では mip 全体を書き出します。", "원시 내보내기는 채널 추출이나 형식 변환 없이 3D mip 전체를 포함합니다."))
                     .child(div().text_sm().text_color(rgb(0x91a7c0)).child(pixel_title))
                     .child(
                         div()
@@ -14145,12 +14274,16 @@ mod ui_tests {
             assert!(window.find(1usize).visible());
             window.click("textures-tab", cx);
             window.click("texture-0", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("texture-export-raw").is_some());
             window.click("texture-export", cx);
         })
         .unwrap();
         cx.update(|cx| {
             assert!(view.read(cx).status.is_some());
             assert!(!view.read(cx).export_pending);
+            view.update(cx, |view, cx| view.export_texture_raw(cx));
+            assert!(view.read(cx).status.is_some());
         });
         assert!(events.lock().unwrap().is_empty());
         cx.update_window(handle.into(), |_, window, cx| {
@@ -16060,16 +16193,32 @@ mod ui_tests {
                     window.render_frame(cx);
                     for _ in 0..20 {
                         let target = window.find("pixel-history");
-                        if target.visible() {
+                        let viewport = window.find("capture-details-scroll").bounds();
+                        let bounds = target.bounds();
+                        if target.visible()
+                            && bounds.origin.y >= viewport.origin.y
+                            && bounds.origin.y + bounds.size.height
+                                <= viewport.origin.y + viewport.size.height
+                        {
                             break;
                         }
+                        let delta = if bounds.origin.y < viewport.origin.y {
+                            100.0
+                        } else {
+                            -100.0
+                        };
                         window.scroll(
                             "capture-details-scroll",
-                            ScrollDelta::Pixels(point(px(0.), px(-100.))),
+                            ScrollDelta::Pixels(point(px(0.), px(delta))),
                             cx,
                         );
                     }
                     window.click("pixel-history", cx);
+                    assert!(
+                        view.read(cx).resource_pending || view.read(cx).pixel_history.is_some(),
+                        "pixel history click did not start: {:?}",
+                        view.read(cx).status
+                    );
                 })
                 .unwrap();
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
