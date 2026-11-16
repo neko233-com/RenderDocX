@@ -124,11 +124,11 @@ int wmain(int argc, wchar_t **argv)
   if(FAILED(hr)) { std::cerr << "Could not create history shader"; return 21; }
   history_code->Release();
   const char *compute_source = R"(
-RWStructuredBuffer<uint> output : register(u0);
+RWStructuredBuffer<uint> output : register(u0); cbuffer Params : register(b0) { uint seed; };
 [numthreads(2,2,1)]
 void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint3 id : SV_DispatchThreadID)
 {
-  uint value = 42 + group.x * 100 + thread.x + thread.y * 10;
+  uint value = seed + group.x * 100 + thread.x + thread.y * 10;
   output[id.x + id.y * 4] = value;
 }
 )";
@@ -148,6 +148,13 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint3 id : 
   hr = device->CreateBuffer(&compute_desc, nullptr, &compute_buffer);
   if(SUCCEEDED(hr)) hr = device->CreateUnorderedAccessView(compute_buffer, nullptr, &compute_uav);
   if(FAILED(hr)) { std::cerr << "Could not create compute output"; return 25; }
+  D3D11_BUFFER_DESC constant_desc = {};
+  constant_desc.ByteWidth = 16; constant_desc.Usage = D3D11_USAGE_DEFAULT; constant_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+  const uint32_t constant_data[4] = {42, 0, 0, 0};
+  D3D11_SUBRESOURCE_DATA constant_initial = {}; constant_initial.pSysMem = constant_data;
+  ID3D11Buffer *constant_buffer = nullptr;
+  hr = device->CreateBuffer(&constant_desc, &constant_initial, &constant_buffer);
+  if(FAILED(hr)) { std::cerr << "Could not create constant buffer"; return 26; }
   D3D11_RASTERIZER_DESC raster_desc = {};
   raster_desc.FillMode = D3D11_FILL_SOLID; raster_desc.CullMode = D3D11_CULL_NONE; raster_desc.DepthClipEnable = TRUE;
   ID3D11RasterizerState *history_rasterizer = nullptr;
@@ -202,6 +209,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint3 id : 
   context->RSSetScissorRects(1, &clipped);
   context->DrawIndexed(3, 0, 0);
   context->CSSetShader(compute_shader, nullptr, 0);
+  context->CSSetConstantBuffers(0, 1, &constant_buffer);
   context->CSSetUnorderedAccessViews(0, 1, &compute_uav, nullptr);
   context->Dispatch(2, 1, 1);
   context->Flush();
@@ -216,7 +224,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint3 id : 
   for(auto *layer_view : layered_views) layer_view->Release();
   for(auto *volume_view : volume_views) volume_view->Release();
   if(msaa_view) msaa_view->Release(); if(msaa_texture) msaa_texture->Release();
-  compute_uav->Release(); compute_buffer->Release(); compute_shader->Release();
+  constant_buffer->Release(); compute_uav->Release(); compute_buffer->Release(); compute_shader->Release();
   scissor_rasterizer->Release(); history_rasterizer->Release(); history_shader->Release(); volume->Release(); integer_view->Release(); integer_texture->Release(); layered->Release(); index_buffer->Release(); vertex_buffer->Release(); layout->Release(); vertex->Release(); pixel->Release(); view->Release(); texture->Release(); context->Release(); device->Release();
   return 0;
 }

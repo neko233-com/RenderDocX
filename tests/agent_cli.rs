@@ -221,6 +221,30 @@ fn real_d3d11_mesh_draw_order() {
             .any(|resource| resource["name"] == "output" && resource["bind"] == 0),
         "{shader}"
     );
+    let blocks = shader["data"]["shader"]["constant_block_details"]
+        .as_array()
+        .unwrap();
+    let block = blocks
+        .iter()
+        .position(|block| block["name"] == "Params")
+        .expect("constant block");
+    let constants = agent.send(
+        &serde_json::json!({"command":"shader_constants","stage":"compute","block":block})
+            .to_string(),
+    );
+    assert_eq!(constants["ok"], true, "{constants}");
+    let seed = constants["data"]["constants"]["variables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|value| value["name"] == "seed")
+        .unwrap();
+    assert!(
+        seed["value_hex"].as_str().unwrap().starts_with("2a000000"),
+        "{seed}"
+    );
+    let invalid = agent.send(&serde_json::json!({"command":"shader_constants","stage":"compute","block":block,"element":1}).to_string());
+    assert_eq!(invalid["error"]["code"], "replay_shader_constants_failed");
     agent.quit();
 }
 

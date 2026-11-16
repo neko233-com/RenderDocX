@@ -475,6 +475,7 @@ struct Workspace {
     resource_pending: bool,
     selected_shader: Option<usize>,
     shader_data: Option<ShaderReport>,
+    shader_constants: Option<renderdocx::replay::ShaderConstants>,
     shader_report_stale: bool,
     shader_source: Option<usize>,
     shader_source_page: usize,
@@ -1709,6 +1710,7 @@ impl Workspace {
                         this.resource_pending = false;
                         this.selected_shader = None;
                         this.shader_data = None;
+                        this.shader_constants = None;
                         this.shader_editor = None;
                         this.structure = StructureView::default();
                         this.mesh = MeshView::default();
@@ -1820,6 +1822,7 @@ impl Workspace {
         self.statistics = None;
         self.buffer_data = None;
         self.shader_data = None;
+        self.shader_constants = None;
         self.structure = StructureView::default();
         self.mesh = MeshView::default();
         self.input_page = None;
@@ -2008,6 +2011,7 @@ impl Workspace {
         }
         self.selected_shader = Some(stage);
         self.shader_data = None;
+        self.shader_constants = None;
         self.resource_pending = true;
         self.status = Some(
             self.t(
@@ -3839,6 +3843,70 @@ impl Workspace {
                         )
                     ),
                 });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn inspect_shader_constants(&mut self, block: u32, cx: &mut Context<Self>) {
+        if self.replay_pending
+            || self.resource_pending
+            || self.export_pending
+            || self.shader_report_stale
+        {
+            return;
+        }
+        let (Some(session), Some(stage), Some(report)) = (
+            self.session.clone(),
+            self.selected_shader,
+            self.shader_data.as_ref(),
+        ) else {
+            return;
+        };
+        let event = report.event_id;
+        let revision = self.open_revision;
+        let selection_revision = self.selection_revision;
+        self.resource_pending = true;
+        self.shader_constants = None;
+        self.status = Some(
+            self.t(
+                "Loading constant values…",
+                "正在加载常量值…",
+                "定数値を読み込み中…",
+                "상수 값을 불러오는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx
+            .background_executor()
+            .spawn(async move { session.shader_constants(event, stage as u32, block, 0) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision || this.selection_revision != selection_revision {
+                    return;
+                }
+                this.resource_pending = false;
+                match result {
+                    Ok(values) if this.selected_shader == Some(stage) => {
+                        this.shader_constants = Some(values);
+                        this.status = None;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Constant values unavailable",
+                                "常量值不可用",
+                                "定数値を利用できません",
+                                "상수 값을 사용할 수 없습니다"
+                            )
+                        ))
+                    }
+                }
                 cx.notify();
             });
         })
@@ -7283,6 +7351,14 @@ impl Workspace {
                             sampler.name, self.t("bind", "绑定", "バインド", "바인딩"), sampler.bind,
                             self.t("space", "空间", "空間", "공간"), sampler.space, sampler.array_size));
                     }
+                    let constant_buttons = shader.constant_block_details.iter().enumerate().map(|(index, block)| {
+                        div().id(("shader-constants", index)).test_support().cursor_pointer().text_color(rgb(0x91cfff))
+                            .child(format!("{}: {} [0]", self.t("Read values", "读取值", "値を読む", "값 읽기"), block.name))
+                            .on_click(cx.listener(move |this, _, _, cx| this.inspect_shader_constants(index as u32, cx)))
+                    }).collect::<Vec<_>>();
+                    let constant_values = self.shader_constants.as_ref().filter(|values| values.event_id == shader.event_id && values.stage == shader.stage).map(|values| {
+                        values.variables.iter().map(shader_debug::display_variable).collect::<Vec<_>>()
+                    }).unwrap_or_default();
                     let mut view = view
                         .child(format!("{entry_label}: {}", shader.entry_point))
                         .child(format!(
@@ -7296,6 +7372,8 @@ impl Workspace {
                         .child(target_button)
                         .child(format!("{constants_label}: {}", shader.constant_blocks))
                         .children(reflection_lines.into_iter().map(|line| div().text_sm().child(line)))
+                        .children(constant_buttons)
+                        .children(constant_values.into_iter().map(|line| div().text_sm().child(line)))
                         .child(format!("{shader_inputs_label}: {}", inputs.len()))
                         .children(inputs.into_iter().map(|line| div().text_sm().child(line)))
                         .child(format!("{shader_outputs_label}: {}", outputs.len()))
@@ -8652,7 +8730,7 @@ impl Workspace {
                             this.export_pending = false;
                             this.resource_pending = false;
                             this.buffer_data = None;
-                            this.shader_data = None;
+                            this.shader_data = None; this.shader_constants = None;
                             this.shader_editor = None;
                             this.structure = StructureView::default();
                             this.mesh = MeshView::default();
@@ -10140,6 +10218,7 @@ fn main() {
                         resource_pending: false,
                         selected_shader: None,
                         shader_data: None,
+                        shader_constants: None,
                         shader_report_stale: false,
                         shader_source: None,
                         shader_source_page: 0,
@@ -10332,6 +10411,7 @@ mod ui_tests {
                         resource_pending: false,
                         selected_shader: None,
                         shader_data: None,
+                        shader_constants: None,
                         shader_report_stale: false,
                         shader_source: None,
                         shader_source_page: 0,
@@ -10757,6 +10837,7 @@ mod ui_tests {
                         resource_pending: false,
                         selected_shader: None,
                         shader_data: None,
+                        shader_constants: None,
                         shader_report_stale: false,
                         shader_source: None,
                         shader_source_page: 0,

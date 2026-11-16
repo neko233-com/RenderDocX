@@ -547,6 +547,17 @@ pub struct ShaderReport {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ShaderConstants {
+    pub event_id: u32,
+    pub stage: u32,
+    pub block: u32,
+    pub element: u32,
+    pub byte_offset: String,
+    pub byte_size: String,
+    pub variables: Vec<DebugVariable>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ShaderCompileFlag {
     pub name: String,
     pub value: String,
@@ -1098,6 +1109,7 @@ enum Reply {
         hex: String,
     },
     Shader(ShaderReport),
+    ShaderConstants(ShaderConstants),
     ShaderEdit(ShaderEdit),
     DebugStarted(DebugTrace),
     DebugStates(DebugStates),
@@ -1420,6 +1432,15 @@ trait Transport: Send {
     }
     fn shader(&mut self, _stage: u32, _target: Option<u32>) -> Result<ShaderReport, String> {
         Err("Shader inspection is not supported by this transport".into())
+    }
+    fn shader_constants(
+        &mut self,
+        _event: u32,
+        _stage: u32,
+        _block: u32,
+        _element: u32,
+    ) -> Result<ShaderConstants, String> {
+        Err("Shader constant inspection is not supported by this transport".into())
     }
     fn shader_edit(
         &mut self,
@@ -2108,6 +2129,31 @@ impl Transport for Process {
         }
     }
 
+    fn shader_constants(
+        &mut self,
+        event: u32,
+        stage: u32,
+        block: u32,
+        element: u32,
+    ) -> Result<ShaderConstants, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(input, "consts {stage} {block} {element}")
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::ShaderConstants(values)
+                if values.event_id == event
+                    && values.stage == stage
+                    && values.block == block
+                    && values.element == element =>
+            {
+                Ok(values)
+            }
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected shader constants response".into()),
+        }
+    }
+
     fn shader_edit(
         &mut self,
         event: u32,
@@ -2596,6 +2642,22 @@ impl Session {
             .lock()
             .map_err(|e| e.to_string())?
             .shader(stage, target)
+    }
+
+    pub fn shader_constants(
+        &self,
+        event: u32,
+        stage: u32,
+        block: u32,
+        element: u32,
+    ) -> Result<ShaderConstants, String> {
+        if stage as usize >= SHADER_STAGES.len() {
+            return Err("Invalid shader stage".into());
+        }
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .shader_constants(event, stage, block, element)
     }
 
     pub fn shader_edit(

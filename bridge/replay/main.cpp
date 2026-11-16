@@ -1710,6 +1710,37 @@ int run(const std::string &capture, bool structure_worker)
       std::cout << "}" << std::endl;
       continue;
     }
+    if(command.compare(0, 7, "consts ") == 0)
+    {
+      std::istringstream arguments(command.substr(7));
+      std::string stage_text, block_text, element_text, extra;
+      uint64_t stage_index = 0, block_index = 0, element = 0;
+      if(!(arguments >> stage_text >> block_text >> element_text) || (arguments >> extra) ||
+         !decimal(stage_text, stage_index) || !decimal(block_text, block_index) || !decimal(element_text, element) ||
+         stage_index >= 8 || block_index > UINT32_MAX || element > UINT32_MAX)
+      { error("Invalid constant block request"); continue; }
+      if(!selected) { error("Select an event first"); continue; }
+      const PipeState &state = replay.controller->GetPipelineState();
+      const ShaderStage stage = ShaderStage(stage_index);
+      const ShaderReflection *reflection = state.GetShaderReflection(stage);
+      if(!reflection || block_index >= reflection->constantBlocks.size()) { error("Constant block is unavailable"); continue; }
+      const ConstantBlock &block = reflection->constantBlocks[size_t(block_index)];
+      if(element >= block.bindArraySize) { error("Constant block array element is out of range"); continue; }
+      const UsedDescriptor binding = state.GetConstantBlock(stage, uint32_t(block_index), uint32_t(element));
+      if(block.bufferBacked && !block.inlineDataBytes && binding.descriptor.resource == ResourceId())
+      { error("Constant buffer is unbound"); continue; }
+      const ResourceId pipeline = stage == ShaderStage::Compute ? state.GetComputePipelineObject() : state.GetGraphicsPipelineObject();
+      const auto variables = replay.controller->GetCBufferVariableContents(pipeline, state.GetShader(stage), stage,
+          state.GetShaderEntryPoint(stage), uint32_t(block_index), binding.descriptor.resource,
+          binding.descriptor.byteOffset, binding.descriptor.byteSize);
+      result = replay.controller->GetFatalErrorStatus();
+      if(!result.OK()) { error(result_message(result)); break; }
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"shader_constants\",\"event_id\":" << selected_event
+                << ",\"stage\":" << stage_index << ",\"block\":" << block_index << ",\"element\":" << element
+                << ",\"byte_offset\":\"" << binding.descriptor.byteOffset << "\",\"byte_size\":\"" << binding.descriptor.byteSize
+                << "\",\"variables\":"; write_debug_variables(variables); std::cout << '}' << std::endl;
+      continue;
+    }
     if(command.compare(0, 7, "buffer ") == 0)
     {
       std::istringstream arguments(command.substr(7));
