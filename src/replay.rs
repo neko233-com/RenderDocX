@@ -280,6 +280,12 @@ pub struct VertexInput {
     pub component_byte_width: Option<u32>,
     #[serde(default)]
     pub element_size: Option<u32>,
+    #[serde(default)]
+    pub bgra_order: Option<bool>,
+    #[serde(default)]
+    pub float_cast_wrong: Option<bool>,
+    #[serde(default)]
+    pub generic_bits: Option<Vec<u32>>,
     pub generic_enabled: bool,
     pub used: bool,
 }

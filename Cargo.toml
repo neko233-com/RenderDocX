@@ -24,6 +24,7 @@ ui-tests = ["gui", "gpui-kit/test-support"]
 
 [dependencies]
 directories = "6"
+half = "2.7"
 gpui-kit = { version = "=0.9.1", optional = true }
 rfd = { version = "0.15", optional = true }
 serde = { version = "1", features = ["derive"] }

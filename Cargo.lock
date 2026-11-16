@@ -5910,6 +5910,7 @@ version = "0.1.0"
 dependencies = [
  "directories",
  "gpui-kit",
+ "half",
  "png 0.18.1",
  "rfd",
  "serde",

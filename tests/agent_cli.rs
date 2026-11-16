@@ -69,6 +69,86 @@ fn invoke(args: &[&str]) -> (bool, Value) {
     )
 }
 
+#[cfg(windows)]
+#[test]
+#[ignore = "requires RENDERDOCX_TEST_BRIDGE and RENDERDOCX_TEST_OPENGL_FIXTURE plus an OpenGL 3.3 driver"]
+fn real_opengl_vertex_inputs_include_generic_and_normalized_values() {
+    use std::os::windows::process::CommandExt;
+    let bridge = std::path::PathBuf::from(std::env::var_os("RENDERDOCX_TEST_BRIDGE").unwrap());
+    let fixture = std::env::var_os("RENDERDOCX_TEST_OPENGL_FIXTURE").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(fixture)
+        .arg(bridge.parent().unwrap().join("renderdoc.dll"))
+        .arg(dir.path().join("frame"))
+        .creation_flags(0x08000000)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "fixture: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let capture = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("RENDERDOCX_CAPTURE="))
+        .unwrap();
+    let mut agent = Agent::new(bridge.to_str());
+    let opened = agent.send(&serde_json::json!({"command":"open","path":capture}).to_string());
+    assert_eq!(opened["ok"], true, "{opened}");
+    assert_eq!(opened["data"]["capture"]["api"], 2);
+    let draw = opened["data"]["capture"]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|action| {
+            action["name"]
+                .as_str()
+                .is_some_and(|name| name.contains("glDrawArrays"))
+        })
+        .expect("OpenGL draw")["event_id"]
+        .as_u64()
+        .unwrap();
+    let selected = agent.send(&serde_json::json!({"command":"select","event_id":draw}).to_string());
+    assert_eq!(selected["ok"], true, "{selected}");
+    let attributes = selected["data"]["pipeline"]["vertex_inputs"]
+        .as_array()
+        .unwrap();
+    assert_eq!(attributes.len(), 4, "{attributes:?}");
+    let page = agent.send(r#"{"command":"vertex_input","limit":3}"#);
+    assert_eq!(page["ok"], true, "{page}");
+    let row = &page["data"]["page"]["rows"][0];
+    let attributes = row["attributes"].as_array().unwrap();
+    let position = attributes
+        .iter()
+        .find(|v| v["name"] == "position")
+        .expect("position");
+    assert_eq!(position["hex"], "00400080");
+    let values = position["values"].as_array().unwrap();
+    assert!((values[0].as_str().unwrap().parse::<f32>().unwrap() - 16384.0 / 32767.0).abs() < 1e-7);
+    assert_eq!(values[1], "-1");
+    let tint = attributes
+        .iter()
+        .find(|v| v["name"] == "tint")
+        .expect("tint");
+    assert_eq!(
+        tint["values"],
+        serde_json::json!(["0.25", "0.5", "0.75", "1"])
+    );
+    assert!(tint["hex"].is_null());
+    let flags = attributes
+        .iter()
+        .find(|v| v["name"] == "flags")
+        .expect("flags");
+    assert_eq!(flags["values"], serde_json::json!(["-4", "42"]));
+    let counters = attributes
+        .iter()
+        .find(|v| v["name"] == "counters")
+        .expect("counters");
+    assert_eq!(counters["values"], serde_json::json!(["9", "123"]));
+    agent.quit();
+}
+
 #[test]
 fn capabilities_advertises_versioned_machine_readable_contract() {
     let (success, value) = invoke(&["capabilities"]);

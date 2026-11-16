@@ -1,4 +1,4 @@
-param([switch]$IncludeFast)
+param([switch]$IncludeFast, [switch]$IncludeOpenGL)
 
 $ErrorActionPreference = 'Stop'
 if (-not $IsWindows -or -not [Environment]::Is64BitProcess) {
@@ -9,6 +9,7 @@ $previousBridge = $env:RENDERDOCX_TEST_BRIDGE
 $previousFixture = $env:RENDERDOCX_TEST_FIXTURE
 $previousMismatch = $env:RENDERDOCX_TEST_MISMATCH_BRIDGE
 $previousLiveFixture = $env:RENDERDOCX_TEST_LIVE_FIXTURE
+$previousOpenGLFixture = $env:RENDERDOCX_TEST_OPENGL_FIXTURE
 Push-Location $root
 try {
     & (Join-Path $PSScriptRoot 'build-replay-bridge.ps1') -WithFixtures
@@ -22,11 +23,18 @@ try {
     $env:RENDERDOCX_TEST_FIXTURE = Join-Path $root 'target/replay-bridge/Release/renderdocx-d3d11-fixture.exe'
     $env:RENDERDOCX_TEST_MISMATCH_BRIDGE = Join-Path $root 'target/replay-mismatch/Release/renderdocx-replay.exe'
     $env:RENDERDOCX_TEST_LIVE_FIXTURE = Join-Path $root 'target/replay-bridge/Release/renderdocx-d3d11-live-fixture.exe'
+    if ($IncludeOpenGL) {
+        $env:RENDERDOCX_TEST_OPENGL_FIXTURE = Join-Path $root 'target/replay-bridge/Release/renderdocx-opengl-fixture.exe'
+    } else { $env:RENDERDOCX_TEST_OPENGL_FIXTURE = $null }
 
     cargo test --no-default-features
     if ($LASTEXITCODE -ne 0) { throw 'Headless tests failed.' }
-    cargo test --no-default-features --test agent_cli -- --ignored
+    cargo test --no-default-features --test agent_cli -- --ignored --skip real_opengl_vertex_inputs_include_generic_and_normalized_values
     if ($LASTEXITCODE -ne 0) { throw 'Real-core and D3D11 integration tests failed.' }
+    if ($IncludeOpenGL) {
+        cargo test --no-default-features --test agent_cli real_opengl_vertex_inputs_include_generic_and_normalized_values -- --ignored
+        if ($LASTEXITCODE -ne 0) { throw 'OpenGL capture and vertex input integration failed.' }
+    }
     Write-Host 'GPUI interaction tests include real D3D11 capture and replay.'
     cargo test --features ui-tests --bin renderdocx
     if ($LASTEXITCODE -ne 0) { throw 'GPUI interaction tests failed.' }
@@ -40,5 +48,6 @@ finally {
     $env:RENDERDOCX_TEST_FIXTURE = $previousFixture
     $env:RENDERDOCX_TEST_MISMATCH_BRIDGE = $previousMismatch
     $env:RENDERDOCX_TEST_LIVE_FIXTURE = $previousLiveFixture
+    $env:RENDERDOCX_TEST_OPENGL_FIXTURE = $previousOpenGLFixture
     Pop-Location
 }

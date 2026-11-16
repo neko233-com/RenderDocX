@@ -5394,6 +5394,123 @@ mod ui_tests {
                 })
                 .unwrap();
             }
+            if let Some(fixture) = std::env::var_os("RENDERDOCX_TEST_OPENGL_FIXTURE") {
+                use std::os::windows::process::CommandExt;
+                let bridge = PathBuf::from(
+                    std::env::var_os("RENDERDOCX_TEST_BRIDGE")
+                        .expect("OpenGL fixture requires bridge"),
+                );
+                let dir = tempfile::tempdir().unwrap();
+                let output = std::process::Command::new(fixture)
+                    .arg(bridge.parent().unwrap().join("renderdoc.dll"))
+                    .arg(dir.path().join("frame"))
+                    .creation_flags(0x08000000)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "OpenGL fixture: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let stdout = String::from_utf8(output.stdout).unwrap();
+                let capture = PathBuf::from(
+                    stdout
+                        .lines()
+                        .find_map(|line| line.strip_prefix("RENDERDOCX_CAPTURE="))
+                        .unwrap(),
+                );
+                let settings = Settings {
+                    replay_bridge: Some(bridge),
+                    ..Settings::default()
+                };
+                let (session, snapshot) = Session::open(&settings, &capture).unwrap();
+                let (draw_index, draw_event) = snapshot
+                    .actions
+                    .iter()
+                    .enumerate()
+                    .find(|(_, action)| action.name.contains("glDrawArrays"))
+                    .map(|(index, action)| (index, action.event_id))
+                    .unwrap();
+                cx.update(|cx| {
+                    view.update(cx, |view, cx| {
+                        view.open_revision += 1;
+                        view.event_tree.reset(&snapshot.actions);
+                        view.snapshot = Some(snapshot);
+                        view.session = Some(session);
+                        view.selected = None;
+                        view.pipeline = None;
+                        view.input_page = None;
+                        view.tab = CaptureTab::Events;
+                        cx.notify();
+                    })
+                });
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    window.click("event-filter", cx);
+                    window.press("ctrl-a", cx);
+                    window.input("glDrawArrays", cx);
+                })
+                .unwrap();
+                cx.run_until_parked();
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    window.click(draw_index, cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx)
+                            .pipeline
+                            .as_ref()
+                            .is_some_and(|state| state.event_id == draw_event)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "OpenGL draw selection did not complete"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.click("vertex-input-tab", cx)
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx)
+                            .input_page
+                            .as_ref()
+                            .is_some_and(|page| page.event_id == draw_event)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "OpenGL inputs did not load: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update(|cx| {
+                    let page = view.read(cx).input_page.as_ref().unwrap();
+                    let tint = page.rows[0]
+                        .attributes
+                        .iter()
+                        .find(|a| a.name == "tint")
+                        .unwrap();
+                    assert_eq!(tint.values.as_ref().unwrap(), &["0.25", "0.5", "0.75", "1"]);
+                });
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    assert!(window.find(("vertex-input-row", 0usize)).visible());
+                })
+                .unwrap();
+            }
         }
     }
 }

@@ -371,11 +371,50 @@ void write_pipeline(IReplayController *controller, uint32_t event)
     buffer(vertex_buffers[i]);
   }
   std::cout << "],\"vertex_inputs\":";
-  // GetVertexInputs() can return uninitialised trailing attributes for OpenGL.
-  if(!state.IsCaptureLoaded() || state.IsCaptureGL()) std::cout << "null";
+  if(!state.IsCaptureLoaded() || (state.IsCaptureGL() &&
+      (!controller->GetGLPipelineState() || !controller->GetGLPipelineState()->vertexShader.reflection))) std::cout << "null";
   else
   {
-    const auto inputs = state.GetVertexInputs();
+    rdcarray<VertexInputAttribute> inputs;
+    if(state.IsCaptureGL())
+    {
+      // GetVertexInputs() allocates for all GL attributes but only initializes
+      // active entries. Construct only the entries backed by shader reflection.
+      const GLPipe::State *gl = controller->GetGLPipelineState();
+      if(gl && gl->vertexShader.reflection)
+      {
+        const auto &signature = gl->vertexShader.reflection->inputSignature;
+        const auto &attributes = gl->vertexInput.attributes;
+        const auto &bindings = gl->vertexInput.vertexBuffers;
+        for(const GLPipe::VertexAttribute &attr : attributes)
+        {
+          if(attr.boundShaderInput < 0 || size_t(attr.boundShaderInput) >= signature.size()) continue;
+          const SigParameter &sig = signature[size_t(attr.boundShaderInput)];
+          VertexInputAttribute input;
+          input.name = sig.varName;
+          input.vertexBuffer = attr.vertexBufferSlot <= uint32_t(INT32_MAX) ? int(attr.vertexBufferSlot) : -1;
+          input.byteOffset = attr.byteOffset;
+          input.perInstance = attr.vertexBufferSlot < bindings.size() && bindings[attr.vertexBufferSlot].instanceDivisor > 0;
+          input.instanceRate = attr.vertexBufferSlot < bindings.size() && bindings[attr.vertexBufferSlot].instanceDivisor <= uint32_t(INT32_MAX)
+              ? int(bindings[attr.vertexBufferSlot].instanceDivisor) : 0;
+          input.format = attr.format;
+          input.used = true;
+          input.genericEnabled = !attr.enabled;
+          input.floatCastWrong = attr.floatCast && (VarTypeCompType(sig.varType) == CompType::UInt || VarTypeCompType(sig.varType) == CompType::SInt);
+          std::memset(&input.genericValue, 0, sizeof(input.genericValue));
+          if(input.genericEnabled)
+          {
+            if(sig.compCount > 4) continue;
+            std::memcpy(&input.genericValue, &attr.genericValue, size_t(sig.compCount) * sizeof(uint32_t));
+            input.perInstance = false; input.instanceRate = 0;
+            input.format.compByteWidth = 4; input.format.compCount = uint8_t(sig.compCount);
+            input.format.compType = VarTypeCompType(sig.varType); input.format.type = ResourceFormatType::Regular;
+          }
+          inputs.push_back(input);
+        }
+      }
+    }
+    else inputs = state.GetVertexInputs();
     std::cout << '[';
     for(size_t i = 0; i < inputs.size(); ++i)
     {
@@ -390,7 +429,20 @@ void write_pipeline(IReplayController *controller, uint32_t event)
                 << ",\"component_type\":" << uint32_t(input.format.compType)
                 << ",\"component_count\":" << uint32_t(input.format.compCount)
                 << ",\"component_byte_width\":" << uint32_t(input.format.compByteWidth)
-                << ",\"element_size\":" << input.format.ElementSize();
+                << ",\"element_size\":" << input.format.ElementSize()
+                << ",\"bgra_order\":" << (input.format.BGRAOrder() ? "true" : "false")
+                << ",\"float_cast_wrong\":" << (input.floatCastWrong ? "true" : "false")
+                << ",\"generic_bits\":";
+      if(input.genericEnabled)
+      {
+        uint32_t bits[4] = {};
+        std::memcpy(bits, &input.genericValue, sizeof(bits));
+        std::cout << '[';
+        for(uint32_t c = 0; c < (std::min)(uint32_t(input.format.compCount), 4U); ++c)
+        { if(c) std::cout << ','; std::cout << bits[c]; }
+        std::cout << ']';
+      }
+      else std::cout << "null";
       std::cout << ",\"generic_enabled\":" << (input.genericEnabled ? "true" : "false")
                 << ",\"used\":" << (input.used ? "true" : "false") << '}';
     }

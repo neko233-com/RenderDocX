@@ -10,7 +10,7 @@ Select an action and open **API calls** to inspect its associated API events, or
 
 **Mesh** queries post-shader output for a selected draw and displays paged positions when RenderDoc reports a supported float position format; otherwise it displays raw bytes. Positions follow buffer order, not draw-index order. The current desktop view uses instance 0 and view 0 and is not yet the complete RenderDoc mesh viewer. The agent CLI also exposes the index buffer and instance selection.
 
-**Vertex input** displays used attributes in draw order, applying the selected draw's indices, base vertex, instance rate and buffer offsets. Common float32 and integer components are decoded; other formats show their raw bytes. Generic values and OpenGL vertex input are not yet available. The desktop view shows instance 0; the agent CLI can select another instance.
+**Vertex input** displays used attributes in draw order, applying the selected draw's indices, base vertex, instance rate and buffer offsets. Common floating-point, integer, normalized and packed formats are decoded; other formats show their raw bytes. OpenGL generic attributes are supported when shader reflection is available. The desktop view shows instance 0; the agent CLI can select another instance.
 
 The interface detects the system language on startup and supports English, Simplified Chinese, Japanese, and Korean, with a manual language override. Its settings are stored in the operating system's user configuration directory.
 
@@ -50,7 +50,7 @@ The native event browser, texture preview, and event replay are initial implemen
 
 ## Verification
 
-On Windows x64, `./scripts/test-windows.ps1` builds the matching core and helpers, runs headless protocol and Agent CLI tests, exercises generated D3D11 capture and replay as well as live target discovery, connection and capture, and runs GPUI interaction tests with both a recording transport and a generated D3D11 capture. Add `-IncludeFast` to include the experimental backend. The real-core tests need a supported D3D11 device or WARP; the headless real-core tests are marked ignored when running `cargo test` alone, and the GPUI real-capture portion runs when both fixture environment variables are set. Other graphics APIs, GPU combinations, Unity/Tuanjie, and platforms still need coverage.
+On Windows x64, `./scripts/test-windows.ps1` builds the matching core and helpers, runs headless protocol and Agent CLI tests, exercises generated D3D11 capture and replay as well as live target discovery, connection and capture, and runs GPUI interaction tests with both a recording transport and a generated D3D11 capture. Add `-IncludeFast` to include the experimental backend, and `-IncludeOpenGL` for OpenGL 3.3 capture and input inspection tests. The real-core tests need a supported D3D11 device or WARP; OpenGL tests require a compatible graphics driver. The headless real-core tests are marked ignored when running `cargo test` alone. Additional graphics APIs, GPU combinations, Unity/Tuanjie, and platforms still need coverage.
 
 ## License
 

@@ -35,28 +35,131 @@ pub struct InputValue {
 }
 
 fn decode(input: &VertexInput, bytes: &[u8]) -> Option<Vec<String>> {
-    if input.format_type? != 0 {
-        return None;
-    }
     let kind = input.component_type?;
     let width = input.component_byte_width? as usize;
     let count = input.component_count? as usize;
-    if count == 0 || count.checked_mul(width)? != bytes.len() {
-        return None;
+    let bgra = input.bgra_order?;
+    let mut values = if input.format_type? == 0 {
+        if count == 0 || width == 0 || count.checked_mul(width)? != bytes.len() {
+            return None;
+        }
+        bytes
+            .chunks_exact(width)
+            .map(|b| {
+                let unsigned = || -> Option<u64> {
+                    Some(match width {
+                        1 => u64::from(b[0]),
+                        2 => u64::from(u16::from_le_bytes(b.try_into().ok()?)),
+                        4 => u64::from(u32::from_le_bytes(b.try_into().ok()?)),
+                        8 => u64::from_le_bytes(b.try_into().ok()?),
+                        _ => return None,
+                    })
+                };
+                let signed = || -> Option<i64> {
+                    Some(match width {
+                        1 => i64::from(b[0] as i8),
+                        2 => i64::from(i16::from_le_bytes(b.try_into().ok()?)),
+                        4 => i64::from(i32::from_le_bytes(b.try_into().ok()?)),
+                        8 => i64::from_le_bytes(b.try_into().ok()?),
+                        _ => return None,
+                    })
+                };
+                let wrong = input.float_cast_wrong.unwrap_or(false);
+                match (kind, width) {
+                    (1, 2) => Some(
+                        half::f16::from_bits(u16::from_le_bytes(b.try_into().ok()?))
+                            .to_f32()
+                            .to_string(),
+                    ),
+                    (1, 4) => Some(f32::from_le_bytes(b.try_into().ok()?).to_string()),
+                    (1, 8) => Some(f64::from_le_bytes(b.try_into().ok()?).to_string()),
+                    (4, 1 | 2 | 4) if wrong => Some(((unsigned()? as f32).to_bits()).to_string()),
+                    (5, 1 | 2 | 4) if wrong => {
+                        Some(((signed()? as f32).to_bits() as i32).to_string())
+                    }
+                    (4, _) if !wrong => Some(unsigned()?.to_string()),
+                    (5, _) if !wrong => Some(signed()?.to_string()),
+                    (6, 1 | 2 | 4) => Some((unsigned()? as f32).to_string()),
+                    (7, 1 | 2 | 4) => Some((signed()? as f32).to_string()),
+                    (2 | 9, 1 | 2) => Some(
+                        ((unsigned()? as f32) / ((1u64 << (width * 8)) - 1) as f32).to_string(),
+                    ),
+                    (3, 1 | 2) => Some(
+                        ((signed()? as f32) / ((1u64 << (width * 8 - 1)) - 1) as f32)
+                            .max(-1.0)
+                            .to_string(),
+                    ),
+                    _ => None,
+                }
+            })
+            .collect::<Option<Vec<_>>>()?
+    } else if input.format_type? == 12 {
+        if count != 4 {
+            return None;
+        }
+        let packed = u32::from_le_bytes(bytes.try_into().ok()?);
+        let channels = [
+            (packed & 1023, 10),
+            ((packed >> 10) & 1023, 10),
+            ((packed >> 20) & 1023, 10),
+            ((packed >> 30) & 3, 2),
+        ];
+        channels
+            .into_iter()
+            .map(|(value, bits)| {
+                let signed = ((value << (32 - bits)) as i32) >> (32 - bits);
+                let wrong = input.float_cast_wrong.unwrap_or(false);
+                match kind {
+                    4 if wrong => Some((value as f32).to_bits().to_string()),
+                    5 if wrong => Some(((signed as f32).to_bits() as i32).to_string()),
+                    4 => Some(value.to_string()),
+                    5 => Some(signed.to_string()),
+                    6 => Some((value as f32).to_string()),
+                    7 => Some((signed as f32).to_string()),
+                    2 | 9 => Some((value as f32 / ((1u32 << bits) - 1) as f32).to_string()),
+                    3 => Some(
+                        (signed as f32 / ((1u32 << (bits - 1)) - 1) as f32)
+                            .max(-1.0)
+                            .to_string(),
+                    ),
+                    _ => None,
+                }
+            })
+            .collect::<Option<Vec<_>>>()?
+    } else {
+        let packed = u16::from_le_bytes(bytes.try_into().ok()?);
+        let channels: Vec<(u16, u16)> = match input.format_type? {
+            14 => vec![
+                (packed & 31, 31),
+                ((packed >> 5) & 63, 63),
+                ((packed >> 11) & 31, 31),
+            ],
+            15 => vec![
+                (packed & 31, 31),
+                ((packed >> 5) & 31, 31),
+                ((packed >> 10) & 31, 31),
+                ((packed >> 15) & 1, 1),
+            ],
+            17 => vec![
+                (packed & 15, 15),
+                ((packed >> 4) & 15, 15),
+                ((packed >> 8) & 15, 15),
+                ((packed >> 12) & 15, 15),
+            ],
+            _ => return None,
+        };
+        if count != channels.len() {
+            return None;
+        }
+        channels
+            .into_iter()
+            .map(|(value, max)| (value as f32 / max as f32).to_string())
+            .collect()
+    };
+    if bgra && values.len() >= 3 {
+        values.swap(0, 2);
     }
-    bytes
-        .chunks_exact(width)
-        .map(|b| match (kind, width) {
-            (1, 4) => Some(f32::from_le_bytes(b.try_into().ok()?).to_string()),
-            (4, 1) => Some(b[0].to_string()),
-            (4, 2) => Some(u16::from_le_bytes(b.try_into().ok()?).to_string()),
-            (4, 4) => Some(u32::from_le_bytes(b.try_into().ok()?).to_string()),
-            (5, 1) => Some((b[0] as i8).to_string()),
-            (5, 2) => Some(i16::from_le_bytes(b.try_into().ok()?).to_string()),
-            (5, 4) => Some(i32::from_le_bytes(b.try_into().ok()?).to_string()),
-            _ => None,
-        })
-        .collect()
+    Some(values)
 }
 
 /// Each read is checked against both the binding range and the actual resource size.
@@ -254,7 +357,22 @@ where
                     vertex_index.map(u64::from)
                 };
                 if input.generic_enabled {
-                    value.unavailable = Some("generic_value_unavailable");
+                    value.values = input.generic_bits.as_ref().and_then(|bits| {
+                        if bits.len() != input.component_count? as usize {
+                            return None;
+                        }
+                        bits.iter()
+                            .map(|bits| match input.component_type? {
+                                1 => Some(f32::from_bits(*bits).to_string()),
+                                4 => Some(bits.to_string()),
+                                5 => Some((*bits as i32).to_string()),
+                                _ => None,
+                            })
+                            .collect()
+                    });
+                    if value.values.is_none() {
+                        value.unavailable = Some("generic_value_unavailable");
+                    }
                 } else if element == 0 || element > crate::replay::BUFFER_PAGE_LIMIT {
                     value.unavailable = Some("format_unavailable");
                 } else if let (Some(binding), Some(idx)) = (slot, idx) {
@@ -311,8 +429,8 @@ mod tests {
             "index_buffer":{"bound":true,"resource_index":0,"name":"","byte_offset":"2","byte_size":"20","byte_stride":2},
             "vertex_buffers":[{"bound":true,"resource_index":1,"name":"","byte_offset":"4","byte_size":"40","byte_stride":8},
                               {"bound":true,"resource_index":2,"name":"","byte_offset":"4","byte_size":"40","byte_stride":4}],
-            "vertex_inputs":[{"name":"POSITION","vertex_buffer":0,"byte_offset":0,"per_instance":false,"instance_rate":0,"format":"float2","format_type":0,"component_type":1,"component_count":2,"component_byte_width":4,"element_size":8,"generic_enabled":false,"used":true},
-                             {"name":"INSTANCE","vertex_buffer":1,"byte_offset":0,"per_instance":true,"instance_rate":2,"format":"uint","format_type":0,"component_type":4,"component_count":1,"component_byte_width":4,"element_size":4,"generic_enabled":false,"used":true}]})).unwrap();
+            "vertex_inputs":[{"name":"POSITION","vertex_buffer":0,"byte_offset":0,"per_instance":false,"instance_rate":0,"format":"float2","format_type":0,"component_type":1,"component_count":2,"component_byte_width":4,"element_size":8,"bgra_order":false,"generic_enabled":false,"used":true},
+                             {"name":"INSTANCE","vertex_buffer":1,"byte_offset":0,"per_instance":true,"instance_rate":2,"format":"uint","format_type":0,"component_type":4,"component_count":1,"component_byte_width":4,"element_size":4,"bgra_order":false,"generic_enabled":false,"used":true}]})).unwrap();
         let buffers: Vec<Buffer> = (0..3)
             .map(|i| {
                 serde_json::from_value(
@@ -399,6 +517,39 @@ mod tests {
                 |_, _, _| unreachable!()
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn decodes_normalized_half_packed_and_bgra_without_losing_raw_bytes() {
+        let mut input: VertexInput = serde_json::from_value(json!({"name":"x","vertex_buffer":0,"byte_offset":0,
+            "per_instance":false,"instance_rate":0,"format":"x","format_type":0,"component_type":3,
+            "component_count":2,"component_byte_width":2,"element_size":4,"bgra_order":false,"generic_enabled":false,"used":true})).unwrap();
+        let values = decode(&input, &[0, 0x40, 0, 0x80]).unwrap();
+        assert_eq!(values[1], "-1");
+        assert!((values[0].parse::<f32>().unwrap() - 16384.0 / 32767.0).abs() < 1e-7);
+        input.component_type = Some(1);
+        assert_eq!(decode(&input, &[0, 0x3c, 0, 0xc0]).unwrap(), ["1", "-2"]);
+        input.format_type = Some(14);
+        input.bgra_order = Some(true);
+        input.component_count = Some(3);
+        assert_eq!(decode(&input, &[0x1f, 0]).unwrap(), ["0", "0", "1"]);
+        input.format_type = Some(0);
+        input.component_type = Some(2);
+        input.component_count = Some(4);
+        input.component_byte_width = Some(1);
+        assert_eq!(
+            decode(&input, &[0, 127, 255, 255]).unwrap(),
+            ["1", "0.49803922", "0", "1"]
+        );
+        input.format_type = Some(12);
+        input.bgra_order = Some(false);
+        input.component_count = Some(4);
+        input.component_type = Some(3);
+        let signed_packed = 0x200u32 | (0x1ff << 10) | (0x3ff << 20) | (2 << 30);
+        assert_eq!(
+            decode(&input, &signed_packed.to_le_bytes()).unwrap(),
+            ["-1", "1", "-0.0019569471", "-1"]
         );
     }
 }
