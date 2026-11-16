@@ -123,6 +123,12 @@ struct DebugTraceScope
   }
 };
 
+struct ScopedReplayOutput
+{
+  IReplayOutput *output = nullptr;
+  ~ScopedReplayOutput() { if(output) output->Shutdown(); }
+};
+
 struct CustomShaderScope
 {
   IReplayController *controller;
@@ -2313,18 +2319,25 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       std::cout << "]}" << std::endl;
       continue;
     }
-    if(command.compare(0, 6, "stats ") == 0)
+    if(command.compare(0, 6, "stats ") == 0 || command.compare(0, 12, "customstats ") == 0)
     {
+      const bool custom_stats = command.compare(0, 12, "customstats ") == 0;
       if(!selected) { error("Select an event before computing texture statistics"); continue; }
-      std::istringstream arguments(command.substr(6));
-      std::string index_text, mip_text, slice_text, sample_text, min_text, max_text, mask_text, cast_text, extra;
-      uint64_t index = 0, mip = 0, slice = 0, sample = 0, min_bits = 0, max_bits = 0, mask = 0, cast = 0;
+      std::istringstream arguments(command.substr(custom_stats ? 12 : 6));
+      std::string index_text, mip_text, slice_text, sample_text, min_text, max_text, mask_text, cast_text, display_cast_text, extra;
+      uint64_t index = 0, mip = 0, slice = 0, sample = 0, min_bits = 0, max_bits = 0, mask = 0, cast = 0, display_cast = 0;
       if(!(arguments >> index_text >> mip_text >> slice_text >> sample_text >> min_text >> max_text >> mask_text) ||
          !decimal(index_text, index) || !decimal(mip_text, mip) || !decimal(slice_text, slice) ||
          (sample_text != "resolve" && !decimal(sample_text, sample)) || !decimal(min_text, min_bits) || !decimal(max_text, max_bits) || !decimal(mask_text, mask) ||
          index >= texture_ids.size() || min_bits > UINT32_MAX || max_bits > UINT32_MAX || mask > 15)
       { error("Invalid texture statistics request"); continue; }
-      if((arguments >> cast_text) && (!decimal(cast_text, cast) || cast > 9 || (arguments >> extra)))
+      if(custom_stats)
+      {
+        if(!(arguments >> cast_text >> display_cast_text) || !decimal(cast_text, cast) || cast > 9 || !decimal(display_cast_text, display_cast) || display_cast > 9 || (arguments >> extra))
+        { error("Invalid custom texture statistics request"); continue; }
+        if(custom_shader.active == ResourceId()) { error("Custom shader is unavailable"); continue; }
+      }
+      else if((arguments >> cast_text) && (!decimal(cast_text, cast) || cast > 9 || (arguments >> extra)))
       { error("Invalid texture cast"); continue; }
       const TextureRef &texture = texture_ids[size_t(index)];
       if(mip >= texture.mips || mip >= 32 || !texture.width || !texture.height || !texture.samples)
@@ -2338,17 +2351,30 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       if(!std::isfinite(lo) || !std::isfinite(hi) || !(lo < hi) || !std::isfinite(hi - lo) || !std::isfinite(hi + hi * 1e-6f))
       { error("Invalid histogram range"); continue; }
       const uint32_t actual_sample = sample_text == "resolve" ? (texture.samples > 1 ? UINT32_MAX : 0U) : uint32_t(sample);
-      const Subresource sub(uint32_t(mip), uint32_t(slice), actual_sample);
-      const auto extrema = replay.controller->GetMinMax(texture.id, sub, CompType(cast));
+      Subresource sub(uint32_t(mip), uint32_t(slice), actual_sample);
+      ResourceId stats_resource = texture.id;
+      CompType stats_cast = CompType(cast);
+      ScopedReplayOutput scoped;
+      if(custom_stats)
+      {
+        scoped.output = replay.controller->CreateOutput(CreateHeadlessWindowingData(1, 1), ReplayOutputType::Texture);
+        if(!scoped.output) { error("Cannot create a headless texture output"); continue; }
+        TextureDisplay display; display.resourceId=texture.id; display.typeCast=CompType(display_cast); display.subresource=sub; display.customShaderId=custom_shader.active;
+        scoped.output->SetTextureDisplay(display);
+        stats_resource = scoped.output->GetCustomShaderTexID();
+        if(stats_resource == ResourceId()) { error("Custom shader output is unavailable"); continue; }
+        stats_cast = CompType::Typeless; sub.slice=0; sub.sample=0;
+      }
+      const auto extrema = replay.controller->GetMinMax(stats_resource, sub, stats_cast);
       result = replay.controller->GetFatalErrorStatus();
       if(!result.OK()) { error(result_message(result)); break; }
       const rdcfixedarray<bool, 4> channels = {(mask & 1) != 0, (mask & 2) != 0, (mask & 4) != 0, (mask & 8) != 0};
-      const rdcarray<uint32_t> histogram = replay.controller->GetHistogram(texture.id, sub, CompType(cast), lo, hi, channels);
+      const rdcarray<uint32_t> histogram = replay.controller->GetHistogram(stats_resource, sub, stats_cast, lo, hi, channels);
       result = replay.controller->GetFatalErrorStatus();
       if(!result.OK()) { error(result_message(result)); break; }
       uint32_t low[4], high[4]; std::memcpy(low, &extrema.first, sizeof(low)); std::memcpy(high, &extrema.second, sizeof(high));
       std::cout << "\nRENDERDOCX/1 {\"type\":\"texture_stats\",\"event_id\":" << selected_event << ",\"index\":" << index
-                << ",\"mip\":" << mip << ",\"slice\":" << slice << ",\"sample\":" << actual_sample
+                << ",\"custom\":" << (custom_stats ? "true" : "false") << ",\"mip\":" << mip << ",\"slice\":" << slice << ",\"sample\":" << actual_sample
                 << ",\"range_min_bits\":" << lo_bits << ",\"range_max_bits\":" << hi_bits << ",\"channel_mask\":" << mask
                 << ",\"min_bits\":[" << low[0] << ',' << low[1] << ',' << low[2] << ',' << low[3] << "],\"max_bits\":[" << high[0] << ',' << high[1] << ',' << high[2] << ',' << high[3] << "],\"histogram\":[";
       for(size_t i = 0; i < histogram.size(); ++i) { if(i) std::cout << ','; std::cout << histogram[i]; }
@@ -2582,7 +2608,7 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       const TextureRef &texture = texture_ids[size_t(index)];
       const uint64_t depth = texture.dimension == 3 ? (mip < 32 ? (std::max)(1U, texture.depth >> uint32_t(mip)) : 1U) : texture.arraysize;
       if(mip >= texture.mips || slice >= depth || (sample_text != "resolve" && sample >= texture.samples) ||
-         (channel_text != "all" && channel >= texture.components))
+         (channel_text != "all" && channel >= (use_custom ? 4U : texture.components)))
       { error("Texture selection is out of range"); continue; }
       float black=0.0f, white=1.0f;
       const uint32_t b=uint32_t(black_bits), w=uint32_t(white_bits);
@@ -2618,9 +2644,10 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       std::cout << "\"}" << std::endl;
       continue;
     }
-    if(command.compare(0, 6, "save2 ") == 0 || command.compare(0, 6, "save3 ") == 0 || command.compare(0, 6, "save4 ") == 0 || command.compare(0, 6, "save5 ") == 0)
+    if(command.compare(0, 6, "save2 ") == 0 || command.compare(0, 6, "save3 ") == 0 || command.compare(0, 6, "save4 ") == 0 || command.compare(0, 6, "save5 ") == 0 || command.compare(0, 6, "save6 ") == 0)
     {
-      const bool options = command.compare(0, 6, "save5 ") == 0;
+      const bool custom_save = command.compare(0, 6, "save6 ") == 0;
+      const bool options = custom_save || command.compare(0, 6, "save5 ") == 0;
       const bool ranged = options || command.compare(0, 6, "save4 ") == 0;
       const bool extended = ranged || command.compare(0, 6, "save3 ") == 0;
       if(!selected) { error("Select an event before saving textures"); continue; }
@@ -2677,7 +2704,7 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       const uint64_t depth = texture.dimension == 3 ? (mip < 32 ? (std::max)(1U, texture.depth >> uint32_t(mip)) : 1U) : texture.arraysize;
       if(mip >= texture.mips || mip > INT32_MAX || slice >= depth || slice > INT32_MAX ||
          (sample_text != "resolve" && sample >= texture.samples) ||
-         (channel_text != "all" && (channel >= texture.components || channel > INT32_MAX)))
+         (channel_text != "all" && (channel >= (custom_save ? 4U : texture.components) || channel > INT32_MAX)))
       { error("Texture selection is out of range"); continue; }
       std::string path;
       bool valid = !encoded.empty() && encoded.size() % 2 == 0;
@@ -2689,9 +2716,22 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
         path.push_back(char(high * 16 + low));
       }
       if(!valid) { error("Invalid output path"); continue; }
+      ScopedReplayOutput scoped;
+      ResourceId save_resource = texture.id;
+      if(custom_save)
+      {
+        if(custom_shader.active == ResourceId()) { error("Custom shader is unavailable"); continue; }
+        scoped.output = replay.controller->CreateOutput(CreateHeadlessWindowingData(1, 1), ReplayOutputType::Texture);
+        if(!scoped.output) { error("Cannot create a headless texture output"); continue; }
+        TextureDisplay display; display.resourceId=texture.id; display.typeCast=CompType(cast);
+        display.subresource=Subresource(uint32_t(mip), uint32_t(slice), sample_text == "resolve" ? TextureDisplay::ResolveSamples : uint32_t(sample));
+        display.customShaderId=custom_shader.active; scoped.output->SetTextureDisplay(display);
+        save_resource = scoped.output->GetCustomShaderTexID();
+        if(save_resource == ResourceId()) { error("Custom shader output is unavailable"); continue; }
+      }
       TextureSave save;
-      save.resourceId = texture.id;
-      save.typeCast = CompType(cast);
+      save.resourceId = save_resource;
+      save.typeCast = custom_save ? CompType::Typeless : CompType(cast);
       save.destType = FileType(file_type);
       save.mip = all_mips ? -1 : int32_t(mip);
       save.slice.sliceIndex = slices ? -1 : int32_t(slice);

@@ -1016,6 +1016,61 @@ fn real_d3d11_mesh_draw_order() {
         "custom pixel {:?}",
         &custom[..3]
     );
+    let custom_stats = agent.send(&serde_json::json!({"command":"texture_statistics","index":float_index,"min":0.0,"max":2.0,"channels":[true,false,true,false],"preview_custom_shader":true}).to_string());
+    assert_eq!(custom_stats["ok"], true, "{custom_stats}");
+    assert_eq!(
+        custom_stats["data"]["statistics"]["custom_shader"], true,
+        "{custom_stats}"
+    );
+    assert_eq!(
+        custom_stats["data"]["statistics"]["min"]["float_values"],
+        serde_json::json!(["1", "0", "1", "1"])
+    );
+    assert!(
+        custom_stats["data"]["statistics"]["histogram"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n.as_u64().unwrap_or(0) > 0)
+    );
+    let single_index = opened["data"]["capture"]["textures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|texture| {
+            texture["dimension"] == 1 && texture["width"] == 8 && texture["component_count"] == 1
+        })
+        .expect("single-channel 1D texture");
+    let custom_alpha_path = dir.path().join("custom-alpha.png");
+    let custom_alpha = agent.send(&serde_json::json!({"command":"export_texture","index":single_index,"path":custom_alpha_path,"channel":3,"preview_custom_shader":true}).to_string());
+    assert_eq!(custom_alpha["ok"], true, "{custom_alpha}");
+    let mut alpha_reader = png::Decoder::new(std::io::BufReader::new(
+        std::fs::File::open(&custom_alpha_path).unwrap(),
+    ))
+    .read_info()
+    .unwrap();
+    let mut alpha_bytes = vec![0; alpha_reader.output_buffer_size().unwrap()];
+    alpha_reader.next_frame(&mut alpha_bytes).unwrap();
+    assert!(
+        alpha_bytes[..3].iter().all(|value| *value >= 250),
+        "custom alpha export pixel {:?}",
+        &alpha_bytes[..3]
+    );
+    let custom_export_path = dir.path().join("custom-output.png");
+    let custom_export = agent.send(&serde_json::json!({"command":"export_texture","index":float_index,"path":custom_export_path,"preview_custom_shader":true}).to_string());
+    assert_eq!(custom_export["ok"], true, "{custom_export}");
+    let mut custom_reader = png::Decoder::new(std::io::BufReader::new(
+        std::fs::File::open(&custom_export_path).unwrap(),
+    ))
+    .read_info()
+    .unwrap();
+    let mut custom_bytes = vec![0; custom_reader.output_buffer_size().unwrap()];
+    custom_reader.next_frame(&mut custom_bytes).unwrap();
+    assert!(
+        custom_bytes[0] >= 250 && custom_bytes[1] <= 2 && custom_bytes[2] >= 250,
+        "custom export pixel {:?}",
+        &custom_bytes[..3]
+    );
     let raw_custom_source = agent.send(
         &serde_json::json!({"command":"pick_pixel","index":float_index,"x":0,"y":0}).to_string(),
     );
@@ -1069,6 +1124,18 @@ fn real_d3d11_mesh_draw_order() {
     assert_eq!(&retained[..3], &custom[..3]);
     let cleared = agent.send(r#"{"command":"custom_shader_clear"}"#);
     assert_eq!(cleared["data"]["result"]["active"], false, "{cleared}");
+    let cleared_stats = agent.send(&serde_json::json!({"command":"texture_statistics","index":float_index,"preview_custom_shader":true}).to_string());
+    assert_eq!(
+        cleared_stats["error"]["code"], "replay_statistics_failed",
+        "{cleared_stats}"
+    );
+    let missing_export_path = dir.path().join("custom-missing-export.png");
+    let cleared_export = agent.send(&serde_json::json!({"command":"export_texture","index":float_index,"path":missing_export_path,"preview_custom_shader":true}).to_string());
+    assert_eq!(
+        cleared_export["error"]["code"], "replay_export_failed",
+        "{cleared_export}"
+    );
+    assert!(!missing_export_path.exists());
     let cleared_pixel = agent.send(&serde_json::json!({"command":"pick_custom_pixel","index":float_index,"x":0,"y":0,"preview_custom_shader":true}).to_string());
     assert_eq!(
         cleared_pixel["error"]["code"], "replay_pixel_failed",

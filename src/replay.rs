@@ -1082,6 +1082,8 @@ impl From<[u32; 4]> for PixelComponents {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TextureStatistics {
+    #[serde(default)]
+    pub custom_shader: bool,
     pub event_id: u32,
     pub index: u32,
     pub mip: u32,
@@ -1198,9 +1200,15 @@ impl TextureSelection {
             || self.slice >= slices
             || self.slice > i32::MAX as u32
             || self.sample.is_some_and(|value| value >= texture.samples)
-            || self
-                .channel
-                .is_some_and(|value| value >= texture.component_count || value > i32::MAX as u32)
+            || self.channel.is_some_and(|value| {
+                value
+                    >= if self.preview_custom_shader {
+                        4
+                    } else {
+                        texture.component_count
+                    }
+                    || value > i32::MAX as u32
+            })
         {
             return Err("Texture selection is out of range".into());
         }
@@ -1480,6 +1488,8 @@ enum Reply {
         custom_bits: Option<[u32; 4]>,
     },
     TextureStats {
+        #[serde(default)]
+        custom: bool,
         event_id: u32,
         index: u32,
         mip: u32,
@@ -2499,21 +2509,35 @@ impl Transport for Process {
             .sample
             .map(|v| v.to_string())
             .unwrap_or_else(|| "resolve".into());
-        writeln!(
-            input,
-            "stats {index} {} {} {requested} {} {} {}{}",
-            selection.mip,
-            selection.slice,
-            request.min.to_bits(),
-            request.max.to_bits(),
-            request.mask(),
-            cast_suffix(selection.analysis_type_cast)
-        )
-        .and_then(|_| input.flush())
-        .map_err(|e| e.to_string())?;
+        let command = if selection.preview_custom_shader {
+            format!(
+                "customstats {index} {} {} {requested} {} {} {} {} {}",
+                selection.mip,
+                selection.slice,
+                request.min.to_bits(),
+                request.max.to_bits(),
+                request.mask(),
+                selection.analysis_type_cast,
+                selection.preview_type_cast
+            )
+        } else {
+            format!(
+                "stats {index} {} {} {requested} {} {} {}{}",
+                selection.mip,
+                selection.slice,
+                request.min.to_bits(),
+                request.max.to_bits(),
+                request.mask(),
+                cast_suffix(selection.analysis_type_cast)
+            )
+        };
+        writeln!(input, "{command}")
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
         match self.read()? {
             Reply::TextureStats {
                 event_id,
+                custom,
                 index: actual,
                 mip,
                 slice,
@@ -2531,9 +2555,11 @@ impl Transport for Process {
                 && actual_sample == sample
                 && range_min_bits == request.min.to_bits()
                 && range_max_bits == request.max.to_bits()
-                && channel_mask == request.mask() =>
+                && channel_mask == request.mask()
+                && custom == selection.preview_custom_shader =>
             {
                 Ok(TextureStatistics {
+                    custom_shader: custom,
                     event_id,
                     index,
                     mip,
@@ -3166,7 +3192,8 @@ impl Transport for Process {
         }
         let input = self.input.as_mut().ok_or("Replay session has closed")?;
         selection.export.validate()?;
-        let command = if selection.export != crate::texture_export::TextureExportOptions::default()
+        let command = if selection.preview_custom_shader
+            || selection.export != crate::texture_export::TextureExportOptions::default()
         {
             let options = selection.export;
             let [black, white] = selection.display_range.unwrap_or([0.0, 1.0]);
@@ -3180,7 +3207,12 @@ impl Transport for Process {
                 .unwrap_or_else(|| "all".into());
             let [r, g, b, a] = options.alpha_color.map(f32::to_bits);
             format!(
-                "save5 {index} {} {} {sample} {channel} {encoded} {} {} {} {} {} {} {} {} {} {} {r} {g} {b} {a}",
+                "save{} {index} {} {} {sample} {channel} {encoded} {} {} {} {} {} {} {} {} {} {} {r} {g} {b} {a}",
+                if selection.preview_custom_shader {
+                    6
+                } else {
+                    5
+                },
                 selection.mip,
                 selection.slice,
                 selection.preview_type_cast,
@@ -4937,6 +4969,7 @@ pub mod test_support {
                 1.0_f32.to_bits(),
             ];
             Ok(TextureStatistics {
+                custom_shader: selection.preview_custom_shader,
                 event_id: event,
                 index,
                 mip: selection.mip,
@@ -5920,6 +5953,15 @@ mod tests {
         selection.slice = 0;
         selection.channel = Some(4);
         assert!(selection.validate(&texture).is_err());
+        let single_channel = Texture {
+            component_count: 1,
+            ..texture.clone()
+        };
+        selection.channel = Some(3);
+        assert!(selection.validate(&single_channel).is_err());
+        selection.preview_custom_shader = true;
+        assert!(selection.validate(&single_channel).is_ok());
+        selection.preview_custom_shader = false;
         selection.channel = None;
         selection.sample = Some(1);
         assert!(selection.validate(&texture).is_err());

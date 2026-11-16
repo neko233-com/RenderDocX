@@ -5767,11 +5767,16 @@ impl Workspace {
                 };
             }
             TextureField::Channel => {
+                let components = if self.texture_selection.preview_custom_shader {
+                    4
+                } else {
+                    texture.component_count
+                };
                 self.texture_selection.channel = match self.texture_selection.channel {
-                    None if texture.component_count > 0 => Some(0),
-                    Some(channel) => channel.checked_add(1).filter(|value| {
-                        *value < texture.component_count && *value <= i32::MAX as u32
-                    }),
+                    None if components > 0 => Some(0),
+                    Some(channel) => channel
+                        .checked_add(1)
+                        .filter(|value| *value < components && *value <= i32::MAX as u32),
                     _ => None,
                 };
                 self.texture_selection.preview_channels = None;
@@ -5889,6 +5894,25 @@ impl Workspace {
         cx.notify();
     }
 
+    fn normalize_texture_channel(&mut self) {
+        let components = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                self.selected_texture
+                    .and_then(|index| snapshot.textures.get(index))
+            })
+            .map(|texture| texture.component_count);
+        if self
+            .texture_selection
+            .channel
+            .zip(components)
+            .is_some_and(|(channel, count)| channel >= count)
+        {
+            self.texture_selection.channel = None;
+        }
+    }
+
     fn change_preview_mode(&mut self, mode: u8, cx: &mut Context<Self>) {
         if !self.preview_edit_ready(cx) {
             return;
@@ -5916,6 +5940,7 @@ impl Workspace {
         self.texture_selection.preview_hdr_multiplier = multiplier;
         self.texture_selection.preview_decode_yuv = mode == 2;
         self.texture_selection.preview_custom_shader = false;
+        self.normalize_texture_channel();
         self.preview = None;
         self.status = None;
         cx.notify();
@@ -6021,6 +6046,7 @@ impl Workspace {
                         this.texture_custom_diagnostics = result.diagnostics;
                         if clear {
                             this.texture_selection.preview_custom_shader = false;
+                            this.normalize_texture_channel();
                             this.preview = None;
                         } else if result.compiled {
                             this.texture_selection.preview_hdr_multiplier = None;
@@ -7604,13 +7630,17 @@ impl Workspace {
             return;
         };
         let selection = self.texture_selection;
-        let channels = std::array::from_fn(|channel| {
-            selection
-                .channel
-                .map_or(channel < texture.component_count as usize, |selected| {
-                    selected as usize == channel
-                })
-        });
+        let channels = if selection.preview_custom_shader {
+            selection.effective_preview_channels()
+        } else {
+            std::array::from_fn(|channel| {
+                selection
+                    .channel
+                    .map_or(channel < texture.component_count as usize, |selected| {
+                        selected as usize == channel
+                    })
+            })
+        };
         let request = HistogramRequest { min, max, channels };
         if request.validate().is_err() || selection.channel.is_some_and(|channel| channel >= 4) {
             self.status = Some(
@@ -13420,6 +13450,7 @@ impl Workspace {
                             .collect::<Vec<_>>()
                             .join(" ");
                         let mut view = view
+                            .when(stats.custom_shader, |view| view.child(div().text_sm().text_color(rgb(0x91a7c0)).child(self.t("Custom shader output statistics", "自定义着色器输出统计", "カスタムシェーダー出力の統計", "사용자 셰이더 출력 통계"))))
                             .child(div().id("texture-statistics").test_support().child(format!(
                                 "{event_label} {} · {} — {} · {channel_label}: {channels}",
                                 stats.event_id, stats.request.min, stats.request.max
@@ -19197,6 +19228,28 @@ mod ui_tests {
                     assert!(
                         std::time::Instant::now() < deadline,
                         "custom GUI pixel did not load: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    reveal_details(window, "histogram-analyze", cx);
+                    window.click("histogram-analyze", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx).statistics.as_ref().is_some_and(|stats| {
+                            stats.custom_shader && stats.min.float_values == ["1", "0", "1", "1"]
+                        })
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "custom shader statistics did not load: {:?}",
                         cx.update(|cx| view.read(cx).status.clone())
                     );
                     std::thread::sleep(std::time::Duration::from_millis(20));
