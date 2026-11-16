@@ -1064,6 +1064,14 @@ fn real_d3d11_mesh_draw_order() {
             texture["creation_flags"].as_u64().unwrap_or(0) & 4 != 0 && texture["format_type"] == 20
         })
         .expect("D24S8 depth texture");
+    let picked_depth = agent.send(
+        &serde_json::json!({"command":"pick_pixel","index":depth_index,"x":0,"y":0}).to_string(),
+    );
+    assert_eq!(picked_depth["ok"], true, "{picked_depth}");
+    let value = &picked_depth["data"]["pixel"]["depth_stencil"];
+    let depth = value["depth"].as_str().unwrap().parse::<f32>().unwrap();
+    assert!((depth - 0.375).abs() < 0.00001, "{picked_depth}");
+    assert_eq!(value["stencil"], 0x65, "{picked_depth}");
     let depth_path = dir.path().join("depth-preview.png");
     let depth_result = agent.send(&serde_json::json!({"command":"render_texture","index":depth_index,"width":16,"height":16,"path":depth_path,"preview_channels":[true,false,false,false],"preview_linear_as_gamma":false}).to_string());
     assert_eq!(depth_result["ok"], true, "{depth_result}");

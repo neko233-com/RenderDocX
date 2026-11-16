@@ -1034,6 +1034,9 @@ pub struct Pixel {
     /// Custom visualization output, when explicitly requested.
     #[serde(default)]
     pub custom: Option<PixelComponents>,
+    /// Interpretation of the original depth/stencil value, absent for overlay pixels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth_stencil: Option<DepthStencilValue>,
     pub event_id: u32,
     pub index: u32,
     pub mip: u32,
@@ -1045,6 +1048,47 @@ pub struct Pixel {
     pub float_values: [String; 4],
     pub uint_values: [u32; 4],
     pub int_values: [i32; 4],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct DepthStencilValue {
+    /// A decimal float or unsigned integer string according to the analysis cast.
+    pub depth: Option<String>,
+    pub stencil: Option<u8>,
+}
+
+impl Pixel {
+    fn interpret_depth_stencil(&mut self, texture: &Texture, selection: TextureSelection) {
+        if self.overlay || !texture.is_depth_stencil() {
+            self.depth_stencil = None;
+            return;
+        }
+        let component_type = if selection.analysis_type_cast != 0 {
+            selection.analysis_type_cast
+        } else {
+            texture.component_type
+        };
+        let depth = if texture.is_stencil_only() {
+            None
+        } else if component_type == 4 {
+            Some(self.uint_values[0].to_string())
+        } else {
+            Some(self.float_values[0].clone())
+        };
+        let stencil = if texture.is_stencil_only() {
+            Some((self.uint_values[0] & 0xff) as u8)
+        } else if (19..=21).contains(&texture.format_type) {
+            let value = f32::from_bits(self.bits[1]) * 255.0;
+            if value.is_finite() && value >= i32::MIN as f32 && value < 2147483648.0 {
+                Some(((value as i32) & 0xff) as u8)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        self.depth_stencil = Some(DepthStencilValue { depth, stencil });
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -2705,6 +2749,7 @@ impl Transport for Process {
                 Ok(Pixel {
                     overlay,
                     custom: custom_bits.map(PixelComponents::from),
+                    depth_stencil: None,
                     event_id,
                     index,
                     mip,
@@ -2770,6 +2815,7 @@ impl Transport for Process {
                 Ok(Pixel {
                     overlay,
                     custom: custom_bits.map(PixelComponents::from),
+                    depth_stencil: None,
                     event_id,
                     index,
                     mip,
@@ -2836,6 +2882,7 @@ impl Transport for Process {
                 Ok(Pixel {
                     overlay,
                     custom: custom_bits.map(PixelComponents::from),
+                    depth_stencil: None,
                     event_id,
                     index,
                     mip,
@@ -4245,10 +4292,11 @@ impl Session {
         if self.revision.load(Ordering::SeqCst) != revision {
             return Err("Replay selection changed".into());
         }
-        let pixel = process.pick_pixel(event, index, selection, sample, x, y)?;
+        let mut pixel = process.pick_pixel(event, index, selection, sample, x, y)?;
         if self.revision.load(Ordering::SeqCst) != revision {
             return Err("Replay selection changed".into());
         }
+        pixel.interpret_depth_stencil(texture, selection);
         Ok(pixel)
     }
 
@@ -4273,10 +4321,11 @@ impl Session {
         if self.revision.load(Ordering::SeqCst) != revision {
             return Err("Replay selection changed".into());
         }
-        let pixel = process.pick_overlay_pixel(event, index, selection, sample, x, y)?;
+        let mut pixel = process.pick_overlay_pixel(event, index, selection, sample, x, y)?;
         if self.revision.load(Ordering::SeqCst) != revision {
             return Err("Replay selection changed".into());
         }
+        pixel.interpret_depth_stencil(texture, selection);
         Ok(pixel)
     }
 
@@ -4305,10 +4354,11 @@ impl Session {
         if self.revision.load(Ordering::SeqCst) != revision {
             return Err("Replay selection changed".into());
         }
-        let pixel = process.pick_custom_pixel(event, index, selection, sample, x, y)?;
+        let mut pixel = process.pick_custom_pixel(event, index, selection, sample, x, y)?;
         if self.revision.load(Ordering::SeqCst) != revision {
             return Err("Replay selection changed".into());
         }
+        pixel.interpret_depth_stencil(texture, selection);
         Ok(pixel)
     }
 
@@ -5135,6 +5185,7 @@ pub mod test_support {
             Ok(Pixel {
                 overlay: false,
                 custom: None,
+                depth_stencil: None,
                 event_id: event,
                 index,
                 mip: selection.mip,
@@ -5958,6 +6009,55 @@ mod tests {
             ..packed
         };
         assert!(stencil.is_stencil_only());
+        let mut pixel = Pixel {
+            overlay: false,
+            custom: None,
+            depth_stencil: None,
+            event_id: 1,
+            index: 0,
+            mip: 0,
+            slice: 0,
+            sample: 0,
+            x: 0,
+            y: 0,
+            bits: [0.375f32.to_bits(), (101.0f32 / 255.0).to_bits(), 0, 0],
+            float_values: ["0.375".into(), "0".into(), "0".into(), "0".into()],
+            uint_values: [0, 0, 0, 0],
+            int_values: [0; 4],
+        };
+        let depth = Texture {
+            format_type: 20,
+            ..stencil.clone()
+        };
+        pixel.interpret_depth_stencil(&depth, TextureSelection::default());
+        assert_eq!(
+            pixel.depth_stencil,
+            Some(DepthStencilValue {
+                depth: Some("0.375".into()),
+                stencil: Some(101)
+            })
+        );
+        pixel.uint_values[0] = 0x165;
+        let cast_uint = TextureSelection {
+            analysis_type_cast: 4,
+            ..TextureSelection::default()
+        };
+        pixel.interpret_depth_stencil(&depth, cast_uint);
+        assert_eq!(
+            pixel.depth_stencil.as_ref().unwrap().depth.as_deref(),
+            Some("357")
+        );
+        pixel.interpret_depth_stencil(&stencil, TextureSelection::default());
+        assert_eq!(
+            pixel.depth_stencil,
+            Some(DepthStencilValue {
+                depth: None,
+                stencil: Some(101)
+            })
+        );
+        pixel.overlay = true;
+        pixel.interpret_depth_stencil(&depth, TextureSelection::default());
+        assert!(pixel.depth_stencil.is_none());
         let mut selection = TextureSelection {
             mip: 2,
             slice: 1,

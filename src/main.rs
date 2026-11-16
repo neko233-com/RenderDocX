@@ -14128,6 +14128,11 @@ impl Workspace {
                                 .test_support()
                                 .child(format!("({}, {}) · RGBA: {bits}", pixel.x, pixel.y)),
                         )
+                        .when_some(pixel.depth_stencil.as_ref(), |view, value| {
+                            let depth = value.depth.as_ref().map(|depth| format!("{}: {depth}", self.t("Depth", "深度", "深度", "깊이")));
+                            let stencil = value.stencil.map(|stencil| format!("{}: {stencil} / 0x{stencil:02X} / 0b{stencil:08b}", self.t("Stencil", "模板", "ステンシル", "스텐실")));
+                            view.child(div().id("pixel-depth-stencil").test_support().child([depth, stencil].into_iter().flatten().collect::<Vec<_>>().join(" · ")))
+                        })
                         .child(format!("{float_label}: {}", pixel.float_values.join(", ")))
                         .when_some(pixel.custom, |view, custom| view
                             .child(div().id("custom-pixel-result").test_support().text_sm().text_color(rgb(0x82aaff)).child(self.t("Custom shader output", "自定义着色器输出", "カスタムシェーダー出力", "사용자 셰이더 출력")))
@@ -18326,6 +18331,23 @@ mod ui_tests {
             assert_eq!((pixel.event_id, pixel.x, pixel.y), (42, 3, 4));
             assert_eq!(pixel.float_values, ["0.25", "0.5", "0.75", "1"]);
         });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.pixel.as_mut().unwrap().depth_stencil =
+                    Some(renderdocx::replay::DepthStencilValue {
+                        depth: Some("0.375".into()),
+                        stencil: Some(101),
+                    });
+                cx.notify();
+            });
+            reveal_details(window, "pixel-depth-stencil", cx);
+            assert!(window.find("pixel-depth-stencil").visible());
+            view.update(cx, |view, cx| {
+                view.pixel.as_mut().unwrap().depth_stencil = None;
+                cx.notify();
+            });
+        })
+        .unwrap();
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             window.click("pixel-history", cx);
