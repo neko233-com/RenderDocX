@@ -660,6 +660,19 @@ fn real_d3d11_mesh_draw_order() {
     assert_eq!(invalid_annotation["error"]["code"], "invalid_filter");
     let filtered = agent.send(&serde_json::json!({"command":"filter_events","expression":format!("$event(EID={draw})"),"show_api":true,"offset":"0","limit":128}).to_string());
     assert_eq!(filtered["ok"], true, "{filtered}");
+    let visible = agent.send(&serde_json::json!({"command":"filter_events","expression":format!("$event(EID={draw})"),"show_empty_regions":false,"collapsed_events":[]}).to_string());
+    assert_eq!(visible["ok"], true, "{visible}");
+    assert!(
+        visible["data"]["events"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["event_id"] == draw && item["collapsed"] == false),
+        "{visible}"
+    );
+    let unknown = agent
+        .send(r#"{"command":"filter_events","expression":"","collapsed_events":[4294967295]}"#);
+    assert_eq!(unknown["error"]["code"], "invalid_arguments", "{unknown}");
     assert!(
         filtered["data"]["events"]["items"]
             .as_array()

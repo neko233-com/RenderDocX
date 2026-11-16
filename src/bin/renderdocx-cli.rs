@@ -51,6 +51,13 @@ fn apply_event_filter(
     }
 }
 
+fn show_empty_regions(request: &serde_json::Map<String, Value>) -> Option<bool> {
+    match request.get("show_empty_regions") {
+        None => Some(true),
+        Some(value) => value.as_bool(),
+    }
+}
+
 fn mesh_filter(request: &serde_json::Map<String, Value>) -> Result<mesh_draw::MeshFilter, String> {
     let parse = |name: &str| -> Result<Option<u32>, String> {
         match request.get(name) {
@@ -716,12 +723,25 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     None => Some(false),
                     Some(v) => v.as_bool(),
                 };
-                match (&opened, path, filter, show_api) {
-                    (None, _, _, _) => Err(("no_capture", "No capture is open".into())),
-                    (Some((session, snapshot)), Some(path), Some(filter), Some(show_api)) => {
+                match (
+                    &opened,
+                    path,
+                    filter,
+                    show_api,
+                    show_empty_regions(&request),
+                ) {
+                    (None, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (
+                        Some((session, snapshot)),
+                        Some(path),
+                        Some(filter),
+                        Some(show_api),
+                        Some(show_empty),
+                    ) => {
                         let mut tree = EventTree::default();
                         tree.reset(&snapshot.actions);
                         tree.set_show_api(show_api);
+                        tree.set_show_empty_regions(show_empty);
                         if let Some(times) = &event_times {
                             tree.set_durations(times.clone());
                         }
@@ -766,14 +786,15 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     Some(Value::String(s)) if s == "previous" => Some(false),
                     _ => None,
                 };
-                match (&opened, event, filter, forward) {
-                    (None, _, _, _) => Err(("no_capture", "No capture is open".into())),
-                    (Some((session, snapshot)), Some(event), Some(filter), Some(forward)) => {
+                match (&opened, event, filter, forward, show_empty_regions(&request)) {
+                    (None, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some((session, snapshot)), Some(event), Some(filter), Some(forward), Some(show_empty)) => {
                         let known = snapshot.actions.iter().any(|action| action.event_id == event || action.api_events.iter().any(|e| e.event_id == event));
                         if !known { Err(("invalid_arguments", "Unknown event".into())) }
                         else {
                             let mut tree = EventTree::default();
                             tree.reset(&snapshot.actions);
+                            tree.set_show_empty_regions(show_empty);
                             if let Some(times) = &event_times { tree.set_durations(times.clone()); }
                             if let Err(error) = apply_event_filter(&mut tree, session, snapshot, settings.language, filter) { Err(("invalid_filter", error)) }
                             else {
@@ -809,12 +830,13 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     Some(Value::String(s)) if s == "previous" => Some(false),
                     _ => None,
                 };
-                match (&opened, query, filter, show_api, current, forward) {
-                    (None, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
-                    (Some((session, snapshot)), Some(query), Some(filter), Some(show_api), Some(current), Some(forward)) => {
+                match (&opened, query, filter, show_api, current, forward, show_empty_regions(&request)) {
+                    (None, _, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some((session, snapshot)), Some(query), Some(filter), Some(show_api), Some(current), Some(forward), Some(show_empty)) => {
                         let mut tree = EventTree::default();
                         tree.reset(&snapshot.actions);
                         tree.set_show_api(show_api);
+                        tree.set_show_empty_regions(show_empty);
                         if let Some(times) = &event_times { tree.set_durations(times.clone()); }
                         if let Err(error) = apply_event_filter(&mut tree, session, snapshot, settings.language, filter) { Err(("invalid_filter", error)) }
                         else {
@@ -852,16 +874,29 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     None => Some(None),
                     Some(value) => value.as_str().map(Some),
                 };
-                match (&opened, expression, show_api, offset, limit, annotation_key) {
-                    (None, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
-                    (Some((session, snapshot)), Some(expression), Some(show_api), Some(offset), Some(limit), Some(annotation_key)) => {
+                let show_empty = show_empty_regions(&request);
+                let collapsed = match request.get("collapsed_events") {
+                    None => Some(Vec::new()),
+                    Some(value) => value.as_array().and_then(|items| {
+                        items
+                            .iter()
+                            .map(|item| item.as_u64().and_then(|n| u32::try_from(n).ok()))
+                            .collect::<Option<Vec<_>>>()
+                    }),
+                };
+                match (&opened, expression, show_api, offset, limit, annotation_key, show_empty, collapsed) {
+                    (None, _, _, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some((session, snapshot)), Some(expression), Some(show_api), Some(offset), Some(limit), Some(annotation_key), Some(show_empty), Some(collapsed)) => {
                         let mut tree = EventTree::default();
                         tree.reset(&snapshot.actions);
                         tree.set_show_api(show_api);
+                        tree.set_show_empty_regions(show_empty);
                         if let Some(times) = &event_times { tree.set_durations(times.clone()); }
                         if let Err(error) = apply_event_filter(&mut tree, session, snapshot, settings.language, expression) {
                             Err(("invalid_filter", error))
-                        } else if offset > tree.visible.len() {
+                        } else if collapsed.iter().any(|event| tree.row_for_event(*event).is_none()) {
+                            Err(("invalid_arguments", "Unknown collapsed event".into()))
+                        } else if { for event in &collapsed { if let Some(row) = tree.row_for_event(*event) { tree.set_subtree_collapsed(row, true); } } offset > tree.visible.len() } {
                             Err(("invalid_arguments", "Event offset exceeds the filtered item count".into()))
                         } else { (|| {
                             let annotations = match annotation_key {
@@ -882,9 +917,9 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                                 json!({"action_index":action_index,"api_index":api_index,"event_id":event_id,
                                     "parent_action_index": if action.parent < 0 { None } else { Some(action.parent) },
                                     "name":name,"direct_match":tree.directly_matches(row),"duration_seconds":tree.duration(event_id),"annotation":annotations.get(&event_id),
-                                    "group_range":tree.action_range(row)})
+                                    "group_range":tree.action_range(row),"has_children":tree.has_children(row),"collapsed":tree.is_collapsed(row)})
                             }).collect();
-                            Ok(json!({"events":{"expression":expression,"show_api":show_api,"annotation_key":annotation_key,"offset":offset.to_string(),
+                            Ok(json!({"events":{"expression":expression,"show_api":show_api,"show_empty_regions":show_empty,"annotation_key":annotation_key,"offset":offset.to_string(),
                                 "total":tree.visible.len().to_string(),"items":items}}))
                         })() }
                     }

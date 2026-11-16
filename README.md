@@ -8,6 +8,8 @@ The event browser supports RenderDoc-style case-insensitive words and quoted lit
 
 Named event filter expressions can be saved, loaded and deleted in the event browser or Agent CLI. They are stored separately from named buffer formats in the RenderDocX user configuration directory. Saving preserves expressions that this version cannot yet evaluate; loading one leaves the last valid result visible and marks the filter as unsupported.
 
+Event groups can be expanded or collapsed recursively. The controls operate on the selected group, or on the whole tree when no event is selected. Hiding empty regions retains ancestors of matching rows while suppressing groups that have no matching descendants. Expansion state remains independent from event export.
+
 `$annot(renderdocx.pass contains shadow)` filters API-event annotations embedded by the capture, not bookmarks or capture notes. Key existence, numeric comparisons, string equality, case-insensitive `contains`, and `/regex/` matching are supported. This requires a replay bridge with annotation lookup; malformed conditions and older bridges report an error. Quoted key parsing and Unicode matching are not yet fully verified against every upstream edge case.
 
 The event browser can also display one captured annotation key beside each event. Changing or clearing the key reloads or hides the column; resource names and language changes refresh it. Loading is asynchronous and can take time on large captures. Compound annotations display `{...}`; GPU-address formatting remains unsupported.

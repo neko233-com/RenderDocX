@@ -25,7 +25,9 @@ pub struct EventTree {
     rows: Vec<EventRow>,
     order: Vec<usize>,
     show_api: bool,
+    hide_empty_regions: bool,
     parents: Vec<Option<usize>>,
+    source_children: Vec<bool>,
     names: Vec<String>,
     lower_names: Vec<String>,
     marker_names: Vec<String>,
@@ -97,6 +99,10 @@ impl EventTree {
             self.order.push(action_index);
         }
         self.collapsed = vec![false; self.parents.len()];
+        self.source_children = vec![false; self.parents.len()];
+        for parent in self.parents.iter().flatten() {
+            self.source_children[*parent] = true;
+        }
         self.rebuild();
     }
 
@@ -136,6 +142,47 @@ impl EventTree {
 
     pub fn set_show_api(&mut self, show: bool) {
         self.show_api = show;
+        self.rebuild();
+    }
+
+    pub fn show_empty_regions(&self) -> bool {
+        !self.hide_empty_regions
+    }
+
+    pub fn set_show_empty_regions(&mut self, show: bool) {
+        self.hide_empty_regions = !show;
+        self.rebuild();
+    }
+
+    pub fn row_for_event(&self, event: u32) -> Option<usize> {
+        self.event_ids.iter().position(|id| *id == event)
+    }
+
+    /// Change the expansion state of the filtered subtree, including its root.
+    pub fn set_subtree_collapsed(&mut self, root: usize, collapsed: bool) -> bool {
+        if root >= self.parents.len() || !self.eligible[root] || !self.matching_children[root] {
+            return false;
+        }
+        let mut inside = vec![false; self.parents.len()];
+        inside[root] = true;
+        for index in 0..self.parents.len() {
+            if self.parents[index].is_some_and(|parent| inside[parent]) {
+                inside[index] = true;
+            }
+            if inside[index] && self.eligible[index] && self.matching_children[index] {
+                self.collapsed[index] = collapsed;
+            }
+        }
+        self.rebuild();
+        true
+    }
+
+    pub fn set_all_collapsed(&mut self, collapsed: bool) {
+        for index in 0..self.parents.len() {
+            if self.eligible[index] && self.matching_children[index] {
+                self.collapsed[index] = collapsed;
+            }
+        }
         self.rebuild();
     }
 
@@ -379,6 +426,7 @@ impl EventTree {
                     EventRow::Api { .. } => None,
                 };
                 (self.show_api || index < self.action_count)
+                    && !(self.hide_empty_regions && self.source_children[index])
                     && self.filter.matches(&EventContext {
                         name,
                         lower_name: &self.lower_names[index],
@@ -417,6 +465,41 @@ impl EventTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_regions_and_filtered_subtree_expansion_follow_hierarchy() {
+        let mut root = action(-1);
+        root.event_id = 1;
+        root.name = "main".into();
+        let mut group = action(0);
+        group.event_id = 2;
+        group.name = "nested".into();
+        let mut draw = action(1);
+        draw.event_id = 3;
+        draw.name = "draw".into();
+        let mut other = action(0);
+        other.event_id = 4;
+        other.name = "other".into();
+        let mut tree = EventTree::default();
+        tree.reset(&[root, group, draw, other]);
+        tree.set_filter("nested");
+        assert_eq!(tree.visible, vec![0, 1]);
+        tree.set_show_empty_regions(false);
+        assert!(tree.visible.is_empty());
+        tree.set_filter("draw");
+        assert_eq!(tree.visible, vec![0, 1, 2]);
+        assert!(!tree.directly_matches(0));
+        assert!(tree.set_subtree_collapsed(0, true));
+        assert_eq!(tree.visible, vec![0]);
+        assert!(tree.set_subtree_collapsed(0, false));
+        assert_eq!(tree.visible, vec![0, 1, 2]);
+        assert!(tree.set_subtree_collapsed(1, true));
+        assert_eq!(tree.visible, vec![0, 1]);
+        tree.set_all_collapsed(false);
+        assert_eq!(tree.visible, vec![0, 1, 2]);
+        assert!(!tree.set_subtree_collapsed(2, true));
+        assert_eq!(tree.row_for_event(3), Some(2));
+    }
 
     #[test]
     fn annotation_filter_requires_complete_results_and_supports_groups() {

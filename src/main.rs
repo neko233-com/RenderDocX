@@ -1438,6 +1438,23 @@ impl Workspace {
         })
     }
 
+    fn set_event_expansion(&mut self, collapsed: bool, cx: &mut Context<Self>) {
+        if let Some(index) = self.selected {
+            let is_action = self
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.actions.get(index))
+                .zip(self.pipeline.as_ref())
+                .is_some_and(|(action, pipeline)| action.event_id == pipeline.event_id);
+            if is_action {
+                self.event_tree.set_subtree_collapsed(index, collapsed);
+            }
+        } else {
+            self.event_tree.set_all_collapsed(collapsed);
+        }
+        cx.notify();
+    }
+
     fn watch_event_annotation(
         input: &Entity<InputState>,
         cx: &mut Context<Self>,
@@ -13571,7 +13588,11 @@ impl Workspace {
                             .bg(rgb(0x192332))
                             .rounded_lg()
                             .p_4()
-                            .child(detail_view),
+                            .child(detail_view)
+                            .when(self.tab == CaptureTab::Events, |view| view.child(div().flex().flex_wrap().gap_2()
+                                .child(button("event-expand-subtree", self.t("Expand subtree", "展开分组", "グループを展開", "그룹 펼치기"), false, |this, cx| this.set_event_expansion(false, cx), cx))
+                                .child(button("event-collapse-subtree", self.t("Collapse subtree", "折叠分组", "グループを折りたたむ", "그룹 접기"), false, |this, cx| this.set_event_expansion(true, cx), cx))
+                                .child(button("event-show-empty", self.t("Show empty regions", "显示空分组", "空の領域を表示", "빈 영역 표시"), self.event_tree.show_empty_regions(), |this, cx| { this.event_tree.set_show_empty_regions(!this.event_tree.show_empty_regions()); cx.notify(); }, cx)))),
                     ),
             )
     }
@@ -16545,6 +16566,11 @@ mod ui_tests {
             )
         });
         cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.find("event-toggle-0").visible(),
+                "event group toggle must be visible"
+            );
             window.click("event-toggle-0", cx);
             window.render_frame(cx);
         })
@@ -16559,6 +16585,28 @@ mod ui_tests {
             );
         });
         assert_eq!(*events.lock().unwrap(), vec![42, 77, 43]);
+        cx.update(|cx| view.update(cx, |view, _| view.selected = None));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            reveal_details(window, "event-expand-subtree", cx);
+            window.click("event-expand-subtree", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).event_tree.visible, [0, 1, 2]));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            reveal_details(window, "event-collapse-subtree", cx);
+            window.click("event-collapse-subtree", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            view.update(cx, |view, _| {
+                assert_eq!(view.event_tree.visible, [0, 2]);
+                view.selected = Some(1);
+            })
+        });
         cx.update_window(handle.into(), |_, window, cx| {
             window.click("event-filter", cx);
             window.input("cHiLd", cx);
