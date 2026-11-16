@@ -872,6 +872,15 @@ pub struct PipelineViewport {
     pub max_depth: Option<f32>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PipelineScissor {
+    pub enabled: bool,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Pipeline {
     pub event_id: u32,
@@ -893,6 +902,8 @@ pub struct Pipeline {
     pub vertex_inputs: Option<Vec<VertexInput>>,
     #[serde(default)]
     pub viewports: Option<Vec<PipelineViewport>>,
+    #[serde(default)]
+    pub scissors: Option<Vec<PipelineScissor>>,
 }
 
 #[derive(Deserialize)]

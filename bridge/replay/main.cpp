@@ -817,7 +817,28 @@ void write_pipeline(IReplayController *controller, uint32_t event)
     std::cout << ",\"max_depth\":"; number(viewport.maxDepth);
     std::cout << '}';
   }
-  std::cout << "]}";
+  std::cout << "],\"scissors\":";
+  const rdcarray<Scissor> *scissors = nullptr;
+  if(state.IsCaptureD3D11()) scissors = &controller->GetD3D11PipelineState()->rasterizer.scissors;
+  else if(state.IsCaptureD3D12()) scissors = &controller->GetD3D12PipelineState()->rasterizer.scissors;
+  else if(state.IsCaptureGL()) scissors = &controller->GetGLPipelineState()->rasterizer.scissors;
+  const bool vulkan_scissors = state.IsCaptureVK();
+  if(!scissors && !vulkan_scissors) std::cout << "null";
+  else
+  {
+    const size_t scissor_count = scissors ? scissors->size() : controller->GetVulkanPipelineState()->viewportScissor.viewportScissors.size();
+    std::cout << '[';
+    for(size_t i = 0; i < scissor_count; ++i)
+    {
+      if(i) std::cout << ',';
+      const Scissor &scissor = scissors ? (*scissors)[i] : controller->GetVulkanPipelineState()->viewportScissor.viewportScissors[i].scissor;
+      std::cout << "{\"enabled\":" << (scissor.enabled ? "true" : "false")
+                << ",\"x\":" << scissor.x << ",\"y\":" << scissor.y
+                << ",\"width\":" << scissor.width << ",\"height\":" << scissor.height << '}';
+    }
+    std::cout << ']';
+  }
+  std::cout << '}';
 }
 
 int run(const std::string &capture, bool structure_worker)

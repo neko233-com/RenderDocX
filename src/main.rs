@@ -5292,6 +5292,7 @@ impl Workspace {
         );
         let inputs_label = self.t("Vertex inputs", "顶点输入", "頂点入力", "정점 입력");
         let viewport_label = self.t("Viewports", "视口", "ビューポート", "뷰포트");
+        let scissor_label = self.t("Scissors", "裁剪矩形", "シザー矩形", "시저 사각형");
         let unavailable = self.t("Unavailable", "不可用", "利用不可", "사용할 수 없음");
         let offset_label = self.t("offset", "偏移", "オフセット", "오프셋");
         let stride_label = self.t("stride", "步长", "ストライド", "스트라이드");
@@ -8109,6 +8110,26 @@ impl Workspace {
                             })
                             .collect::<Vec<_>>()
                     });
+                    let scissors = state.scissors.as_ref().map(|scissors| {
+                        scissors
+                            .iter()
+                            .enumerate()
+                            .map(|(slot, scissor)| {
+                                format!(
+                                    "{slot}: ({}, {}) {} × {} · {}",
+                                    scissor.x,
+                                    scissor.y,
+                                    scissor.width,
+                                    scissor.height,
+                                    if scissor.enabled {
+                                        enabled_label
+                                    } else {
+                                        disabled_label
+                                    }
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    });
                     view.child(
                         div()
                             .text_sm()
@@ -8154,16 +8175,34 @@ impl Workspace {
                             |values| values.len().to_string()
                         )
                     ))
+                    .children(viewports.unwrap_or_default().into_iter().enumerate().map(
+                        |(slot, line)| {
+                            div()
+                                .id(("pipeline-viewport", slot))
+                                .test_support()
+                                .text_sm()
+                                .child(line)
+                        },
+                    ))
+                    .child(format!(
+                        "{scissor_label}: {}",
+                        scissors.as_ref().map_or_else(
+                            || unavailable.to_owned(),
+                            |values| values.len().to_string()
+                        )
+                    ))
                     .children(
-                        viewports.unwrap_or_default().into_iter().enumerate().map(
-                            |(slot, line)| {
+                        scissors
+                            .unwrap_or_default()
+                            .into_iter()
+                            .enumerate()
+                            .map(|(slot, line)| {
                                 div()
-                                    .id(("pipeline-viewport", slot))
+                                    .id(("pipeline-scissor", slot))
                                     .test_support()
                                     .text_sm()
                                     .child(line)
-                            },
-                        ),
+                            }),
                     )
                 })
                 .when(self.selected.is_none(), |view| {

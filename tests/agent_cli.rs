@@ -134,6 +134,33 @@ fn real_d3d11_mesh_draw_order() {
         agent.send(&request.to_string())["error"]["code"],
         "mesh_export_failed"
     );
+    let scissor_draw = opened["data"]["capture"]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|action| {
+            action["name"]
+                .as_str()
+                .is_some_and(|name| name.contains("DrawIndexed"))
+        })
+        .last()
+        .unwrap()["event_id"]
+        .as_u64()
+        .unwrap();
+    let scissored =
+        agent.send(&serde_json::json!({"command":"select","event_id":scissor_draw}).to_string());
+    assert_eq!(scissored["ok"], true, "{scissored}");
+    let scissor = &scissored["data"]["pipeline"]["scissors"][0];
+    assert_eq!(scissor["enabled"], true, "{scissored}");
+    assert_eq!(
+        (
+            scissor["x"].as_i64(),
+            scissor["y"].as_i64(),
+            scissor["width"].as_i64(),
+            scissor["height"].as_i64()
+        ),
+        (Some(0), Some(0), Some(1), Some(1))
+    );
     agent.quit();
 }
 
