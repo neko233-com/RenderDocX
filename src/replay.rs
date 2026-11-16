@@ -1912,6 +1912,7 @@ trait Transport: Send {
         _selection: TextureSelection,
         _sample: u32,
         _request: HistogramRequest,
+        _include_histogram: bool,
     ) -> Result<TextureStatistics, String> {
         Err("Texture statistics are not supported by this transport".into())
     }
@@ -2503,6 +2504,7 @@ impl Transport for Process {
         selection: TextureSelection,
         sample: u32,
         request: HistogramRequest,
+        include_histogram: bool,
     ) -> Result<TextureStatistics, String> {
         let input = self.input.as_mut().ok_or("Replay session has closed")?;
         let requested = selection
@@ -2511,7 +2513,12 @@ impl Transport for Process {
             .unwrap_or_else(|| "resolve".into());
         let command = if selection.preview_custom_shader {
             format!(
-                "customstats {index} {} {} {requested} {} {} {} {} {}",
+                "{} {index} {} {} {requested} {} {} {} {} {}",
+                if include_histogram {
+                    "customstats"
+                } else {
+                    "customminmax"
+                },
                 selection.mip,
                 selection.slice,
                 request.min.to_bits(),
@@ -2522,7 +2529,8 @@ impl Transport for Process {
             )
         } else {
             format!(
-                "stats {index} {} {} {requested} {} {} {}{}",
+                "{} {index} {} {} {requested} {} {} {}{}",
+                if include_histogram { "stats" } else { "minmax" },
                 selection.mip,
                 selection.slice,
                 request.min.to_bits(),
@@ -2556,7 +2564,8 @@ impl Transport for Process {
                 && range_min_bits == request.min.to_bits()
                 && range_max_bits == request.max.to_bits()
                 && channel_mask == request.mask()
-                && custom == selection.preview_custom_shader =>
+                && custom == selection.preview_custom_shader
+                && (include_histogram || histogram.is_empty()) =>
             {
                 Ok(TextureStatistics {
                     custom_shader: custom,
@@ -4306,7 +4315,37 @@ impl Session {
         if self.revision.load(Ordering::SeqCst) != revision {
             return Err("Replay selection changed".into());
         }
-        let result = process.texture_statistics(event, index, selection, sample, request)?;
+        let result = process.texture_statistics(event, index, selection, sample, request, true)?;
+        if self.revision.load(Ordering::SeqCst) != revision {
+            return Err("Replay selection changed".into());
+        }
+        Ok(result)
+    }
+
+    /// Fetch only extrema without asking the driver to build a histogram.
+    pub fn texture_minmax(
+        &self,
+        event: u32,
+        index: u32,
+        texture: &Texture,
+        selection: TextureSelection,
+        channels: [bool; 4],
+    ) -> Result<TextureStatistics, String> {
+        selection.validate_pixel(texture, 0, 0)?;
+        let sample = selection
+            .sample
+            .unwrap_or(if texture.samples > 1 { u32::MAX } else { 0 });
+        let revision = self.revision.load(Ordering::SeqCst);
+        let mut process = self.process.lock().map_err(|e| e.to_string())?;
+        if self.revision.load(Ordering::SeqCst) != revision {
+            return Err("Replay selection changed".into());
+        }
+        let request = HistogramRequest {
+            min: 0.0,
+            max: 1.0,
+            channels,
+        };
+        let result = process.texture_statistics(event, index, selection, sample, request, false)?;
         if self.revision.load(Ordering::SeqCst) != revision {
             return Err("Replay selection changed".into());
         }
@@ -4959,9 +4998,16 @@ pub mod test_support {
             selection: TextureSelection,
             sample: u32,
             request: HistogramRequest,
+            include_histogram: bool,
         ) -> Result<TextureStatistics, String> {
-            let mut histogram = vec![0; 256];
-            histogram[64] = 16;
+            let mut histogram = if include_histogram {
+                vec![0; 256]
+            } else {
+                Vec::new()
+            };
+            if include_histogram {
+                histogram[64] = 16;
+            }
             let min = [
                 0.25_f32.to_bits(),
                 0.5_f32.to_bits(),

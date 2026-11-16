@@ -1056,6 +1056,25 @@ fn real_d3d11_mesh_draw_order() {
         invalid_background["error"]["code"], "invalid_arguments",
         "{invalid_background}"
     );
+    let ordinary_fit = agent
+        .send(&serde_json::json!({"command":"texture_fit_range","index":float_index}).to_string());
+    assert_eq!(ordinary_fit["ok"], true, "{ordinary_fit}");
+    assert_eq!(ordinary_fit["data"]["histogram_computed"], false);
+    assert!(
+        ordinary_fit["data"]["statistics"]["histogram"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let ordinary_stats = agent
+        .send(&serde_json::json!({"command":"texture_statistics","index":float_index}).to_string());
+    assert_eq!(ordinary_stats["ok"], true, "{ordinary_stats}");
+    assert!(
+        !ordinary_stats["data"]["statistics"]["histogram"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     let custom_info = agent.send(r#"{"command":"custom_shader_info"}"#);
     assert_eq!(custom_info["ok"], true, "{custom_info}");
     assert!(
@@ -1139,6 +1158,13 @@ fn real_d3d11_mesh_draw_order() {
     );
     let fitted = agent.send(&serde_json::json!({"command":"texture_fit_range","index":float_index,"channels":[true,false,true,false],"preview_custom_shader":true}).to_string());
     assert_eq!(fitted["ok"], true, "{fitted}");
+    assert_eq!(fitted["data"]["histogram_computed"], false);
+    assert!(
+        fitted["data"]["statistics"]["histogram"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(fitted["data"]["range"][0], 1.0);
     assert!(fitted["data"]["range"][1].as_f64().unwrap() > 1.0);
     let custom_stats = agent.send(&serde_json::json!({"command":"texture_statistics","index":float_index,"min":0.0,"max":2.0,"channels":[true,false,true,false],"preview_custom_shader":true}).to_string());

@@ -2319,11 +2319,13 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       std::cout << "]}" << std::endl;
       continue;
     }
-    if(command.compare(0, 6, "stats ") == 0 || command.compare(0, 12, "customstats ") == 0)
+    if(command.compare(0, 6, "stats ") == 0 || command.compare(0, 12, "customstats ") == 0 ||
+       command.compare(0, 7, "minmax ") == 0 || command.compare(0, 13, "customminmax ") == 0)
     {
-      const bool custom_stats = command.compare(0, 12, "customstats ") == 0;
+      const bool minmax_only = command.compare(0, 7, "minmax ") == 0 || command.compare(0, 13, "customminmax ") == 0;
+      const bool custom_stats = command.compare(0, 12, "customstats ") == 0 || command.compare(0, 13, "customminmax ") == 0;
       if(!selected) { error("Select an event before computing texture statistics"); continue; }
-      std::istringstream arguments(command.substr(custom_stats ? 12 : 6));
+      std::istringstream arguments(command.substr(minmax_only ? (custom_stats ? 13 : 7) : (custom_stats ? 12 : 6)));
       std::string index_text, mip_text, slice_text, sample_text, min_text, max_text, mask_text, cast_text, display_cast_text, extra;
       uint64_t index = 0, mip = 0, slice = 0, sample = 0, min_bits = 0, max_bits = 0, mask = 0, cast = 0, display_cast = 0;
       if(!(arguments >> index_text >> mip_text >> slice_text >> sample_text >> min_text >> max_text >> mask_text) ||
@@ -2369,9 +2371,13 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       result = replay.controller->GetFatalErrorStatus();
       if(!result.OK()) { error(result_message(result)); break; }
       const rdcfixedarray<bool, 4> channels = {(mask & 1) != 0, (mask & 2) != 0, (mask & 4) != 0, (mask & 8) != 0};
-      const rdcarray<uint32_t> histogram = replay.controller->GetHistogram(stats_resource, sub, stats_cast, lo, hi, channels);
-      result = replay.controller->GetFatalErrorStatus();
-      if(!result.OK()) { error(result_message(result)); break; }
+      rdcarray<uint32_t> histogram;
+      if(!minmax_only)
+      {
+        histogram = replay.controller->GetHistogram(stats_resource, sub, stats_cast, lo, hi, channels);
+        result = replay.controller->GetFatalErrorStatus();
+        if(!result.OK()) { error(result_message(result)); break; }
+      }
       uint32_t low[4], high[4]; std::memcpy(low, &extrema.first, sizeof(low)); std::memcpy(high, &extrema.second, sizeof(high));
       std::cout << "\nRENDERDOCX/1 {\"type\":\"texture_stats\",\"event_id\":" << selected_event << ",\"index\":" << index
                 << ",\"custom\":" << (custom_stats ? "true" : "false") << ",\"mip\":" << mip << ",\"slice\":" << slice << ",\"sample\":" << actual_sample

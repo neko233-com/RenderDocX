@@ -2615,11 +2615,11 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                                             channels,
                                         };
                                         match selection.validate_pixel(texture, 0, 0).and_then(|_| histogram.validate()) {
-                                            Ok(()) => session.texture_statistics(event, index, texture, selection, histogram)
+                                            Ok(()) => (if command == "texture_fit_range" { session.texture_minmax(event, index, texture, selection, channels) } else { session.texture_statistics(event, index, texture, selection, histogram) })
                                                 .and_then(|stats| {
                                                     if command == "texture_fit_range" {
                                                         let range = renderdocx::texture_view::fit_range(&stats, texture.component_type, selection.analysis_type_cast, texture.component_count, channels).map_err(str::to_owned)?;
-                                                        Ok(json!({"range":range,"statistics":stats,"selection":selection}))
+                                                        Ok(json!({"range":range,"statistics":stats,"histogram_computed":false,"selection":selection}))
                                                     } else { Ok(json!({"statistics":stats,"selection":selection})) }
                                                 })
                                                 .map_err(|error| ("replay_statistics_failed", error)),

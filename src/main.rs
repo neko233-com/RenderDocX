@@ -5995,11 +5995,6 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let request = HistogramRequest {
-            min: 0.0,
-            max: 1.0,
-            channels,
-        };
         let revision = self.open_revision;
         let selection_revision = self.selection_revision;
         let shader_revision = self.texture_custom_revision;
@@ -6017,7 +6012,7 @@ impl Workspace {
         cx.notify();
         let task = cx.background_executor().spawn(async move {
             let stats =
-                session.texture_statistics(event, texture_index, &texture, selection, request)?;
+                session.texture_minmax(event, texture_index, &texture, selection, channels)?;
             let range = renderdocx::texture_view::fit_range(
                 &stats,
                 texture.component_type,
@@ -6051,8 +6046,7 @@ impl Workspace {
                         return;
                     }
                     match result {
-                        Ok((stats, range)) => {
-                            this.statistics = Some(stats);
+                        Ok((_stats, range)) => {
                             this.set_texture_range(range, window, cx);
                         }
                         Err(error) => {
@@ -18168,6 +18162,12 @@ mod ui_tests {
             view.update(cx, |view, _| view.texture_selection.display_range = None);
         });
         cx.update_window(handle.into(), |_, window, cx| {
+            reveal_details(window, "histogram-analyze", cx);
+            window.click("histogram-analyze", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
             reveal_details(window, "texture-histogram", cx);
             assert!(window.find("texture-histogram").visible());
         })
@@ -20098,7 +20098,12 @@ mod ui_tests {
                     );
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
-                cx.update(|cx| view.update(cx, |view, _| view.statistics = None));
+                cx.update(|cx| {
+                    view.update(cx, |view, _| {
+                        view.statistics = None;
+                        view.texture_selection.display_range = None;
+                    })
+                });
                 cx.update_window(handle.into(), |_, window, cx| {
                     reveal_details(window, "texture-fit-range", cx);
                     window.click("texture-fit-range", cx);
@@ -20109,11 +20114,7 @@ mod ui_tests {
                     cx.run_until_parked();
                     if cx.update(|cx| {
                         !view.read(cx).resource_pending
-                            && view
-                                .read(cx)
-                                .statistics
-                                .as_ref()
-                                .is_some_and(|stats| stats.custom_shader)
+                            && view.read(cx).texture_selection.display_range.is_some()
                     }) {
                         break;
                     }
