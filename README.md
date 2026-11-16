@@ -26,7 +26,7 @@ Texture preview and export accept black and white points. The preview uses a hea
 
 Native preview supports independent RGBA channel toggles, vertical flip and linear-as-gamma display. These controls affect preview only; the existing single-channel selection continues to control export. The default preview behavior remains compatible with earlier replay bridges, while the new options require an updated bridge.
 
-Preview can fit the texture or use explicit zoom and pixel offsets for panning. These affect the rendered preview only. A D3D11 capture exercises the zoom and pan path; other APIs remain unverified.
+Preview can fit the texture or use explicit zoom and pixel offsets for panning; scroll over the preview to zoom at the cursor and drag to pan, with rendering refreshed on release. These affect the rendered preview only. A D3D11 capture exercises the zoom and pan path; other APIs remain unverified.
 
 The native preview also exposes RenderDoc's texture debug overlays. Overlay rendering can replay the selected event; RenderDocX restores that event and invalidates dependent cached results afterward. A D3D11 capture verifies draw highlighting, clear-before-draw restoration and rejection of an unavailable overlay. Other overlay modes, graphics APIs and engines still need real-capture validation.
 

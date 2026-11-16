@@ -674,6 +674,7 @@ struct Workspace {
     replay_pending: bool,
     export_pending: bool,
     preview: Option<TexturePreview>,
+    preview_drag: Option<(gpui::Point<gpui::Pixels>, f32, [f32; 2])>,
     live: Option<LiveSession>,
     live_generation: u64,
     live_starting: bool,
@@ -5887,6 +5888,52 @@ impl Workspace {
         cx.notify();
     }
 
+    // RenderDoc's headless output is 512×360; fit centers the selected mip.
+    fn preview_fitted_transform(&self) -> Option<(f32, [f32; 2])> {
+        let texture = self
+            .snapshot
+            .as_ref()?
+            .textures
+            .get(self.selected_texture?)?;
+        let mip = self.texture_selection.mip;
+        let width = texture.width.checked_shr(mip).unwrap_or(0).max(1) as f32;
+        let height = texture.height.checked_shr(mip).unwrap_or(0).max(1) as f32;
+        let scale = (512.0 / width).min(360.0 / height);
+        Some((
+            scale,
+            [
+                (512.0 - width * scale) / 2.0,
+                (360.0 - height * scale) / 2.0,
+            ],
+        ))
+    }
+
+    fn preview_transform(&self) -> Option<(f32, [f32; 2])> {
+        self.texture_selection
+            .preview_scale
+            .map(|scale| (scale, self.texture_selection.preview_offset))
+            .or_else(|| self.preview_fitted_transform())
+    }
+
+    fn finish_preview_drag(
+        &mut self,
+        position: gpui::Point<gpui::Pixels>,
+        factor: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((start, scale, offset)) = self.preview_drag.take() else {
+            return;
+        };
+        let dx = f32::from(position.x - start.x) * factor;
+        let dy = f32::from(position.y - start.y) * factor;
+        if dx.abs() < 1.0 && dy.abs() < 1.0 {
+            return;
+        }
+        self.texture_selection.preview_scale = Some(scale);
+        self.texture_selection.preview_offset = [offset[0] + dx, offset[1] + dy];
+        self.preview_texture(cx);
+    }
+
     fn change_preview_overlay(
         &mut self,
         overlay: renderdocx::texture_overlay::TextureOverlay,
@@ -8795,6 +8842,90 @@ impl Workspace {
             )
     }
 
+    fn texture_preview_image(&self, path: PathBuf, cx: &mut Context<Self>) -> impl IntoElement {
+        let bounds = std::rc::Rc::new(std::cell::Cell::new(Bounds::<gpui::Pixels>::default()));
+        let paint = bounds.clone();
+        let scroll = bounds.clone();
+        let up = bounds.clone();
+        let up_out = bounds.clone();
+        div()
+            .id("texture-preview-image")
+            .test_support()
+            .w_full()
+            .h(px(180.))
+            .on_prepaint(move |bounds, _, _| paint.set(bounds))
+            .on_scroll(cx.listener(move |this, event: &gpui::ScrollEvent, _, cx| {
+                if !this.preview_edit_ready(cx) {
+                    return;
+                }
+                let bounds = scroll.get();
+                let width = f32::from(bounds.size.width);
+                let height = f32::from(bounds.size.height);
+                let display_scale = (width / 512.0).min(height / 360.0);
+                if display_scale <= 0.0 {
+                    return;
+                }
+                let Some((old_scale, old_offset)) = this.preview_transform() else {
+                    return;
+                };
+                let steps = match event.delta {
+                    gpui::ScrollDelta::Lines(delta) => delta.y,
+                    gpui::ScrollDelta::Pixels(delta) => f32::from(delta.y) / 40.0,
+                };
+                if !steps.is_finite() || steps == 0.0 {
+                    return;
+                }
+                let scale = (old_scale * 1.2_f32.powf(steps.clamp(-20.0, 20.0))).clamp(0.1, 256.0);
+                let local_x = f32::from(event.position.x - bounds.origin.x)
+                    - (width - 512.0 * display_scale) / 2.0;
+                let local_y = f32::from(event.position.y - bounds.origin.y)
+                    - (height - 360.0 * display_scale) / 2.0;
+                let anchor = [local_x / display_scale, local_y / display_scale];
+                let ratio = scale / old_scale;
+                this.texture_selection.preview_scale = Some(scale);
+                this.texture_selection.preview_offset = [
+                    anchor[0] - (anchor[0] - old_offset[0]) * ratio,
+                    anchor[1] - (anchor[1] - old_offset[1]) * ratio,
+                ];
+                cx.stop_propagation();
+                this.preview_texture(cx);
+            }))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                    if !this.preview_edit_ready(cx) {
+                        return;
+                    }
+                    if let Some((scale, offset)) = this.preview_transform() {
+                        this.preview_drag = Some((event.position, scale, offset));
+                    }
+                }),
+            )
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, event: &gpui::MouseUpEvent, _, cx| {
+                    let bounds = up.get();
+                    let display_scale = (f32::from(bounds.size.width) / 512.0)
+                        .min(f32::from(bounds.size.height) / 360.0);
+                    if display_scale > 0.0 {
+                        this.finish_preview_drag(event.position, 1.0 / display_scale, cx);
+                    }
+                }),
+            )
+            .on_mouse_up_out(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, event: &gpui::MouseUpEvent, _, cx| {
+                    let bounds = up_out.get();
+                    let display_scale = (f32::from(bounds.size.width) / 512.0)
+                        .min(f32::from(bounds.size.height) / 360.0);
+                    if display_scale > 0.0 {
+                        this.finish_preview_drag(event.position, 1.0 / display_scale, cx);
+                    }
+                }),
+            )
+            .child(img(path).size_full().object_fit(gpui::ObjectFit::Contain))
+    }
+
     fn capture_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.tab == CaptureTab::Annotations && self.annotations.editor.is_none() {
             if let Some((_, doc)) = &self.annotations.notes {
@@ -9209,10 +9340,10 @@ impl Workspace {
         let export_label = self.t("Export PNG", "导出 PNG", "PNG を書き出す", "PNG 내보내기");
         let preview_label = self.t("Preview", "预览", "プレビュー", "미리 보기");
         let preview_note = self.t(
-            "Native RenderDoc texture display, rendered to RGB.",
-            "使用 RenderDoc 原生纹理显示，输出为 RGB。",
-            "RenderDoc のネイティブテクスチャ表示を RGB で描画。",
-            "RenderDoc 기본 텍스처 표시를 RGB로 렌더링합니다.",
+            "Native RenderDoc display. Scroll to zoom; drag and release to pan.",
+            "RenderDoc 原生显示。滚轮缩放，拖动并松开以平移。",
+            "RenderDoc ネイティブ表示。スクロールで拡大縮小、ドラッグして移動。",
+            "RenderDoc 네이티브 표시. 스크롤로 확대/축소하고 드래그 후 놓아 이동합니다.",
         );
         let export_note = self.t(
             "Existing files are never replaced.",
@@ -12569,14 +12700,7 @@ impl Workspace {
                     })
                     .child(div().text_sm().text_color(rgb(0x91a7c0)).child(export_note))
                     .when_some(preview_path, |view, path| {
-                        view.child(
-                            div()
-                                .id("texture-preview-image")
-                                .test_support()
-                                .w_full()
-                                .h(px(180.))
-                                .child(img(path).size_full().object_fit(gpui::ObjectFit::Contain)),
-                        )
+                        view.child(self.texture_preview_image(path, cx))
                         .child(
                             div()
                                 .text_sm()
@@ -14913,6 +15037,7 @@ fn main() {
                         replay_pending: false,
                         export_pending: false,
                         preview: None,
+                        preview_drag: None,
                         live: None,
                         live_generation: 0,
                         live_starting: false,
@@ -14978,6 +15103,64 @@ mod ui_tests {
     use super::*;
     use gpui_kit::InputEvent as PlatformInputEvent;
     use gpui_kit::{ScrollDelta, TestAppContext, base::Root, point, test::TestWindowExt};
+
+    #[inline(never)]
+    fn exercise_texture_preview_gestures(
+        cx: &mut TestAppContext,
+        view: &Entity<Workspace>,
+        handle: gpui::WindowHandle<Root>,
+    ) {
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(-800.))),
+                cx,
+            );
+            assert!(window.find("texture-preview-image").visible());
+            assert!(window.find("texture-preview-image").bounds().size.height > px(0.));
+            reveal_details(window, "texture-preview-image", cx);
+            window.scroll(
+                "texture-preview-image",
+                ScrollDelta::Lines(point(0., 1.)),
+                cx,
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let zoomed_offset = cx.update(|cx| {
+            let selection = view.read(cx).texture_selection;
+            assert!(selection.preview_scale.is_some());
+            selection.preview_offset
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            reveal_details(window, "texture-preview-image", cx);
+            let bounds = window.find("texture-preview-image").bounds();
+            let from = bounds.origin + gpui::point(bounds.size.width / 2., bounds.size.height / 2.);
+            let to = from + gpui::point(px(10.), px(5.));
+            window.drag(from, to, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let offset = view.read(cx).texture_selection.preview_offset;
+            assert!(
+                offset[0] > zoomed_offset[0] && offset[1] > zoomed_offset[1],
+                "before={zoomed_offset:?} after={offset:?} drag={:?}",
+                view.read(cx).preview_drag
+            );
+            assert!(view.read(cx).preview.is_some());
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            reveal_details(window, "texture-view-fit", cx);
+            window.click("texture-view-fit", cx);
+            reveal_details(window, "texture-next-channel", cx);
+            window.click("texture-next-channel", cx);
+        })
+        .unwrap();
+    }
 
     fn reveal_details(window: &mut Window, id: &'static str, cx: &mut App) {
         for _ in 0..60 {
@@ -15257,6 +15440,7 @@ mod ui_tests {
                         replay_pending: false,
                         export_pending: false,
                         preview: None,
+                        preview_drag: None,
                         live: None,
                         live_generation: 0,
                         live_starting: false,
@@ -15796,6 +15980,7 @@ mod ui_tests {
                         replay_pending: false,
                         export_pending: false,
                         preview: None,
+                        preview_drag: None,
                         live: None,
                         live_generation: 0,
                         live_starting: false,
@@ -16228,19 +16413,7 @@ mod ui_tests {
                     .is_some_and(|preview| preview.path.is_file())
             );
         });
-        cx.update_window(handle.into(), |_, window, cx| {
-            window.render_frame(cx);
-            window.scroll(
-                "capture-details-scroll",
-                ScrollDelta::Pixels(point(px(0.), px(-800.))),
-                cx,
-            );
-            assert!(window.find("texture-preview-image").visible());
-            assert!(window.find("texture-preview-image").bounds().size.height > px(0.));
-            reveal_details(window, "texture-next-channel", cx);
-            window.click("texture-next-channel", cx);
-        })
-        .unwrap();
+        exercise_texture_preview_gestures(cx, &view, handle);
         cx.update(|cx| assert!(view.read(cx).preview.is_none()));
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| {
