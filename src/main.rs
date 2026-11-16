@@ -8032,6 +8032,40 @@ impl Workspace {
                             format!("{}: {}", index, if name.is_empty() { "—" } else { name })
                         })
                         .collect::<Vec<_>>();
+                    let attachment_text = |attachment: &renderdocx::replay::PipelineAttachment| {
+                        if !attachment.resource.bound {
+                            return self
+                                .t("Unbound", "未绑定", "未バインド", "바인딩되지 않음")
+                                .to_owned();
+                        }
+                        format!(
+                            "{} · {} · mip {} + {} · {} {} + {}",
+                            self.resource_display_name(
+                                attachment.resource.resource_index,
+                                &attachment.resource.name
+                            ),
+                            attachment.format,
+                            attachment.first_mip,
+                            attachment.mip_count,
+                            self.t("slice", "切片", "スライス", "슬라이스"),
+                            attachment.first_slice,
+                            attachment.slice_count
+                        )
+                    };
+                    let attachments = state.color_attachments.as_ref().map(|items| {
+                        items
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, item)| item.resource.bound)
+                            .map(|(slot, item)| format!("{slot}: {}", attachment_text(item)))
+                            .collect::<Vec<_>>()
+                    });
+                    let depth_attachment = state.depth_attachment.as_ref().map(&attachment_text);
+                    let depth_resolve = state
+                        .depth_resolve_attachment
+                        .as_ref()
+                        .filter(|item| item.resource.bound)
+                        .map(&attachment_text);
                     let index = state
                         .index_buffer
                         .as_ref()
@@ -8299,6 +8333,32 @@ impl Workspace {
                     .children(shaders.into_iter().map(|line| div().text_sm().child(line)))
                     .child(format!("{outputs_label}: {}", outputs.len()))
                     .children(outputs.into_iter().map(|line| div().text_sm().child(line)))
+                    .when_some(attachments, |view, lines| {
+                        view.child(self.t(
+                            "Color attachment views",
+                            "颜色附件视图",
+                            "カラーアタッチメントビュー",
+                            "색상 첨부 뷰",
+                        ))
+                        .children(lines.into_iter().map(|line| div().text_sm().child(line)))
+                    })
+                    .when_some(depth_attachment, |view, text| {
+                        view.child(format!(
+                            "{}: {text}",
+                            self.t(
+                                "Depth attachment",
+                                "深度附件",
+                                "深度アタッチメント",
+                                "깊이 첨부"
+                            )
+                        ))
+                    })
+                    .when_some(depth_resolve, |view, text| {
+                        view.child(format!(
+                            "{}: {text}",
+                            self.t("Depth resolve", "深度解析", "深度リゾルブ", "깊이 리졸브")
+                        ))
+                    })
                     .child(format!("{index_buffer_label}: {index}"))
                     .child(format!(
                         "{vertex_buffers_label}: {}",

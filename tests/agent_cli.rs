@@ -168,6 +168,13 @@ fn real_d3d11_mesh_draw_order() {
     assert!(fixed["stencil_front"]["reference"].is_u64(), "{fixed}");
     assert_eq!(fixed["blend_factor"].as_array().unwrap().len(), 4);
     assert!(!fixed["blends"].as_array().unwrap().is_empty(), "{fixed}");
+    let pipeline = &scissored["data"]["pipeline"];
+    let color = &pipeline["color_attachments"][0];
+    assert_eq!(color["resource"]["bound"], true, "{pipeline}");
+    assert_eq!(color["first_mip"], 0);
+    assert_eq!(color["first_slice"], 0);
+    assert_eq!(color["swizzle"].as_array().unwrap().len(), 4);
+    assert_eq!(pipeline["depth_attachment"]["resource"]["bound"], false);
     agent.quit();
 }
 

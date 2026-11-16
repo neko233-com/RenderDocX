@@ -817,6 +817,23 @@ pub struct PipelineResource {
     pub name: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PipelineAttachment {
+    pub resource: PipelineResource,
+    pub view: PipelineResource,
+    #[serde(rename = "type")]
+    pub descriptor_type: u32,
+    pub flags: u32,
+    pub format: String,
+    pub texture_type: u32,
+    pub first_mip: u32,
+    pub mip_count: u32,
+    pub first_slice: u32,
+    pub slice_count: u32,
+    pub min_lod_clamp: Option<f32>,
+    pub swizzle: [u32; 4],
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct PipelineShader {
     pub stage: String,
@@ -951,6 +968,12 @@ pub struct Pipeline {
     pub restart_index: Option<u32>,
     pub shaders: Vec<PipelineShader>,
     pub outputs: Vec<PipelineResource>,
+    #[serde(default)]
+    pub color_attachments: Option<Vec<PipelineAttachment>>,
+    #[serde(default)]
+    pub depth_attachment: Option<PipelineAttachment>,
+    #[serde(default)]
+    pub depth_resolve_attachment: Option<PipelineAttachment>,
     #[serde(default)]
     pub index_buffer: Option<PipelineBuffer>,
     #[serde(default)]

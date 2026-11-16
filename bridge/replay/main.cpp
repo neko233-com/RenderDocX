@@ -689,6 +689,18 @@ void write_pipeline(IReplayController *controller, uint32_t event)
     else std::cout << "null";
   };
   static const char *names[] = {"vertex", "tess_control", "tess_eval", "geometry", "fragment", "compute", "task", "mesh"};
+  auto attachment = [&](const Descriptor &value) {
+    std::cout << "{\"resource\":{"; resource(value.resource);
+    std::cout << "},\"view\":{"; resource(value.view);
+    std::cout << "},\"type\":" << uint32_t(value.type) << ",\"flags\":" << uint32_t(value.flags) << ",\"format\":";
+    json_string(value.format.Name());
+    std::cout << ",\"texture_type\":" << uint32_t(value.textureType)
+              << ",\"first_mip\":" << uint32_t(value.firstMip) << ",\"mip_count\":" << uint32_t(value.numMips)
+              << ",\"first_slice\":" << uint32_t(value.firstSlice) << ",\"slice_count\":" << uint32_t(value.numSlices)
+              << ",\"min_lod_clamp\":"; number(value.minLODClamp);
+    std::cout << ",\"swizzle\":[" << uint32_t(value.swizzle.red) << ',' << uint32_t(value.swizzle.green) << ','
+              << uint32_t(value.swizzle.blue) << ',' << uint32_t(value.swizzle.alpha) << "]}";
+  };
   std::cout << "{\"event_id\":" << event << ",\"available\":" << (state.IsCaptureLoaded() ? "true" : "false")
             << ",\"topology\":" << uint32_t(state.GetPrimitiveTopology())
             << ",\"multiview_count\":" << state.MultiviewBroadcastCount() << ",\"shaders\":[";
@@ -710,7 +722,11 @@ void write_pipeline(IReplayController *controller, uint32_t event)
     resource(outputs[i].resource);
     std::cout << '}';
   }
-  std::cout << "],\"index_buffer\":";
+  std::cout << "],\"color_attachments\":[";
+  for(size_t i = 0; i < outputs.size(); ++i) { if(i) std::cout << ','; attachment(outputs[i]); }
+  std::cout << "],\"depth_attachment\":"; attachment(state.GetDepthTarget());
+  std::cout << ",\"depth_resolve_attachment\":"; attachment(state.GetDepthResolveTarget());
+  std::cout << ",\"index_buffer\":";
   buffer(state.GetIBuffer());
   std::cout << ",\"restart_enabled\":" << (state.IsRestartEnabled() ? "true" : "false")
             << ",\"restart_index\":" << state.GetRestartIndex();
