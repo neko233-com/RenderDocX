@@ -13880,7 +13880,7 @@ mod ui_tests {
             window.click("buffer-layout-input", cx);
             window.press("ctrl-a", cx);
             window.input(
-                "#pack(std430) struct V { float2 p; uint id; }; V v; ushort q[2]; uint end;",
+                "#pack(cbuffer) struct V { float2 p; uint id; }; V v; ushort q[2]; uint end;",
                 cx,
             );
             window.click("buffer-layout-apply", cx);
@@ -13889,7 +13889,7 @@ mod ui_tests {
         cx.run_until_parked();
         cx.update(|cx| {
             let view = view.read(cx);
-            assert_eq!(view.buffer_layout.as_ref().unwrap().stride(), 24);
+            assert_eq!(view.buffer_layout.as_ref().unwrap().stride(), 40);
             assert_eq!(view.buffer_page_size(), 240);
             assert_eq!(view.buffer_data.as_ref().unwrap().len(), 240);
         });

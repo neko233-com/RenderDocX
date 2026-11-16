@@ -1929,6 +1929,13 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     };
     let content = agent.send(&read("4", 8));
     assert_eq!(content["data"]["hex"], "0000404000004040", "{content}");
+    let cbuffer = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"4", "length":8, "layout":"#pack(cbuffer) float2 position;"}).to_string());
+    assert_eq!(cbuffer["data"]["page"]["packing"], "cbuffer", "{cbuffer}");
+    assert_eq!(
+        cbuffer["data"]["page"]["rows"][0]["fields"][0]["values"][0],
+        serde_json::json!(["3", "3"]),
+        "{cbuffer}"
+    );
     let std430 = agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"4", "length":8, "layout":"#pack(std430) vec2 position;"}).to_string());
     assert_eq!(std430["data"]["page"]["packing"], "std430", "{std430}");
     assert_eq!(
@@ -1980,7 +1987,7 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         serde_json::json!(["3", "3"]),
         "{layout_page}"
     );
-    assert_eq!(agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"4", "length":8, "layout":"#pack(std140) float2 pos;"}).to_string())["error"]["code"], "invalid_layout");
+    assert_eq!(agent.send(&serde_json::json!({"command":"decode_buffer_layout", "index":vertex_index, "offset":"4", "length":8, "layout":"#pack(unknown) float2 pos;"}).to_string())["error"]["code"], "invalid_layout");
     let decoded = agent.send(&serde_json::json!({"command":"decode_buffer", "index":vertex_index, "offset":"4", "length":8, "format":"float"}).to_string());
     assert_eq!(
         decoded["data"]["page"]["values"][0]["offset"], "4",

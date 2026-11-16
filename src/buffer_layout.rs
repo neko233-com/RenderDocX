@@ -25,13 +25,29 @@ enum Packing {
     Scalar,
     Structured,
     Std430,
+    Std140,
+    CBuffer,
 }
 impl Packing {
+    fn tight_arrays(self) -> bool {
+        !matches!(self, Self::Std140 | Self::CBuffer)
+    }
+    fn vector_align_component(self) -> bool {
+        !matches!(self, Self::Std140 | Self::Std430)
+    }
+    fn vector_straddle(self) -> bool {
+        matches!(self, Self::Scalar | Self::Structured)
+    }
+    fn trailing_overlap(self) -> bool {
+        matches!(self, Self::Scalar | Self::CBuffer)
+    }
     fn name(self) -> &'static str {
         match self {
             Self::Scalar => "scalar",
             Self::Structured => "structured",
             Self::Std430 => "std430",
+            Self::Std140 => "std140",
+            Self::CBuffer => "cbuffer",
         }
     }
 }
@@ -41,6 +57,7 @@ pub struct Layout {
     fields: Vec<Field>,
     stride: usize,
     alignment: usize,
+    natural_alignment: usize,
     used: usize,
     packing: Packing,
 }
@@ -160,6 +177,8 @@ impl Layout {
                 Some("scalar") => Packing::Scalar,
                 Some("structured" | "d3duav" | "uav" | "c") => Packing::Structured,
                 Some("std430" | "ssbo") => Packing::Std430,
+                Some("std140" | "ubo" | "gl" | "gles" | "opengl" | "glsl") => Packing::Std140,
+                Some("cbuffer" | "d3dcbuffer" | "cb") => Packing::CBuffer,
                 _ => return Err("Unsupported packing directive".into()),
             };
             i = 5;
@@ -186,7 +205,12 @@ impl Layout {
             if tokens.get(end + 1) != Some(&";") {
                 return Err("Expected semicolon after struct".into());
             }
-            let layout = Arc::new(Self::parse_body(&tokens[body..end], &definitions, packing)?);
+            let layout = Arc::new(Self::parse_body(
+                &tokens[body..end],
+                &definitions,
+                packing,
+                true,
+            )?);
             definitions.insert(name, layout.clone());
             last = Some(layout);
             i = end + 2;
@@ -196,19 +220,21 @@ impl Layout {
                 .map(|layout| (*layout).clone())
                 .ok_or_else(|| "Layout must contain fields".into());
         }
-        Self::parse_body(&tokens[i..], &definitions, packing)
+        Self::parse_body(&tokens[i..], &definitions, packing, false)
     }
 
     fn parse_body(
         t: &[&str],
         definitions: &HashMap<&str, Arc<Layout>>,
         packing: Packing,
+        is_struct: bool,
     ) -> Result<Self, String> {
         let mut i = 0;
         let mut fields = Vec::new();
         let mut names = HashSet::new();
         let mut cursor = 0usize;
         let mut alignment = 1usize;
+        let mut last_full_end = 0usize;
         while i < t.len() {
             let mut specified_offset = None;
             let mut padding = false;
@@ -302,7 +328,7 @@ impl Layout {
                 }
                 i += 1;
                 if !padding {
-                    alignment = alignment.max(nested.alignment);
+                    alignment = alignment.max(nested.natural_alignment);
                 }
                 cursor = align(cursor, nested.alignment).ok_or("Layout size overflow")?;
                 if let Some(offset) = specified_offset {
@@ -311,16 +337,21 @@ impl Layout {
                     }
                     cursor = offset;
                 }
-                let mut size = nested
+                let full_size = nested
                     .stride
                     .checked_mul(count)
                     .ok_or("Layout size overflow")?;
-                if packing == Packing::Scalar {
-                    size = size
+                let size = if packing.trailing_overlap() {
+                    full_size
                         .checked_sub(nested.stride - nested.used)
-                        .ok_or("Layout size overflow")?;
-                }
+                        .ok_or("Layout size overflow")?
+                } else {
+                    full_size
+                };
                 if !padding {
+                    last_full_end = cursor
+                        .checked_add(full_size)
+                        .ok_or("Layout size overflow")?;
                     fields.push(Field {
                         name: name.to_owned(),
                         format: ScalarFormat::Bool,
@@ -451,7 +482,7 @@ impl Layout {
             } else {
                 components
             };
-            let vector_alignment = if packing == Packing::Std430 {
+            let vector_alignment = if !packing.vector_align_component() {
                 width
                     .checked_mul(if vector_size >= 3 {
                         4
@@ -464,8 +495,6 @@ impl Layout {
             } else {
                 width
             };
-            // RenderDoc uses four-byte placement for packed elements but computes enclosing
-            // structure alignment from the underlying vector type.
             let element_alignment = if packed.is_some() {
                 4
             } else {
@@ -475,19 +504,22 @@ impl Layout {
                 alignment = alignment.max(vector_alignment);
             }
             cursor = align(cursor, element_alignment).ok_or("Layout size overflow")?;
-            let vector_stride = if packed.is_some() {
+            if !packing.tight_arrays() && (count > 1 || matrix_rows > 1) {
+                cursor = align(cursor, 16).ok_or("Layout size overflow")?;
+            }
+            let element_size = if packed.is_some() {
                 4
-            } else if packing == Packing::Std430 {
-                vector_alignment
-            } else {
-                width
+            } else if packing.vector_align_component() {
+                element_alignment
                     .checked_mul(vector_size)
                     .ok_or("Layout size overflow")?
+            } else {
+                element_alignment
             };
-            if packing == Packing::Std430
+            if !packing.vector_straddle()
                 && cursor / 16
                     != cursor
-                        .checked_add(vector_stride - 1)
+                        .checked_add(element_size - 1)
                         .ok_or("Layout size overflow")?
                         / 16
             {
@@ -499,24 +531,52 @@ impl Layout {
                 }
                 cursor = offset;
             }
-            let array_stride = if packed.is_some() {
+            let mut vector_stride = if packed.is_some() {
                 4
-            } else if matrix_rows > 1 {
-                vector_stride
-                    .checked_mul(if row_major { matrix_rows } else { components })
-                    .ok_or("Layout size overflow")?
-            } else if components > 1 {
-                vector_stride
+            } else if components > 1 || matrix_rows > 1 {
+                element_size
             } else {
                 element_alignment
             };
+            if !packing.tight_arrays() {
+                vector_stride = vector_stride.max(16);
+            }
+            let array_stride = if matrix_rows > 1 {
+                vector_stride
+                    .checked_mul(if row_major { matrix_rows } else { components })
+                    .ok_or("Layout size overflow")?
+            } else {
+                vector_stride
+            };
             let matrix_stride = if matrix_rows > 1 { vector_stride } else { 0 };
-            let size = if count > 1 || matrix_rows > 1 || packed.is_some() {
+            let full_size = if count > 1 {
                 array_stride.checked_mul(count)
+            } else if matrix_rows > 1 {
+                Some(array_stride)
+            } else if packed.is_some() {
+                Some(4)
             } else {
                 width.checked_mul(components)
             }
             .ok_or("Layout size overflow")?;
+            let size = if packing.trailing_overlap()
+                && !packing.tight_arrays()
+                && (count > 1 || matrix_rows > 1)
+            {
+                let padding = 16usize
+                    .checked_sub(element_size)
+                    .ok_or("Wide cbuffer array or matrix is not supported")?;
+                full_size
+                    .checked_sub(padding)
+                    .ok_or("Layout size overflow")?
+            } else {
+                full_size
+            };
+            if !padding {
+                last_full_end = cursor
+                    .checked_add(full_size)
+                    .ok_or("Layout size overflow")?;
+            }
             if !padding {
                 fields.push(Field {
                     name: name.to_owned(),
@@ -537,11 +597,21 @@ impl Layout {
         if fields.is_empty() {
             return Err("Layout must contain fields".into());
         }
-        let stride = align(cursor, alignment).ok_or("Layout size overflow")?;
+        let natural_alignment = alignment;
+        if is_struct && !packing.tight_arrays() {
+            alignment = 16;
+        }
+        let end = if is_struct {
+            cursor
+        } else {
+            cursor.max(last_full_end)
+        };
+        let stride = align(end, alignment).ok_or("Layout size overflow")?;
         Ok(Self {
             fields,
             stride,
             alignment,
+            natural_alignment,
             used: cursor,
             packing,
         })
@@ -584,7 +654,7 @@ impl Layout {
                 let mut values = Vec::new();
                 for item in 0..field.count {
                     if let Some(packed) = field.packed {
-                        let start = field_start + item * 4;
+                        let start = field_start + item * field.array_stride;
                         values.push(packed.decode(u32::from_le_bytes(
                             bytes[start..start + 4].try_into().unwrap(),
                         )));
@@ -637,6 +707,54 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn std140_and_cbuffer_align_arrays_matrices_and_structs() {
+        let std = Layout::parse("#pack(std140) float a; float2 b; float c[2]; mat2x3 m;").unwrap();
+        assert_eq!(
+            std.fields.iter().map(|f| f.offset).collect::<Vec<_>>(),
+            [0, 8, 16, 48]
+        );
+        assert_eq!(std.stride(), 80);
+        let mut bytes = vec![0; 80];
+        for (at, value) in [
+            (16, 1f32),
+            (32, 2.),
+            (48, 3.),
+            (52, 4.),
+            (56, 5.),
+            (64, 6.),
+            (68, 7.),
+            (72, 8.),
+        ] {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        let page = std.decode(0, &bytes).unwrap();
+        assert_eq!(page.rows[0].fields[2].values, [["1"], ["2"]]);
+        assert_eq!(
+            page.rows[0].fields[3].values[0],
+            ["3", "6", "4", "7", "5", "8"]
+        );
+        let cb = Layout::parse("#pack(cbuffer) float3 p; float2 q; float a[2]; float b;").unwrap();
+        assert_eq!(
+            cb.fields.iter().map(|f| f.offset).collect::<Vec<_>>(),
+            [0, 16, 32, 52]
+        );
+        assert_eq!(cb.stride(), 56);
+        let cb_tail = Layout::parse("#pack(cb) float a[2];").unwrap();
+        assert_eq!(cb_tail.stride(), 32);
+        let nested = Layout::parse("#pack(ubo) struct A { float x; }; A a; float b;").unwrap();
+        assert_eq!(nested.fields[1].offset, 16);
+        assert_eq!(nested.stride(), 20);
+        let packed = Layout::parse("#pack(cb) [[packed(r10g10b10a2_uint)]] uint4 p[2];").unwrap();
+        let mut data = vec![0; 32];
+        data[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(
+            packed.decode(0, &data).unwrap().rows[0].fields[0].values[1],
+            ["1023", "1023", "1023", "3"]
+        );
+        assert!(Layout::parse("#pack(cb) double3 a[2];").is_err());
+    }
+
     #[test]
     fn structured_and_std430_packing_follow_upstream_layouts() {
         let scalar = Layout::parse("struct A { ushort x; ubyte y; }; A a; ubyte b;").unwrap();
@@ -717,8 +835,8 @@ mod tests {
         );
         let unaligned =
             Layout::parse("struct A { ushort x; ubyte y; }; [[offset(1)]] A a;").unwrap();
-        assert_eq!(unaligned.stride(), 4);
-        let page = unaligned.decode(0, &[0, 2, 0, 3]).unwrap();
+        assert_eq!(unaligned.stride(), 6);
+        let page = unaligned.decode(0, &[0, 2, 0, 3, 0, 0]).unwrap();
         assert_eq!(page.rows[0].fields[0].values[0][0], "2");
         assert_eq!(page.rows[0].fields[1].values[0][0], "3");
         for bad in [
@@ -837,7 +955,7 @@ mod tests {
             "",
             "float x",
             "float x[];",
-            "#pack(std140) float x;",
+            "#pack(invalid) float x;",
             "float x; float x;",
             "struct S {};",
             "/*",
