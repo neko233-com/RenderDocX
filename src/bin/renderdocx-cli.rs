@@ -117,6 +117,17 @@ impl AgentDebugTimeline {
     }
 }
 
+fn custom_shader_processor(
+    request: &serde_json::Map<String, Value>,
+) -> Result<Option<renderdocx::shader_processor::ShaderProcessor>, String> {
+    match request.get("processor") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => serde_json::from_value(value.clone())
+            .map(Some)
+            .map_err(|error| error.to_string()),
+    }
+}
+
 fn usage() -> Value {
     let mut capabilities = json!({"schema":"renderdocx.cli.v1","ok":true,"commands":[
         {"name":"inspect","arguments":["capture.rdc"],"description":"Open a capture and return its action tree and resource counts."},
@@ -401,21 +412,13 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                 match (&opened, request.get("name").and_then(Value::as_str)) {
                     (None, _) => Err(("no_capture", "No capture is open".into())),
                     (Some((session, _)), Some(name)) => {
-                        renderdocx::custom_shaders::ShaderStore::new()
-                            .and_then(|store| store.get(name))
-                            .and_then(|shader| {
-                                shader.source().and_then(|source| {
-                                    session.custom_shader_build(
-                                        shader.encoding,
-                                        &shader.entry,
-                                        &source,
-                                        shader.apply_prefix,
-                                        &shader.flags,
-                                    )
-                                })
-                            })
-                            .map(|result| json!({"result":result}))
-                            .map_err(|error| ("custom_shader_failed", error))
+                        custom_shader_processor(&request).map_err(|error| ("invalid_arguments", error)).and_then(|processor| {
+                            renderdocx::custom_shaders::ShaderStore::new()
+                                .and_then(|store| store.get(name))
+                                .and_then(|shader| shader.source().and_then(|source| renderdocx::custom_shaders::build(session, shader.encoding, &shader.entry, &source, shader.apply_prefix, &shader.flags, processor.as_ref())))
+                                .map(|(result, processor_diagnostics)| json!({"result":result,"processor_diagnostics":processor_diagnostics}))
+                                .map_err(|error| ("custom_shader_failed", error))
+                        })
                     }
                     _ => Err(("invalid_arguments", "name must be a string".into())),
                 }
@@ -2109,10 +2112,11 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         Some(Value::Bool(value)) => Some(*value),
                         _ => None,
                     };
-                    match (encoding, entry, source, prefix, flags) {
-                            (Some(encoding), Some(entry), Some(source), Some(prefix), Ok(flags)) if !source.is_empty() => session.custom_shader_build(encoding, entry, &source, prefix, flags.as_deref().unwrap_or(&[])).map(|result| json!({"result":result})).map_err(|error| ("custom_shader_failed", error)),
-                            _ => Err(("invalid_arguments", "custom_shader_build requires encoding, entry and exactly one nonempty source or source_hex".into())),
-                        }
+                    let processor = custom_shader_processor(&request);
+                    match (encoding, entry, source, prefix, flags, processor) {
+                        (Some(encoding), Some(entry), Some(source), Some(prefix), Ok(flags), Ok(processor)) if !source.is_empty() => renderdocx::custom_shaders::build(session, encoding, entry, &source, prefix, flags.as_deref().unwrap_or(&[]), processor.as_ref()).map(|(result, processor_diagnostics)| json!({"result":result,"processor_diagnostics":processor_diagnostics})).map_err(|error| ("custom_shader_failed", error)),
+                        _ => Err(("invalid_arguments", "custom_shader_build requires encoding, entry, valid processor and exactly one nonempty source or source_hex".into())),
+                    }
                 }
             },
             "shader_apply" | "shader_revert" => {

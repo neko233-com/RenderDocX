@@ -6193,19 +6193,39 @@ impl Workspace {
         let source = source.unwrap_or_default();
         let flags = self.texture_custom_flags.clone();
         let prefix = self.texture_custom_prefix;
+        let processor = encoding.and_then(|encoding| {
+            if self.texture_custom_encodings.contains(&encoding) {
+                return None;
+            }
+            self.settings
+                .shader_processors
+                .iter()
+                .find(|config| {
+                    config.validate().is_ok()
+                        && config.processor.input_encoding == encoding
+                        && self
+                            .texture_custom_encodings
+                            .contains(&config.processor.output_encoding)
+                })
+                .map(|config| config.processor.clone())
+        });
         self.resource_pending = true;
         let revision = self.open_revision;
         let task = cx.background_executor().spawn(async move {
             if clear {
-                session.custom_shader_clear()
+                session
+                    .custom_shader_clear()
+                    .map(|result| (result, String::new()))
             } else {
                 let encoding = encoding.unwrap();
-                session.custom_shader_build(
+                renderdocx::custom_shaders::build(
+                    &session,
                     encoding,
                     &entry,
                     &source,
                     prefix.unwrap_or(matches!(encoding, 2 | 5 | 9)),
                     &flags,
+                    processor.as_ref(),
                 )
             }
         });
@@ -6217,9 +6237,14 @@ impl Workspace {
                 }
                 this.resource_pending = false;
                 match result {
-                    Ok(result) => {
+                    Ok((result, processor_diagnostics)) => {
                         this.texture_custom_active = result.active;
-                        this.texture_custom_diagnostics = result.diagnostics;
+                        this.texture_custom_diagnostics =
+                            [processor_diagnostics, result.diagnostics]
+                                .into_iter()
+                                .filter(|s| !s.is_empty())
+                                .collect::<Vec<_>>()
+                                .join("\n");
                         if clear {
                             this.texture_selection.preview_custom_shader = false;
                             this.normalize_texture_channel();
@@ -16324,6 +16349,44 @@ mod ui_tests {
                     && !view.read(cx).texture_selection.preview_custom_shader
             )
         });
+        if let Some(executable) = std::env::var_os("RENDERDOCX_TEST_SHADER_PROCESSOR") {
+            cx.update_window(handle.into(), |_, window, cx| {
+                view.update(cx, |view, cx| {
+                    view.settings.shader_processors.push(
+                        renderdocx::shader_processor::NamedShaderProcessor {
+                            name: "test custom processor".into(),
+                            processor: renderdocx::shader_processor::ShaderProcessor {
+                                executable: executable.into(),
+                                input_encoding: 4,
+                                output_encoding: 5,
+                                arguments: vec!["{stdin}".into()],
+                                timeout_ms: None,
+                            },
+                        },
+                    );
+                    view.texture_custom_encoding
+                        .update(cx, |input, cx| input.set_value("4", window, cx));
+                });
+                reveal_details(window, "texture-custom-build", cx);
+                window.click("texture-custom-build", cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.update(|cx| {
+                assert!(view.read(cx).texture_custom_active);
+                assert!(
+                    view.read(cx)
+                        .texture_custom_diagnostics
+                        .contains("fixture compiler diagnostics")
+                );
+            });
+            cx.update_window(handle.into(), |_, window, cx| {
+                reveal_details(window, "texture-custom-clear", cx);
+                window.click("texture-custom-clear", cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+        }
         cx.update_window(handle.into(), |_, window, cx| {
             reveal_details(window, "texture-custom-editor", cx);
             window.click("texture-custom-editor", cx);

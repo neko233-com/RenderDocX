@@ -1083,6 +1083,39 @@ fn real_d3d11_mesh_draw_order() {
         imported_build["data"]["result"]["compiled"], true,
         "{imported_build}"
     );
+    if let Some(executable) = std::env::var_os("RENDERDOCX_TEST_SHADER_PROCESSOR") {
+        let processor = serde_json::json!({"executable":executable.to_string_lossy(),"input_encoding":4,"output_encoding":5,"arguments":["{stdin}"]});
+        let request = serde_json::json!({"command":"custom_shader_build","encoding":4,"entry":"main","source":shader,"apply_prefix":false,"processor":processor});
+        let processed = agent.send(&request.to_string());
+        assert_eq!(processed["data"]["result"]["compiled"], true, "{processed}");
+        assert!(
+            processed["data"]["processor_diagnostics"]
+                .as_str()
+                .unwrap()
+                .contains("fixture compiler diagnostics")
+        );
+        let record = serde_json::json!({"command":"custom_shader_library_save","shader":{"name":"processor shader","encoding":4,"entry":"main","source_hex":renderdocx::custom_shaders::encode_hex(shader.as_bytes()),"flags":[],"apply_prefix":false}});
+        assert_eq!(agent.send(&record.to_string())["ok"], true);
+        let library = agent.send(&serde_json::json!({"command":"custom_shader_library_build","name":"processor shader","processor":processor}).to_string());
+        assert_eq!(library["data"]["result"]["compiled"], true, "{library}");
+        let mut failure = request.clone();
+        failure["processor"]["arguments"] = serde_json::json!(["--fail"]);
+        let failure = agent.send(&failure.to_string());
+        assert_eq!(
+            failure["error"]["code"], "custom_shader_failed",
+            "{failure}"
+        );
+        assert_eq!(
+            agent.send(r#"{"command":"custom_shader_info"}"#)["data"]["info"]["active"],
+            true
+        );
+        let mut invalid = request.clone();
+        invalid["processor"]["output_encoding"] = 999.into();
+        assert_eq!(
+            agent.send(&invalid.to_string())["error"]["code"],
+            "custom_shader_failed"
+        );
+    }
     let saved = agent.send(&serde_json::json!({"command":"custom_shader_library_save","shader":{"name":"fixture shader","encoding":5,"entry":"main","source_hex":renderdocx::custom_shaders::encode_hex(shader.as_bytes()),"flags":[],"apply_prefix":true}}).to_string());
     assert_eq!(saved["ok"], true, "{saved}");
     let library_build =

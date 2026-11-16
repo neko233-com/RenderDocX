@@ -131,6 +131,72 @@ pub fn import_renderdoc_directory(
     Ok(results)
 }
 
+/// Apply RenderDoc's source prefix before invoking the external compiler.
+pub fn processor_input(
+    info: &crate::replay::CustomShaderInfo,
+    encoding: u32,
+    source: &[u8],
+    apply_prefix: bool,
+) -> Vec<u8> {
+    let prefix = if apply_prefix {
+        info.prefixes
+            .iter()
+            .find(|p| p.encoding == encoding)
+            .map(|p| p.prefix.as_bytes())
+            .unwrap_or_default()
+    } else {
+        &[]
+    };
+    let mut result = Vec::with_capacity(prefix.len() + source.len());
+    result.extend_from_slice(prefix);
+    result.extend_from_slice(source);
+    result
+}
+
+/// Compile through an explicitly configured processor or directly through RenderDoc.
+/// Processor errors do not replace the current active shader.
+pub fn build(
+    session: &crate::replay::Session,
+    encoding: u32,
+    entry: &str,
+    source: &[u8],
+    apply_prefix: bool,
+    flags: &[ShaderCompileFlag],
+    processor: Option<&crate::shader_processor::ShaderProcessor>,
+) -> Result<(crate::replay::CustomShaderBuild, String), String> {
+    if !(1..=9).contains(&encoding) || entry.is_empty() || entry.contains('\0') || source.is_empty()
+    {
+        return Err("Invalid custom shader request".into());
+    }
+    let Some(processor) = processor else {
+        return session
+            .custom_shader_build(encoding, entry, source, apply_prefix, flags)
+            .map(|result| (result, String::new()));
+    };
+    if processor.input_encoding != encoding {
+        return Err("Processor input encoding does not match source encoding".into());
+    }
+    let info = session.custom_shader_info()?;
+    if !info.encodings.contains(&processor.output_encoding) {
+        return Err("Processor output encoding is unsupported for custom shaders".into());
+    }
+    let input = processor_input(&info, encoding, source, apply_prefix);
+    let spirv = flags
+        .iter()
+        .find(|flag| flag.name == "@spirver")
+        .map(|flag| flag.value.as_str())
+        .unwrap_or("");
+    let output = crate::shader_processor::run(processor, &input, 4, entry, spirv)?;
+    let result = session.custom_shader_build(
+        processor.output_encoding,
+        entry,
+        &output.bytes,
+        false,
+        flags,
+    )?;
+    Ok((result, output.diagnostics))
+}
+
 pub struct ShaderStore(FormatStore);
 impl ShaderStore {
     pub fn new() -> Result<Self, String> {
@@ -183,6 +249,24 @@ impl ShaderStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn processor_gets_input_encoding_prefix_once() {
+        let info = crate::replay::CustomShaderInfo {
+            active: false,
+            encodings: vec![5],
+            prefixes: vec![crate::replay::CustomShaderPrefix {
+                encoding: 2,
+                prefix: "prefix\n".into(),
+            }],
+        };
+        assert_eq!(
+            processor_input(&info, 2, b"source", true),
+            b"prefix\nsource"
+        );
+        assert_eq!(processor_input(&info, 2, b"source", false), b"source");
+        assert_eq!(processor_input(&info, 5, b"source", true), b"source");
+    }
+
     #[test]
     fn imports_upstream_sources_without_overwriting_or_touching_files() {
         let root = tempfile::tempdir().unwrap();
