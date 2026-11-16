@@ -68,6 +68,10 @@ fn usage() -> Value {
         .as_array_mut()
         .expect("capabilities commands")
         .push(json!("step_action"));
+    capabilities["serve_commands"]
+        .as_array_mut()
+        .expect("capabilities commands")
+        .push(json!("debug_mesh"));
     capabilities
 }
 
@@ -1422,7 +1426,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     _ => Err(("invalid_arguments", "debug_pixel requires x and y and optional sample, primitive and view as unsigned integers; use null for no preference".into())),
                 }
             }
-            "debug_compute" => {
+            "debug_compute" | "debug_mesh" => {
                 let dimensions = |key: &str| {
                     request
                         .get(key)
@@ -1438,12 +1442,12 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     (None, _, _, _) => Err(("no_capture", "No capture is open".into())),
                     (Some(_), None, _, _) => Err((
                         "no_event",
-                        "Select a compute dispatch before debugging".into(),
+                        "Select a dispatch before debugging".into(),
                     )),
                     (Some((session, _)), Some(event), Some(group), Some(thread)) => {
                         mesh_selection = None;
-                        session
-                            .debug_compute(ComputeDebugSelection { group, thread })
+                        let selection = ComputeDebugSelection { group, thread };
+                        (if command == "debug_mesh" { session.debug_mesh(selection) } else { session.debug_compute(selection) })
                             .and_then(|trace| {
                                 if trace.event_id == event {
                                     Ok(json!({"trace":trace}))
@@ -1455,7 +1459,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     }
                     _ => Err((
                         "invalid_arguments",
-                        "debug_compute requires group and thread arrays of three unsigned integers"
+                        "debug_compute and debug_mesh require group and thread arrays of three unsigned integers"
                             .into(),
                     )),
                 }
@@ -2460,7 +2464,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
         };
         if let Ok(data) = &result {
             match command {
-                "debug_vertex" | "debug_pixel" | "debug_compute" => {
+                "debug_vertex" | "debug_pixel" | "debug_compute" | "debug_mesh" => {
                     pending_debug = data
                         .get("trace")
                         .cloned()
@@ -2476,8 +2480,10 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                 }
                 _ => {}
             }
-        } else if matches!(command, "debug_vertex" | "debug_pixel" | "debug_compute")
-            && matches!(&result, Err(("replay_debug_failed", _)))
+        } else if matches!(
+            command,
+            "debug_vertex" | "debug_pixel" | "debug_compute" | "debug_mesh"
+        ) && matches!(&result, Err(("replay_debug_failed", _)))
         {
             // The bridge may have replaced an earlier trace before a failed start.
             pending_debug = None;

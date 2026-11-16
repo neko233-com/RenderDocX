@@ -803,6 +803,8 @@ pub struct ComputeDebugSelection {
     pub thread: [u32; 3],
 }
 
+pub type MeshDebugSelection = ComputeDebugSelection;
+
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Buffer {
     pub name: String,
@@ -1799,6 +1801,9 @@ trait Transport: Send {
     }
     fn debug_compute(&mut self, _selection: ComputeDebugSelection) -> Result<DebugTrace, String> {
         Err("Shader debugging is not supported by this transport".into())
+    }
+    fn debug_mesh(&mut self, _selection: MeshDebugSelection) -> Result<DebugTrace, String> {
+        Err("Mesh shader debugging is not supported by this transport".into())
     }
     fn debug_next(&mut self) -> Result<DebugStates, String> {
         Err("Shader debugging is not supported by this transport".into())
@@ -2958,6 +2963,20 @@ impl Transport for Process {
         }
     }
 
+    fn debug_mesh(&mut self, selection: MeshDebugSelection) -> Result<DebugTrace, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        let [gx, gy, gz] = selection.group;
+        let [tx, ty, tz] = selection.thread;
+        writeln!(input, "debug_mesh {gx} {gy} {gz} {tx} {ty} {tz}")
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::DebugStarted(trace) if trace.stage == 7 => Ok(trace),
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected mesh shader debug response".into()),
+        }
+    }
+
     fn debug_next(&mut self) -> Result<DebugStates, String> {
         let input = self.input.as_mut().ok_or("Replay session has closed")?;
         writeln!(input, "debug_next")
@@ -3735,6 +3754,13 @@ impl Session {
             .lock()
             .map_err(|e| e.to_string())?
             .debug_compute(selection)
+    }
+
+    pub fn debug_mesh(&self, selection: MeshDebugSelection) -> Result<DebugTrace, String> {
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .debug_mesh(selection)
     }
 
     pub fn debug_next(&self) -> Result<DebugStates, String> {
@@ -4782,6 +4808,68 @@ mod tests {
         };
         assert_eq!(make(false).counter_all(1).unwrap().len(), 129);
         assert!(make(true).counter_all(1).is_err());
+    }
+
+    #[test]
+    fn mesh_debug_forwards_coordinates_and_trace_lifecycle() {
+        struct Fake {
+            calls: Arc<Mutex<Vec<String>>>,
+        }
+        impl Transport for Fake {
+            fn select(&mut self, _: u32) -> Result<Pipeline, String> {
+                Err("Unexpected selection".into())
+            }
+            fn debug_mesh(&mut self, selection: MeshDebugSelection) -> Result<DebugTrace, String> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("{:?}:{:?}", selection.group, selection.thread));
+                Ok(DebugTrace {
+                    event_id: 42,
+                    stage: 7,
+                    inputs: vec![],
+                    constant_blocks: vec![],
+                    read_only_resources: vec![],
+                    read_write_resources: vec![],
+                    samplers: vec![],
+                    source_variables: vec![],
+                    instructions: vec![],
+                })
+            }
+            fn debug_next(&mut self) -> Result<DebugStates, String> {
+                self.calls.lock().unwrap().push("next".into());
+                Ok(DebugStates {
+                    event_id: 42,
+                    finished: true,
+                    states: vec![],
+                })
+            }
+            fn debug_stop(&mut self) -> Result<(), String> {
+                self.calls.lock().unwrap().push("stop".into());
+                Ok(())
+            }
+        }
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let session = Session {
+            process: Arc::new(Mutex::new(Box::new(Fake {
+                calls: calls.clone(),
+            }))),
+            revision: Arc::new(AtomicU64::new(0)),
+            remote_url: None,
+        };
+        let trace = session
+            .debug_mesh(MeshDebugSelection {
+                group: [1, 2, 3],
+                thread: [4, 5, 6],
+            })
+            .unwrap();
+        assert_eq!((trace.event_id, trace.stage), (42, 7));
+        assert!(session.debug_next().unwrap().finished);
+        session.debug_stop().unwrap();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["[1, 2, 3]:[4, 5, 6]", "next", "stop"]
+        );
     }
 
     #[test]

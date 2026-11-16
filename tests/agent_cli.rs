@@ -619,6 +619,13 @@ fn capabilities_advertises_versioned_machine_readable_contract() {
             .as_array()
             .unwrap()
             .iter()
+            .any(|name| name == "debug_mesh")
+    );
+    assert!(
+        value["serve_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
             .any(|name| name == "texture_statistics")
     );
     assert_eq!(value["resource_usage_page_limit"], 128);
@@ -694,6 +701,7 @@ fn agent_jsonl_session_has_correlated_errors_and_clean_shutdown() {
         "debug_vertex",
         "debug_pixel",
         "debug_compute",
+        "debug_mesh",
         "debug_next",
         "debug_stop",
         "debug_messages",
@@ -2134,6 +2142,17 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let bad_debug =
         agent.send(r#"{"command":"debug_vertex","vertex":4294967295,"instance":0,"index":0}"#);
     assert_eq!(bad_debug["error"]["code"], "replay_debug_failed");
+    let invalid_mesh = agent.send(r#"{"command":"debug_mesh","group":[0,0],"thread":[0,0,0]}"#);
+    assert_eq!(invalid_mesh["error"]["code"], "invalid_arguments");
+    let unsupported_mesh =
+        agent.send(r#"{"command":"debug_mesh","group":[0,0,0],"thread":[0,0,0]}"#);
+    assert_eq!(unsupported_mesh["error"]["code"], "replay_debug_failed");
+    assert!(
+        unsupported_mesh["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("mesh dispatch")
+    );
     let invalid_debug_view =
         agent.send(r#"{"command":"debug_vertex","vertex":0,"instance":0,"index":0,"view":1}"#);
     assert!(

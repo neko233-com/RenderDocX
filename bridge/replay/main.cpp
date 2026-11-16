@@ -469,7 +469,7 @@ void write_snapshot(IReplayController *controller, const ReplayOptions &options,
       draw_vertices.emplace(action.eventId, action.numIndices);
     if((action.flags & ActionFlags::Drawcall) && (action.flags & ActionFlags::Indexed))
       indexed_draws.insert(action.eventId);
-    if(action.flags & ActionFlags::Dispatch)
+    if(action.flags & (ActionFlags::Dispatch | ActionFlags::MeshDispatch))
       dispatch_actions.emplace(action.eventId, &action);
     for(size_t i = action.children.size(); i > 0; --i)
       pending.push_back({&action.children[i - 1], node.depth + 1, static_cast<int64_t>(index)});
@@ -1069,7 +1069,7 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
     // operations to mutate that state between ContinueDebug calls.
     if(debug.trace && command != "debug_next" && command != "debug_stop" && command != "debug_messages" &&
        command.compare(0, 13, "debug_vertex ") != 0 && command.compare(0, 12, "debug_pixel ") != 0 &&
-       command.compare(0, 14, "debug_compute ") != 0 &&
+       command.compare(0, 14, "debug_compute ") != 0 && command.compare(0, 11, "debug_mesh ") != 0 &&
        command.compare(0, 7, "select ") != 0)
     { error("Stop the shader debug trace before other replay operations"); continue; }
     if(command == "debug_messages")
@@ -1447,7 +1447,7 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       }
       if(!valid || (arguments >> extra)) { error("Invalid compute debug request"); continue; }
       auto action = dispatch_actions.find(selected_event);
-      if(!selected || action == dispatch_actions.end()) { error("Select a compute dispatch event first"); continue; }
+      if(!selected || action == dispatch_actions.end() || !(action->second->flags & ActionFlags::Dispatch)) { error("Select a compute dispatch event first"); continue; }
       const PipeState &state = replay.controller->GetPipelineState();
       if(state.GetShader(ShaderStage::Compute) == ResourceId()) { error("No compute shader is bound"); continue; }
       const ShaderReflection *reflection = state.GetShaderReflection(ShaderStage::Compute);
@@ -1465,6 +1465,43 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       if(!debug.trace || !debug.trace->debugger)
       { debug.reset(); error("RenderDoc could not create a compute debug trace"); continue; }
       if(debug.trace->stage != ShaderStage::Compute)
+      { debug.reset(); error("RenderDoc returned a different shader stage"); continue; }
+      write_debug_trace(selected_event, *debug.trace);
+      continue;
+    }
+    if(command.compare(0, 11, "debug_mesh ") == 0)
+    {
+      std::istringstream arguments(command.substr(11));
+      std::string text[6], extra;
+      rdcfixedarray<uint32_t, 3> group, thread;
+      bool valid = true;
+      for(size_t i = 0; i < 6; ++i)
+      {
+        uint64_t value = 0;
+        if(!(arguments >> text[i]) || !decimal(text[i], value) || value > UINT32_MAX) { valid = false; break; }
+        if(i < 3) group[i] = uint32_t(value); else thread[i - 3] = uint32_t(value);
+      }
+      if(!valid || (arguments >> extra)) { error("Invalid mesh debug request"); continue; }
+      auto action = dispatch_actions.find(selected_event);
+      if(!selected || action == dispatch_actions.end() || !(action->second->flags & ActionFlags::MeshDispatch))
+      { error("Select a mesh dispatch event first"); continue; }
+      const PipeState &state = replay.controller->GetPipelineState();
+      if(state.GetShader(ShaderStage::Mesh) == ResourceId()) { error("No mesh shader is bound"); continue; }
+      const ShaderReflection *reflection = state.GetShaderReflection(ShaderStage::Mesh);
+      if(!reflection) { error("Mesh shader reflection is unavailable"); continue; }
+      const auto &groups = action->second->dispatchDimension;
+      const auto &threads = action->second->dispatchThreadsDimension[0] == 0
+                                ? reflection->dispatchThreadsDimension : action->second->dispatchThreadsDimension;
+      for(size_t i = 0; i < 3; ++i)
+        if(groups[i] == 0 || threads[i] == 0 || group[i] >= groups[i] || thread[i] >= threads[i]) valid = false;
+      if(!valid) { error("Mesh group or thread is out of range or its dimensions are unavailable"); continue; }
+      debug.reset(); debug_finished = false; mesh_ready = false;
+      debug.trace = replay.controller->DebugMeshThread(group, thread);
+      result = replay.controller->GetFatalErrorStatus();
+      if(!result.OK()) { error(result_message(result)); break; }
+      if(!debug.trace || !debug.trace->debugger)
+      { debug.reset(); error("RenderDoc could not create a mesh debug trace"); continue; }
+      if(debug.trace->stage != ShaderStage::Mesh)
       { debug.reset(); error("RenderDoc returned a different shader stage"); continue; }
       write_debug_trace(selected_event, *debug.trace);
       continue;

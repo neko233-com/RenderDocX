@@ -72,6 +72,7 @@ enum ShaderDebugContext {
     },
     Pixel(PixelDebugSelection),
     Compute(ComputeDebugSelection),
+    Mesh(ComputeDebugSelection),
 }
 
 struct ShaderDebugView {
@@ -149,6 +150,7 @@ fn collect_shader_debug(
         ShaderDebugContext::Vertex { .. } => 0,
         ShaderDebugContext::Pixel(_) => 4,
         ShaderDebugContext::Compute(_) => 5,
+        ShaderDebugContext::Mesh(_) => 7,
     };
     let shader = session.shader(stage, None)?;
     if shader.event_id != event {
@@ -163,6 +165,7 @@ fn collect_shader_debug(
         } => session.debug_vertex(vertex, instance, index, view)?,
         ShaderDebugContext::Pixel(selection) => session.debug_pixel(selection)?,
         ShaderDebugContext::Compute(selection) => session.debug_compute(selection)?,
+        ShaderDebugContext::Mesh(selection) => session.debug_mesh(selection)?,
     };
     let collected = (|| {
         if trace.event_id != event {
@@ -4757,10 +4760,13 @@ impl Workspace {
             cx.notify();
             return;
         };
-        self.start_shader_debug(
-            ShaderDebugContext::Compute(ComputeDebugSelection { group, thread }),
-            cx,
-        );
+        let selection = ComputeDebugSelection { group, thread };
+        let context = if self.selected_shader == Some(7) {
+            ShaderDebugContext::Mesh(selection)
+        } else {
+            ShaderDebugContext::Compute(selection)
+        };
+        self.start_shader_debug(context, cx);
     }
 
     fn start_shader_debug(&mut self, context: ShaderDebugContext, cx: &mut Context<Self>) {
@@ -7015,6 +7021,13 @@ impl Workspace {
             ShaderDebugContext::Compute(selection) => format!(
                 "{} {:?} · {} {:?}",
                 self.t("Group", "工作组", "ワークグループ", "워크그룹"),
+                selection.group,
+                self.t("Thread", "组内线程", "グループ内スレッド", "그룹 내 스레드"),
+                selection.thread
+            ),
+            ShaderDebugContext::Mesh(selection) => format!(
+                "{} {:?} · {} {:?}",
+                self.t("Mesh group", "网格工作组", "メッシュグループ", "메시 그룹"),
                 selection.group,
                 self.t("Thread", "组内线程", "グループ内スレッド", "그룹 내 스레드"),
                 selection.thread
@@ -10231,7 +10244,7 @@ impl Workspace {
                 }))
         } else if self.tab == CaptureTab::Shaders {
             let report = self.shader_data.as_ref();
-            let compute_selected = self.selected_shader == Some(5) && report.is_some();
+            let compute_selected = matches!(self.selected_shader, Some(5 | 7)) && report.is_some();
             let dispatch_action = detail.as_ref().filter(|action| {
                 self.pipeline
                     .as_ref()
@@ -10249,11 +10262,13 @@ impl Workspace {
                 .map(|value| format!("{value:?}"))
                 .unwrap_or_else(|| "—".into());
             let compute_panel = if compute_selected
-                && self
-                    .debug_view
-                    .as_ref()
-                    .is_some_and(|debug| matches!(debug.context, ShaderDebugContext::Compute(_)))
-            {
+                && self.debug_view.as_ref().is_some_and(|debug| {
+                    matches!(
+                        (self.selected_shader, debug.context),
+                        (Some(5), ShaderDebugContext::Compute(_))
+                            | (Some(7), ShaderDebugContext::Mesh(_))
+                    )
+                }) {
                 self.shader_debug_panel(cx)
             } else {
                 None
