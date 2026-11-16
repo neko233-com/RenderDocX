@@ -20,6 +20,9 @@ use renderdocx::{
 };
 use std::path::PathBuf;
 
+mod event_tree;
+use event_tree::EventTree;
+
 struct TexturePreview {
     path: PathBuf,
     _directory: tempfile::TempDir,
@@ -47,6 +50,7 @@ struct Workspace {
     capture: Option<PathBuf>,
     session: Option<Session>,
     snapshot: Option<Snapshot>,
+    event_tree: EventTree,
     selected: Option<usize>,
     pipeline: Option<Pipeline>,
     tab: CaptureTab,
@@ -519,6 +523,7 @@ impl Workspace {
                         // Invalidate work started against the old session while this open was pending.
                         this.open_revision += 1;
                         this.capture = Some(capture);
+                        this.event_tree.reset(&snapshot.actions);
                         this.snapshot = Some(snapshot);
                         this.session = Some(session);
                         this.selected = None;
@@ -1089,6 +1094,11 @@ impl Workspace {
     }
 
     fn capture_view(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(snapshot) = &self.snapshot {
+            if self.event_tree.len() != snapshot.actions.len() {
+                self.event_tree.reset(&snapshot.actions);
+            }
+        }
         let snapshot = self
             .snapshot
             .as_ref()
@@ -1096,7 +1106,7 @@ impl Workspace {
         let count = match self.tab {
             CaptureTab::Textures => snapshot.textures.len(),
             CaptureTab::Buffers => snapshot.buffers.len(),
-            CaptureTab::Events => snapshot.actions.len(),
+            CaptureTab::Events => self.event_tree.visible.len(),
             CaptureTab::Shaders => {
                 if self.pipeline.is_some() {
                     SHADER_STAGES.len()
@@ -1448,7 +1458,8 @@ impl Workspace {
                 count,
                 cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
                     range
-                        .filter_map(|index| {
+                        .filter_map(|row| {
+                            let index = *this.event_tree.visible.get(row)?;
                             let action = this.snapshot.as_ref()?.actions.get(index)?;
                             let selected = this.selected == Some(index);
                             let name = action.name.clone();
@@ -1456,27 +1467,53 @@ impl Workspace {
                             let indent = action.depth as f32 * 14.0 + 12.0;
                             Some(
                                 div()
-                                    .id(index)
-                                    .test_support()
                                     .h(px(32.))
                                     .pl(px(indent))
                                     .pr_3()
                                     .flex()
                                     .items_center()
-                                    .gap_3()
-                                    .cursor_pointer()
                                     .bg(rgb(if selected { 0x304c7c } else { 0x192332 }))
                                     .hover(|row| row.bg(rgb(0x263950)))
+                                    .child(if this.event_tree.has_children(index) {
+                                        div()
+                                            .id(SharedString::from(format!("event-toggle-{index}")))
+                                            .test_support()
+                                            .w(px(22.))
+                                            .flex_none()
+                                            .cursor_pointer()
+                                            .child(if this.event_tree.is_collapsed(index) {
+                                                "▸"
+                                            } else {
+                                                "▾"
+                                            })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.event_tree.toggle(index);
+                                                cx.notify();
+                                            }))
+                                            .into_any_element()
+                                    } else {
+                                        div().w(px(22.)).flex_none().into_any_element()
+                                    })
                                     .child(
                                         div()
-                                            .w(px(64.))
-                                            .flex_none()
-                                            .text_color(rgb(0x91a7c0))
-                                            .child(event.to_string()),
-                                    )
-                                    .child(div().overflow_hidden().child(name))
-                                    .on_click(
-                                        cx.listener(move |this, _, _, cx| this.select(index, cx)),
+                                            .id(index)
+                                            .test_support()
+                                            .flex_1()
+                                            .flex()
+                                            .items_center()
+                                            .gap_3()
+                                            .cursor_pointer()
+                                            .child(
+                                                div()
+                                                    .w(px(64.))
+                                                    .flex_none()
+                                                    .text_color(rgb(0x91a7c0))
+                                                    .child(event.to_string()),
+                                            )
+                                            .child(div().overflow_hidden().child(name))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.select(index, cx)
+                                            })),
                                     ),
                             )
                         })
@@ -2036,6 +2073,7 @@ impl Workspace {
                             this.open_revision += 1;
                             this.session = None;
                             this.snapshot = None;
+                            this.event_tree = EventTree::default();
                             this.capture = None;
                             this.selected = None;
                             this.replay_pending = false;
@@ -2923,6 +2961,7 @@ fn main() {
                         capture: None,
                         session: None,
                         snapshot: None,
+                        event_tree: EventTree::default(),
                         selected: None,
                         pipeline: None,
                         tab: CaptureTab::Events,
@@ -3023,6 +3062,7 @@ mod ui_tests {
                             textures: Vec::new(),
                             buffers: Vec::new(),
                         }),
+                        event_tree: EventTree::default(),
                         selected: None,
                         pipeline: None,
                         tab: CaptureTab::Events,
@@ -3198,16 +3238,38 @@ mod ui_tests {
                             api: 0,
                             frame: 2,
                             degraded: false,
-                            actions: vec![renderdocx::replay::Action {
-                                event_id: 42,
-                                action_id: 3,
-                                depth: 0,
-                                parent: -1,
-                                flags: 2,
-                                indices: 3,
-                                instances: 1,
-                                name: "Draw".into(),
-                            }],
+                            actions: vec![
+                                renderdocx::replay::Action {
+                                    event_id: 42,
+                                    action_id: 3,
+                                    depth: 0,
+                                    parent: -1,
+                                    flags: 2,
+                                    indices: 3,
+                                    instances: 1,
+                                    name: "Draw".into(),
+                                },
+                                renderdocx::replay::Action {
+                                    event_id: 43,
+                                    action_id: 4,
+                                    depth: 1,
+                                    parent: 0,
+                                    flags: 2,
+                                    indices: 3,
+                                    instances: 1,
+                                    name: "Child".into(),
+                                },
+                                renderdocx::replay::Action {
+                                    event_id: 77,
+                                    action_id: 5,
+                                    depth: 0,
+                                    parent: -1,
+                                    flags: 2,
+                                    indices: 3,
+                                    instances: 1,
+                                    name: "Next".into(),
+                                },
+                            ],
                             resource_count: 1,
                             texture_count: 1,
                             buffer_count: 1,
@@ -3234,6 +3296,7 @@ mod ui_tests {
                                 creation_flags: 1,
                             }],
                         }),
+                        event_tree: EventTree::default(),
                         selected: None,
                         pipeline: None,
                         tab: CaptureTab::Events,
@@ -3275,6 +3338,13 @@ mod ui_tests {
         let handle = handle.downcast::<Root>().unwrap();
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
+            assert!(window.find(1usize).visible());
+            window.click("event-toggle-0", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).event_tree.visible, [0, 2]);
+            window.click("event-toggle-0", cx);
+            window.render_frame(cx);
+            assert!(window.find(1usize).visible());
             window.click("textures-tab", cx);
             window.click("texture-0", cx);
             window.click("texture-export", cx);
@@ -3428,5 +3498,34 @@ mod ui_tests {
         .unwrap();
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(view.read(cx).shader_data.as_ref().unwrap().target, "native"));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("events-tab", cx);
+            window.click("event-toggle-0", cx);
+            window.render_frame(cx);
+            window.click(2usize, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 77));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("event-toggle-0", cx);
+            window.render_frame(cx);
+            window.click(1usize, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 43));
+        assert_eq!(*events.lock().unwrap(), vec![42, 77, 43]);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("event-toggle-0", cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        cx.update(|cx| {
+            assert_eq!(view.read(cx).selected, Some(1));
+            assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 43);
+            assert_eq!(view.read(cx).event_tree.visible, [0, 2]);
+        });
+        assert_eq!(*events.lock().unwrap(), vec![42, 77, 43]);
     }
 }
