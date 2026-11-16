@@ -5872,6 +5872,21 @@ impl Workspace {
         cx.notify();
     }
 
+    fn change_preview_transform(
+        &mut self,
+        scale: Option<f32>,
+        pan: [f32; 2],
+        cx: &mut Context<Self>,
+    ) {
+        if !self.preview_edit_ready(cx) {
+            return;
+        }
+        self.texture_selection.preview_scale = scale;
+        self.texture_selection.preview_offset = if scale.is_some() { pan } else { [0.0, 0.0] };
+        self.preview = None;
+        cx.notify();
+    }
+
     fn change_preview_overlay(
         &mut self,
         overlay: renderdocx::texture_overlay::TextureOverlay,
@@ -8673,6 +8688,78 @@ impl Workspace {
                 "チャンネルの組み合わせ、反転、ガンマはプレビューのみに影響します。",
                 "채널 조합, 반전 및 감마는 미리보기에만 적용됩니다.",
             )))
+            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
+                "Preview zoom and pan (output pixels)",
+                "预览缩放与平移（输出像素）",
+                "プレビューの拡大と移動（出力ピクセル）",
+                "미리보기 확대 및 이동 (출력 픽셀)",
+            )))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(button(
+                        "texture-view-fit",
+                        self.t("Fit", "适应", "全体表示", "맞춤"),
+                        self.texture_selection.preview_scale.is_none(),
+                        |this, cx| this.change_preview_transform(None, [0.0, 0.0], cx),
+                        cx,
+                    ))
+                    .children([0.25_f32, 0.5, 1.0, 2.0, 4.0].into_iter().map(|scale| {
+                        div()
+                            .id(SharedString::from(format!(
+                                "texture-view-scale-{}",
+                                (scale * 100.0) as u32
+                            )))
+                            .test_support()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(
+                                if self.texture_selection.preview_scale == Some(scale) {
+                                    0x4169e1
+                                } else {
+                                    0x252f40
+                                },
+                            ))
+                            .child(format!("{}%", (scale * 100.0) as u32))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.change_preview_transform(Some(scale), [0.0, 0.0], cx)
+                            }))
+                    }))
+                    .children(
+                        [
+                            (-32.0, 0.0, "←"),
+                            (32.0, 0.0, "→"),
+                            (0.0, -32.0, "↑"),
+                            (0.0, 32.0, "↓"),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, (x, y, label))| {
+                            div()
+                                .id(SharedString::from(format!("texture-view-pan-{i}")))
+                                .test_support()
+                                .cursor_pointer()
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .bg(rgb(0x252f40))
+                                .child(label)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    let [old_x, old_y] = this.texture_selection.preview_offset;
+                                    let scale = this.texture_selection.preview_scale.unwrap_or(1.0);
+                                    this.change_preview_transform(
+                                        Some(scale),
+                                        [old_x + x, old_y + y],
+                                        cx,
+                                    );
+                                }))
+                        }),
+                    ),
+            )
             .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
                 "Debug overlay (may replay the capture)",
                 "调试叠加层（可能重新回放捕获）",
@@ -16128,6 +16215,8 @@ mod ui_tests {
                 preview_flip_y: false,
                 preview_linear_as_gamma: None,
                 preview_overlay: renderdocx::texture_overlay::TextureOverlay::None,
+                preview_scale: None,
+                preview_offset: [0.0, 0.0],
             }]
         );
         cx.update(|cx| {
@@ -16192,6 +16281,10 @@ mod ui_tests {
             window.click("texture-preview-flip", cx);
             reveal_details(window, "texture-preview-gamma", cx);
             window.click("texture-preview-gamma", cx);
+            reveal_details(window, "texture-view-scale-200", cx);
+            window.click("texture-view-scale-200", cx);
+            reveal_details(window, "texture-view-pan-1", cx);
+            window.click("texture-view-pan-1", cx);
             reveal_details(window, "texture-overlay-1", cx);
             window.click("texture-overlay-1", cx);
         })
@@ -16201,6 +16294,8 @@ mod ui_tests {
             assert_eq!(selection.preview_channels, Some([true, true, false, false]));
             assert!(selection.preview_flip_y);
             assert_eq!(selection.preview_linear_as_gamma, Some(false));
+            assert_eq!(selection.preview_scale, Some(2.0));
+            assert_eq!(selection.preview_offset, [32.0, 0.0]);
             assert_eq!(
                 selection.preview_overlay,
                 renderdocx::texture_overlay::TextureOverlay::Drawcall

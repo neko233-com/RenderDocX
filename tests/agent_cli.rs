@@ -943,10 +943,27 @@ fn real_d3d11_mesh_draw_order() {
     let base_path = dir.path().join("overlay-baseline.png");
     let baseline = agent.send(&serde_json::json!({"command":"render_texture","index":texture_index,"width":16,"height":16,"path":base_path}).to_string());
     assert_eq!(baseline["ok"], true, "{baseline}");
+    let zoom_path = dir.path().join("zoom-preview.png");
+    let zoom = agent.send(&serde_json::json!({"command":"render_texture","index":texture_index,"width":16,"height":16,"path":zoom_path,"preview_scale":2.0,"preview_offset":[4.0,0.0]}).to_string());
+    assert_eq!(zoom["ok"], true, "{zoom}");
+    assert_ne!(
+        std::fs::read(&base_path).unwrap(),
+        std::fs::read(&zoom_path).unwrap(),
+        "zoom and pan must affect the rendered image"
+    );
+    let invalid_zoom = agent.send(&serde_json::json!({"command":"render_texture","index":texture_index,"width":16,"height":16,"path":dir.path().join("invalid-zoom.png"),"preview_scale":0.0}).to_string());
+    assert_eq!(
+        invalid_zoom["error"]["code"], "invalid_arguments",
+        "{invalid_zoom}"
+    );
     let draw_path = dir.path().join("draw-overlay.png");
     let draw_overlay = agent.send(&serde_json::json!({"command":"render_texture","index":texture_index,"width":16,"height":16,"path":draw_path,"preview_overlay":"drawcall"}).to_string());
     assert_eq!(draw_overlay["ok"], true, "{draw_overlay}");
-    assert_ne!(std::fs::read(&base_path).unwrap(), std::fs::read(&draw_path).unwrap(), "draw overlay must affect the rendered image");
+    assert_ne!(
+        std::fs::read(&base_path).unwrap(),
+        std::fs::read(&draw_path).unwrap(),
+        "draw overlay must affect the rendered image"
+    );
     let unsupported_overlay = agent.send(&serde_json::json!({"command":"render_texture","index":float_index,"width":4,"height":4,"path":dir.path().join("missing-overlay.png"),"preview_overlay":"drawcall"}).to_string());
     assert_eq!(
         unsupported_overlay["error"]["code"], "replay_render_failed",

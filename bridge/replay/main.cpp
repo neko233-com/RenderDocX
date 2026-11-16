@@ -2401,7 +2401,7 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
     {
       if(!selected) { error("Select an event before rendering textures"); continue; }
       std::istringstream arguments(command.substr(15));
-      std::string i_text, mip_text, slice_text, sample_text, channel_text, cast_text, width_text, height_text, black_text, white_text, mask_text, flip_text, gamma_text, overlay_text, extra;
+      std::string i_text, mip_text, slice_text, sample_text, channel_text, cast_text, width_text, height_text, black_text, white_text, mask_text, flip_text, gamma_text, overlay_text, scale_text, x_text, y_text, extra;
       uint64_t index=0, mip=0, slice=0, sample=0, channel=0, cast=0, width=0, height=0, black_bits=0, white_bits=0;
       if(!(arguments >> i_text >> mip_text >> slice_text >> sample_text >> channel_text >> cast_text >> width_text >> height_text >> black_text >> white_text) ||
          !decimal(i_text,index) || index >= texture_ids.size() || !decimal(mip_text,mip) || !decimal(slice_text,slice) ||
@@ -2415,8 +2415,21 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       if(has_options && (!(arguments >> flip_text >> gamma_text) || !decimal(mask_text,mask) || mask > 15 ||
                          !decimal(flip_text,flip) || flip > 1 || !decimal(gamma_text,gamma) || gamma > 1))
       { error("Invalid texture display options"); continue; }
-      if(has_options && (arguments >> overlay_text) && (!decimal(overlay_text,overlay) || overlay > 14 || (arguments >> extra)))
+      if(has_options && (arguments >> overlay_text) && (!decimal(overlay_text,overlay) || overlay > 14))
       { error("Invalid texture overlay"); continue; }
+      float scale = -1.0f, x_offset = 0.0f, y_offset = 0.0f;
+      if(arguments >> scale_text)
+      {
+        uint64_t scale_bits=0, x_bits=0, y_bits=0;
+        if(!(arguments >> x_text >> y_text) || !decimal(scale_text,scale_bits) || scale_bits > UINT32_MAX ||
+           !decimal(x_text,x_bits) || x_bits > UINT32_MAX || !decimal(y_text,y_bits) || y_bits > UINT32_MAX)
+        { error("Invalid texture view transform"); continue; }
+        const uint32_t sb=uint32_t(scale_bits), xb=uint32_t(x_bits), yb=uint32_t(y_bits);
+        std::memcpy(&scale,&sb,sizeof(scale)); std::memcpy(&x_offset,&xb,sizeof(x_offset)); std::memcpy(&y_offset,&yb,sizeof(y_offset));
+        if(!std::isfinite(scale) || scale <= 0.0f || !std::isfinite(x_offset) || !std::isfinite(y_offset))
+        { error("Invalid texture view transform"); continue; }
+      }
+      if(arguments >> extra) { error("Invalid texture display options"); continue; }
       const TextureRef &texture = texture_ids[size_t(index)];
       const uint64_t depth = texture.dimension == 3 ? (mip < 32 ? (std::max)(1U, texture.depth >> uint32_t(mip)) : 1U) : texture.arraysize;
       if(mip >= texture.mips || slice >= depth || (sample_text != "resolve" && sample >= texture.samples) ||
@@ -2431,7 +2444,7 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       TextureDisplay display;
       display.resourceId=texture.id; display.typeCast=CompType(cast);
       display.subresource=Subresource(uint32_t(mip), uint32_t(slice), sample_text == "resolve" ? TextureDisplay::ResolveSamples : uint32_t(sample));
-      display.rangeMin=black; display.rangeMax=white; display.scale=-1.0f;
+      display.rangeMin=black; display.rangeMax=white; display.scale=scale; display.xOffset=x_offset; display.yOffset=y_offset;
       display.overlay=DebugOverlay(overlay);
       if(channel_text != "all") { display.red=channel==0; display.green=channel==1; display.blue=channel==2; display.alpha=channel==3; }
       if(has_options) { display.red=(mask & 1) != 0; display.green=(mask & 2) != 0; display.blue=(mask & 4) != 0; display.alpha=(mask & 8) != 0; display.flipY=flip != 0; display.linearDisplayAsGamma=gamma != 0; }

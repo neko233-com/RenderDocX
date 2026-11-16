@@ -883,6 +883,10 @@ pub struct TextureSelection {
     /// None uses RenderDoc's default, which is true.
     pub preview_linear_as_gamma: Option<bool>,
     pub preview_overlay: crate::texture_overlay::TextureOverlay,
+    /// Explicit preview scale; None fits the output.
+    pub preview_scale: Option<f32>,
+    /// Preview pan in output pixels.
+    pub preview_offset: [f32; 2],
 }
 
 /// Raw data is a whole subresource; a 3D mip contains its complete depth.
@@ -1133,6 +1137,11 @@ impl TextureSelection {
         if self.mip >= texture.mips
             || self.preview_type_cast > 9
             || self.analysis_type_cast > 9
+            || self
+                .preview_scale
+                .is_some_and(|scale| !scale.is_finite() || scale <= 0.0)
+            || self.preview_offset.iter().any(|value| !value.is_finite())
+            || (self.preview_scale.is_none() && self.preview_offset != [0.0, 0.0])
             || self
                 .display_range
                 .is_some_and(|[min, max]| !min.is_finite() || !max.is_finite() || min >= max)
@@ -1981,6 +1990,7 @@ impl Transport for Process {
             || selection.preview_flip_y
             || selection.preview_linear_as_gamma.is_some()
             || selection.preview_overlay != crate::texture_overlay::TextureOverlay::None
+            || selection.preview_scale.is_some()
         {
             let channels = selection.effective_preview_channels();
             let mask = channels
@@ -1994,9 +2004,21 @@ impl Transport for Process {
                 u8::from(selection.preview_linear_as_gamma.unwrap_or(true))
             )
             .map_err(|e| e.to_string())?;
-            if selection.preview_overlay != crate::texture_overlay::TextureOverlay::None {
+            if selection.preview_overlay != crate::texture_overlay::TextureOverlay::None
+                || selection.preview_scale.is_some()
+            {
                 write!(input, " {}", selection.preview_overlay as u32)
                     .map_err(|e| e.to_string())?;
+            }
+            if let Some(scale) = selection.preview_scale {
+                write!(
+                    input,
+                    " {} {} {}",
+                    scale.to_bits(),
+                    selection.preview_offset[0].to_bits(),
+                    selection.preview_offset[1].to_bits()
+                )
+                .map_err(|e| e.to_string())?;
             }
         }
         writeln!(input)
@@ -5320,6 +5342,8 @@ mod tests {
             preview_flip_y: false,
             preview_linear_as_gamma: None,
             preview_overlay: crate::texture_overlay::TextureOverlay::None,
+            preview_scale: None,
+            preview_offset: [0.0, 0.0],
         };
         let raw = RawTextureSelection {
             mip: 2,
