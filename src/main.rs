@@ -525,6 +525,50 @@ struct Workspace {
 }
 
 impl Workspace {
+    fn open_attachment_texture(
+        &mut self,
+        index: usize,
+        mip: u32,
+        slice: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let selection = TextureSelection {
+            mip,
+            slice,
+            ..TextureSelection::default()
+        };
+        let Some(texture) = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.textures.get(index))
+        else {
+            return;
+        };
+        if selection.validate(texture).is_err() {
+            self.status = Some(
+                self.t(
+                    "Attachment subresource is unavailable.",
+                    "附件子资源不可用。",
+                    "アタッチメントのサブリソースを利用できません。",
+                    "첨부 하위 리소스를 사용할 수 없습니다.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        self.tab = CaptureTab::Textures;
+        self.selected_texture = Some(index);
+        self.texture_selection = selection;
+        self.preview = None;
+        self.pixel = None;
+        self.pixel_history = None;
+        self.history_selected = None;
+        self.statistics = None;
+        self.status = None;
+        cx.notify();
+    }
+
     fn resource_display_name<'a>(&'a self, index: Option<usize>, fallback: &'a str) -> &'a str {
         annotations::display_resource_name(
             self.snapshot
@@ -8052,20 +8096,50 @@ impl Workspace {
                             attachment.slice_count
                         )
                     };
+                    let attachment_target =
+                        |attachment: &renderdocx::replay::PipelineAttachment| {
+                            let resource = attachment.resource.resource_index?;
+                            snapshot
+                                .textures
+                                .iter()
+                                .position(|texture| texture.resource_index == Some(resource))
+                        };
                     let attachments = state.color_attachments.as_ref().map(|items| {
                         items
                             .iter()
                             .enumerate()
                             .filter(|(_, item)| item.resource.bound)
-                            .map(|(slot, item)| format!("{slot}: {}", attachment_text(item)))
+                            .map(|(slot, item)| {
+                                (
+                                    slot,
+                                    format!("{slot}: {}", attachment_text(item)),
+                                    attachment_target(item),
+                                    item.first_mip,
+                                    item.first_slice,
+                                )
+                            })
                             .collect::<Vec<_>>()
                     });
-                    let depth_attachment = state.depth_attachment.as_ref().map(&attachment_text);
+                    let depth_attachment = state.depth_attachment.as_ref().map(|item| {
+                        (
+                            attachment_text(item),
+                            attachment_target(item),
+                            item.first_mip,
+                            item.first_slice,
+                        )
+                    });
                     let depth_resolve = state
                         .depth_resolve_attachment
                         .as_ref()
                         .filter(|item| item.resource.bound)
-                        .map(&attachment_text);
+                        .map(|item| {
+                            (
+                                attachment_text(item),
+                                attachment_target(item),
+                                item.first_mip,
+                                item.first_slice,
+                            )
+                        });
                     let index = state
                         .index_buffer
                         .as_ref()
@@ -8340,24 +8414,70 @@ impl Workspace {
                             "カラーアタッチメントビュー",
                             "색상 첨부 뷰",
                         ))
-                        .children(lines.into_iter().map(|line| div().text_sm().child(line)))
-                    })
-                    .when_some(depth_attachment, |view, text| {
-                        view.child(format!(
-                            "{}: {text}",
-                            self.t(
-                                "Depth attachment",
-                                "深度附件",
-                                "深度アタッチメント",
-                                "깊이 첨부"
-                            )
+                        .children(lines.into_iter().map(
+                            |(slot, line, target, mip, slice)| {
+                                div()
+                                    .id(("pipeline-color-attachment", slot))
+                                    .test_support()
+                                    .text_sm()
+                                    .child(line)
+                                    .when_some(target, |row, index| {
+                                        row.cursor_pointer().text_color(rgb(0x91cfff)).on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.open_attachment_texture(index, mip, slice, cx)
+                                            }),
+                                        )
+                                    })
+                            },
                         ))
                     })
-                    .when_some(depth_resolve, |view, text| {
-                        view.child(format!(
-                            "{}: {text}",
-                            self.t("Depth resolve", "深度解析", "深度リゾルブ", "깊이 리졸브")
-                        ))
+                    .when_some(depth_attachment, |view, (text, target, mip, slice)| {
+                        view.child(
+                            div()
+                                .id("pipeline-depth-attachment")
+                                .test_support()
+                                .text_sm()
+                                .child(format!(
+                                    "{}: {text}",
+                                    self.t(
+                                        "Depth attachment",
+                                        "深度附件",
+                                        "深度アタッチメント",
+                                        "깊이 첨부"
+                                    )
+                                ))
+                                .when_some(target, |row, index| {
+                                    row.cursor_pointer().text_color(rgb(0x91cfff)).on_click(
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.open_attachment_texture(index, mip, slice, cx)
+                                        }),
+                                    )
+                                }),
+                        )
+                    })
+                    .when_some(depth_resolve, |view, (text, target, mip, slice)| {
+                        view.child(
+                            div()
+                                .id("pipeline-depth-resolve")
+                                .test_support()
+                                .text_sm()
+                                .child(format!(
+                                    "{}: {text}",
+                                    self.t(
+                                        "Depth resolve",
+                                        "深度解析",
+                                        "深度リゾルブ",
+                                        "깊이 리졸브"
+                                    )
+                                ))
+                                .when_some(target, |row, index| {
+                                    row.cursor_pointer().text_color(rgb(0x91cfff)).on_click(
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.open_attachment_texture(index, mip, slice, cx)
+                                        }),
+                                    )
+                                }),
+                        )
                     })
                     .child(format!("{index_buffer_label}: {index}"))
                     .child(format!(
@@ -10674,6 +10794,35 @@ mod ui_tests {
             assert_eq!(pipeline.topology, 5);
             assert_eq!(pipeline.index_buffer.as_ref().unwrap().byte_offset, "2");
         });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                let attachment = serde_json::from_value(serde_json::json!({
+                    "resource":{"bound":true,"resource_index":0,"name":"Color"},
+                    "view":{"bound":false,"resource_index":null,"name":""},
+                    "type":0,"flags":0,"format":"R8G8B8A8_UNORM","texture_type":0,
+                    "first_mip":1,"mip_count":1,"first_slice":1,"slice_count":1,
+                    "min_lod_clamp":0.0,"swizzle":[0,1,2,3]
+                }))
+                .unwrap();
+                view.pipeline.as_mut().unwrap().color_attachments = Some(vec![attachment]);
+                cx.notify();
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("pipeline-color-attachment", 0usize), cx);
+        })
+        .unwrap();
+        cx.update(|cx| {
+            assert!(view.read(cx).tab == CaptureTab::Textures);
+            assert_eq!(view.read(cx).selected_texture, Some(0));
+            assert_eq!(view.read(cx).texture_selection.mip, 1);
+            assert_eq!(view.read(cx).texture_selection.slice, 1);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("events-tab", cx);
+        })
+        .unwrap();
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(window.find("capture-details-scroll").visible());
