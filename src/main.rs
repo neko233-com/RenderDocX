@@ -614,7 +614,7 @@ struct Workspace {
     texture_export_quality: Entity<InputState>,
     texture_export_color: Entity<InputState>,
     texture_custom_name: Entity<InputState>,
-    texture_custom_flags: Vec<renderdocx::replay::ShaderCompileFlag>,
+    texture_custom_flags: Entity<TextareaState>,
     texture_custom_prefix: Option<bool>,
     saved_custom_shaders: Vec<renderdocx::custom_shaders::SavedCustomShader>,
     pending_custom_delete: Option<String>,
@@ -6013,6 +6013,33 @@ impl Workspace {
         }
     }
 
+    fn custom_shader_flags(
+        &self,
+        cx: &App,
+    ) -> Result<Vec<renderdocx::replay::ShaderCompileFlag>, String> {
+        serde_json::from_str(&self.texture_custom_flags.read(cx).value()).map_err(|error| {
+            format!(
+                "{}: {error}",
+                self.t(
+                    "Invalid compile flags JSON",
+                    "编译参数 JSON 无效",
+                    "コンパイルフラグの JSON が無効です",
+                    "컴파일 플래그 JSON이 올바르지 않습니다"
+                )
+            )
+        })
+    }
+
+    fn custom_shader_prefix_enabled(&self, cx: &App) -> bool {
+        self.texture_custom_prefix.unwrap_or_else(|| {
+            self.texture_custom_encoding
+                .read(cx)
+                .value()
+                .parse::<u32>()
+                .is_ok_and(|encoding| matches!(encoding, 2 | 5 | 9))
+        })
+    }
+
     fn save_custom_shader(&mut self, replace: bool, cx: &mut Context<Self>) {
         let result = (|| {
             let encoding = self
@@ -6027,7 +6054,7 @@ impl Workspace {
                 encoding,
                 entry: self.texture_custom_entry.read(cx).value().to_string(),
                 source_hex: renderdocx::custom_shaders::encode_hex(&source),
-                flags: self.texture_custom_flags.clone(),
+                flags: self.custom_shader_flags(cx)?,
                 apply_prefix: self
                     .texture_custom_prefix
                     .unwrap_or(matches!(encoding, 2 | 5 | 9)),
@@ -6104,7 +6131,10 @@ impl Workspace {
                 });
                 self.texture_custom_source
                     .update(cx, |input, cx| input.replace_all(source, window, cx));
-                self.texture_custom_flags = shader.flags;
+                let flags =
+                    serde_json::to_string_pretty(&shader.flags).expect("flags are serializable");
+                self.texture_custom_flags
+                    .update(cx, |input, cx| input.replace_all(flags, window, cx));
                 self.texture_custom_prefix = Some(shader.apply_prefix);
                 self.pending_custom_delete = None;
                 self.texture_custom_diagnostics.clear();
@@ -6191,7 +6221,18 @@ impl Workspace {
             return;
         }
         let source = source.unwrap_or_default();
-        let flags = self.texture_custom_flags.clone();
+        let flags = if clear {
+            Vec::new()
+        } else {
+            match self.custom_shader_flags(cx) {
+                Ok(flags) => flags,
+                Err(error) => {
+                    self.texture_custom_diagnostics = error;
+                    cx.notify();
+                    return;
+                }
+            }
+        };
         let prefix = self.texture_custom_prefix;
         let processor = encoding.and_then(|encoding| {
             if self.texture_custom_encodings.contains(&encoding) {
@@ -9628,6 +9669,9 @@ impl Workspace {
                             cx,
                         )),
                 )
+                .child(button("texture-custom-prefix", if self.custom_shader_prefix_enabled(cx) { self.t("Prefix: on", "前缀：开", "プレフィックス：オン", "접두사: 켜짐") } else { self.t("Prefix: off", "前缀：关", "プレフィックス：オフ", "접두사: 꺼짐") }, self.custom_shader_prefix_enabled(cx), |this, cx| { this.texture_custom_prefix = Some(!this.custom_shader_prefix_enabled(cx)); cx.notify(); }, cx))
+                .child(div().text_sm().child(self.t("Compile flags (JSON array of name and value)", "编译参数（包含 name 和 value 的 JSON 数组）", "コンパイルフラグ（name と value の JSON 配列）", "컴파일 플래그 (name과 value의 JSON 배열)")))
+                .child(div().id("texture-custom-flags").test_support().w_full().child(Textarea::new(&self.texture_custom_flags).aria_label(self.t("Compile flags JSON", "编译参数 JSON", "コンパイルフラグ JSON", "컴파일 플래그 JSON"))))
                 .child(
                     div()
                         .id("texture-custom-source")
@@ -15939,6 +15983,7 @@ fn main() {
                     let texture_custom_name = cx.new(|cx| InputState::new(window, cx));
                     let texture_custom_entry = cx.new(|cx| InputState::new(window, cx).default_value("main"));
                     let texture_custom_encoding = cx.new(|cx| InputState::new(window, cx).default_value("5"));
+                    let texture_custom_flags = cx.new(|cx| TextareaState::new(window, cx).default_value("[]").auto_grow(2, 6));
                     let texture_custom_source = cx.new(|cx| TextareaState::new(window, cx).default_value("float4 main(float4 pos : SV_Position, float4 uv : TEXCOORD0) : SV_Target0 { return float4(1, 0, 1, 1); }").auto_grow(4, 12));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_debug_primitive = cx.new(|cx| InputState::new(window, cx));
@@ -16009,7 +16054,7 @@ fn main() {
                         texture_export_quality,
                         texture_export_color,
                         texture_custom_name,
-                        texture_custom_flags: Vec::new(),
+                        texture_custom_flags,
                         texture_custom_prefix: None,
                         saved_custom_shaders: Vec::new(),
                         pending_custom_delete: None,
@@ -16287,22 +16332,69 @@ mod ui_tests {
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| {
                 view.texture_custom_name
-                    .update(cx, |input, cx| input.set_value("test shader", window, cx))
+                    .update(cx, |input, cx| input.set_value("test shader", window, cx));
+                view.texture_custom_flags.update(cx, |input, cx| {
+                    input.replace_all(
+                        r#"[{"name":"@spirver","value":"spirv1.3"}]"#.to_owned(),
+                        window,
+                        cx,
+                    )
+                });
             });
+            reveal_details(window, "texture-custom-prefix", cx);
+            window.click("texture-custom-prefix", cx);
             reveal_details(window, "texture-custom-save", cx);
             window.click("texture-custom-save", cx);
         })
         .unwrap();
-        cx.update(|cx| assert_eq!(view.read(cx).saved_custom_shaders.len(), 1));
+        cx.update(|cx| {
+            let shader = &view.read(cx).saved_custom_shaders[0];
+            assert_eq!(shader.flags[0].name, "@spirver");
+            assert_eq!(shader.flags[0].value, "spirv1.3");
+            assert!(!shader.apply_prefix);
+        });
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| {
                 view.texture_custom_entry
                     .update(cx, |input, cx| input.set_value("changed", window, cx));
+                view.texture_custom_flags.update(cx, |input, cx| {
+                    input.replace_all("[]".to_owned(), window, cx)
+                });
+                view.texture_custom_prefix = Some(true);
                 view.load_custom_shader("test shader", window, cx);
             });
         })
         .unwrap();
-        cx.update(|cx| assert_eq!(view.read(cx).texture_custom_entry.read(cx).value(), "main"));
+        cx.update(|cx| {
+            assert_eq!(view.read(cx).texture_custom_entry.read(cx).value(), "main");
+            assert_eq!(
+                view.read(cx).custom_shader_flags(cx).unwrap()[0].value,
+                "spirv1.3"
+            );
+            assert!(!view.read(cx).custom_shader_prefix_enabled(cx));
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.texture_custom_flags.update(cx, |input, cx| {
+                    input.replace_all("invalid".to_owned(), window, cx)
+                })
+            });
+            reveal_details(window, "texture-custom-build", cx);
+            window.click("texture-custom-build", cx);
+        })
+        .unwrap();
+        cx.update(|cx| {
+            assert!(!view.read(cx).texture_custom_active);
+            assert!(view.read(cx).texture_custom_diagnostics.contains("JSON"));
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.texture_custom_flags.update(cx, |input, cx| {
+                    input.replace_all("[]".to_owned(), window, cx)
+                })
+            });
+        })
+        .unwrap();
         cx.update_window(handle.into(), |_, window, cx| {
             reveal_details(window, "texture-custom-delete", cx);
             window.click("texture-custom-delete", cx);
@@ -16638,6 +16730,7 @@ mod ui_tests {
                     let texture_custom_name = cx.new(|cx| InputState::new(window, cx));
                     let texture_custom_entry = cx.new(|cx| InputState::new(window, cx).default_value("main"));
                     let texture_custom_encoding = cx.new(|cx| InputState::new(window, cx).default_value("5"));
+                    let texture_custom_flags = cx.new(|cx| TextareaState::new(window, cx).default_value("[]").auto_grow(2, 6));
                     let texture_custom_source = cx.new(|cx| TextareaState::new(window, cx).default_value("float4 main(float4 pos : SV_Position, float4 uv : TEXCOORD0) : SV_Target0 { return float4(1, 0, 1, 1); }").auto_grow(4, 12));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_debug_primitive = cx.new(|cx| InputState::new(window, cx));
@@ -16727,7 +16820,7 @@ mod ui_tests {
                         texture_export_quality,
                         texture_export_color,
                         texture_custom_name,
-                        texture_custom_flags: Vec::new(),
+                        texture_custom_flags,
                         texture_custom_prefix: None,
                         saved_custom_shaders: Vec::new(),
                         pending_custom_delete: None,
@@ -17090,6 +17183,7 @@ mod ui_tests {
                     let texture_custom_name = cx.new(|cx| InputState::new(window, cx));
                     let texture_custom_entry = cx.new(|cx| InputState::new(window, cx).default_value("main"));
                     let texture_custom_encoding = cx.new(|cx| InputState::new(window, cx).default_value("5"));
+                    let texture_custom_flags = cx.new(|cx| TextareaState::new(window, cx).default_value("[]").auto_grow(2, 6));
                     let texture_custom_source = cx.new(|cx| TextareaState::new(window, cx).default_value("float4 main(float4 pos : SV_Position, float4 uv : TEXCOORD0) : SV_Target0 { return float4(1, 0, 1, 1); }").auto_grow(4, 12));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_debug_primitive = cx.new(|cx| InputState::new(window, cx));
@@ -17299,7 +17393,7 @@ mod ui_tests {
                         texture_export_quality,
                         texture_export_color,
                         texture_custom_name,
-                        texture_custom_flags: Vec::new(),
+                        texture_custom_flags,
                         texture_custom_prefix: None,
                         saved_custom_shaders: Vec::new(),
                         pending_custom_delete: None,
