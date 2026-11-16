@@ -146,6 +146,26 @@ fn real_opengl_vertex_inputs_include_generic_and_normalized_values() {
         .find(|v| v["name"] == "counters")
         .expect("counters");
     assert_eq!(counters["values"], serde_json::json!(["9", "123"]));
+    let texture = opened["data"]["capture"]["textures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|texture| texture["width"] == 2 && texture["height"] == 2)
+        .expect("OpenGL fixture texture");
+    let top = agent
+        .send(&serde_json::json!({"command":"pick_pixel","index":texture,"x":0,"y":0}).to_string());
+    assert_eq!(top["ok"], true, "{top}");
+    assert_eq!(
+        top["data"]["pixel"]["float_values"],
+        serde_json::json!(["0", "0", "1", "1"])
+    );
+    let bottom = agent
+        .send(&serde_json::json!({"command":"pick_pixel","index":texture,"x":0,"y":1}).to_string());
+    assert_eq!(
+        bottom["data"]["pixel"]["float_values"],
+        serde_json::json!(["1", "0", "0", "1"]),
+        "{bottom}"
+    );
     agent.quit();
 }
 
@@ -160,6 +180,13 @@ fn capabilities_advertises_versioned_machine_readable_contract() {
     assert_eq!(value["capture_options_default"]["soft_memory_limit"], 0);
     assert_eq!(value["structure_page_limit"], 128);
     assert_eq!(value["vertex_input_page_limit"], 64);
+    assert!(
+        value["serve_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|name| name == "pick_pixel")
+    );
     assert!(
         value["serve_commands"]
             .as_array()
@@ -206,6 +233,10 @@ fn agent_jsonl_session_has_correlated_errors_and_clean_shutdown() {
     assert_eq!(reply["schema"], "renderdocx.agent.v1");
     assert_eq!(reply["id"], 17);
     assert_eq!(reply["error"]["code"], "no_capture");
+    assert_eq!(
+        agent.send(r#"{"command":"pick_pixel","index":0,"x":0,"y":0}"#)["error"]["code"],
+        "no_capture"
+    );
     assert_eq!(
         agent.send(r#"{"command":"target_events"}"#)["error"]["code"],
         "no_target"
@@ -875,6 +906,49 @@ fn real_d3d11_capture_is_inspected_and_selected() {
                 && texture["array_size"] == 2
         })
         .expect("layered fixture texture");
+    let picked = agent.send(&serde_json::json!({"command":"pick_pixel","index":layered_index,"mip":1,"slice":1,"sample":0,"x":3,"y":3}).to_string());
+    assert_eq!(picked["ok"], true, "{picked}");
+    assert_eq!(picked["data"]["pixel"]["event_id"], draw_event);
+    assert_eq!(
+        picked["data"]["pixel"]["float_values"],
+        serde_json::json!(["1", "1", "0", "1"])
+    );
+    let out_of_range = agent.send(&serde_json::json!({"command":"pick_pixel","index":layered_index,"mip":1,"slice":1,"x":4,"y":0}).to_string());
+    assert_eq!(
+        out_of_range["error"]["code"], "invalid_arguments",
+        "{out_of_range}"
+    );
+    let integer_index = opened["data"]["capture"]["textures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|texture| texture["format_name"] == "R32G32B32A32_UINT")
+        .expect("integer texture");
+    let integer = agent.send(
+        &serde_json::json!({"command":"pick_pixel","index":integer_index,"x":0,"y":0}).to_string(),
+    );
+    assert_eq!(integer["ok"], true, "{integer}");
+    assert_eq!(
+        integer["data"]["pixel"]["uint_values"],
+        serde_json::json!([1, 2, 3, 4])
+    );
+    let volume_index = opened["data"]["capture"]["textures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|texture| {
+            texture["dimension"] == 3 && texture["width"] == 4 && texture["depth"] == 2
+        })
+        .expect("3D texture");
+    let volume = agent.send(
+        &serde_json::json!({"command":"pick_pixel","index":volume_index,"slice":1,"x":3,"y":3})
+            .to_string(),
+    );
+    assert_eq!(volume["ok"], true, "{volume}");
+    assert_eq!(
+        volume["data"]["pixel"]["float_values"],
+        serde_json::json!(["0", "0", "1", "1"])
+    );
     let layered_path = dir.path().join("layered.png");
     let save_layer = serde_json::json!({"command":"export_texture","index":layered_index,"path":layered_path.to_str().unwrap(),"mip":1,"slice":1,"sample":0}).to_string();
     let saved_layer = agent.send(&save_layer);

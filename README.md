@@ -8,6 +8,8 @@ The event browser can filter visible event names using case-insensitive literal 
 
 Select an action and open **API calls** to inspect its associated API events, or select those events in the main hierarchy after enabling them. Both views can replay the selected event. **Parameters** browses structured capture data on demand, including nested children and pages. Buffer nodes offer a paged byte view; the first read creates an isolated worker and exports the full structured capture, which can require substantial extra memory and time. Event names still use structured chunk names rather than RenderDoc's fully formatted call summaries.
 
+The texture details view can pick a pixel at explicit top-left coordinates for the selected mip, slice and sample. It shows RenderDoc's returned component bits and their float, signed and unsigned interpretations; these are not necessarily the texture's original storage bytes.
+
 **Mesh** queries post-shader output for a selected draw and displays paged positions when RenderDoc reports a supported float position format; otherwise it displays raw bytes. Positions follow buffer order, not draw-index order. The current desktop view uses instance 0 and view 0 and is not yet the complete RenderDoc mesh viewer. The agent CLI also exposes the index buffer and instance selection.
 
 **Vertex input** displays used attributes in draw order, applying the selected draw's indices, base vertex, instance rate and buffer offsets. Common floating-point, integer, normalized and packed formats are decoded; other formats show their raw bytes. OpenGL generic attributes are supported when shader reflection is available. The desktop view shows instance 0; the agent CLI can select another instance.

@@ -62,6 +62,27 @@ int wmain(int argc, wchar_t **argv)
       hr = device->CreateRenderTargetView(layered, &vd, &layered_views[slice * 2 + mip]);
     }
   if(FAILED(hr)) { std::cerr << "Could not create layered texture"; return 17; }
+  D3D11_TEXTURE2D_DESC integer_desc = desc;
+  integer_desc.Width = 4; integer_desc.Height = 4; integer_desc.Format = DXGI_FORMAT_R32G32B32A32_UINT;
+  ID3D11Texture2D *integer_texture = nullptr;
+  ID3D11RenderTargetView *integer_view = nullptr;
+  hr = device->CreateTexture2D(&integer_desc, nullptr, &integer_texture);
+  if(SUCCEEDED(hr)) hr = device->CreateRenderTargetView(integer_texture, nullptr, &integer_view);
+  if(FAILED(hr)) { std::cerr << "Could not create integer texture"; return 18; }
+  D3D11_TEXTURE3D_DESC volume_desc = {};
+  volume_desc.Width = 4; volume_desc.Height = 4; volume_desc.Depth = 2; volume_desc.MipLevels = 1;
+  volume_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; volume_desc.Usage = D3D11_USAGE_DEFAULT; volume_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+  ID3D11Texture3D *volume = nullptr;
+  ID3D11RenderTargetView *volume_views[2] = {};
+  hr = device->CreateTexture3D(&volume_desc, nullptr, &volume);
+  for(UINT slice = 0; SUCCEEDED(hr) && slice < 2; ++slice)
+  {
+    D3D11_RENDER_TARGET_VIEW_DESC vd = {};
+    vd.Format = volume_desc.Format; vd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE3D;
+    vd.Texture3D.MipSlice = 0; vd.Texture3D.FirstWSlice = slice; vd.Texture3D.WSize = 1;
+    hr = device->CreateRenderTargetView(volume, &vd, &volume_views[slice]);
+  }
+  if(FAILED(hr)) { std::cerr << "Could not create 3D texture"; return 19; }
 
   HMODULE compiler = LoadLibraryW(L"d3dcompiler_47.dll");
   auto compile = compiler ? reinterpret_cast<decltype(&D3DCompile)>(GetProcAddress(compiler, "D3DCompile")) : nullptr;
@@ -95,6 +116,10 @@ int wmain(int argc, wchar_t **argv)
   if(!api->IsFrameCapturing()) { std::cerr << "Capture did not start"; return 9; }
   const float color[4] = {0.25f, 0.5f, 0.75f, 1.0f};
   context->ClearRenderTargetView(view, color);
+  const float integer_color[4] = {1, 2, 3, 4};
+  context->ClearRenderTargetView(integer_view, integer_color);
+  const float volume_colors[2][4] = {{1,0,0,1}, {0,0,1,1}};
+  for(unsigned i = 0; i < 2; ++i) context->ClearRenderTargetView(volume_views[i], volume_colors[i]);
   const float layer_colors[4][4] = {{1,0,0,1}, {0,1,0,1}, {0,0,1,1}, {1,1,0,1}};
   for(unsigned i = 0; i < 4; ++i) context->ClearRenderTargetView(layered_views[i], layer_colors[i]);
   const float updated_vertices[] = {0, 3, 3, 3, 3, 3, 3};
@@ -119,6 +144,7 @@ int wmain(int argc, wchar_t **argv)
   if(!api->GetCapture(0, output.data(), &length, nullptr)) { std::cerr << "Could not read capture path"; return 13; }
   std::cout << "RENDERDOCX_CAPTURE=" << output.data() << std::endl;
   for(auto *layer_view : layered_views) layer_view->Release();
-  layered->Release(); index_buffer->Release(); vertex_buffer->Release(); layout->Release(); vertex->Release(); pixel->Release(); view->Release(); texture->Release(); context->Release(); device->Release();
+  for(auto *volume_view : volume_views) volume_view->Release();
+  volume->Release(); integer_view->Release(); integer_texture->Release(); layered->Release(); index_buffer->Release(); vertex_buffer->Release(); layout->Release(); vertex->Release(); pixel->Release(); view->Release(); texture->Release(); context->Release(); device->Release();
   return 0;
 }

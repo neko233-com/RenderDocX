@@ -17,7 +17,7 @@ use renderdocx::{
         LiveSession, capture_directory, capture_notice, enumerate, parse_target_pid,
     },
     replay::{
-        MeshInfo, MeshSelection, Pipeline, SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session,
+        MeshInfo, MeshSelection, Pipeline, Pixel, SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session,
         ShaderReport, Snapshot, StructurePage, StructuredNode, TextureSelection,
     },
     vertex_input::{INPUT_PAGE_LIMIT, InputPage},
@@ -194,6 +194,9 @@ struct Workspace {
     tab: CaptureTab,
     selected_texture: Option<usize>,
     texture_selection: TextureSelection,
+    pixel_x: Entity<InputState>,
+    pixel_y: Entity<InputState>,
+    pixel: Option<Pixel>,
     selected_buffer: Option<usize>,
     buffer_offset: u64,
     buffer_data: Option<Vec<u8>>,
@@ -695,6 +698,7 @@ impl Workspace {
                         this.replay_pending = false;
                         this.export_pending = false;
                         this.preview = None;
+                        this.pixel = None;
                         this.status = None;
                     }
                     Err(error) => {
@@ -750,6 +754,7 @@ impl Workspace {
         self.selection_revision = revision;
         self.replay_pending = true;
         self.preview = None;
+        self.pixel = None;
         self.buffer_data = None;
         self.shader_data = None;
         self.structure = StructureView::default();
@@ -1384,6 +1389,7 @@ impl Workspace {
             }
         }
         self.preview = None;
+        self.pixel = None;
         self.status = None;
         cx.notify();
     }
@@ -1488,6 +1494,116 @@ impl Workspace {
         .detach();
     }
 
+    fn pick_texture_pixel(&mut self, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            self.status = Some(
+                self.t(
+                    "Wait for the current operation.",
+                    "请等待当前操作完成。",
+                    "現在の処理が完了するまでお待ちください。",
+                    "현재 작업이 끝날 때까지 기다려 주세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let Some(event) = self.pipeline.as_ref().map(|pipeline| pipeline.event_id) else {
+            self.status = Some(
+                self.t(
+                    "Select an event before picking a pixel.",
+                    "请先选择事件再读取像素。",
+                    "ピクセルを取得する前にイベントを選択してください。",
+                    "픽셀을 읽기 전에 이벤트를 선택하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let (Ok(x), Ok(y)) = (
+            self.pixel_x.read(cx).value().parse::<u32>(),
+            self.pixel_y.read(cx).value().parse::<u32>(),
+        ) else {
+            self.status = Some(
+                self.t(
+                    "Enter nonnegative integer pixel coordinates.",
+                    "请输入非负整数像素坐标。",
+                    "非負の整数ピクセル座標を入力してください。",
+                    "음이 아닌 정수 픽셀 좌표를 입력하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let (Some(session), Some(index)) = (self.session.clone(), self.selected_texture) else {
+            return;
+        };
+        let Some(texture) = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.textures.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        let Ok(texture_index) = u32::try_from(index) else {
+            return;
+        };
+        let selection = self.texture_selection;
+        let revision = self.open_revision;
+        let selection_revision = self.selection_revision;
+        self.pixel = None;
+        self.resource_pending = true;
+        self.status = Some(
+            self.t(
+                "Picking pixel…",
+                "正在读取像素…",
+                "ピクセルを取得中…",
+                "픽셀을 읽는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            session.pick_pixel(event, texture_index, &texture, selection, x, y)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision || this.selection_revision != selection_revision {
+                    return;
+                }
+                this.resource_pending = false;
+                if this.selected_texture != Some(index) || this.texture_selection != selection {
+                    this.status = None;
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok(pixel) => {
+                        this.pixel = Some(pixel);
+                        this.status = None;
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Could not pick pixel",
+                                "无法读取像素",
+                                "ピクセルを取得できません",
+                                "픽셀을 읽을 수 없습니다"
+                            )
+                        ));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn preview_texture(&mut self, cx: &mut Context<Self>) {
         if self.replay_pending
             || self.export_pending
@@ -1535,6 +1651,7 @@ impl Workspace {
         }
         let revision = self.open_revision;
         self.preview = None;
+        self.pixel = None;
         self.export_pending = true;
         self.status = Some(
             self.t(
@@ -2219,6 +2336,7 @@ impl Workspace {
                                         this.selected_texture = Some(index);
                                         this.texture_selection = TextureSelection::default();
                                         this.preview = None;
+                                        this.pixel = None;
                                         cx.notify();
                                     })),
                             )
@@ -2709,6 +2827,32 @@ impl Workspace {
                 |this, cx| this.preview_texture(cx),
                 cx,
             );
+            let pixel = self.pixel.clone();
+            let pixel_title = self.t(
+                "Pixel coordinates (top-left)",
+                "像素坐标（左上角为原点）",
+                "ピクセル座標（左上原点）",
+                "픽셀 좌표 (왼쪽 위 원점)",
+            );
+            let pick = self.t("Pick pixel", "读取像素", "ピクセルを取得", "픽셀 읽기");
+            let float_label = self.t(
+                "Float interpretation",
+                "浮点解释",
+                "浮動小数点として解釈",
+                "부동소수점 해석",
+            );
+            let uint_label = self.t(
+                "Unsigned interpretation",
+                "无符号整数解释",
+                "符号なし整数として解釈",
+                "부호 없는 정수 해석",
+            );
+            let int_label = self.t(
+                "Signed interpretation",
+                "有符号整数解释",
+                "符号付き整数として解釈",
+                "부호 있는 정수 해석",
+            );
             div()
                 .flex()
                 .flex_col()
@@ -2778,6 +2922,52 @@ impl Workspace {
                             .child(preview)
                             .child(export),
                     )
+                    .child(div().text_sm().text_color(rgb(0x91a7c0)).child(pixel_title))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .child(div().child("X"))
+                            .child(
+                                Input::new(&self.pixel_x)
+                                    .id("pixel-x")
+                                    .aria_label("X")
+                                    .w(px(75.)),
+                            )
+                            .child(div().child("Y"))
+                            .child(
+                                Input::new(&self.pixel_y)
+                                    .id("pixel-y")
+                                    .aria_label("Y")
+                                    .w(px(75.)),
+                            )
+                            .child(button(
+                                "pixel-pick",
+                                pick,
+                                false,
+                                |this, cx| this.pick_texture_pixel(cx),
+                                cx,
+                            )),
+                    )
+                    .when_some(pixel, |view, pixel| {
+                        let bits = pixel
+                            .bits
+                            .iter()
+                            .map(|v| format!("{v:08X}"))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        view.child(
+                            div()
+                                .id("pixel-result")
+                                .test_support()
+                                .child(format!("({}, {}) · RGBA: {bits}", pixel.x, pixel.y)),
+                        )
+                        .child(format!("{float_label}: {}", pixel.float_values.join(", ")))
+                        .child(format!("{uint_label}: {:?}", pixel.uint_values))
+                        .child(format!("{int_label}: {:?}", pixel.int_values))
+                    })
                     .child(div().text_sm().text_color(rgb(0x91a7c0)).child(export_note))
                     .when_some(preview_path, |view, path| {
                         view.child(
@@ -3039,6 +3229,7 @@ impl Workspace {
                             this.mesh = MeshView::default();
                             this.input_page = None;
                             this.preview = None;
+                            this.pixel = None;
                             this.status = None;
                             cx.notify();
                         },
@@ -4246,6 +4437,8 @@ fn main() {
                     let launch_env_name = cx.new(|cx| InputState::new(window, cx));
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
+                    let pixel_x = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let pixel_y = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let entity = cx.new(|cx| Workspace {
                         settings,
                         status: None,
@@ -4263,6 +4456,9 @@ fn main() {
                         tab: CaptureTab::Events,
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
+                        pixel_x,
+                        pixel_y,
+                        pixel: None,
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_data: None,
@@ -4345,6 +4541,8 @@ mod ui_tests {
                     let launch_env_name = cx.new(|cx| InputState::new(window, cx));
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
+                    let pixel_x = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let pixel_y = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     cx.new(|cx| Workspace {
                         settings: Settings::default(),
                         status: None,
@@ -4373,6 +4571,9 @@ mod ui_tests {
                         tab: CaptureTab::Events,
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
+                        pixel_x,
+                        pixel_y,
+                        pixel: None,
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_data: None,
@@ -4537,6 +4738,8 @@ mod ui_tests {
                     let launch_env_name = cx.new(|cx| InputState::new(window, cx));
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
+                    let pixel_x = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let pixel_y = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     cx.new(|cx| Workspace {
                         settings: Settings::default(),
                         status: None,
@@ -4644,6 +4847,9 @@ mod ui_tests {
                         tab: CaptureTab::Events,
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
+                        pixel_x,
+                        pixel_y,
+                        pixel: None,
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_data: None,
@@ -4745,6 +4951,28 @@ mod ui_tests {
             assert!(view.read(cx).tab == CaptureTab::Textures);
             assert_eq!(view.read(cx).selected_texture, Some(0));
         });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(-600.))),
+                cx,
+            );
+            window.click("pixel-x", cx);
+            window.press("ctrl-a", cx);
+            window.input("3", cx);
+            window.click("pixel-y", cx);
+            window.press("ctrl-a", cx);
+            window.input("4", cx);
+            window.click("pixel-pick", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let pixel = view.read(cx).pixel.as_ref().unwrap();
+            assert_eq!((pixel.event_id, pixel.x, pixel.y), (42, 3, 4));
+            assert_eq!(pixel.float_values, ["0.25", "0.5", "0.75", "1"]);
+        });
         assert_eq!(*events.lock().unwrap(), vec![42]);
         cx.update_window(handle.into(), |_, window, cx| {
             window.scroll(
@@ -4760,6 +4988,7 @@ mod ui_tests {
         })
         .unwrap();
         cx.run_until_parked();
+        cx.update(|cx| assert!(view.read(cx).pixel.is_none()));
         assert_eq!(
             *selections.lock().unwrap(),
             vec![TextureSelection {
@@ -5114,6 +5343,11 @@ mod ui_tests {
                     ..Settings::default()
                 };
                 let (real_session, real_snapshot) = Session::open(&settings, &capture).unwrap();
+                let color_index = real_snapshot
+                    .textures
+                    .iter()
+                    .position(|texture| texture.width == 16 && texture.height == 16)
+                    .expect("captured color target");
                 let (draw_index, draw_event) = real_snapshot
                     .actions
                     .iter()
@@ -5322,6 +5556,46 @@ mod ui_tests {
                     );
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.click("textures-tab", cx);
+                    window.click(SharedString::from(format!("texture-{color_index}")), cx);
+                    window.scroll(
+                        "capture-details-scroll",
+                        ScrollDelta::Pixels(point(px(0.), px(-800.))),
+                        cx,
+                    );
+                    window.click("pixel-pick", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx)
+                            .pixel
+                            .as_ref()
+                            .is_some_and(|pixel| pixel.event_id == draw_event)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real pixel did not load: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update(|cx| {
+                    let pixel = view.read(cx).pixel.as_ref().unwrap();
+                    let values: Vec<f32> = pixel
+                        .float_values
+                        .iter()
+                        .map(|value| value.parse().unwrap())
+                        .collect();
+                    for (actual, expected) in values.iter().zip([0.25, 0.5, 0.75, 1.0]) {
+                        assert!((actual - expected).abs() <= 1.0 / 255.0);
+                    }
+                });
                 cx.update_window(handle.into(), |_, window, cx| {
                     window.click("vertex-input-tab", cx)
                 })

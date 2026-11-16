@@ -66,7 +66,7 @@ int wmain(int argc, wchar_t **argv)
   PROC(void (APIENTRY *)(GLuint, GLuint, GLuint, GLuint, GLuint), glVertexAttribI4ui);
 #undef PROC
   const char *vs = "#version 130\nin vec2 position; in vec4 tint; in ivec2 flags; in uvec2 counters; out vec4 color; void main(){ gl_Position=vec4(position,0,1); color=tint+vec4(float(flags.x+flags.y)*0.001,float(counters.x+counters.y)*0.001,0,0); }";
-  const char *fs = "#version 130\nin vec4 color; out vec4 result; void main(){ result=color; }";
+  const char *fs = "#version 130\nin vec4 color; uniform sampler2D tex; out vec4 result; void main(){ result=color+texture(tex,vec2(0.25,0.25))*0.001; }";
   GLuint vertex = glCreateShader(0x8B31), fragment = glCreateShader(0x8B30);
   glShaderSource(vertex, 1, &vs, nullptr); glCompileShader(vertex);
   glShaderSource(fragment, 1, &fs, nullptr); glCompileShader(fragment);
@@ -82,6 +82,11 @@ int wmain(int argc, wchar_t **argv)
   glEnableVertexAttribArray(0); glVertexAttribPointer(0, 2, GL_SHORT, GL_TRUE, 4, nullptr);
   glVertexAttrib4f(1, 0.25f, 0.5f, 0.75f, 1.0f);
   glVertexAttribI4i(2, -4, 42, 0, 1); glVertexAttribI4ui(3, 9, 123, 0, 1);
+  GLuint texture = 0; glGenTextures(1, &texture); glBindTexture(GL_TEXTURE_2D, texture);
+  const uint8_t pixels[] = {255,0,0,255, 0,255,0,255, 0,0,255,255, 255,255,0,255};
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
   api->StartFrameCapture(nullptr, nullptr);
   if(!api->IsFrameCapturing()) { std::cerr << "OpenGL capture did not start"; return 15; }
   glDrawArrays(GL_TRIANGLES, 0, 3); glFinish();

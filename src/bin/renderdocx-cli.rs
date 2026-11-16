@@ -25,7 +25,7 @@ fn usage() -> Value {
         {"name":"select","arguments":["capture.rdc","event_id"],"description":"Replay a capture to an event."},
         {"name":"serve","arguments":[],"description":"Serve sequential JSONL requests using a persistent replay session."},
         {"name":"capabilities","arguments":[],"description":"Describe the commands currently implemented."}
-    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","vertex_input","mesh","mesh_read","structure","structure_buffer","read_buffer","export_texture","close","target_list","target_launch","target_connect","target_connect_pid","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
+    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","vertex_input","mesh","mesh_read","structure","structure_buffer","read_buffer","pick_pixel","export_texture","close","target_list","target_launch","target_connect","target_connect_pid","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
 }
 
 fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
@@ -598,6 +598,50 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     _ => Err((
                         "invalid_arguments",
                         "shader requires a valid stage and optional target_index".into(),
+                    )),
+                }
+            }
+            "pick_pixel" => {
+                let number = |key: &str| {
+                    request
+                        .get(key)
+                        .and_then(Value::as_u64)
+                        .and_then(|v| u32::try_from(v).ok())
+                };
+                match (
+                    &opened,
+                    selected_event,
+                    number("index"),
+                    number("x"),
+                    number("y"),
+                ) {
+                    (None, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some(_), None, _, _, _) => {
+                        Err(("no_event", "Select an event before picking a pixel".into()))
+                    }
+                    (Some((session, snapshot)), Some(event), Some(index), Some(x), Some(y)) => {
+                        let selection = serde_json::from_value::<TextureSelection>(Value::Object(
+                            request.clone(),
+                        ));
+                        match (snapshot.textures.get(index as usize), selection) {
+                            (Some(texture), Ok(selection)) => {
+                                match selection.validate_pixel(texture, x, y) {
+                                    Ok(()) => session
+                                        .pick_pixel(event, index, texture, selection, x, y)
+                                        .map(|pixel| json!({"pixel":pixel,"selection":selection}))
+                                        .map_err(|error| ("replay_pixel_failed", error)),
+                                    Err(error) => Err(("invalid_arguments", error)),
+                                }
+                            }
+                            _ => Err((
+                                "invalid_arguments",
+                                "Invalid texture index or selection".into(),
+                            )),
+                        }
+                    }
+                    _ => Err((
+                        "invalid_arguments",
+                        "pick_pixel requires a texture index and unsigned x/y".into(),
                     )),
                 }
             }

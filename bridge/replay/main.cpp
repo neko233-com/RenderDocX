@@ -93,7 +93,7 @@ struct PendingAction
 };
 
 struct BufferRef { ResourceId id; uint64_t length; };
-struct TextureRef { ResourceId id; uint32_t dimension, depth, mips, arraysize, samples, components; };
+struct TextureRef { ResourceId id; uint32_t width, height, dimension, depth, mips, arraysize, samples, components; };
 
 bool decimal(const std::string &text, uint64_t &value)
 {
@@ -183,7 +183,7 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
   for(size_t i = 0; i < textures.size(); ++i)
   {
     const TextureDescription &texture = textures[i];
-    texture_ids.push_back({texture.resourceId, texture.dimension, texture.depth, texture.mips, texture.arraysize, texture.msSamp, texture.format.compCount});
+    texture_ids.push_back({texture.resourceId, texture.width, texture.height, texture.dimension, texture.depth, texture.mips, texture.arraysize, texture.msSamp, texture.format.compCount});
     const auto found_name = resource_names.find(texture.resourceId);
     const rdcstr *name = found_name == resource_names.end() ? nullptr : found_name->second;
     if(i) std::cout << ',';
@@ -746,6 +746,34 @@ int run(const std::string &capture, bool structure_worker)
       std::cout << "\nRENDERDOCX/1 {\"type\":\"buffer_data\",\"index\":" << index << ",\"offset\":\"" << offset << "\",\"hex\":\"";
       for(byte value : data) std::cout << hex[value >> 4] << hex[value & 15];
       std::cout << "\"}" << std::endl;
+      continue;
+    }
+    if(command.compare(0, 6, "pixel ") == 0)
+    {
+      if(!selected) { error("Select an event before picking a pixel"); continue; }
+      std::istringstream arguments(command.substr(6));
+      std::string index_text, mip_text, slice_text, sample_text, x_text, y_text, extra;
+      uint64_t index = 0, mip = 0, slice = 0, sample = 0, x = 0, y = 0;
+      if(!(arguments >> index_text >> mip_text >> slice_text >> sample_text >> x_text >> y_text) || (arguments >> extra) ||
+         !decimal(index_text, index) || !decimal(mip_text, mip) || !decimal(slice_text, slice) ||
+         (sample_text != "resolve" && !decimal(sample_text, sample)) || !decimal(x_text, x) || !decimal(y_text, y) || index >= texture_ids.size())
+      { error("Invalid pixel request"); continue; }
+      const TextureRef &texture = texture_ids[size_t(index)];
+      if(mip >= texture.mips || mip >= 32 || !texture.width || !texture.height || !texture.samples)
+      { error("Invalid texture dimensions, mip or sample count"); continue; }
+      const uint32_t width = (std::max)(1U, texture.width >> uint32_t(mip));
+      const uint32_t height = (std::max)(1U, texture.height >> uint32_t(mip));
+      const uint32_t depth = texture.dimension == 3 ? (std::max)(1U, texture.depth >> uint32_t(mip)) : texture.arraysize;
+      if(x >= width || y >= height || slice >= depth || (sample_text != "resolve" && sample >= texture.samples))
+      { error("Pixel selection is out of range"); continue; }
+      const uint32_t actual_sample = sample_text == "resolve" ? (texture.samples > 1 ? UINT32_MAX : 0U) : uint32_t(sample);
+      PixelValue pixel = replay.controller->PickPixel(texture.id, uint32_t(x), uint32_t(y), Subresource(uint32_t(mip), uint32_t(slice), actual_sample), CompType::Typeless);
+      result = replay.controller->GetFatalErrorStatus();
+      if(!result.OK()) { error(result_message(result)); break; }
+      uint32_t bits[4]; std::memcpy(bits, &pixel, sizeof(bits));
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"pixel\",\"event_id\":" << selected_event << ",\"index\":" << index
+                << ",\"mip\":" << mip << ",\"slice\":" << slice << ",\"sample\":" << actual_sample
+                << ",\"x\":" << x << ",\"y\":" << y << ",\"bits\":[" << bits[0] << ',' << bits[1] << ',' << bits[2] << ',' << bits[3] << "]}" << std::endl;
       continue;
     }
     if(command.compare(0, 6, "save2 ") == 0)

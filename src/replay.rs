@@ -217,6 +217,21 @@ pub struct TextureSelection {
     pub channel: Option<u32>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Pixel {
+    pub event_id: u32,
+    pub index: u32,
+    pub mip: u32,
+    pub slice: u32,
+    pub sample: u32,
+    pub x: u32,
+    pub y: u32,
+    pub bits: [u32; 4],
+    pub float_values: [String; 4],
+    pub uint_values: [u32; 4],
+    pub int_values: [i32; 4],
+}
+
 impl TextureSelection {
     pub fn validate(&self, texture: &Texture) -> Result<(), String> {
         let slices = if texture.dimension == 3 {
@@ -234,6 +249,17 @@ impl TextureSelection {
                 .is_some_and(|value| value >= texture.component_count || value > i32::MAX as u32)
         {
             return Err("Texture selection is out of range".into());
+        }
+        Ok(())
+    }
+
+    pub fn validate_pixel(&self, texture: &Texture, x: u32, y: u32) -> Result<(), String> {
+        self.validate(texture)?;
+        if self.mip >= 32 || texture.width == 0 || texture.height == 0 || texture.samples == 0 {
+            return Err("Invalid texture dimensions or sample count".into());
+        }
+        if x >= (texture.width >> self.mip).max(1) || y >= (texture.height >> self.mip).max(1) {
+            return Err("Pixel coordinates are out of range".into());
         }
         Ok(())
     }
@@ -346,6 +372,16 @@ enum Reply {
         kind: String,
         offset: String,
         hex: String,
+    },
+    Pixel {
+        event_id: u32,
+        index: u32,
+        mip: u32,
+        slice: u32,
+        sample: u32,
+        x: u32,
+        y: u32,
+        bits: [u32; 4],
     },
     StructuredBuffer {
         event_id: u32,
@@ -533,6 +569,17 @@ trait Transport: Send {
     fn read_buffer(&mut self, _index: u32, _offset: u64, _length: u32) -> Result<Vec<u8>, String> {
         Err("Buffer reading is not supported by this transport".into())
     }
+    fn pick_pixel(
+        &mut self,
+        _event: u32,
+        _index: u32,
+        _selection: TextureSelection,
+        _sample: u32,
+        _x: u32,
+        _y: u32,
+    ) -> Result<Pixel, String> {
+        Err("Pixel picking is not supported by this transport".into())
+    }
     fn shader(&mut self, _stage: u32, _target: Option<u32>) -> Result<ShaderReport, String> {
         Err("Shader inspection is not supported by this transport".into())
     }
@@ -573,6 +620,63 @@ trait Transport: Send {
 }
 
 impl Transport for Process {
+    fn pick_pixel(
+        &mut self,
+        event: u32,
+        index: u32,
+        selection: TextureSelection,
+        sample: u32,
+        x: u32,
+        y: u32,
+    ) -> Result<Pixel, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        let requested = selection
+            .sample
+            .map(|sample| sample.to_string())
+            .unwrap_or_else(|| "resolve".into());
+        writeln!(
+            input,
+            "pixel {index} {} {} {requested} {x} {y}",
+            selection.mip, selection.slice
+        )
+        .and_then(|_| input.flush())
+        .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::Pixel {
+                event_id,
+                index: actual,
+                mip,
+                slice,
+                sample: actual_sample,
+                x: actual_x,
+                y: actual_y,
+                bits,
+            } if event_id == event
+                && actual == index
+                && mip == selection.mip
+                && slice == selection.slice
+                && actual_sample == sample
+                && actual_x == x
+                && actual_y == y =>
+            {
+                Ok(Pixel {
+                    event_id,
+                    index,
+                    mip,
+                    slice,
+                    sample,
+                    x,
+                    y,
+                    bits,
+                    float_values: bits.map(|bits| f32::from_bits(bits).to_string()),
+                    uint_values: bits,
+                    int_values: bits.map(|bits| bits as i32),
+                })
+            }
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected pixel response".into()),
+        }
+    }
     fn mesh(&mut self, event: u32, selection: MeshSelection) -> Result<MeshInfo, String> {
         let input = self.input.as_mut().ok_or("Replay session has closed")?;
         writeln!(
@@ -923,6 +1027,31 @@ impl Session {
             .read_buffer(index, offset, length)
     }
 
+    pub fn pick_pixel(
+        &self,
+        event: u32,
+        index: u32,
+        texture: &Texture,
+        selection: TextureSelection,
+        x: u32,
+        y: u32,
+    ) -> Result<Pixel, String> {
+        selection.validate_pixel(texture, x, y)?;
+        let sample = selection
+            .sample
+            .unwrap_or(if texture.samples > 1 { u32::MAX } else { 0 });
+        let revision = self.revision.load(Ordering::SeqCst);
+        let mut process = self.process.lock().map_err(|e| e.to_string())?;
+        if self.revision.load(Ordering::SeqCst) != revision {
+            return Err("Replay selection changed".into());
+        }
+        let pixel = process.pick_pixel(event, index, selection, sample, x, y)?;
+        if self.revision.load(Ordering::SeqCst) != revision {
+            return Err("Replay selection changed".into());
+        }
+        Ok(pixel)
+    }
+
     pub fn vertex_input_page(
         &self,
         action: &Action,
@@ -1089,6 +1218,35 @@ pub mod test_support {
     use super::*;
     struct RecordingTransport(Arc<Mutex<Vec<u32>>>, Arc<Mutex<Vec<TextureSelection>>>);
     impl Transport for RecordingTransport {
+        fn pick_pixel(
+            &mut self,
+            event: u32,
+            index: u32,
+            selection: TextureSelection,
+            sample: u32,
+            x: u32,
+            y: u32,
+        ) -> Result<Pixel, String> {
+            let bits = [
+                0.25_f32.to_bits(),
+                0.5_f32.to_bits(),
+                0.75_f32.to_bits(),
+                1.0_f32.to_bits(),
+            ];
+            Ok(Pixel {
+                event_id: event,
+                index,
+                mip: selection.mip,
+                slice: selection.slice,
+                sample,
+                x,
+                y,
+                bits,
+                float_values: bits.map(|v| f32::from_bits(v).to_string()),
+                uint_values: bits,
+                int_values: bits.map(|v| v as i32),
+            })
+        }
         fn mesh(&mut self, event: u32, selection: MeshSelection) -> Result<MeshInfo, String> {
             Ok(MeshInfo {
                 event_id: event,
@@ -1393,6 +1551,9 @@ mod tests {
             channel: Some(3),
         };
         assert!(selection.validate(&texture).is_ok());
+        assert!(selection.validate_pixel(&texture, 1, 1).is_ok());
+        assert!(selection.validate_pixel(&texture, 2, 1).is_err());
+        assert!(selection.validate_pixel(&texture, 1, 2).is_err());
         selection.slice = 2;
         assert!(selection.validate(&texture).is_err());
         selection.slice = 0;
