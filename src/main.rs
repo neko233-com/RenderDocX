@@ -5366,9 +5366,26 @@ impl Workspace {
             return;
         }
         let Some(destination) = rfd::FileDialog::new()
-            .add_filter("PNG", &["png"])
+            .set_file_name("texture.png")
+            .add_filter(
+                "Texture images",
+                &["png", "dds", "jpg", "jpeg", "bmp", "tga", "hdr", "exr"],
+            )
             .save_file()
         else {
+            return;
+        };
+        let Some(format) = renderdocx::replay::TextureExportFormat::from_path(&destination) else {
+            self.status = Some(
+                self.t(
+                    "Choose a supported texture file extension.",
+                    "请选择受支持的纹理文件扩展名。",
+                    "対応するテクスチャの拡張子を選択してください。",
+                    "지원되는 텍스처 파일 확장자를 선택하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
             return;
         };
         let destination_label = destination.display().to_string();
@@ -5384,9 +5401,9 @@ impl Workspace {
             .to_owned(),
         );
         cx.notify();
-        let task = cx
-            .background_executor()
-            .spawn(async move { session.export_texture_selected(index, selection, &destination) });
+        let task = cx.background_executor().spawn(async move {
+            session.export_texture_as(index, selection, format, &destination)
+        });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {

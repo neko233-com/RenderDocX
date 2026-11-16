@@ -464,6 +464,10 @@ fn real_opengl_vertex_inputs_include_generic_and_normalized_values() {
         .iter()
         .position(|texture| texture["width"] == 2 && texture["height"] == 2)
         .expect("OpenGL fixture texture");
+    let dds = dir.path().join("gl-texture.dds");
+    let saved = agent.send(&serde_json::json!({"command":"export_texture", "index":texture, "path":dds, "format":"dds"}).to_string());
+    assert_eq!(saved["ok"], true, "{saved}");
+    assert!(std::fs::read(dds).unwrap().starts_with(b"DDS "));
     let top = agent
         .send(&serde_json::json!({"command":"pick_pixel","index":texture,"x":0,"y":0}).to_string());
     assert_eq!(top["ok"], true, "{top}");
@@ -1531,6 +1535,40 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     );
     assert_eq!(agent.send(&export)["error"]["code"], "replay_export_failed");
     assert_eq!(std::fs::read(&png_path).unwrap(), bytes);
+    for (format, signature) in [
+        ("dds", &b"DDS "[..]),
+        ("jpg", &[0xff, 0xd8][..]),
+        ("bmp", &b"BM"[..]),
+        ("hdr", &b"#?RADIANCE"[..]),
+        ("exr", &[0x76, 0x2f, 0x31, 0x01][..]),
+        ("tga", &[][..]),
+    ] {
+        let path = dir.path().join(format!("texture.{format}"));
+        let request = serde_json::json!({"command":"export_texture", "index":texture_index, "path":path, "format":format});
+        let result = agent.send(&request.to_string());
+        assert_eq!(result["ok"], true, "{format}: {result}");
+        assert_eq!(result["data"]["format"], format);
+        let data = std::fs::read(&path).unwrap();
+        assert!(
+            !data.is_empty() && data.starts_with(signature),
+            "{format}: {} bytes",
+            data.len()
+        );
+        if format == "tga" {
+            assert!(
+                data.len() >= 18 && matches!(data[2], 2 | 10),
+                "invalid TGA header"
+            );
+            assert_eq!(u16::from_le_bytes([data[12], data[13]]), 16);
+            assert_eq!(u16::from_le_bytes([data[14], data[15]]), 16);
+        }
+        assert_eq!(
+            agent.send(&request.to_string())["error"]["code"],
+            "replay_export_failed"
+        );
+        assert_eq!(std::fs::read(path).unwrap(), data);
+    }
+    assert_eq!(agent.send(&serde_json::json!({"command":"export_texture","index":texture_index,"path":dir.path().join("invalid.out"),"format":"unsupported"}).to_string())["error"]["code"], "invalid_arguments");
     let draw =
         agent.send(&serde_json::json!({"command":"select","event_id":draw_event}).to_string());
     assert_eq!(draw["ok"], true, "{draw}");
@@ -1842,6 +1880,13 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let mut layer_pixels = vec![0; layer_reader.output_buffer_size().unwrap()];
     layer_reader.next_frame(&mut layer_pixels).unwrap();
     assert_eq!(&layer_pixels[..3], &[255, 255, 0]);
+    let layered_dds = dir.path().join("layered.dds");
+    let selected_dds = agent.send(&serde_json::json!({"command":"export_texture", "index":layered_index, "path":layered_dds, "format":"dds", "mip":1, "slice":1, "sample":0}).to_string());
+    assert_eq!(selected_dds["ok"], true, "{selected_dds}");
+    let dds_data = std::fs::read(&layered_dds).unwrap();
+    assert_eq!(&dds_data[..4], b"DDS ");
+    assert_eq!(u32::from_le_bytes(dds_data[12..16].try_into().unwrap()), 4);
+    assert_eq!(u32::from_le_bytes(dds_data[16..20].try_into().unwrap()), 4);
     let saved_bytes = std::fs::read(&layered_path).unwrap();
     assert_eq!(
         agent.send(&save_layer)["error"]["code"],

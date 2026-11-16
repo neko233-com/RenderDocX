@@ -846,6 +846,56 @@ pub struct TextureSelection {
     pub analysis_type_cast: u32,
 }
 
+/// Values match FileType in the version-matched RenderDoc replay API.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextureExportFormat {
+    Dds,
+    #[default]
+    Png,
+    Jpg,
+    Bmp,
+    Tga,
+    Hdr,
+    Exr,
+}
+impl TextureExportFormat {
+    fn wire(self) -> u32 {
+        match self {
+            Self::Dds => 0,
+            Self::Png => 1,
+            Self::Jpg => 2,
+            Self::Bmp => 3,
+            Self::Tga => 4,
+            Self::Hdr => 5,
+            Self::Exr => 6,
+        }
+    }
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Dds => "dds",
+            Self::Png => "png",
+            Self::Jpg => "jpg",
+            Self::Bmp => "bmp",
+            Self::Tga => "tga",
+            Self::Hdr => "hdr",
+            Self::Exr => "exr",
+        }
+    }
+    pub fn from_path(path: &Path) -> Option<Self> {
+        match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+            "dds" => Some(Self::Dds),
+            "png" => Some(Self::Png),
+            "jpg" | "jpeg" => Some(Self::Jpg),
+            "bmp" => Some(Self::Bmp),
+            "tga" => Some(Self::Tga),
+            "hdr" => Some(Self::Hdr),
+            "exr" => Some(Self::Exr),
+            _ => None,
+        }
+    }
+}
+
 fn cast_suffix(value: u32) -> String {
     if value == 0 {
         String::new()
@@ -1607,6 +1657,7 @@ trait Transport: Send {
         &mut self,
         _index: u32,
         _selection: TextureSelection,
+        _format: TextureExportFormat,
         _path: &Path,
     ) -> Result<(), String> {
         Err("Texture export is not supported by this transport".into())
@@ -2523,6 +2574,7 @@ impl Transport for Process {
         &mut self,
         index: u32,
         selection: TextureSelection,
+        format: TextureExportFormat,
         path: &Path,
     ) -> Result<(), String> {
         let path = path
@@ -2535,7 +2587,23 @@ impl Transport for Process {
             encoded.push(HEX[(byte & 15) as usize] as char);
         }
         let input = self.input.as_mut().ok_or("Replay session has closed")?;
-        let command = if selection == TextureSelection::default() {
+        let command = if format != TextureExportFormat::Png {
+            let sample = selection
+                .sample
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "resolve".into());
+            let channel = selection
+                .channel
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "all".into());
+            format!(
+                "save3 {index} {} {} {sample} {channel} {encoded} {} {}",
+                selection.mip,
+                selection.slice,
+                selection.preview_type_cast,
+                format.wire()
+            )
+        } else if selection == TextureSelection::default() {
             format!("save {index} {encoded}")
         } else {
             let sample = selection
@@ -3526,6 +3594,16 @@ impl Session {
         selection: TextureSelection,
         destination: &Path,
     ) -> Result<(), String> {
+        self.export_texture_as(index, selection, TextureExportFormat::Png, destination)
+    }
+
+    pub fn export_texture_as(
+        &self,
+        index: u32,
+        selection: TextureSelection,
+        format: TextureExportFormat,
+        destination: &Path,
+    ) -> Result<(), String> {
         if selection.mip > i32::MAX as u32
             || selection.slice > i32::MAX as u32
             || selection.channel.is_some_and(|v| v > i32::MAX as u32)
@@ -3538,14 +3616,14 @@ impl Session {
             .unwrap_or(Path::new("."));
         let temporary = tempfile::Builder::new()
             .prefix(".renderdocx-")
-            .suffix(".png")
+            .suffix(&format!(".{}", format.extension()))
             .tempfile_in(parent)
             .map_err(|e| format!("Cannot create temporary export: {e}"))?
             .into_temp_path();
         self.process
             .lock()
             .map_err(|e| e.to_string())?
-            .save_texture(index, selection, temporary.as_ref())?;
+            .save_texture(index, selection, format, temporary.as_ref())?;
         temporary
             .persist_noclobber(destination)
             .map_err(|e| format!("Cannot publish texture export: {}", e.error))?;
@@ -3986,8 +4064,12 @@ pub mod test_support {
             &mut self,
             _index: u32,
             selection: TextureSelection,
+            format: TextureExportFormat,
             path: &Path,
         ) -> Result<(), String> {
+            if format != TextureExportFormat::Png {
+                return Err("Mock supports PNG only".into());
+            }
             self.1.lock().map_err(|e| e.to_string())?.push(selection);
             const PIXEL: &[u8] = &[
                 137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0,
@@ -4158,6 +4240,19 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn texture_export_formats_follow_known_extensions_and_wire_values() {
+        use super::TextureExportFormat as F;
+        use std::path::Path;
+        assert_eq!(F::from_path(Path::new("image.JPEG")), Some(F::Jpg));
+        assert_eq!(F::from_path(Path::new("image.dds")), Some(F::Dds));
+        assert_eq!(F::from_path(Path::new("image.exr")), Some(F::Exr));
+        assert_eq!(F::from_path(Path::new("image.invalid")), None);
+        assert_eq!(F::Dds.wire(), 0);
+        assert_eq!(F::Exr.wire(), 6);
+        assert_eq!(serde_json::to_string(&F::Png).unwrap(), "\"png\"");
+        assert!(serde_json::from_str::<F>("\"unknown\"").is_err());
+    }
     use super::*;
 
     #[test]

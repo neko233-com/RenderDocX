@@ -9,7 +9,7 @@ use renderdocx::{
     replay::{
         BUFFER_PAGE_LIMIT, ComputeDebugSelection, DebugState, DebugTrace, MeshInfo, MeshSelection,
         Pipeline, PixelDebugSelection, SHADER_STAGES, STRUCTURE_PAGE_LIMIT, Session, Snapshot,
-        TextureSelection,
+        TextureExportFormat, TextureSelection,
     },
 };
 use serde_json::{Value, json};
@@ -46,7 +46,7 @@ fn usage() -> Value {
         {"name":"select","arguments":["capture.rdc","event_id"],"description":"Replay a capture to an event."},
         {"name":"serve","arguments":[],"description":"Serve sequential JSONL requests using a persistent replay session."},
         {"name":"capabilities","arguments":[],"description":"Describe the commands currently implemented."}
-    ],"serve_commands":["capabilities","open","snapshot","timeline","timeline_usage","timeline_history","select","pipeline","shader","shader_bindings","shader_binding_read","shader_constants","shader_export","shader_apply","shader_revert","debug_vertex","debug_pixel","debug_compute","debug_collect","debug_state","debug_breakpoint","debug_navigate","debug_next","debug_stop","vertex_input","mesh","mesh_read","mesh_draw","mesh_draw_export","structure","structure_buffer","callstack","read_buffer","decode_buffer","decode_buffer_layout","buffer_formats_list","buffer_format_get","buffer_format_save","buffer_format_delete","export_buffer","export_buffer_csv","find_buffer","resource_usage","resource_rename","annotation_read","annotation_write","dependencies","dependencies_save","descriptors","debug_messages","clear_debug_messages","counter_fetch","counter_page","pick_pixel","pixel_history","texture_statistics","export_texture","close","gpu_list","remote_list","remote_download","target_list","target_launch","target_connect","target_connect_pid","target_copy","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"mesh_draw_page_limit":renderdocx::mesh_draw::PAGE_LIMIT,"shader_binding_page_limit":renderdocx::replay::SHADER_BINDING_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"counter_page_limit":renderdocx::replay::COUNTER_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
+    ],"serve_commands":["capabilities","open","snapshot","timeline","timeline_usage","timeline_history","select","pipeline","shader","shader_bindings","shader_binding_read","shader_constants","shader_export","shader_apply","shader_revert","debug_vertex","debug_pixel","debug_compute","debug_collect","debug_state","debug_breakpoint","debug_navigate","debug_next","debug_stop","vertex_input","mesh","mesh_read","mesh_draw","mesh_draw_export","structure","structure_buffer","callstack","read_buffer","decode_buffer","decode_buffer_layout","buffer_formats_list","buffer_format_get","buffer_format_save","buffer_format_delete","export_buffer","export_buffer_csv","find_buffer","resource_usage","resource_rename","annotation_read","annotation_write","dependencies","dependencies_save","descriptors","debug_messages","clear_debug_messages","counter_fetch","counter_page","pick_pixel","pixel_history","texture_statistics","export_texture","close","gpu_list","remote_list","remote_download","target_list","target_launch","target_connect","target_connect_pid","target_copy","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"texture_export_formats":["png","dds","jpg","bmp","tga","hdr","exr"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"mesh_draw_page_limit":renderdocx::mesh_draw::PAGE_LIMIT,"shader_binding_page_limit":renderdocx::replay::SHADER_BINDING_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"counter_page_limit":renderdocx::replay::COUNTER_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
 }
 
 fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
@@ -2055,14 +2055,20 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         let selection = serde_json::from_value::<TextureSelection>(Value::Object(
                             request.clone(),
                         ));
-                        match (snapshot.textures.get(index as usize), selection) {
-                            (Some(texture), Ok(selection)) => match selection.validate(texture) {
-                                Ok(()) => session.export_texture_selected(index, selection, PathBuf::from(path).as_path())
-                                    .map(|_| json!({"index":index,"event_id":event,"path":path,"selection":selection}))
+                        let format = match request.get("format") {
+                            None => Ok(TextureExportFormat::Png),
+                            Some(value) => {
+                                serde_json::from_value::<TextureExportFormat>(value.clone())
+                            }
+                        };
+                        match (snapshot.textures.get(index as usize), selection, format) {
+                            (Some(texture), Ok(selection), Ok(format)) => match selection.validate(texture) {
+                                Ok(()) => session.export_texture_as(index, selection, format, PathBuf::from(path).as_path())
+                                    .map(|_| json!({"index":index,"event_id":event,"path":path,"selection":selection,"format":format}))
                                     .map_err(|error| ("replay_export_failed", error)),
                                 Err(error) => Err(("invalid_arguments", error)),
                             },
-                            _ => Err(("invalid_arguments", "Invalid texture index or selection".into())),
+                            _ => Err(("invalid_arguments", "Invalid texture index, selection or export format".into())),
                         }
                     }
                 }
