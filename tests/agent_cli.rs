@@ -12,7 +12,15 @@ struct Agent {
 
 impl Agent {
     fn new(bridge: Option<&str>) -> Self {
+        Self::with_handoff_environment(bridge, false)
+    }
+
+    fn with_handoff_environment(bridge: Option<&str>, handoff: bool) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_renderdocx-cli"));
+        if handoff {
+            command.env("RENDERDOCX_CONNECT_PID", "12345");
+            command.env("RENDERDOCX_OPEN_CAPTURE", "stale.rdc");
+        }
         if let Some(bridge) = bridge {
             command.args(["--bridge", bridge]);
         }
@@ -110,6 +118,10 @@ fn agent_jsonl_session_has_correlated_errors_and_clean_shutdown() {
         agent.send(r#"{"command":"target_connect","ident":0}"#)["error"]["code"],
         "invalid_arguments"
     );
+    assert_eq!(
+        agent.send(r#"{"command":"target_connect_pid","pid":0}"#)["error"]["code"],
+        "invalid_arguments"
+    );
     assert_eq!(agent.send(r#"{"id":"c","command":"close"}"#)["ok"], true);
     agent.quit();
 }
@@ -151,7 +163,7 @@ fn native_target_launch_triggers_capture_and_disconnects_without_stopping_target
     let _stop_guard = Stop(stop.clone());
     let template = dir.path();
     let arguments = format!("\"{}\"", stop.display());
-    let mut agent = Agent::new(Some(bridge.to_str().unwrap()));
+    let mut agent = Agent::with_handoff_environment(Some(bridge.to_str().unwrap()), true);
     let invalid = serde_json::json!({"command":"target_launch","path":fixture,"capture_directory":template,
         "configuration":{"environment":[{"name":"BAD=NAME","value":"fixture-private-value","operation":"set","separator":"no_sep"}]}});
     let rejected = agent.send(&invalid.to_string());
@@ -169,14 +181,15 @@ fn native_target_launch_triggers_capture_and_disconnects_without_stopping_target
     assert_eq!(launched["ok"], true, "{launched}");
     let ident = launched["data"]["target"]["ident"].as_u64().unwrap();
     assert!(ident > 0);
-    assert!(launched["data"]["target"]["pid"].as_u64().unwrap() > 0);
+    let pid = launched["data"]["target"]["pid"].as_u64().unwrap();
+    assert!(pid > 0);
     let info_path = PathBuf::from(format!("{}.info", stop.display()));
     let deadline = Instant::now() + Duration::from_secs(10);
     while !info_path.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(25));
     }
     let info = std::fs::read_to_string(&info_path).expect("fixture launch configuration");
-    assert_eq!(info, "1 1 0 0 1 1 1 0 64");
+    assert_eq!(info, "1 1 0 0 1 1 1 0 64 1");
     let discovered = agent.send(r#"{"command":"target_list"}"#);
     assert_eq!(discovered["ok"], true, "{discovered}");
     assert!(
@@ -191,6 +204,12 @@ fn native_target_launch_triggers_capture_and_disconnects_without_stopping_target
     let busy =
         other.send(&serde_json::json!({"command":"target_connect","ident":ident}).to_string());
     assert_eq!(busy["error"]["code"], "target_connect_failed", "{busy}");
+    let busy_pid =
+        other.send(&serde_json::json!({"command":"target_connect_pid","pid":pid}).to_string());
+    assert_eq!(
+        busy_pid["error"]["code"], "target_connect_failed",
+        "{busy_pid}"
+    );
     other.quit();
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut ready = false;
@@ -287,8 +306,10 @@ fn native_target_launch_triggers_capture_and_disconnects_without_stopping_target
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let reconnected =
-            agent.send(&serde_json::json!({"command":"target_connect","ident":ident}).to_string());
+            agent.send(&serde_json::json!({"command":"target_connect_pid","pid":pid}).to_string());
         if reconnected["ok"] == true {
+            assert_eq!(reconnected["data"]["target"]["pid"], pid);
+            assert_eq!(reconnected["data"]["target"]["ident"], ident);
             break;
         }
         assert!(Instant::now() < deadline, "{reconnected}");

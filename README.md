@@ -32,7 +32,7 @@ The GUI and Agent CLI offer RenderDoc capture options, an optional working direc
 
 ## Unity and Tuanjie
 
-Unity's built-in RenderDoc integration can load RenderDoc in the Editor and capture from the Game or Scene view on supported platform/API combinations. RenderDocX can discover local targets already running with RenderDoc and attempt a non-forced connection, but this flow has not been validated with Unity or Tuanjie. See the [Unity manual](https://docs.unity3d.com/Manual/RenderDocIntegration.html) and the engine version's documentation. An early [Unity package](integrations/unity/README.md) adds Editor handoff of saved captures and an optional wrapper for Unity's experimental external GPU profiler API. Tuanjie compatibility and automatic Editor handoff remain unverified.
+Unity's built-in RenderDoc integration can load RenderDoc in the Editor and capture from the Game or Scene view on supported platform/API combinations. RenderDocX can discover local targets already running with RenderDoc and attempt a non-forced connection, but this flow has not been validated with Unity or Tuanjie. See the [Unity manual](https://docs.unity3d.com/Manual/RenderDocIntegration.html) and the engine version's documentation. An early [Unity package](integrations/unity/README.md) provides saved capture handoff, an Editor-PID connection command, and an optional wrapper for Unity's experimental external GPU profiler API. Package installation and handoff construction have been checked in Unity 2022.3; actual engine connection, capture and Tuanjie compatibility remain unverified.
 
 ## Source and compatibility
 

@@ -25,7 +25,9 @@ int wmain(int argc, wchar_t **argv)
        << api->GetCaptureOptionU32(eRENDERDOC_Option_CaptureCallstacksOnlyActions) << ' '
        << api->GetCaptureOptionU32(eRENDERDOC_Option_RefAllResources) << ' '
        << api->GetCaptureOptionU32(eRENDERDOC_Option_DebugOutputMute) << ' '
-       << api->GetCaptureOptionU32(eRENDERDOC_Option_SoftMemoryLimit);
+       << api->GetCaptureOptionU32(eRENDERDOC_Option_SoftMemoryLimit) << ' '
+       << (GetEnvironmentVariableW(L"RENDERDOCX_CONNECT_PID", nullptr, 0) == 0 &&
+           GetEnvironmentVariableW(L"RENDERDOCX_OPEN_CAPTURE", nullptr, 0) == 0 ? 1 : 0);
   info.close();
   WNDCLASSW wc = {};
   wc.lpfnWndProc = DefWindowProcW; wc.hInstance = GetModuleHandleW(nullptr); wc.lpszClassName = L"RenderDocXLiveFixture";

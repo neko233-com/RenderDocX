@@ -455,7 +455,9 @@ impl Session {
             .arg(capture)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::null())
+            .env_remove("RENDERDOCX_CONNECT_PID")
+            .env_remove("RENDERDOCX_OPEN_CAPTURE");
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;

@@ -22,7 +22,7 @@ fn usage() -> Value {
         {"name":"select","arguments":["capture.rdc","event_id"],"description":"Replay a capture to an action event."},
         {"name":"serve","arguments":[],"description":"Serve sequential JSONL requests using a persistent replay session."},
         {"name":"capabilities","arguments":[],"description":"Describe the commands currently implemented."}
-    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","read_buffer","export_texture","close","target_list","target_launch","target_connect","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"buffer_page_limit":BUFFER_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
+    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","read_buffer","export_texture","close","target_list","target_launch","target_connect","target_connect_pid","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"buffer_page_limit":BUFFER_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
 }
 
 fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
@@ -201,6 +201,28 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     _ => Err((
                         "invalid_arguments",
                         "target_connect requires a nonzero ident".into(),
+                    )),
+                }
+            }
+            "target_connect_pid" => {
+                let pid = request
+                    .get("pid")
+                    .and_then(Value::as_u64)
+                    .and_then(|v| u32::try_from(v).ok())
+                    .filter(|v| *v != 0);
+                match (&target, pid) {
+                    (Some(_), _) => Err(("target_open", "Close the existing target first".into())),
+                    (None, Some(pid)) => match LiveSession::connect_pid(&settings, pid) {
+                        Ok(session) => {
+                            let value = json!({"target":session.connected});
+                            target = Some(session);
+                            Ok(value)
+                        }
+                        Err(error) => Err(("target_connect_failed", error)),
+                    },
+                    _ => Err((
+                        "invalid_arguments",
+                        "target_connect_pid requires a nonzero PID".into(),
                     )),
                 }
             }

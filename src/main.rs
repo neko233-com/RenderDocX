@@ -14,7 +14,7 @@ use renderdocx::{
     i18n::Language,
     live::{
         CaptureOptions, EnvOperation, EnvSeparator, EnvironmentModification, LaunchConfiguration,
-        LiveSession, capture_directory, capture_notice, enumerate,
+        LiveSession, capture_directory, capture_notice, enumerate, parse_target_pid,
     },
     replay::{Pipeline, SHADER_STAGES, Session, ShaderReport, Snapshot, TextureSelection},
 };
@@ -154,6 +154,10 @@ impl Workspace {
     }
 
     fn connect_live(&mut self, ident: u32, cx: &mut Context<Self>) {
+        self.connect_target(ident, false, cx);
+    }
+
+    fn connect_target(&mut self, identifier: u32, by_pid: bool, cx: &mut Context<Self>) {
         if self.live.is_some() || self.live_starting {
             return;
         }
@@ -171,9 +175,13 @@ impl Workspace {
             .to_owned(),
         );
         cx.notify();
-        let task = cx
-            .background_executor()
-            .spawn(async move { LiveSession::connect(&settings, ident) });
+        let task = cx.background_executor().spawn(async move {
+            if by_pid {
+                LiveSession::connect_pid(&settings, identifier)
+            } else {
+                LiveSession::connect(&settings, identifier)
+            }
+        });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -184,8 +192,13 @@ impl Workspace {
                 match result {
                     Ok(session) => {
                         this.live_status = Some(format!(
-                            "{}: {ident}",
-                            this.t("Connected", "已连接", "接続済み", "연결됨")
+                            "{}: {}",
+                            this.t("Connected", "已连接", "接続済み", "연결됨"),
+                            session
+                                .connected
+                                .get("ident")
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or_default()
                         ));
                         this.live_targets.clear();
                         this.live = Some(session.clone());
@@ -2889,6 +2902,9 @@ fn main() {
             let initial_capture = std::env::var_os("RENDERDOCX_OPEN_CAPTURE")
                 .or_else(|| std::env::args_os().nth(1))
                 .map(std::path::PathBuf::from);
+            let target_pid = std::env::var_os("RENDERDOCX_CONNECT_PID");
+            let initial_pid = target_pid.as_deref().and_then(parse_target_pid);
+            let invalid_pid = target_pid.is_some() && initial_pid.is_none();
             gpui_kit::open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -2943,6 +2959,22 @@ fn main() {
                     });
                     if let Some(path) = initial_capture {
                         entity.update(cx, |view, cx| view.open(path, cx));
+                    }
+                    if let Some(pid) = initial_pid {
+                        entity.update(cx, |view, cx| view.connect_target(pid, true, cx));
+                    } else if invalid_pid {
+                        entity.update(cx, |view, cx| {
+                            view.status = Some(
+                                view.t(
+                                    "Invalid Editor process ID.",
+                                    "Editor 进程 ID 无效。",
+                                    "Editor のプロセス ID が無効です。",
+                                    "Editor 프로세스 ID가 올바르지 않습니다.",
+                                )
+                                .to_owned(),
+                            );
+                            cx.notify();
+                        });
                     }
                     entity
                 },

@@ -186,9 +186,17 @@ pub fn capture_notice(event: &Value) -> Option<(u32, PathBuf, bool)> {
     Some((frame, PathBuf::from(path), event.get("local")?.as_bool()?))
 }
 
+pub fn parse_target_pid(value: &std::ffi::OsStr) -> Option<u32> {
+    value.to_str()?.parse::<u32>().ok().filter(|pid| *pid != 0)
+}
+
 pub fn enumerate(settings: &Settings) -> Result<Vec<u32>, String> {
     let mut command = Command::new(target_helper(settings)?);
-    command.arg("--enumerate").stderr(Stdio::null());
+    command
+        .arg("--enumerate")
+        .stderr(Stdio::null())
+        .env_remove("RENDERDOCX_CONNECT_PID")
+        .env_remove("RENDERDOCX_OPEN_CAPTURE");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -230,7 +238,9 @@ impl LiveSession {
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::null())
+            .env_remove("RENDERDOCX_CONNECT_PID")
+            .env_remove("RENDERDOCX_OPEN_CAPTURE");
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -433,6 +443,18 @@ impl LiveSession {
             Duration::from_secs(30),
         )
     }
+    pub fn connect_pid(settings: &Settings, pid: u32) -> Result<Self, String> {
+        if pid == 0 {
+            return Err("Process ID must be nonzero".into());
+        }
+        let value = pid.to_string();
+        Self::start(
+            settings,
+            &["--connect-pid".as_ref(), value.as_ref()],
+            None,
+            Duration::from_secs(30),
+        )
+    }
     pub fn is_alive(&self) -> bool {
         self.inner.alive.load(Ordering::SeqCst)
     }
@@ -517,6 +539,14 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn editor_pid_must_be_a_nonzero_u32() {
+        assert_eq!(parse_target_pid(std::ffi::OsStr::new("1234")), Some(1234));
+        for invalid in ["", "0", "-1", "4294967296", "42x"] {
+            assert_eq!(parse_target_pid(std::ffi::OsStr::new(invalid)), None);
+        }
     }
 
     #[test]

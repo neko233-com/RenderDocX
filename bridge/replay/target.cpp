@@ -94,6 +94,7 @@ int run(const std::vector<std::string> &args)
     RENDERDOC_ShutdownReplay(); return 0;
   }
   uint32_t ident = 0;
+  ITargetControl *target = nullptr;
   if(args[1] == "--launch" && args.size() == 5)
   {
     ExecuteResult result = RENDERDOC_ExecuteAndInject(args[2].c_str(), "", args[4].c_str(), {}, args[3].c_str(), CaptureOptions(), false);
@@ -141,9 +142,24 @@ int run(const std::vector<std::string> &args)
     if(!result.result.OK() || !result.ident) { failure(detail(result.result)); RENDERDOC_ShutdownReplay(); return 1; }
     ident = result.ident;
   }
+  else if(args[1] == "--connect-pid" && args.size() == 3)
+  {
+    uint32_t pid = 0;
+    if(!decimal(args[2], pid) || !pid) { failure("Invalid process ID"); RENDERDOC_ShutdownReplay(); return 2; }
+    uint32_t candidate = 0;
+    while((candidate = RENDERDOC_EnumerateRemoteTargets("", candidate)) != 0)
+    {
+      ITargetControl *probe = RENDERDOC_CreateTargetControl("", candidate, "RenderDocX", false);
+      if(probe && probe->Connected() && probe->GetBusyClient().empty() && probe->GetPID() == pid)
+      { target = probe; ident = candidate; break; }
+      if(probe) probe->Shutdown();
+    }
+    if(!target)
+    { failure("No available local RenderDoc target for the requested process; it may not be loaded or may be busy"); RENDERDOC_ShutdownReplay(); return 1; }
+  }
   else if(args[1] == "--connect" && args.size() == 3 && decimal(args[2], ident) && ident != 0) {}
   else { failure("Invalid target arguments"); RENDERDOC_ShutdownReplay(); return 2; }
-  ITargetControl *target = RENDERDOC_CreateTargetControl("", ident, "RenderDocX", false);
+  if(!target) target = RENDERDOC_CreateTargetControl("", ident, "RenderDocX", false);
   if(!target || !target->Connected() || !target->GetBusyClient().empty())
   {
     rdcstr busy = target ? target->GetBusyClient() : rdcstr();
