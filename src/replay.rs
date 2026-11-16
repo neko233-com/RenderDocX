@@ -3616,7 +3616,10 @@ pub mod test_support {
                 index,
                 tracked: true,
                 entries: (0..140)
-                    .map(|event_id| ResourceUse { event_id, usage: 2 })
+                    .map(|event_id| ResourceUse {
+                        event_id,
+                        usage: [2, 12, 22, 35, 44][event_id as usize % 5],
+                    })
                     .collect(),
             })
         }

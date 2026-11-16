@@ -4,6 +4,40 @@ use serde::Serialize;
 
 const SET_MARKER: u32 = 0x20;
 
+/// Categories and colors follow qrenderdoc's TimelineBar for the matched upstream enum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum UsageKind {
+    Read,
+    Write,
+    ReadWrite,
+    Clear,
+    Barrier,
+}
+
+impl UsageKind {
+    pub fn from_usage(usage: u32) -> Self {
+        match usage {
+            22..=30 | 37 | 38 | 41 => Self::ReadWrite,
+            12 | 32 | 33 | 40 | 43 | 45 => Self::Write,
+            35 | 36 => Self::Clear,
+            44 => Self::Barrier,
+            _ => Self::Read,
+        }
+    }
+    pub fn color(self) -> u32 {
+        match self {
+            Self::Read => 0xe69f00,
+            Self::Write => 0x56b4e9,
+            Self::ReadWrite => 0xf0e442,
+            Self::Clear => 0x000000,
+            Self::Barrier => 0xcc79a7,
+        }
+    }
+    pub fn row(self) -> u8 {
+        self as u8
+    }
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct TimelineItem {
     pub action_index: usize,
@@ -191,5 +225,41 @@ mod tests {
         assert_eq!(model.next_action(u32::MAX), Some((20, 3)));
         assert_eq!(model.count(10, 10), 1);
         assert_eq!(model.page(10, 20, 1, 1)[0].event_id, 11);
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::UsageKind;
+    #[test]
+    fn categories_match_upstream_resource_usage() {
+        use UsageKind::*;
+        for usage in 0..=45 {
+            let name = crate::replay::resource_usage_name(usage);
+            let expected = if name.ends_with("_RWResource")
+                || ["GenMips", "Copy", "Resolve"].contains(&name)
+            {
+                ReadWrite
+            } else if [
+                "StreamOut",
+                "ResolveDst",
+                "ColorTarget",
+                "DepthStencilTarget",
+                "CopyDst",
+                "CPUWrite",
+            ]
+            .contains(&name)
+            {
+                Write
+            } else if ["Clear", "Discard"].contains(&name) {
+                Clear
+            } else if name == "Barrier" {
+                Barrier
+            } else {
+                Read
+            };
+            assert_eq!(UsageKind::from_usage(usage), expected, "{name}");
+        }
+        assert_eq!(UsageKind::from_usage(u32::MAX), Read);
     }
 }
