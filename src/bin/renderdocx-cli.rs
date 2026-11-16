@@ -25,7 +25,7 @@ fn usage() -> Value {
         {"name":"select","arguments":["capture.rdc","event_id"],"description":"Replay a capture to an event."},
         {"name":"serve","arguments":[],"description":"Serve sequential JSONL requests using a persistent replay session."},
         {"name":"capabilities","arguments":[],"description":"Describe the commands currently implemented."}
-    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","vertex_input","mesh","mesh_read","structure","structure_buffer","read_buffer","resource_usage","pick_pixel","pixel_history","texture_statistics","export_texture","close","target_list","target_launch","target_connect","target_connect_pid","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
+    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","debug_vertex","debug_next","debug_stop","vertex_input","mesh","mesh_read","structure","structure_buffer","read_buffer","resource_usage","pick_pixel","pixel_history","texture_statistics","export_texture","close","target_list","target_launch","target_connect","target_connect_pid","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
 }
 
 fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
@@ -571,6 +571,51 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     )),
                 }
             }
+            "debug_vertex" => {
+                let number = |name: &str| {
+                    request
+                        .get(name)
+                        .and_then(Value::as_u64)
+                        .and_then(|v| u32::try_from(v).ok())
+                };
+                let view = if request.get("view").is_none() {
+                    Some(0)
+                } else {
+                    number("view")
+                };
+                match (&opened, selected_event, number("vertex"), number("instance"), number("index"), view) {
+                    (None, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some(_), None, _, _, _, _) => Err(("no_event", "Select a draw before debugging".into())),
+                    (Some((session, _)), Some(event), Some(vertex), Some(instance), Some(index), Some(view)) => {
+                        mesh_selection = None;
+                        session.debug_vertex(vertex, instance, index, view)
+                        .and_then(|trace| if trace.event_id == event { Ok(json!({"trace":trace})) } else { Err("Debug trace belongs to a different event".into()) })
+                        .map_err(|error| ("replay_debug_failed", error))
+                    },
+                    _ => Err(("invalid_arguments", "debug_vertex requires vertex, instance and adjusted index as unsigned integers".into())),
+                }
+            }
+            "debug_next" => match (&opened, selected_event) {
+                (None, _) => Err(("no_capture", "No capture is open".into())),
+                (Some(_), None) => Err(("no_event", "Select a draw before debugging".into())),
+                (Some((session, _)), Some(event)) => session
+                    .debug_next()
+                    .and_then(|batch| {
+                        if batch.event_id == event {
+                            Ok(json!({"batch":batch}))
+                        } else {
+                            Err("Debug states belong to a different event".into())
+                        }
+                    })
+                    .map_err(|error| ("replay_debug_failed", error)),
+            },
+            "debug_stop" => match &opened {
+                None => Err(("no_capture", "No capture is open".into())),
+                Some((session, _)) => session
+                    .debug_stop()
+                    .map(|()| json!({}))
+                    .map_err(|error| ("replay_debug_failed", error)),
+            },
             "shader" => {
                 let stage = request
                     .get("stage")

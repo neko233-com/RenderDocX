@@ -304,6 +304,12 @@ fn agent_jsonl_session_has_correlated_errors_and_clean_shutdown() {
     assert_eq!(reply["schema"], "renderdocx.agent.v1");
     assert_eq!(reply["id"], 17);
     assert_eq!(reply["error"]["code"], "no_capture");
+    for command in ["debug_vertex", "debug_next", "debug_stop"] {
+        assert_eq!(
+            agent.send(&serde_json::json!({"command":command}).to_string())["error"]["code"],
+            "no_capture"
+        );
+    }
     assert_eq!(
         agent.send(r#"{"command":"pixel_history","index":0,"x":0,"y":0}"#)["error"]["code"],
         "no_capture"
@@ -1275,6 +1281,63 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     }
     let vertex_shader = agent.send(r#"{"command":"shader","stage":"vertex"}"#);
     assert_eq!(vertex_shader["ok"], true, "{vertex_shader}");
+    let bad_debug =
+        agent.send(r#"{"command":"debug_vertex","vertex":4294967295,"instance":0,"index":0}"#);
+    assert_eq!(bad_debug["error"]["code"], "replay_debug_failed");
+    let debug = agent.send(r#"{"command":"debug_vertex","vertex":0,"instance":0,"index":0}"#);
+    assert_eq!(debug["ok"], true, "{debug}");
+    assert_eq!(debug["data"]["trace"]["event_id"], draw_event);
+    assert_eq!(debug["data"]["trace"]["stage"], 0);
+    assert_eq!(
+        agent.send(r#"{"command":"shader","stage":"vertex"}"#)["error"]["code"],
+        "replay_shader_failed"
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"debug_vertex","vertex":0,"instance":0}"#)["error"]["code"],
+        "invalid_arguments"
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"debug_vertex","vertex":0,"instance":0,"index":0,"view":1}"#)["error"]
+            ["code"],
+        "replay_debug_failed"
+    );
+    let mut steps = 0;
+    loop {
+        let batch = agent.send(r#"{"command":"debug_next"}"#);
+        assert_eq!(batch["ok"], true, "{batch}");
+        assert_eq!(batch["data"]["batch"]["event_id"], draw_event);
+        let states = batch["data"]["batch"]["states"].as_array().unwrap();
+        for state in states {
+            assert_eq!(state["step"], steps);
+            steps += 1;
+            for change in state["changes"].as_array().unwrap() {
+                assert_eq!(change["before"]["value_hex"].as_str().unwrap().len(), 256);
+                assert_eq!(change["after"]["value_hex"].as_str().unwrap().len(), 256);
+            }
+        }
+        if batch["data"]["batch"]["finished"] == true {
+            break;
+        }
+        assert!(!states.is_empty());
+    }
+    assert!(steps > 1);
+    assert_eq!(agent.send(r#"{"command":"debug_stop"}"#)["ok"], true);
+    assert_eq!(
+        agent.send(r#"{"command":"debug_next"}"#)["error"]["code"],
+        "replay_debug_failed"
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"debug_vertex","vertex":0,"instance":0,"index":0}"#)["ok"],
+        true
+    );
+    assert_eq!(
+        agent.send(&serde_json::json!({"command":"select","event_id":draw_event}).to_string())["ok"],
+        true
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"debug_next"}"#)["error"]["code"],
+        "replay_debug_failed"
+    );
     assert_eq!(vertex_shader["data"]["shader"]["event_id"], draw_event);
     assert!(
         vertex_shader["data"]["shader"]["disassembly"]

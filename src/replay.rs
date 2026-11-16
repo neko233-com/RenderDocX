@@ -288,6 +288,52 @@ pub struct ShaderReport {
     pub samplers: usize,
 }
 
+/// RenderDoc variable data as raw native-endian ShaderValue bytes, including nested members.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DebugVariable {
+    pub name: String,
+    pub rows: u8,
+    pub columns: u8,
+    #[serde(rename = "type")]
+    pub variable_type: u32,
+    pub flags: u32,
+    pub value_hex: String,
+    pub members: Vec<DebugVariable>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DebugTrace {
+    pub event_id: u32,
+    pub stage: u32,
+    pub inputs: Vec<DebugVariable>,
+    pub constant_blocks: Vec<DebugVariable>,
+    pub read_only_resources: Vec<DebugVariable>,
+    pub read_write_resources: Vec<DebugVariable>,
+    pub samplers: Vec<DebugVariable>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DebugChange {
+    pub before: DebugVariable,
+    pub after: DebugVariable,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DebugState {
+    pub step: u32,
+    pub next_instruction: u32,
+    pub flags: u32,
+    pub callstack: Vec<String>,
+    pub changes: Vec<DebugChange>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DebugStates {
+    pub event_id: u32,
+    pub finished: bool,
+    pub states: Vec<DebugState>,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Buffer {
     pub name: String,
@@ -590,6 +636,9 @@ enum Reply {
         hex: String,
     },
     Shader(ShaderReport),
+    DebugStarted(DebugTrace),
+    DebugStates(DebugStates),
+    DebugStopped,
     Structure(StructurePage),
     Mesh(MeshInfo),
     MeshData {
@@ -868,6 +917,21 @@ trait Transport: Send {
     }
     fn shader(&mut self, _stage: u32, _target: Option<u32>) -> Result<ShaderReport, String> {
         Err("Shader inspection is not supported by this transport".into())
+    }
+    fn debug_vertex(
+        &mut self,
+        _vertex: u32,
+        _instance: u32,
+        _index: u32,
+        _view: u32,
+    ) -> Result<DebugTrace, String> {
+        Err("Shader debugging is not supported by this transport".into())
+    }
+    fn debug_next(&mut self) -> Result<DebugStates, String> {
+        Err("Shader debugging is not supported by this transport".into())
+    }
+    fn debug_stop(&mut self) -> Result<(), String> {
+        Err("Shader debugging is not supported by this transport".into())
     }
     fn structure(
         &mut self,
@@ -1339,6 +1403,48 @@ impl Transport for Process {
         }
     }
 
+    fn debug_vertex(
+        &mut self,
+        vertex: u32,
+        instance: u32,
+        index: u32,
+        view: u32,
+    ) -> Result<DebugTrace, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(input, "debug_vertex {vertex} {instance} {index} {view}")
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::DebugStarted(trace) if trace.stage == 0 => Ok(trace),
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected shader debug response".into()),
+        }
+    }
+
+    fn debug_next(&mut self) -> Result<DebugStates, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(input, "debug_next")
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::DebugStates(states) => Ok(states),
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected shader debug states response".into()),
+        }
+    }
+
+    fn debug_stop(&mut self) -> Result<(), String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(input, "debug_stop")
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::DebugStopped => Ok(()),
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected shader debug stop response".into()),
+        }
+    }
+
     fn close(&mut self) -> Result<(), String> {
         let worker_result = self
             .structure_worker
@@ -1598,6 +1704,27 @@ impl Session {
             .lock()
             .map_err(|e| e.to_string())?
             .shader(stage, target)
+    }
+
+    pub fn debug_vertex(
+        &self,
+        vertex: u32,
+        instance: u32,
+        index: u32,
+        view: u32,
+    ) -> Result<DebugTrace, String> {
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .debug_vertex(vertex, instance, index, view)
+    }
+
+    pub fn debug_next(&self) -> Result<DebugStates, String> {
+        self.process.lock().map_err(|e| e.to_string())?.debug_next()
+    }
+
+    pub fn debug_stop(&self) -> Result<(), String> {
+        self.process.lock().map_err(|e| e.to_string())?.debug_stop()
     }
 
     pub fn mesh(&self, event: u32, selection: MeshSelection) -> Result<MeshInfo, String> {

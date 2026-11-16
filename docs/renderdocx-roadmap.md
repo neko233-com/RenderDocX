@@ -12,3 +12,5 @@ Remaining work includes:
 4. Integrate Unity/Tuanjie Editor and standalone workflows against the applicable documented engine APIs, graphics APIs, and versions, including capture handoff to the new frontend.
 5. Extend translation resources, keyboard navigation, accessibility, settings, packaging, and platform support alongside each implemented feature.
 6. Complete automated tests across protocol, UI interactions, actual captures, replay, supported GPUs, platforms, and Unity/Tuanjie before claiming parity. Compilation and mock tests alone do not establish these properties.
+
+The agent CLI also exposes RenderDoc vertex-shader debug trace batches and variable changes. This has been exercised on a real D3D11 fixture; the GUI debugger, instruction/source mappings, other stages and additional graphics APIs are still pending.

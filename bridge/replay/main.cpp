@@ -85,6 +85,48 @@ struct ReplayScope
   }
 };
 
+struct DebugTraceScope
+{
+  IReplayController *controller;
+  ShaderDebugTrace *trace = nullptr;
+  ~DebugTraceScope() { reset(); }
+  void reset()
+  {
+    if(trace) controller->FreeTrace(trace);
+    trace = nullptr;
+  }
+};
+
+void write_debug_variable(const ShaderVariable &variable)
+{
+  std::cout << "{\"name\":"; json_string(variable.name);
+  std::cout << ",\"rows\":" << unsigned(variable.rows) << ",\"columns\":" << unsigned(variable.columns)
+            << ",\"type\":" << uint32_t(variable.type) << ",\"flags\":" << uint32_t(variable.flags)
+            << ",\"value_hex\":\"";
+  const auto *bytes = reinterpret_cast<const unsigned char *>(&variable.value);
+  static const char hex[] = "0123456789abcdef";
+  for(size_t i = 0; i < sizeof(variable.value); ++i)
+    std::cout << hex[bytes[i] >> 4] << hex[bytes[i] & 15];
+  std::cout << "\",\"members\":[";
+  for(size_t i = 0; i < variable.members.size(); ++i)
+  {
+    if(i) std::cout << ',';
+    write_debug_variable(variable.members[i]);
+  }
+  std::cout << "]}";
+}
+
+void write_debug_variables(const rdcarray<ShaderVariable> &variables)
+{
+  std::cout << '[';
+  for(size_t i = 0; i < variables.size(); ++i)
+  {
+    if(i) std::cout << ',';
+    write_debug_variable(variables[i]);
+  }
+  std::cout << ']';
+}
+
 struct PendingAction
 {
   const ActionDescription *action;
@@ -112,7 +154,8 @@ bool decimal(const std::string &text, uint64_t &value)
 void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids,
                     std::vector<TextureRef> &texture_ids, std::vector<BufferRef> &buffer_ids,
                     std::map<uint32_t, uint32_t> &event_chunks,
-                    std::map<uint32_t, uint32_t> &draw_instances)
+                    std::map<uint32_t, uint32_t> &draw_instances,
+                    std::map<uint32_t, uint32_t> &draw_vertices)
 {
   const APIProperties api = controller->GetAPIProperties();
   const FrameDescription frame = controller->GetFrameInfo();
@@ -164,6 +207,8 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
     event_ids.insert(action.eventId);
     if(action.flags & (ActionFlags::Drawcall | ActionFlags::MeshDispatch))
       draw_instances.emplace(action.eventId, (std::max)(1U, action.numInstances));
+    if(action.flags & ActionFlags::Drawcall)
+      draw_vertices.emplace(action.eventId, action.numIndices);
     for(size_t i = action.children.size(); i > 0; --i)
       pending.push_back({&action.children[i - 1], node.depth + 1, static_cast<int64_t>(index)});
     ++index;
@@ -547,18 +592,21 @@ int run(const std::string &capture, bool structure_worker)
   if(!opened.first.OK()) { error(result_message(opened.first)); return 1; }
   replay.controller = opened.second;
   if(!replay.controller) { error("RenderDoc returned no replay controller"); return 1; }
+  DebugTraceScope debug{replay.controller};
   if(!structure_worker) { replay.file->Shutdown(); replay.file = nullptr; }
   std::set<uint32_t> event_ids;
   std::vector<TextureRef> texture_ids;
   std::vector<BufferRef> buffer_ids;
   std::map<uint32_t, uint32_t> event_chunks;
   std::map<uint32_t, uint32_t> draw_instances;
-  write_snapshot(replay.controller, event_ids, texture_ids, buffer_ids, event_chunks, draw_instances);
+  std::map<uint32_t, uint32_t> draw_vertices;
+  write_snapshot(replay.controller, event_ids, texture_ids, buffer_ids, event_chunks, draw_instances, draw_vertices);
   std::map<ResourceId, size_t> resource_indices;
   const auto &resources = replay.controller->GetResources();
   for(size_t i = 0; i < resources.size(); ++i) resource_indices.emplace(resources[i].resourceId, i);
   bool selected = false;
   uint32_t selected_event = 0;
+  bool debug_finished = false;
   bool mesh_ready = false;
   MeshFormat selected_mesh;
   uint32_t mesh_instance = 0, mesh_view = 0, mesh_stage = 0;
@@ -570,6 +618,86 @@ int run(const std::string &capture, bool structure_worker)
   while(std::getline(std::cin, command))
   {
     if(command == "quit") break;
+    // A live debugger can hold backend replay state. Do not allow unrelated replay
+    // operations to mutate that state between ContinueDebug calls.
+    if(debug.trace && command != "debug_next" && command != "debug_stop" &&
+       command.compare(0, 13, "debug_vertex ") != 0 && command.compare(0, 7, "select ") != 0)
+    { error("Stop the shader debug trace before other replay operations"); continue; }
+    if(command.compare(0, 13, "debug_vertex ") == 0)
+    {
+      std::istringstream arguments(command.substr(13));
+      std::string vertex_text, instance_text, index_text, view_text, extra;
+      uint64_t vertex = 0, instance = 0, index = 0, view = 0;
+      if(!(arguments >> vertex_text >> instance_text >> index_text >> view_text) || (arguments >> extra) ||
+         !decimal(vertex_text, vertex) || !decimal(instance_text, instance) ||
+         !decimal(index_text, index) || !decimal(view_text, view) ||
+         vertex > UINT32_MAX || instance > UINT32_MAX || index > UINT32_MAX || view > UINT32_MAX)
+      { error("Invalid vertex debug request"); continue; }
+      auto vertices = draw_vertices.find(selected_event);
+      auto instances = draw_instances.find(selected_event);
+      if(!selected || vertices == draw_vertices.end() || instances == draw_instances.end())
+      { error("Select a draw event before debugging a vertex"); continue; }
+      if(vertex >= vertices->second || instance >= instances->second)
+      { error("Vertex or instance is out of range"); continue; }
+      if(view != 0) { error("Nonzero debug views cannot yet be verified"); continue; }
+      if(replay.controller->GetPipelineState().GetShader(ShaderStage::Vertex) == ResourceId())
+      { error("No vertex shader is bound"); continue; }
+      debug.reset();
+      debug_finished = false;
+      mesh_ready = false;
+      debug.trace = replay.controller->DebugVertex(uint32_t(vertex), uint32_t(instance), uint32_t(index), uint32_t(view));
+      result = replay.controller->GetFatalErrorStatus();
+      if(!result.OK()) { error(result_message(result)); break; }
+      if(!debug.trace || !debug.trace->debugger)
+      { debug.reset(); error("RenderDoc could not create a vertex debug trace"); continue; }
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"debug_started\",\"event_id\":" << selected_event
+                << ",\"stage\":" << uint32_t(debug.trace->stage) << ",\"inputs\":";
+      write_debug_variables(debug.trace->inputs);
+      std::cout << ",\"constant_blocks\":"; write_debug_variables(debug.trace->constantBlocks);
+      std::cout << ",\"read_only_resources\":"; write_debug_variables(debug.trace->readOnlyResources);
+      std::cout << ",\"read_write_resources\":"; write_debug_variables(debug.trace->readWriteResources);
+      std::cout << ",\"samplers\":"; write_debug_variables(debug.trace->samplers);
+      std::cout << "}" << std::endl;
+      continue;
+    }
+    if(command == "debug_next")
+    {
+      if(!debug.trace || !debug.trace->debugger) { error("No shader debug trace is active"); continue; }
+      rdcarray<ShaderDebugState> states;
+      if(!debug_finished) states = replay.controller->ContinueDebug(debug.trace->debugger);
+      result = replay.controller->GetFatalErrorStatus();
+      if(!result.OK()) { error(result_message(result)); break; }
+      if(states.empty()) debug_finished = true;
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"debug_states\",\"event_id\":" << selected_event
+                << ",\"finished\":" << (debug_finished ? "true" : "false") << ",\"states\":[";
+      for(size_t i = 0; i < states.size(); ++i)
+      {
+        if(i) std::cout << ',';
+        const auto &state = states[i];
+        std::cout << "{\"step\":" << state.stepIndex << ",\"next_instruction\":" << state.nextInstruction
+                  << ",\"flags\":" << uint32_t(state.flags) << ",\"callstack\":[";
+        for(size_t j = 0; j < state.callstack.size(); ++j)
+        { if(j) std::cout << ','; json_string(state.callstack[j]); }
+        std::cout << "],\"changes\":[";
+        for(size_t j = 0; j < state.changes.size(); ++j)
+        {
+          if(j) std::cout << ',';
+          std::cout << "{\"before\":"; write_debug_variable(state.changes[j].before);
+          std::cout << ",\"after\":"; write_debug_variable(state.changes[j].after);
+          std::cout << '}';
+        }
+        std::cout << "]}";
+      }
+      std::cout << "]}" << std::endl;
+      continue;
+    }
+    if(command == "debug_stop")
+    {
+      debug.reset();
+      debug_finished = false;
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"debug_stopped\"}" << std::endl;
+      continue;
+    }
     if(command.compare(0, 6, "usage ") == 0)
     {
       std::istringstream arguments(command.substr(6));
@@ -1023,6 +1151,7 @@ int run(const std::string &capture, bool structure_worker)
       if(event > (std::numeric_limits<uint32_t>::max)()) { valid = false; break; }
     }
     if(!valid || event_ids.count(uint32_t(event)) == 0) { error("Unknown capture event"); continue; }
+    debug.reset();
     mesh_ready = false;
     history_ready = false;
     cached_history = rdcarray<PixelModification>();
