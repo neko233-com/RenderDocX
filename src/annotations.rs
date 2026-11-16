@@ -1,6 +1,54 @@
 //! RenderDoc's version-one JSON notes and event bookmarks.
 use serde_json::{Value, json};
 
+pub fn resource_name<'a>(document: &'a Value, key: &str) -> Result<Option<&'a str>, String> {
+    let object = document
+        .as_object()
+        .ok_or("Resource names must be a JSON object")?;
+    let Some(names) = object.get("CustomResourceNames") else {
+        return Ok(None);
+    };
+    let names = names
+        .as_object()
+        .ok_or("CustomResourceNames must be an object")?;
+    match names.get(key) {
+        None => Ok(None),
+        Some(name) => name
+            .as_str()
+            .map(Some)
+            .ok_or_else(|| "Resource name must be a string".into()),
+    }
+}
+
+pub fn set_resource_name(document: &Value, key: &str, name: &str) -> Result<Value, String> {
+    let Some(id) = key
+        .strip_prefix("ResourceId::")
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|id| *id != 0)
+    else {
+        return Err("Invalid RenderDoc resource identifier".into());
+    };
+    if key != format!("ResourceId::{id}") {
+        return Err("Noncanonical RenderDoc resource identifier".into());
+    }
+    resource_name(document, key)?;
+    let mut updated = document.clone();
+    let object = updated
+        .as_object_mut()
+        .ok_or("Resource names must be a JSON object")?;
+    let names = object
+        .entry("CustomResourceNames")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or("CustomResourceNames must be an object")?;
+    if name.is_empty() {
+        names.remove(key);
+    } else {
+        names.insert(key.into(), Value::String(name.into()));
+    }
+    Ok(updated)
+}
+
 pub fn set_comment(document: &Value, comment: &str) -> Result<Value, String> {
     let mut updated = document.clone();
     let object = updated
@@ -86,5 +134,29 @@ mod tests {
             json!([])
         );
         assert!(set_bookmark(&json!({"Bookmarks":"invalid"}), 1, Some("x")).is_err());
+    }
+
+    #[test]
+    fn rename_uses_renderdoc_keys_and_preserves_other_entries() {
+        let original = json!({"extra":true,"CustomResourceNames":{"ResourceId::7":"old","ResourceId::8":"keep"}});
+        let renamed = set_resource_name(&original, "ResourceId::7", "颜色").unwrap();
+        assert_eq!(
+            resource_name(&renamed, "ResourceId::7").unwrap(),
+            Some("颜色")
+        );
+        assert_eq!(renamed["CustomResourceNames"]["ResourceId::8"], "keep");
+        assert_eq!(renamed["extra"], true);
+        assert_eq!(
+            resource_name(
+                &set_resource_name(&renamed, "ResourceId::7", "").unwrap(),
+                "ResourceId::7"
+            )
+            .unwrap(),
+            None
+        );
+        assert!(set_resource_name(&original, "ResourceId::0", "x").is_err());
+        assert!(
+            set_resource_name(&json!({"CustomResourceNames":[]}), "ResourceId::7", "x").is_err()
+        );
     }
 }

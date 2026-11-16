@@ -44,7 +44,19 @@ struct TexturePreview {
 struct AnnotationView {
     notes: Option<(AnnotationSection, serde_json::Value)>,
     bookmarks: Option<(AnnotationSection, serde_json::Value)>,
+    renames: Option<(AnnotationSection, serde_json::Value)>,
     editor: Option<Entity<TextareaState>>,
+}
+
+fn resource_name<'a>(
+    resource: &'a renderdocx::replay::ResourceInfo,
+    renames: Option<&'a serde_json::Value>,
+) -> &'a str {
+    resource
+        .rename_key
+        .as_deref()
+        .and_then(|key| renames.and_then(|doc| annotations::resource_name(doc, key).ok().flatten()))
+        .unwrap_or(&resource.name)
 }
 
 #[derive(Clone, Copy)]
@@ -296,6 +308,7 @@ struct Workspace {
     event_search: Entity<InputState>,
     _event_search_subscription: gpui::Subscription,
     resource_search: Entity<InputState>,
+    resource_rename: Entity<InputState>,
     _resource_search_subscription: gpui::Subscription,
     resource_query: String,
     resource_visible: Vec<usize>,
@@ -454,10 +467,11 @@ impl Workspace {
         let Some(session) = self.session.clone() else {
             return;
         };
-        let section = if name == "notes" {
-            &self.annotations.notes
-        } else {
-            &self.annotations.bookmarks
+        let section = match name {
+            "notes" => &self.annotations.notes,
+            "bookmarks" => &self.annotations.bookmarks,
+            "renames" => &self.annotations.renames,
+            _ => return,
         };
         let Some((section, _)) = section else { return };
         let section = section.clone();
@@ -488,8 +502,11 @@ impl Workspace {
                     Ok((section, document)) => {
                         if name == "notes" {
                             this.annotations.notes = Some((section, document));
-                        } else {
+                        } else if name == "bookmarks" {
                             this.annotations.bookmarks = Some((section, document));
+                        } else {
+                            this.annotations.renames = Some((section, document));
+                            this.refresh_resources();
                         }
                         this.status = None;
                     }
@@ -730,6 +747,7 @@ impl Workspace {
 
     fn refresh_resources(&mut self) {
         let query = &self.resource_query;
+        let renames = self.annotations.renames.as_ref().map(|(_, doc)| doc);
         let exact_index = query
             .strip_prefix('#')
             .and_then(|value| value.parse::<usize>().ok());
@@ -745,7 +763,9 @@ impl Workspace {
                         let matches = if let Some(exact) = exact_index {
                             index == exact
                         } else {
-                            resource.name.to_lowercase().contains(query)
+                            resource_name(resource, renames)
+                                .to_lowercase()
+                                .contains(query)
                                 || resource_type_name(resource.resource_type)
                                     .to_lowercase()
                                     .contains(query)
@@ -755,6 +775,37 @@ impl Workspace {
                     .collect()
             })
             .unwrap_or_default();
+    }
+
+    fn rename_selected_resource(&mut self, reset: bool, cx: &mut Context<Self>) {
+        let Some(resource) = self
+            .selected_resource
+            .and_then(|index| self.snapshot.as_ref()?.resources.get(index))
+        else {
+            return;
+        };
+        let Some(key) = resource.rename_key.as_deref() else {
+            self.status = Some("Resource ID unavailable; update the replay bridge".into());
+            cx.notify();
+            return;
+        };
+        let Some((_, document)) = self.annotations.renames.as_ref() else {
+            self.status = Some("Resource names are unavailable; reopen the capture".into());
+            cx.notify();
+            return;
+        };
+        let name = if reset {
+            String::new()
+        } else {
+            self.resource_rename.read(cx).value().to_string()
+        };
+        match annotations::set_resource_name(document, key, &name) {
+            Ok(document) => self.save_annotation("renames", document, cx),
+            Err(error) => {
+                self.status = Some(error);
+                cx.notify();
+            }
+        }
     }
 
     fn watch_event_search(
@@ -1205,9 +1256,15 @@ impl Workspace {
             .to_owned(),
         );
         cx.notify();
-        let task = cx
-            .background_executor()
-            .spawn(async move { Session::open(&settings, &path) });
+        let task = cx.background_executor().spawn(async move {
+            let (session, snapshot) = Session::open(&settings, &path)?;
+            let renames = session.annotation_read("renames").and_then(|section| {
+                let document = section.document()?;
+                annotations::resource_name(&document, "ResourceId::1")?;
+                Ok((section, document))
+            });
+            Ok::<_, String>((session, snapshot, renames))
+        });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -1215,7 +1272,7 @@ impl Workspace {
                     return;
                 }
                 match result {
-                    Ok((session, snapshot)) => {
+                    Ok((session, snapshot, renames)) => {
                         // Invalidate work started against the old session while this open was pending.
                         this.open_revision += 1;
                         this.capture = Some(capture);
@@ -1248,6 +1305,14 @@ impl Workspace {
                         this.descriptor_store = None;
                         this.descriptor_page = None;
                         this.annotations = AnnotationView::default();
+                        let rename_error = match renames {
+                            Ok(value) => {
+                                this.annotations.renames = Some(value);
+                                None
+                            }
+                            Err(error) => Some(error),
+                        };
+                        this.refresh_resources();
                         this.usage_page = None;
                         this.replay_pending = false;
                         this.export_pending = false;
@@ -1256,7 +1321,17 @@ impl Workspace {
                         this.pixel_history = None;
                         this.history_selected = None;
                         this.statistics = None;
-                        this.status = None;
+                        this.status = rename_error.map(|error| {
+                            format!(
+                                "{}: {error}",
+                                this.t(
+                                    "Could not load resource names",
+                                    "无法加载资源名称",
+                                    "リソース名を読み込めません",
+                                    "리소스 이름을 불러올 수 없습니다"
+                                )
+                            )
+                        });
                     }
                     Err(error) => {
                         this.status = Some(format!(
@@ -4030,7 +4105,11 @@ impl Workspace {
                         .filter_map(|row| {
                             let index = *visible.get(row)?;
                             let resource = this.snapshot.as_ref()?.resources.get(index)?;
-                            let name = resource.name.clone();
+                            let name = resource_name(
+                                resource,
+                                this.annotations.renames.as_ref().map(|(_, doc)| doc),
+                            )
+                            .to_owned();
                             let kind = resource_type_name(resource.resource_type);
                             Some(
                                 div()
@@ -5136,14 +5215,67 @@ impl Workspace {
                         "#{index} · {} ({}) · {}",
                         resource_type_name(resource.resource_type),
                         resource.resource_type,
-                        resource.name
+                        resource_name(
+                            resource,
+                            self.annotations.renames.as_ref().map(|(_, doc)| doc)
+                        )
                     ))
-                    .child(if resource.autogenerated_name {
-                        generated_name
-                    } else {
-                        application_name
-                    })
+                    .child(
+                        if resource
+                            .rename_key
+                            .as_deref()
+                            .and_then(|key| {
+                                self.annotations.renames.as_ref().and_then(|(_, doc)| {
+                                    annotations::resource_name(doc, key).ok().flatten()
+                                })
+                            })
+                            .is_some()
+                        {
+                            self.t(
+                                "Custom name",
+                                "自定义名称",
+                                "カスタム名",
+                                "사용자 지정 이름",
+                            )
+                        } else if resource.autogenerated_name {
+                            generated_name
+                        } else {
+                            application_name
+                        },
+                    )
                     .child(format!("{chunks}: {:?}", resource.initialisation_chunks));
+                let rename_label = self.t(
+                    "Custom resource name",
+                    "自定义资源名称",
+                    "カスタムリソース名",
+                    "사용자 지정 리소스 이름",
+                );
+                view = view
+                    .child(
+                        Input::new(&self.resource_rename)
+                            .id("resource-rename-input")
+                            .aria_label(rename_label)
+                            .w_full(),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(button(
+                                "resource-rename-save",
+                                self.t("Save name", "保存名称", "名前を保存", "이름 저장"),
+                                false,
+                                |this, cx| this.rename_selected_resource(false, cx),
+                                cx,
+                            ))
+                            .child(button(
+                                "resource-rename-reset",
+                                self.t("Reset name", "重置名称", "名前をリセット", "이름 재설정"),
+                                false,
+                                |this, cx| this.rename_selected_resource(true, cx),
+                                cx,
+                            )),
+                    );
                 for (label, links) in [(parents, &resource.parents), (derived, &resource.derived)] {
                     view = view.child(format!("{label}: {}", links.len()));
                     for (ordinal, link) in links.iter().enumerate() {
@@ -5151,7 +5283,13 @@ impl Workspace {
                             let name = snapshot
                                 .resources
                                 .get(target)
-                                .map(|resource| resource.name.clone())
+                                .map(|resource| {
+                                    resource_name(
+                                        resource,
+                                        self.annotations.renames.as_ref().map(|(_, doc)| doc),
+                                    )
+                                    .to_owned()
+                                })
                                 .unwrap_or_default();
                             view = view.child(
                                 div()
@@ -7825,6 +7963,7 @@ fn main() {
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
+                    let resource_rename = cx.new(|cx| InputState::new(window, cx));
                     let message_search = cx.new(|cx| InputState::new(window, cx));
                     let bookmark_text = cx.new(|cx| InputState::new(window, cx));
                     let stats_min = cx.new(|cx| InputState::new(window, cx).default_value("0"));
@@ -7848,6 +7987,7 @@ fn main() {
                             cx,
                         ),
                         resource_search,
+                        resource_rename,
                         resource_query: String::new(),
                         resource_visible: Vec::new(),
                         _message_search_subscription: Workspace::watch_message_search(
@@ -7978,6 +8118,7 @@ mod ui_tests {
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
+                    let resource_rename = cx.new(|cx| InputState::new(window, cx));
                     let message_search = cx.new(|cx| InputState::new(window, cx));
                     let bookmark_text = cx.new(|cx| InputState::new(window, cx));
                     let stats_min = cx.new(|cx| InputState::new(window, cx).default_value("0"));
@@ -8018,6 +8159,7 @@ mod ui_tests {
                             cx,
                         ),
                         resource_search,
+                        resource_rename,
                         resource_query: String::new(),
                         resource_visible: Vec::new(),
                         _message_search_subscription: Workspace::watch_message_search(
@@ -8230,6 +8372,7 @@ mod ui_tests {
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
+                    let resource_rename = cx.new(|cx| InputState::new(window, cx));
                     let message_search = cx.new(|cx| InputState::new(window, cx));
                     let bookmark_text = cx.new(|cx| InputState::new(window, cx));
                     let stats_min = cx.new(|cx| InputState::new(window, cx).default_value("0"));
@@ -8327,6 +8470,7 @@ mod ui_tests {
                             resources: vec![
                                 renderdocx::replay::ResourceInfo {
                                     name: "Fixture".into(),
+                                    rename_key: Some("ResourceId::1".into()),
                                     resource_type: 5,
                                     autogenerated_name: false,
                                     initialisation_chunks: vec![2],
@@ -8335,6 +8479,7 @@ mod ui_tests {
                                 },
                                 renderdocx::replay::ResourceInfo {
                                     name: "View".into(),
+                                    rename_key: Some("ResourceId::2".into()),
                                     resource_type: 6,
                                     autogenerated_name: false,
                                     initialisation_chunks: vec![],
@@ -8372,6 +8517,7 @@ mod ui_tests {
                             cx,
                         ),
                         resource_search,
+                        resource_rename,
                         resource_query: String::new(),
                         resource_visible: Vec::new(),
                         _message_search_subscription: Workspace::watch_message_search(

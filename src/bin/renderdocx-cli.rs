@@ -42,7 +42,7 @@ fn usage() -> Value {
         {"name":"select","arguments":["capture.rdc","event_id"],"description":"Replay a capture to an event."},
         {"name":"serve","arguments":[],"description":"Serve sequential JSONL requests using a persistent replay session."},
         {"name":"capabilities","arguments":[],"description":"Describe the commands currently implemented."}
-    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","debug_vertex","debug_pixel","debug_compute","debug_collect","debug_state","debug_breakpoint","debug_navigate","debug_next","debug_stop","vertex_input","mesh","mesh_read","structure","structure_buffer","read_buffer","resource_usage","annotation_read","annotation_write","descriptors","debug_messages","clear_debug_messages","counter_fetch","counter_page","pick_pixel","pixel_history","texture_statistics","export_texture","close","target_list","target_launch","target_connect","target_connect_pid","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"counter_page_limit":renderdocx::replay::COUNTER_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
+    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","debug_vertex","debug_pixel","debug_compute","debug_collect","debug_state","debug_breakpoint","debug_navigate","debug_next","debug_stop","vertex_input","mesh","mesh_read","structure","structure_buffer","read_buffer","resource_usage","resource_rename","annotation_read","annotation_write","descriptors","debug_messages","clear_debug_messages","counter_fetch","counter_page","pick_pixel","pixel_history","texture_statistics","export_texture","close","target_list","target_launch","target_connect","target_connect_pid","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"counter_page_limit":renderdocx::replay::COUNTER_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
 }
 
 fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
@@ -832,17 +832,51 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                 let name = request.get("name").and_then(Value::as_str);
                 match (&opened, name) {
                     (None, _) => Err(("no_capture", "No capture is open".into())),
-                    (Some((session, _)), Some(name @ ("notes" | "bookmarks"))) => session
-                        .annotation_read(name)
-                        .and_then(|section| {
-                            section
-                                .document()
-                                .map(|document| json!({"section":section,"document":document}))
-                        })
-                        .map_err(|error| ("replay_annotation_failed", error)),
+                    (Some((session, _)), Some(name @ ("notes" | "bookmarks" | "renames"))) => {
+                        session
+                            .annotation_read(name)
+                            .and_then(|section| {
+                                section
+                                    .document()
+                                    .map(|document| json!({"section":section,"document":document}))
+                            })
+                            .map_err(|error| ("replay_annotation_failed", error))
+                    }
                     _ => Err((
                         "invalid_arguments",
-                        "annotation_read requires notes or bookmarks".into(),
+                        "annotation_read requires notes, bookmarks or renames".into(),
+                    )),
+                }
+            }
+            "resource_rename" => {
+                let index = request
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .and_then(|n| usize::try_from(n).ok());
+                let name = request.get("name").and_then(Value::as_str);
+                match (&opened, index, name) {
+                    (None, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some((session, snapshot)), Some(index), Some(name)) => {
+                        let result = (|| {
+                            let key = snapshot
+                                .resources
+                                .get(index)
+                                .and_then(|r| r.rename_key.as_deref())
+                                .ok_or("Resource index or stable ID unavailable")?;
+                            let section = session.annotation_read("renames")?;
+                            let document = renderdocx::annotations::set_resource_name(
+                                &section.document()?,
+                                key,
+                                name,
+                            )?;
+                            let section = session.annotation_write(&section, &document)?;
+                            Ok::<_, String>(json!({"index":index,"name":name,"section":section}))
+                        })();
+                        result.map_err(|error| ("replay_annotation_failed", error))
+                    }
+                    _ => Err((
+                        "invalid_arguments",
+                        "resource_rename requires index and name".into(),
                     )),
                 }
             }

@@ -781,6 +781,21 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let opened_copy = annotation_agent
         .send(&serde_json::json!({"command":"open","path":annotation_copy}).to_string());
     assert_eq!(opened_copy["ok"], true, "{opened_copy}");
+    let resources = opened_copy["data"]["capture"]["resources"]
+        .as_array()
+        .unwrap();
+    let (rename_index, rename_key) = resources
+        .iter()
+        .enumerate()
+        .find_map(|(i, resource)| {
+            resource["rename_key"]
+                .as_str()
+                .filter(|key| *key != "ResourceId::0")
+                .map(|key| (i, key.to_owned()))
+        })
+        .expect("fixture has a stable resource ID");
+    let renamed = annotation_agent.send(&serde_json::json!({"command":"resource_rename","index":rename_index,"name":"中文 日本語 한국어"}).to_string());
+    assert_eq!(renamed["ok"], true, "{renamed}");
     let read = annotation_agent.send(r#"{"command":"annotation_read","name":"notes"}"#);
     assert_eq!(read["ok"], true, "{read}");
     let original = read["data"]["section"].clone();
@@ -820,6 +835,22 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     assert_eq!(
         reopened.send(r#"{"command":"annotation_read","name":"bookmarks"}"#)["data"]["document"],
         bookmark_doc
+    );
+    let renamed = reopened.send(r#"{"command":"annotation_read","name":"renames"}"#);
+    assert_eq!(
+        renamed["data"]["document"]["CustomResourceNames"][&rename_key],
+        "中文 日本語 한국어"
+    );
+    let reset = reopened.send(
+        &serde_json::json!({"command":"resource_rename","index":rename_index,"name":""})
+            .to_string(),
+    );
+    assert_eq!(reset["ok"], true, "{reset}");
+    let reset_names = reopened.send(r#"{"command":"annotation_read","name":"renames"}"#);
+    assert!(
+        reset_names["data"]["document"]["CustomResourceNames"]
+            .get(&rename_key)
+            .is_none()
     );
     reopened.quit();
 
