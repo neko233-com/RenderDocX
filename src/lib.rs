@@ -2,6 +2,7 @@ pub mod annotations;
 pub mod backend;
 pub mod buffer_binding;
 pub mod buffer_export;
+pub mod buffer_search;
 pub mod debug_navigation;
 pub mod i18n;
 pub mod live;

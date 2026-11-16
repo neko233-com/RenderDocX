@@ -1929,6 +1929,11 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     };
     let content = agent.send(&read("4", 8));
     assert_eq!(content["data"]["hex"], "0000404000004040", "{content}");
+    let found = agent.send(&serde_json::json!({"command":"find_buffer", "index":vertex_index, "offset":"4", "length":"8", "hex":"00 00 40 40"}).to_string());
+    assert_eq!(found["data"]["offset"], "4", "{found}");
+    let missing = agent.send(&serde_json::json!({"command":"find_buffer", "index":vertex_index, "offset":"4", "length":"8", "hex":"de ad be ef"}).to_string());
+    assert!(missing["data"]["offset"].is_null(), "{missing}");
+    assert_eq!(agent.send(&serde_json::json!({"command":"find_buffer", "index":vertex_index, "offset":"4", "length":"8", "hex":"0"}).to_string())["error"]["code"], "invalid_arguments");
     let buffer_export = dir.path().join("vertex-range.bin");
     let export_request = serde_json::json!({"command":"export_buffer", "index":vertex_index, "offset":"4", "length":"8", "path":buffer_export});
     let exported = agent.send(&export_request.to_string());

@@ -532,6 +532,16 @@ enum TextureField {
 }
 const BUFFER_VIEW_PAGE: u64 = 256;
 
+struct BufferSearchHit {
+    open_revision: u64,
+    selection_revision: u64,
+    index: usize,
+    offset: u64,
+    range_start: u64,
+    range_end: u64,
+    pattern: Vec<u8>,
+}
+
 struct Workspace {
     settings: Settings,
     status: Option<String>,
@@ -576,6 +586,8 @@ struct Workspace {
     selected_buffer: Option<usize>,
     buffer_offset: u64,
     buffer_seek: Entity<InputState>,
+    buffer_search: Entity<InputState>,
+    buffer_search_last: Option<BufferSearchHit>,
     buffer_data: Option<Vec<u8>>,
     buffer_binding_range: Option<renderdocx::buffer_binding::BufferBindingRange>,
     resource_pending: bool,
@@ -2727,6 +2739,144 @@ impl Workspace {
                     }
                 }
                 cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn find_buffer(&mut self, cx: &mut Context<Self>) {
+        if self.replay_pending
+            || self.resource_pending
+            || self.export_pending
+            || self.selected.is_none()
+        {
+            return;
+        }
+        let (Some(session), Some(index)) = (self.session.clone(), self.selected_buffer) else {
+            return;
+        };
+        let Some(size) = self
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.buffers.get(index))
+            .and_then(|b| b.length.parse::<u64>().ok())
+        else {
+            return;
+        };
+        let Some(pattern) =
+            renderdocx::buffer_search::parse_hex(self.buffer_search.read(cx).value().as_ref())
+        else {
+            self.status = Some(
+                self.t(
+                    "Enter a nonempty sequence of hexadecimal bytes.",
+                    "请输入非空的十六进制字节序列。",
+                    "空でない 16 進バイト列を入力してください。",
+                    "비어 있지 않은 16진수 바이트를 입력하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let range = self
+            .buffer_binding_range
+            .filter(|range| range.index == index);
+        let range_start = range.map_or(0, |range| range.start);
+        let end = range.map_or(size, |range| range.end.min(size));
+        let mut start = self.buffer_offset.max(range_start);
+        if self.buffer_search_last.as_ref().is_some_and(|hit| {
+            hit.open_revision == self.open_revision
+                && hit.selection_revision == self.selection_revision
+                && hit.index == index
+                && hit.offset == self.buffer_offset
+                && hit.range_start == range_start
+                && hit.range_end == end
+                && hit.pattern == pattern
+        }) {
+            start = start.saturating_add(1);
+        }
+        if start > end {
+            self.status = Some(
+                self.t(
+                    "No further match in the current range.",
+                    "当前范围内没有后续匹配。",
+                    "現在の範囲に次の一致はありません。",
+                    "현재 범위에 다음 일치 항목이 없습니다.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let Ok(wire_index) = u32::try_from(index) else {
+            return;
+        };
+        let open = self.open_revision;
+        let selection = self.selection_revision;
+        self.resource_pending = true;
+        self.status = Some(
+            self.t(
+                "Searching buffer…",
+                "正在搜索缓冲区…",
+                "バッファを検索中…",
+                "버퍼 검색 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            let found = session.find_buffer(wire_index, start, end - start, &pattern);
+            (found, pattern)
+        });
+        cx.spawn(async move |this, cx| {
+            let (result, pattern) = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != open || this.selection_revision != selection {
+                    return;
+                }
+                this.resource_pending = false;
+                if this.selected_buffer != Some(index) {
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok(Some(offset)) => {
+                        this.buffer_search_last = Some(BufferSearchHit {
+                            open_revision: open,
+                            selection_revision: selection,
+                            index,
+                            offset,
+                            range_start,
+                            range_end: end,
+                            pattern,
+                        });
+                        this.read_buffer(index, offset, cx);
+                    }
+                    Ok(None) => {
+                        this.status = Some(
+                            this.t(
+                                "No further match in the current range.",
+                                "当前范围内没有后续匹配。",
+                                "現在の範囲に次の一致はありません。",
+                                "현재 범위에 다음 일치 항목이 없습니다.",
+                            )
+                            .to_owned(),
+                        );
+                        cx.notify();
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Buffer search failed",
+                                "缓冲区搜索失败",
+                                "バッファ検索に失敗しました",
+                                "버퍼 검색 실패"
+                            )
+                        ));
+                        cx.notify();
+                    }
+                }
             });
         })
         .detach();
@@ -9561,6 +9711,36 @@ impl Workspace {
                             .flex()
                             .flex_wrap()
                             .gap_2()
+                            .child(self.t(
+                                "Hex bytes",
+                                "十六进制字节",
+                                "16 進バイト",
+                                "16진수 바이트",
+                            ))
+                            .child(
+                                Input::new(&self.buffer_search)
+                                    .id("buffer-search-input")
+                                    .aria_label(self.t(
+                                        "Hex bytes",
+                                        "十六进制字节",
+                                        "16 進バイト",
+                                        "16진수 바이트",
+                                    ))
+                                    .w(px(220.)),
+                            )
+                            .child(button(
+                                "buffer-search-next",
+                                self.t("Find next", "查找下一个", "次を検索", "다음 찾기"),
+                                false,
+                                |this, cx| this.find_buffer(cx),
+                                cx,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
                             .child(prev)
                             .child(read_button)
                             .child(next_button)
@@ -12180,6 +12360,7 @@ fn main() {
                     let shader_edit_command = cx.new(|cx| InputState::new(window, cx));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let buffer_seek = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let buffer_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
                     let message_search = cx.new(|cx| InputState::new(window, cx));
@@ -12247,6 +12428,8 @@ fn main() {
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_seek,
+                        buffer_search,
+                        buffer_search_last: None,
                         buffer_data: None,
                         buffer_binding_range: None,
                         resource_pending: false,
@@ -12425,6 +12608,7 @@ mod ui_tests {
                     let shader_edit_command = cx.new(|cx| InputState::new(window, cx));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let buffer_seek = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let buffer_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
                     let message_search = cx.new(|cx| InputState::new(window, cx));
@@ -12510,6 +12694,8 @@ mod ui_tests {
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_seek,
+                        buffer_search,
+                        buffer_search_last: None,
                         buffer_data: None,
                         buffer_binding_range: None,
                         resource_pending: false,
@@ -12797,6 +12983,7 @@ mod ui_tests {
                     let shader_edit_command = cx.new(|cx| InputState::new(window, cx));
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let buffer_seek = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let buffer_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
                     let message_search = cx.new(|cx| InputState::new(window, cx));
@@ -12993,6 +13180,8 @@ mod ui_tests {
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_seek,
+                        buffer_search,
+                        buffer_search_last: None,
                         buffer_data: None,
                         buffer_binding_range: None,
                         resource_pending: false,
@@ -13524,6 +13713,22 @@ mod ui_tests {
             assert_eq!(view.read(cx).buffer_offset, 16);
             assert!(view.read(cx).status.is_some());
         });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("buffer-search-input", cx);
+            window.input("1f 20", cx);
+            window.click("buffer-search-next", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).buffer_offset, 31));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("buffer-search-next", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).buffer_offset, 287));
         cx.update_window(handle.into(), |_, window, cx| {
             window.click("shaders-tab", cx);
             window.click("shader-0", cx);

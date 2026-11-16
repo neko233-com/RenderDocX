@@ -52,7 +52,7 @@ For functionality not yet migrated, RenderDocX can open `qrenderdoc` separately.
 
 The GUI and Agent CLI offer RenderDoc capture options, an optional working directory, application arguments and ordered environment modifications. Each GUI launch writes to a fresh session directory under the user application-data captures directory. Remote workflows and some upstream configuration remain incomplete. Only capture applications you own or are authorized to debug, in accordance with upstream's usage policy.
 
-The buffer viewer supports direct decimal or hexadecimal byte-offset navigation within the current range. The buffer viewer and Agent CLI can export a selected event's raw buffer range to a new file. The GUI exports the currently viewed binding range or the full buffer. Data is streamed in bounded pages; an existing destination is not overwritten.
+The buffer viewer supports direct decimal or hexadecimal byte-offset navigation and repeated hexadecimal byte searches within the current range. The buffer viewer and Agent CLI can export a selected event's raw buffer range to a new file. The GUI exports the currently viewed binding range or the full buffer. Data is streamed in bounded pages; an existing destination is not overwritten.
 
 ## Unity and Tuanjie
 
