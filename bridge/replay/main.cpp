@@ -838,6 +838,53 @@ void write_pipeline(IReplayController *controller, uint32_t event)
     }
     std::cout << ']';
   }
+  const bool common = state.IsCaptureD3D11() || state.IsCaptureD3D12() || state.IsCaptureGL() || state.IsCaptureVK();
+  std::cout << ",\"fixed_state\":";
+  if(!common) std::cout << "null";
+  else
+  {
+    const RasterState raster = state.GetRasterState();
+    const DepthTestState depth = state.GetDepthTestState();
+    const auto faces = state.GetStencilFaces();
+    auto number64 = [](double value) {
+      if(std::isfinite(value)) std::cout << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
+      else std::cout << "null";
+    };
+    auto face = [](const StencilFace &value) {
+      std::cout << "{\"fail\":" << uint32_t(value.failOperation) << ",\"depth_fail\":" << uint32_t(value.depthFailOperation)
+                << ",\"pass\":" << uint32_t(value.passOperation) << ",\"function\":" << uint32_t(value.function)
+                << ",\"reference\":" << value.reference << ",\"compare_mask\":" << value.compareMask
+                << ",\"write_mask\":" << value.writeMask << '}';
+    };
+    auto equation = [](const BlendEquation &value) {
+      std::cout << "{\"source\":" << uint32_t(value.source) << ",\"destination\":" << uint32_t(value.destination)
+                << ",\"operation\":" << uint32_t(value.operation) << '}';
+    };
+    std::cout << "{\"raster\":{\"front_ccw\":" << (raster.frontCCW ? "true" : "false")
+              << ",\"fill\":" << uint32_t(raster.fillMode) << ",\"cull\":" << uint32_t(raster.cullMode) << "},\"depth\":{\"enabled\":"
+              << (depth.depthEnable ? "true" : "false") << ",\"function\":" << uint32_t(depth.depthFunction)
+              << ",\"writes\":" << (depth.depthWrites ? "true" : "false") << ",\"bounds_enabled\":" << (depth.depthBounds ? "true" : "false")
+              << ",\"min_bounds\":"; number64(depth.minDepthBounds); std::cout << ",\"max_bounds\":"; number64(depth.maxDepthBounds);
+    std::cout << "},\"stencil_enabled\":" << (state.IsStencilTestEnabled() ? "true" : "false") << ",\"stencil_front\":";
+    face(faces.first); std::cout << ",\"stencil_back\":"; face(faces.second);
+    std::cout << ",\"independent_blend\":" << (state.IsIndependentBlendingEnabled() ? "true" : "false") << ",\"blend_factor\":[";
+    const auto factors = state.GetBlendFactor();
+    for(size_t i = 0; i < 4; ++i) { if(i) std::cout << ','; number(factors[i]); }
+    std::cout << "],\"blends\":[";
+    // GetColorBlends assumes the D3D blend array has an element even when empty.
+    const bool has_blends = (!state.IsCaptureD3D11() || !controller->GetD3D11PipelineState()->outputMerger.blendState.blends.empty()) &&
+                            (!state.IsCaptureD3D12() || !controller->GetD3D12PipelineState()->outputMerger.blendState.blends.empty());
+    const rdcarray<ColorBlend> blends = has_blends ? state.GetColorBlends() : rdcarray<ColorBlend>();
+    for(size_t i = 0; i < blends.size(); ++i)
+    {
+      if(i) std::cout << ',';
+      const ColorBlend &blend = blends[i];
+      std::cout << "{\"enabled\":" << (blend.enabled ? "true" : "false") << ",\"logic_enabled\":" << (blend.logicOperationEnabled ? "true" : "false")
+                << ",\"logic_operation\":" << uint32_t(blend.logicOperation) << ",\"write_mask\":" << uint32_t(blend.writeMask) << ",\"color\":";
+      equation(blend.colorBlend); std::cout << ",\"alpha\":"; equation(blend.alphaBlend); std::cout << '}';
+    }
+    std::cout << "]}";
+  }
   std::cout << '}';
 }
 

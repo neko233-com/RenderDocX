@@ -881,6 +881,63 @@ pub struct PipelineScissor {
     pub height: i32,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PipelineRaster {
+    pub front_ccw: bool,
+    pub fill: u32,
+    pub cull: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PipelineDepth {
+    pub enabled: bool,
+    pub function: u32,
+    pub writes: bool,
+    pub bounds_enabled: bool,
+    pub min_bounds: Option<f64>,
+    pub max_bounds: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PipelineStencilFace {
+    pub fail: u32,
+    pub depth_fail: u32,
+    pub pass: u32,
+    pub function: u32,
+    pub reference: u32,
+    pub compare_mask: u32,
+    pub write_mask: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PipelineBlendEquation {
+    pub source: u32,
+    pub destination: u32,
+    pub operation: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PipelineBlend {
+    pub enabled: bool,
+    pub logic_enabled: bool,
+    pub logic_operation: u32,
+    pub write_mask: u32,
+    pub color: PipelineBlendEquation,
+    pub alpha: PipelineBlendEquation,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PipelineFixedState {
+    pub raster: PipelineRaster,
+    pub depth: PipelineDepth,
+    pub stencil_enabled: bool,
+    pub stencil_front: PipelineStencilFace,
+    pub stencil_back: PipelineStencilFace,
+    pub independent_blend: bool,
+    pub blend_factor: [Option<f32>; 4],
+    pub blends: Vec<PipelineBlend>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Pipeline {
     pub event_id: u32,
@@ -904,6 +961,8 @@ pub struct Pipeline {
     pub viewports: Option<Vec<PipelineViewport>>,
     #[serde(default)]
     pub scissors: Option<Vec<PipelineScissor>>,
+    #[serde(default)]
+    pub fixed_state: Option<PipelineFixedState>,
 }
 
 #[derive(Deserialize)]

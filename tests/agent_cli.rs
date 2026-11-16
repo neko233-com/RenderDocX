@@ -161,6 +161,13 @@ fn real_d3d11_mesh_draw_order() {
         ),
         (Some(0), Some(0), Some(1), Some(1))
     );
+    let fixed = &scissored["data"]["pipeline"]["fixed_state"];
+    assert_eq!(fixed["raster"]["fill"], 0, "{fixed}");
+    assert_eq!(fixed["raster"]["cull"], 0, "{fixed}");
+    assert!(fixed["depth"]["enabled"].is_boolean(), "{fixed}");
+    assert!(fixed["stencil_front"]["reference"].is_u64(), "{fixed}");
+    assert_eq!(fixed["blend_factor"].as_array().unwrap().len(), 4);
+    assert!(!fixed["blends"].as_array().unwrap().is_empty(), "{fixed}");
     agent.quit();
 }
 

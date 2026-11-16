@@ -8130,6 +8130,164 @@ impl Workspace {
                             })
                             .collect::<Vec<_>>()
                     });
+                    let fixed_lines = state.fixed_state.as_ref().map(|fixed| {
+                        let name = |items: &[&str], value: u32| {
+                            items
+                                .get(value as usize)
+                                .map(|s| (*s).to_owned())
+                                .unwrap_or_else(|| format!("#{value}"))
+                        };
+                        let fill = ["Solid", "Wireframe", "Point"];
+                        let cull = ["None", "Front", "Back", "FrontAndBack"];
+                        let compare = [
+                            "Never",
+                            "Always",
+                            "Less",
+                            "LessEqual",
+                            "Greater",
+                            "GreaterEqual",
+                            "Equal",
+                            "NotEqual",
+                        ];
+                        let operation = [
+                            "Keep", "Zero", "Replace", "IncSat", "DecSat", "IncWrap", "DecWrap",
+                            "Invert",
+                        ];
+                        let multipliers = [
+                            "Zero",
+                            "One",
+                            "SrcCol",
+                            "InvSrcCol",
+                            "DstCol",
+                            "InvDstCol",
+                            "SrcAlpha",
+                            "InvSrcAlpha",
+                            "DstAlpha",
+                            "InvDstAlpha",
+                            "SrcAlphaSat",
+                            "FactorRGB",
+                            "InvFactorRGB",
+                            "FactorAlpha",
+                            "InvFactorAlpha",
+                            "Src1Col",
+                            "InvSrc1Col",
+                            "Src1Alpha",
+                            "InvSrc1Alpha",
+                        ];
+                        let blend_ops =
+                            ["Add", "Subtract", "ReversedSubtract", "Minimum", "Maximum"];
+                        let logic_ops = [
+                            "NoOp",
+                            "Clear",
+                            "Set",
+                            "Copy",
+                            "CopyInverted",
+                            "Invert",
+                            "And",
+                            "Nand",
+                            "Or",
+                            "Xor",
+                            "Nor",
+                            "Equivalent",
+                            "AndReverse",
+                            "AndInverted",
+                            "OrReverse",
+                            "OrInverted",
+                        ];
+                        let on = |value| if value { enabled_label } else { disabled_label };
+                        let mut lines = vec![
+                            format!(
+                                "{}: {} · {} · CCW {}",
+                                self.t("Raster", "光栅", "ラスタ", "래스터"),
+                                name(&fill, fixed.raster.fill),
+                                name(&cull, fixed.raster.cull),
+                                fixed.raster.front_ccw
+                            ),
+                            format!(
+                                "{}: {} · {} · {} {} · {} {} ({}–{})",
+                                self.t("Depth", "深度", "深度", "깊이"),
+                                on(fixed.depth.enabled),
+                                name(&compare, fixed.depth.function),
+                                self.t("writes", "写入", "書き込み", "쓰기"),
+                                on(fixed.depth.writes),
+                                self.t("bounds", "范围", "範囲", "범위"),
+                                on(fixed.depth.bounds_enabled),
+                                fixed
+                                    .depth
+                                    .min_bounds
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_else(|| "—".into()),
+                                fixed
+                                    .depth
+                                    .max_bounds
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_else(|| "—".into())
+                            ),
+                            format!(
+                                "{}: {}",
+                                self.t("Stencil", "模板", "ステンシル", "스텐실"),
+                                on(fixed.stencil_enabled)
+                            ),
+                        ];
+                        for (label, face) in [
+                            (
+                                self.t("Front", "正面", "前面", "앞면"),
+                                &fixed.stencil_front,
+                            ),
+                            (self.t("Back", "背面", "背面", "뒷면"), &fixed.stencil_back),
+                        ] {
+                            lines.push(format!(
+                                "{label}: {} · {}/{}/{} · ref {} · masks {:#x}/{:#x}",
+                                name(&compare, face.function),
+                                name(&operation, face.fail),
+                                name(&operation, face.depth_fail),
+                                name(&operation, face.pass),
+                                face.reference,
+                                face.compare_mask,
+                                face.write_mask
+                            ));
+                        }
+                        lines.push(format!(
+                            "{}: {} · {}",
+                            self.t(
+                                "Independent blend",
+                                "独立混合",
+                                "独立ブレンド",
+                                "독립 블렌드"
+                            ),
+                            on(fixed.independent_blend),
+                            fixed
+                                .blend_factor
+                                .iter()
+                                .map(|v| v.map(|n| n.to_string()).unwrap_or_else(|| "—".into()))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                        for (slot, blend) in fixed.blends.iter().enumerate() {
+                            let eq = |e: &renderdocx::replay::PipelineBlendEquation| {
+                                format!(
+                                    "{} {} {}",
+                                    name(&multipliers, e.source),
+                                    name(&blend_ops, e.operation),
+                                    name(&multipliers, e.destination)
+                                )
+                            };
+                            lines.push(format!(
+                                "{slot}: {} · RGB {} · A {} · {} {} · mask {:#x}",
+                                on(blend.enabled),
+                                eq(&blend.color),
+                                eq(&blend.alpha),
+                                self.t("logic", "逻辑", "論理", "논리"),
+                                if blend.logic_enabled {
+                                    name(&logic_ops, blend.logic_operation)
+                                } else {
+                                    disabled_label.to_owned()
+                                },
+                                blend.write_mask
+                            ));
+                        }
+                        lines
+                    });
                     view.child(
                         div()
                             .text_sm()
@@ -8191,18 +8349,20 @@ impl Workspace {
                             |values| values.len().to_string()
                         )
                     ))
+                    .children(scissors.unwrap_or_default().into_iter().enumerate().map(
+                        |(slot, line)| {
+                            div()
+                                .id(("pipeline-scissor", slot))
+                                .test_support()
+                                .text_sm()
+                                .child(line)
+                        },
+                    ))
                     .children(
-                        scissors
+                        fixed_lines
                             .unwrap_or_default()
                             .into_iter()
-                            .enumerate()
-                            .map(|(slot, line)| {
-                                div()
-                                    .id(("pipeline-scissor", slot))
-                                    .test_support()
-                                    .text_sm()
-                                    .child(line)
-                            }),
+                            .map(|line| div().text_sm().child(line)),
                     )
                 })
                 .when(self.selected.is_none(), |view| {
