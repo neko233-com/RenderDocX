@@ -893,6 +893,21 @@ fn real_d3d11_mesh_draw_order() {
         &dir.path().join("normal-options.png"),
         serde_json::json!({}),
     );
+    let background = render_options(
+        &mut agent,
+        &dir.path().join("red-background.png"),
+        serde_json::json!({"preview_scale":1.0,"preview_offset":[32.0,32.0],"preview_background":[1.0,0.0,0.0,1.0]}),
+    );
+    assert!(
+        background[0] >= 250 && background[1] <= 2 && background[2] <= 2,
+        "red background: {:?}",
+        &background[..3]
+    );
+    let invalid_background = agent.send(&serde_json::json!({"command":"render_texture","index":float_index,"width":4,"height":4,"path":dir.path().join("invalid-background.png"),"preview_background":[1.1,0.0,0.0,1.0]}).to_string());
+    assert_eq!(
+        invalid_background["error"]["code"], "invalid_arguments",
+        "{invalid_background}"
+    );
     let rgbm = render_options(
         &mut agent,
         &dir.path().join("rgbm-options.png"),

@@ -890,6 +890,8 @@ pub struct TextureSelection {
     /// RGBM multiplier; None disables RGBM.
     pub preview_hdr_multiplier: Option<f32>,
     pub preview_decode_yuv: bool,
+    /// sRGB RGBA background; None and [0,0,0,0] select the upstream checkerboard.
+    pub preview_background: Option<[f32; 4]>,
 }
 
 /// Raw data is a whole subresource; a 3D mip contains its complete depth.
@@ -1148,6 +1150,11 @@ impl TextureSelection {
                 .preview_hdr_multiplier
                 .is_some_and(|value| !value.is_finite() || value < 0.0)
             || (self.preview_hdr_multiplier.is_some() && self.preview_decode_yuv)
+            || self.preview_background.is_some_and(|color| {
+                color
+                    .iter()
+                    .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
+            })
             || self
                 .preview_scale
                 .is_some_and(|scale| !scale.is_finite() || scale <= 0.0)
@@ -2004,6 +2011,7 @@ impl Transport for Process {
             || selection.preview_scale.is_some()
             || selection.preview_hdr_multiplier.is_some()
             || selection.preview_decode_yuv
+            || selection.preview_background.is_some()
         {
             let channels = selection.effective_preview_channels();
             let mask = channels
@@ -2021,6 +2029,7 @@ impl Transport for Process {
                 || selection.preview_scale.is_some()
                 || selection.preview_hdr_multiplier.is_some()
                 || selection.preview_decode_yuv
+                || selection.preview_background.is_some()
             {
                 write!(input, " {}", selection.preview_overlay as u32)
                     .map_err(|e| e.to_string())?;
@@ -2028,6 +2037,7 @@ impl Transport for Process {
             if selection.preview_scale.is_some()
                 || selection.preview_hdr_multiplier.is_some()
                 || selection.preview_decode_yuv
+                || selection.preview_background.is_some()
             {
                 write!(
                     input,
@@ -2038,7 +2048,10 @@ impl Transport for Process {
                 )
                 .map_err(|e| e.to_string())?;
             }
-            if selection.preview_hdr_multiplier.is_some() || selection.preview_decode_yuv {
+            if selection.preview_hdr_multiplier.is_some()
+                || selection.preview_decode_yuv
+                || selection.preview_background.is_some()
+            {
                 write!(
                     input,
                     " {} {}",
@@ -2046,6 +2059,11 @@ impl Transport for Process {
                     u8::from(selection.preview_decode_yuv)
                 )
                 .map_err(|e| e.to_string())?;
+            }
+            if let Some(background) = selection.preview_background {
+                for value in background {
+                    write!(input, " {}", value.to_bits()).map_err(|e| e.to_string())?;
+                }
             }
         }
         writeln!(input)
@@ -5373,6 +5391,7 @@ mod tests {
             preview_offset: [0.0, 0.0],
             preview_hdr_multiplier: None,
             preview_decode_yuv: false,
+            preview_background: None,
         };
         let raw = RawTextureSelection {
             mip: 2,

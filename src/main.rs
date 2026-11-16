@@ -609,6 +609,7 @@ struct Workspace {
     texture_black_point: Entity<InputState>,
     texture_white_point: Entity<InputState>,
     texture_hdr_multiplier: Entity<InputState>,
+    texture_background: Entity<InputState>,
     texture_raw_page: Option<renderdocx::replay::RawTexturePage>,
     texture_raw_seek: Entity<InputState>,
     texture_raw_search: Entity<InputState>,
@@ -5905,6 +5906,46 @@ impl Workspace {
         cx.notify();
     }
 
+    fn change_preview_background(&mut self, checker: bool, cx: &mut Context<Self>) {
+        if !self.preview_edit_ready(cx) {
+            return;
+        }
+        let background = if checker {
+            None
+        } else {
+            let input = self.texture_background.read(cx).value().to_string();
+            let text = input.trim().strip_prefix('#').unwrap_or(input.trim());
+            match (text.len() == 6)
+                .then(|| u32::from_str_radix(text, 16).ok())
+                .flatten()
+            {
+                Some(rgb) => Some([
+                    ((rgb >> 16) & 255) as f32 / 255.0,
+                    ((rgb >> 8) & 255) as f32 / 255.0,
+                    (rgb & 255) as f32 / 255.0,
+                    1.0,
+                ]),
+                None => {
+                    self.status = Some(
+                        self.t(
+                            "Enter a background color as #RRGGBB.",
+                            "请输入 #RRGGBB 格式的背景色。",
+                            "背景色を #RRGGBB 形式で入力してください。",
+                            "배경색을 #RRGGBB 형식으로 입력하세요.",
+                        )
+                        .to_owned(),
+                    );
+                    cx.notify();
+                    return;
+                }
+            }
+        };
+        self.texture_selection.preview_background = background;
+        self.preview = None;
+        self.status = None;
+        cx.notify();
+    }
+
     fn change_preview_transform(
         &mut self,
         scale: Option<f32>,
@@ -8694,6 +8735,44 @@ impl Workspace {
             .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t("Preview uses native texture display. Export applies the range only when RenderDoc converts the data.", "预览使用原生纹理显示；导出仅在 RenderDoc 转换数据时应用范围。", "プレビューはネイティブ表示を使用し、書き出しでは変換時のみ範囲が適用されます。", "미리보기는 기본 텍스처 표시를 사용하며 내보내기는 데이터 변환 시에만 범위를 적용합니다.")))
     }
 
+    fn texture_background_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .child(button(
+                "texture-background-checker",
+                self.t("Checkerboard", "棋盘格", "市松模様", "체커보드"),
+                self.texture_selection.preview_background.is_none(),
+                |this, cx| this.change_preview_background(true, cx),
+                cx,
+            ))
+            .child(
+                Input::new(&self.texture_background)
+                    .id("texture-background-color")
+                    .aria_label(self.t(
+                        "Preview background #RRGGBB",
+                        "预览背景色 #RRGGBB",
+                        "プレビュー背景色 #RRGGBB",
+                        "미리보기 배경색 #RRGGBB",
+                    ))
+                    .w(px(110.)),
+            )
+            .child(button(
+                "texture-background-apply",
+                self.t(
+                    "Apply background",
+                    "应用背景色",
+                    "背景色を適用",
+                    "배경색 적용",
+                ),
+                self.texture_selection.preview_background.is_some(),
+                |this, cx| this.change_preview_background(false, cx),
+                cx,
+            ))
+            .into_any_element()
+    }
+
     fn texture_preview_modes(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
@@ -8809,6 +8888,7 @@ impl Workspace {
                 "채널 조합, 반전 및 감마는 미리보기에만 적용됩니다.",
             )))
             .child(self.texture_preview_modes(cx))
+            .child(self.texture_background_controls(cx))
             .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
                 "Preview zoom and pan (output pixels)",
                 "预览缩放与平移（输出像素）",
@@ -14999,6 +15079,8 @@ fn main() {
                         cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let texture_hdr_multiplier =
                         cx.new(|cx| InputState::new(window, cx).default_value("32"));
+                    let texture_background =
+                        cx.new(|cx| InputState::new(window, cx).default_value("#000000"));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_debug_primitive = cx.new(|cx| InputState::new(window, cx));
                     let pixel_debug_view = cx.new(|cx| InputState::new(window, cx));
@@ -15063,6 +15145,7 @@ fn main() {
                         texture_black_point,
                         texture_white_point,
                         texture_hdr_multiplier,
+                        texture_background,
                         texture_raw_page: None,
                         texture_raw_seek,
                         texture_raw_search,
@@ -15256,6 +15339,22 @@ mod ui_tests {
                 Some(32.0)
             );
             assert!(!view.read(cx).texture_selection.preview_decode_yuv);
+            view.update(cx, |view, cx| {
+                view.texture_background
+                    .update(cx, |input, cx| input.set_value("#12A0FF", window, cx))
+            });
+            reveal_details(window, "texture-background-apply", cx);
+            window.click("texture-background-apply", cx);
+            let bg = view.read(cx).texture_selection.preview_background.unwrap();
+            assert!(
+                (bg[0] - 18.0 / 255.0).abs() < 0.0001
+                    && (bg[1] - 160.0 / 255.0).abs() < 0.0001
+                    && bg[2] == 1.0
+                    && bg[3] == 1.0
+            );
+            reveal_details(window, "texture-background-checker", cx);
+            window.click("texture-background-checker", cx);
+            assert!(view.read(cx).texture_selection.preview_background.is_none());
             reveal_details(window, "texture-overlay-1", cx);
             window.click("texture-overlay-1", cx);
         })
@@ -15467,6 +15566,8 @@ mod ui_tests {
                         cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let texture_hdr_multiplier =
                         cx.new(|cx| InputState::new(window, cx).default_value("32"));
+                    let texture_background =
+                        cx.new(|cx| InputState::new(window, cx).default_value("#000000"));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_debug_primitive = cx.new(|cx| InputState::new(window, cx));
                     let pixel_debug_view = cx.new(|cx| InputState::new(window, cx));
@@ -15549,6 +15650,7 @@ mod ui_tests {
                         texture_black_point,
                         texture_white_point,
                         texture_hdr_multiplier,
+                        texture_background,
                         texture_raw_page: None,
                         texture_raw_seek,
                         texture_raw_search,
@@ -15890,6 +15992,8 @@ mod ui_tests {
                         cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let texture_hdr_multiplier =
                         cx.new(|cx| InputState::new(window, cx).default_value("32"));
+                    let texture_background =
+                        cx.new(|cx| InputState::new(window, cx).default_value("#000000"));
                     let stats_max = cx.new(|cx| InputState::new(window, cx).default_value("1"));
                     let pixel_debug_primitive = cx.new(|cx| InputState::new(window, cx));
                     let pixel_debug_view = cx.new(|cx| InputState::new(window, cx));
@@ -16092,6 +16196,7 @@ mod ui_tests {
                         texture_black_point,
                         texture_white_point,
                         texture_hdr_multiplier,
+                        texture_background,
                         texture_raw_page: None,
                         texture_raw_seek,
                         texture_raw_search,
@@ -16559,6 +16664,7 @@ mod ui_tests {
                 preview_offset: [0.0, 0.0],
                 preview_hdr_multiplier: None,
                 preview_decode_yuv: false,
+                preview_background: None,
             }]
         );
         cx.update(|cx| {

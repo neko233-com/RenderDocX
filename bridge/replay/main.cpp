@@ -2401,7 +2401,7 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
     {
       if(!selected) { error("Select an event before rendering textures"); continue; }
       std::istringstream arguments(command.substr(15));
-      std::string i_text, mip_text, slice_text, sample_text, channel_text, cast_text, width_text, height_text, black_text, white_text, mask_text, flip_text, gamma_text, overlay_text, scale_text, x_text, y_text, hdr_text, yuv_text, extra;
+      std::string i_text, mip_text, slice_text, sample_text, channel_text, cast_text, width_text, height_text, black_text, white_text, mask_text, flip_text, gamma_text, overlay_text, scale_text, x_text, y_text, hdr_text, yuv_text, background_text, extra;
       uint64_t index=0, mip=0, slice=0, sample=0, channel=0, cast=0, width=0, height=0, black_bits=0, white_bits=0;
       if(!(arguments >> i_text >> mip_text >> slice_text >> sample_text >> channel_text >> cast_text >> width_text >> height_text >> black_text >> white_text) ||
          !decimal(i_text,index) || index >= texture_ids.size() || !decimal(mip_text,mip) || !decimal(slice_text,slice) ||
@@ -2441,6 +2441,21 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
         if(!std::isfinite(hdr_multiplier) || (hdr_multiplier < 0.0f && hdr_multiplier != -1.0f) || (hdr_multiplier >= 0.0f && yuv))
         { error("Invalid texture display mode"); continue; }
       }
+      float background[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+      if(arguments >> background_text)
+      {
+        bool valid_background = true;
+        for(size_t i=0; i<4; ++i)
+        {
+          if(i && !(arguments >> background_text)) { valid_background=false; break; }
+          uint64_t bits=0;
+          if(!decimal(background_text,bits) || bits > UINT32_MAX) { valid_background=false; break; }
+          const uint32_t value=uint32_t(bits);
+          std::memcpy(&background[i],&value,sizeof(float));
+          if(!std::isfinite(background[i]) || background[i] < 0.0f || background[i] > 1.0f) { valid_background=false; break; }
+        }
+        if(!valid_background) { error("Invalid texture background"); continue; }
+      }
       if(arguments >> extra) { error("Invalid texture display options"); continue; }
       const TextureRef &texture = texture_ids[size_t(index)];
       const uint64_t depth = texture.dimension == 3 ? (mip < 32 ? (std::max)(1U, texture.depth >> uint32_t(mip)) : 1U) : texture.arraysize;
@@ -2457,7 +2472,7 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       display.resourceId=texture.id; display.typeCast=CompType(cast);
       display.subresource=Subresource(uint32_t(mip), uint32_t(slice), sample_text == "resolve" ? TextureDisplay::ResolveSamples : uint32_t(sample));
       display.rangeMin=black; display.rangeMax=white; display.scale=scale; display.xOffset=x_offset; display.yOffset=y_offset;
-      display.overlay=DebugOverlay(overlay); display.hdrMultiplier=hdr_multiplier; display.decodeYUV=yuv != 0;
+      display.overlay=DebugOverlay(overlay); display.hdrMultiplier=hdr_multiplier; display.decodeYUV=yuv != 0; display.backgroundColor=FloatVector(background[0],background[1],background[2],background[3]);
       if(channel_text != "all") { display.red=channel==0; display.green=channel==1; display.blue=channel==2; display.alpha=channel==3; }
       if(has_options) { display.red=(mask & 1) != 0; display.green=(mask & 2) != 0; display.blue=(mask & 4) != 0; display.alpha=(mask & 8) != 0; display.flipY=flip != 0; display.linearDisplayAsGamma=gamma != 0; }
       output->SetTextureDisplay(display); output->Display();

@@ -30,6 +30,8 @@ Preview can fit the texture or use explicit zoom and pixel offsets for panning; 
 
 Preview display modes include RGBM with an editable multiplier and YUVA decoding. RGBM has targeted D3D11 fixture coverage; real YUV textures and other APIs remain unverified.
 
+Preview background can use RenderDoc's checkerboard or an sRGB `#RRGGBB` color. A D3D11 capture checks solid background output; transparent texture blending and other APIs remain unverified.
+
 The native preview also exposes RenderDoc's texture debug overlays. Overlay rendering can replay the selected event; RenderDocX restores that event and invalidates dependent cached results afterward. A D3D11 capture verifies draw highlighting, clear-before-draw restoration and rejection of an unavailable overlay. Other overlay modes, graphics APIs and engines still need real-capture validation.
 
 Pixel history lists modifications through the selected event, including fragment test failures and before, shader-output and after values. Select an entry to inspect it or replay its event. History can require substantial GPU replay work, and an empty result can also indicate that the upstream backend could not inspect the pixel.
