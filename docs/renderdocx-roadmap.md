@@ -13,4 +13,4 @@ Remaining work includes:
 5. Extend translation resources, keyboard navigation, accessibility, settings, packaging, and platform support alongside each implemented feature.
 6. Complete automated tests across protocol, UI interactions, actual captures, replay, supported GPUs, platforms, and Unity/Tuanjie before claiming parity. Compilation and mock tests alone do not establish these properties.
 
-The agent CLI also exposes RenderDoc vertex-shader debug trace batches and variable changes. This has been exercised on a real D3D11 fixture; the GUI debugger, instruction/source mappings, other stages and additional graphics APIs are still pending.
+The agent CLI exposes RenderDoc vertex-shader debug trace batches and variable changes. The GPUI vertex-input view can collect a trace for a selected row and navigate its steps. Both paths have been exercised on a real D3D11 fixture. The desktop collects all states before display and currently uses instance 0 and view 0; instruction/source mappings, breakpoints, other stages and additional graphics APIs are still pending.

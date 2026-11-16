@@ -20,6 +20,8 @@ The same view can calculate RenderDoc's per-channel minimum and maximum and disp
 
 **Vertex input** displays used attributes in draw order, applying the selected draw's indices, base vertex, instance rate and buffer offsets. Common floating-point, integer, normalized and packed formats are decoded; other formats show their raw bytes. OpenGL generic attributes are supported when shader reflection is available. The desktop view shows instance 0; the agent CLI can select another instance.
 
+Select a vertex-input row and choose **Debug vertex** to collect a RenderDoc vertex shader trace, then browse its states, variable changes and disassembly. The selected input index includes the draw offsets. The desktop currently uses instance 0 and view 0 and collects the complete trace before displaying it, which can take substantial time and memory. Source mapping, interactive breakpoints and other shader stages remain to be implemented. Real D3D11 fixture coverage checks the desktop interactions; other APIs and engines are not yet validated for this workflow.
+
 The interface detects the system language on startup and supports English, Simplified Chinese, Japanese, and Korean, with a manual language override. Its settings are stored in the operating system's user configuration directory.
 
 ## Build and run
