@@ -9,8 +9,8 @@ pub fn write_csv<F>(path: &Path, info: &MeshInfo, mut read: F) -> Result<u32, St
 where
     F: FnMut(&str, u64, u32) -> Result<Vec<u8>, String>,
 {
-    if !(1..=2).contains(&info.stage) {
-        return Err("Draw-order export supports VS and GS output only".into());
+    if !matches!(info.stage, 1 | 2 | 4) {
+        return Err("Draw-order export supports VS, GS and mesh output".into());
     }
     let parent = path
         .parent()
@@ -20,8 +20,16 @@ where
         .map_err(|error| format!("Cannot create temporary CSV: {error}"))?;
     {
         let mut output = BufWriter::new(temp.as_file_mut());
-        writeln!(output, "row,raw_index,vertex,restart,x,y,z,w,unavailable")
-            .map_err(|error| format!("Cannot write CSV: {error}"))?;
+        writeln!(
+            output,
+            "{}",
+            if info.stage == 4 {
+                "row,raw_index,vertex,restart,x,y,z,w,unavailable,meshlet,meshlet_row"
+            } else {
+                "row,raw_index,vertex,restart,x,y,z,w,unavailable"
+            }
+        )
+        .map_err(|error| format!("Cannot write CSV: {error}"))?;
         let mut offset = 0;
         while offset < info.num_indices {
             let page = mesh_draw::page(info, offset, mesh_draw::PAGE_LIMIT, &mut read)?;
@@ -43,8 +51,18 @@ where
                     write!(output, ",{value}")
                         .map_err(|error| format!("Cannot write CSV: {error}"))?;
                 }
-                writeln!(output, ",{}", row.unavailable.unwrap_or_default())
+                write!(output, ",{}", row.unavailable.unwrap_or_default())
                     .map_err(|error| format!("Cannot write CSV: {error}"))?;
+                if info.stage == 4 {
+                    write!(
+                        output,
+                        ",{},{}",
+                        row.meshlet.map(|v| v.to_string()).unwrap_or_default(),
+                        row.meshlet_row.map(|v| v.to_string()).unwrap_or_default()
+                    )
+                    .map_err(|error| format!("Cannot write CSV: {error}"))?;
+                }
+                writeln!(output).map_err(|error| format!("Cannot write CSV: {error}"))?;
             }
             offset = offset
                 .checked_add(page.rows.len() as u32)

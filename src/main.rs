@@ -8042,6 +8042,10 @@ impl Workspace {
             page.rows
                 .iter()
                 .map(|row| {
+                    let row_label = match (row.meshlet, row.meshlet_row) {
+                        (Some(meshlet), Some(local_row)) => format!("{meshlet}[{local_row}]"),
+                        _ => row.row.to_string(),
+                    };
                     let index = match (row.raw_index, row.vertex) {
                         (Some(raw), Some(vertex)) => format!("{raw} → {vertex}"),
                         (None, Some(vertex)) => vertex.to_string(),
@@ -8051,15 +8055,15 @@ impl Workspace {
                     if row.restart {
                         format!(
                             "{}: {index} · {}",
-                            row.row,
+                            row_label,
                             self.t("Restart", "重启", "リスタート", "재시작")
                         )
                     } else if let Some(position) = &row.position {
-                        format!("{}: {index} → {position:?}", row.row)
+                        format!("{}: {index} → {position:?}", row_label)
                     } else {
                         format!(
                             "{}: {index} · {}",
-                            row.row,
+                            row_label,
                             match row.unavailable {
                                 Some("index_out_of_bounds") => self.t(
                                     "Index out of bounds",

@@ -224,7 +224,7 @@ fn real_vulkan_target_launch_uses_packaged_layer() {
 }
 
 #[test]
-#[ignore = "requires a Vulkan mesh-shader capture and a matching RenderDoc replay bridge"]
+#[ignore = "requires an upstream VK_Mesh_Shader capture and a matching RenderDoc replay bridge"]
 fn real_vulkan_mesh_shader_debug_trace() {
     let bridge = std::env::var("RENDERDOCX_TEST_BRIDGE").expect("set RENDERDOCX_TEST_BRIDGE");
     let capture = std::env::var("RENDERDOCX_TEST_VULKAN_MESH_CAPTURE")
@@ -247,6 +247,37 @@ fn real_vulkan_mesh_shader_debug_trace() {
     let selected =
         agent.send(&serde_json::json!({"command":"select","event_id":event}).to_string());
     assert_eq!(selected["ok"], true, "{selected}");
+    let mesh = agent.send(r#"{"command":"mesh","stage":"mesh_out","instance":0,"view":0}"#);
+    assert_eq!(mesh["ok"], true, "{mesh}");
+    let draw = agent.send(r#"{"command":"mesh_draw","offset":0,"count":12}"#);
+    assert_eq!(draw["ok"], true, "{draw}");
+    let rows = draw["data"]["page"]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 12, "{draw}");
+    assert_eq!(
+        (rows[5]["meshlet"].as_u64(), rows[5]["meshlet_row"].as_u64()),
+        (Some(0), Some(5))
+    );
+    assert_eq!(
+        (rows[6]["meshlet"].as_u64(), rows[6]["meshlet_row"].as_u64()),
+        (Some(1), Some(0))
+    );
+    assert_eq!(rows[6]["vertex"], 6);
+    let first = rows[0]["position"].as_array().unwrap();
+    assert!((first[0].as_f64().unwrap() + 0.85).abs() < 0.001);
+    assert!((first[1].as_f64().unwrap() - 0.45).abs() < 0.001);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mesh.csv");
+    let export =
+        agent.send(&serde_json::json!({"command":"mesh_draw_export","path":path}).to_string());
+    assert_eq!(export["ok"], true, "{export}");
+    let csv = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        csv.lines()
+            .next()
+            .unwrap()
+            .ends_with(",meshlet,meshlet_row")
+    );
+    assert_eq!(csv.lines().count(), 13);
     let shader = agent.send(r#"{"command":"shader","stage":"mesh"}"#);
     assert_eq!(shader["ok"], true, "{shader}");
     let trace = agent.send(r#"{"command":"debug_mesh","group":[0,0,0],"thread":[0,0,0]}"#);
