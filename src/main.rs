@@ -588,7 +588,7 @@ struct Workspace {
     buffer_format: Option<renderdocx::buffer_format::ScalarFormat>,
     buffer_layout: Option<renderdocx::buffer_layout::Layout>,
     buffer_layout_origin: u64,
-    buffer_layout_input: Entity<InputState>,
+    buffer_layout_input: Entity<TextareaState>,
     buffer_format_name: Entity<InputState>,
     saved_buffer_formats: Vec<renderdocx::buffer_formats::SavedFormat>,
     #[cfg(test)]
@@ -2851,7 +2851,7 @@ impl Workspace {
                 self.buffer_format_name
                     .update(cx, |input, cx| input.set_value(format.name, window, cx));
                 self.buffer_layout_input
-                    .update(cx, |input, cx| input.set_value(format.layout, window, cx));
+                    .update(cx, |input, cx| input.replace_all(format.layout, window, cx));
                 self.apply_buffer_layout(cx);
             }
             Err(error) => {
@@ -10132,7 +10132,7 @@ impl Workspace {
                     .child(formats)
                     .child(div().flex().flex_wrap().gap_2()
                         .child(self.t("Buffer layout (#pack)", "缓冲区布局（#pack）", "バッファ配置（#pack）", "버퍼 레이아웃 (#pack)"))
-                        .child(Input::new(&self.buffer_layout_input).id("buffer-layout-input").aria_label(self.t("Buffer layout (#pack)", "缓冲区布局（#pack）", "バッファ配置（#pack）", "버퍼 레이아웃 (#pack)")).w(px(300.)))
+                        .child(div().id("buffer-layout-input").test_support().w(px(240.)).h(px(96.)).child(Textarea::new(&self.buffer_layout_input).aria_label(self.t("Buffer layout (#pack)", "缓冲区布局（#pack）", "バッファ配置（#pack）", "버퍼 레이아웃 (#pack)")).h(px(96.))))
                         .child(button("buffer-layout-apply", self.t("Apply layout", "应用布局", "レイアウト適用", "레이아웃 적용"), false, |this, cx| this.apply_buffer_layout(cx), cx)))
                     .child(div().flex().flex_wrap().gap_2()
                         .child(Input::new(&self.buffer_format_name).id("buffer-format-name").aria_label(self.t("Saved format name", "已保存格式名称", "保存形式の名前", "저장된 형식 이름")).w(px(180.)))
@@ -12831,7 +12831,9 @@ fn main() {
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let buffer_seek = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let buffer_layout_input = cx.new(|cx| {
-                        InputState::new(window, cx).default_value("float3 position; uint id;")
+                        TextareaState::new(window, cx)
+                            .rows(4)
+                            .default_value("float3 position; uint id;")
                     });
                     let buffer_format_name = cx.new(|cx| InputState::new(window, cx));
                     let buffer_search = cx.new(|cx| InputState::new(window, cx));
@@ -13013,6 +13015,7 @@ fn main() {
 #[cfg(all(test, feature = "ui-tests"))]
 mod ui_tests {
     use super::*;
+    use gpui_kit::InputEvent as PlatformInputEvent;
     use gpui_kit::{ScrollDelta, TestAppContext, base::Root, point, test::TestWindowExt};
 
     #[test]
@@ -13091,7 +13094,9 @@ mod ui_tests {
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let buffer_seek = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let buffer_layout_input = cx.new(|cx| {
-                        InputState::new(window, cx).default_value("float3 position; uint id;")
+                        TextareaState::new(window, cx)
+                            .rows(4)
+                            .default_value("float3 position; uint id;")
                     });
                     let buffer_format_name = cx.new(|cx| InputState::new(window, cx));
                     let buffer_search = cx.new(|cx| InputState::new(window, cx));
@@ -13479,7 +13484,9 @@ mod ui_tests {
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let buffer_seek = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let buffer_layout_input = cx.new(|cx| {
-                        InputState::new(window, cx).default_value("float3 position; uint id;")
+                        TextareaState::new(window, cx)
+                            .rows(4)
+                            .default_value("float3 position; uint id;")
                     });
                     let buffer_format_name = cx.new(|cx| InputState::new(window, cx));
                     let buffer_search = cx.new(|cx| InputState::new(window, cx));
@@ -14182,8 +14189,9 @@ mod ui_tests {
                 view.buffer_store_override = Some(format_dir.path().to_path_buf());
                 view.buffer_format_name
                     .update(cx, |input, cx| input.set_value("test format", window, cx));
-                view.buffer_layout_input
-                    .update(cx, |input, cx| input.set_value("uint saved;", window, cx));
+                view.buffer_layout_input.update(cx, |input, cx| {
+                    input.set_value("uint saved;\nuint another;", window, cx)
+                });
                 view.save_buffer_format(cx);
                 assert_eq!(view.saved_buffer_formats.len(), 1);
                 view.buffer_layout_input.update(cx, |input, cx| {
@@ -14206,7 +14214,32 @@ mod ui_tests {
             window.click(("saved-buffer-format", 0usize), cx);
             assert_eq!(
                 view.read(cx).buffer_layout_input.read(cx).value().as_ref(),
-                "uint saved;"
+                "uint saved;\nuint another;"
+            );
+            window.click("buffer-layout-input", cx);
+            window.press(
+                if cfg!(target_os = "macos") {
+                    "cmd-z"
+                } else {
+                    "ctrl-z"
+                },
+                cx,
+            );
+            assert_eq!(
+                view.read(cx).buffer_layout_input.read(cx).value().as_ref(),
+                "float changed;"
+            );
+            window.press(
+                if cfg!(target_os = "macos") {
+                    "cmd-shift-z"
+                } else {
+                    "ctrl-y"
+                },
+                cx,
+            );
+            assert_eq!(
+                view.read(cx).buffer_layout_input.read(cx).value().as_ref(),
+                "uint saved;\nuint another;"
             );
         })
         .unwrap();
@@ -14254,14 +14287,51 @@ mod ui_tests {
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            let y = window.find("buffer-next").bounds().origin.y;
-            window.scroll(
-                "capture-details-scroll",
-                ScrollDelta::Pixels(point(px(0.), px(400.) - y)),
-                cx,
+            for _ in 0..40 {
+                let target = window.find("buffer-next");
+                let viewport = window.find("capture-details-scroll").bounds();
+                let bounds = target.bounds();
+                if target.visible()
+                    && bounds.origin.y >= viewport.origin.y
+                    && bounds.origin.y + bounds.size.height
+                        <= viewport.origin.y + viewport.size.height
+                {
+                    break;
+                }
+                let delta = if target.bounds().origin.y < viewport.origin.y {
+                    100.0
+                } else {
+                    -100.0
+                };
+                window.dispatch_event(
+                    gpui::ScrollEvent {
+                        position: point(
+                            viewport.origin.x + viewport.size.width - px(4.),
+                            viewport.origin.y + viewport.size.height / 2.,
+                        ),
+                        delta: ScrollDelta::Pixels(point(px(0.), px(delta))),
+                        modifiers: window.modifiers(),
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                window.render_frame(cx);
+            }
+            assert!(
+                window.find("buffer-next").visible(),
+                "buffer-next {:?}, viewport {:?}",
+                window.find("buffer-next").bounds(),
+                window.find("capture-details-scroll").bounds()
             );
-            window.render_frame(cx);
             window.click("buffer-next", cx);
+            assert_eq!(
+                view.read(cx).buffer_offset,
+                216,
+                "click did not navigate; status {:?}, button {:?}",
+                view.read(cx).status,
+                window.find("buffer-next").bounds()
+            );
         })
         .unwrap();
         cx.run_until_parked();
@@ -14297,6 +14367,13 @@ mod ui_tests {
             assert_eq!(view.buffer_data.as_ref().unwrap().len(), 252);
         });
         cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let y = window.find("buffer-next").bounds().origin.y;
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(400.) - y)),
+                cx,
+            );
             window.render_frame(cx);
             window.click("buffer-next", cx);
         })
@@ -14497,6 +14574,13 @@ mod ui_tests {
             assert_eq!(view.read(cx).buffer_binding_range.unwrap().end, 16);
         });
         cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let y = window.find("buffer-next").bounds().origin.y;
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(400.) - y)),
+                cx,
+            );
             window.render_frame(cx);
             window.click("buffer-next", cx);
             window.click("buffer-prev", cx);
