@@ -1,6 +1,6 @@
 use renderdocx::{
     backend::Settings,
-    live::{LiveSession, enumerate},
+    live::{CaptureOptions, LaunchConfiguration, LiveSession, enumerate},
     replay::{BUFFER_PAGE_LIMIT, Pipeline, SHADER_STAGES, Session, Snapshot, TextureSelection},
 };
 use serde_json::{Value, json};
@@ -22,7 +22,7 @@ fn usage() -> Value {
         {"name":"select","arguments":["capture.rdc","event_id"],"description":"Replay a capture to an action event."},
         {"name":"serve","arguments":[],"description":"Serve sequential JSONL requests using a persistent replay session."},
         {"name":"capabilities","arguments":[],"description":"Describe the commands currently implemented."}
-    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","read_buffer","export_texture","close","target_list","target_launch","target_connect","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"buffer_page_limit":BUFFER_PAGE_LIMIT,"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
+    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","shader","read_buffer","export_texture","close","target_list","target_launch","target_connect","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"shader_stages":SHADER_STAGES,"buffer_page_limit":BUFFER_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
 }
 
 fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
@@ -139,14 +139,47 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     .get("capture_directory")
                     .and_then(Value::as_str)
                     .filter(|s| !s.is_empty());
-                let arguments = request.get("arguments").map_or(Some(""), Value::as_str);
-                match (&target, app, template, arguments) {
-                    (Some(_), _, _, _) => Err(("target_open", "Close the existing target first".into())),
-                    (None, Some(app), Some(template), Some(arguments)) => match LiveSession::launch(&settings, PathBuf::from(app).as_path(), PathBuf::from(template).as_path(), arguments) {
-                        Ok(session) => { let value = json!({"target":session.connected, "capture_template":session.capture_template}); target = Some(session); Ok(value) },
-                        Err(error) => Err(("target_launch_failed", error)),
-                    },
-                    _ => Err(("invalid_arguments", "target_launch requires path and an existing absolute capture_directory; arguments must be a string".into())),
+                let configuration = match request.get("configuration") {
+                    Some(_) if request.contains_key("arguments") => None,
+                    Some(value) => {
+                        serde_json::from_value::<LaunchConfiguration>(value.clone()).ok()
+                    }
+                    None => request.get("arguments").map_or(
+                        Some(LaunchConfiguration::default()),
+                        |value| {
+                            value.as_str().map(|arguments| LaunchConfiguration {
+                                arguments: arguments.to_owned(),
+                                ..Default::default()
+                            })
+                        },
+                    ),
+                };
+                match (&target, app, template, configuration) {
+                    (Some(_), _, _, _) => {
+                        Err(("target_open", "Close the existing target first".into()))
+                    }
+                    (None, Some(app), Some(template), Some(configuration))
+                        if configuration.validate().is_ok() =>
+                    {
+                        match LiveSession::launch(
+                            &settings,
+                            PathBuf::from(app).as_path(),
+                            PathBuf::from(template).as_path(),
+                            &configuration,
+                        ) {
+                            Ok(session) => {
+                                let value = json!({"target":session.connected, "capture_template":session.capture_template});
+                                target = Some(session);
+                                Ok(value)
+                            }
+                            Err(error) => Err(("target_launch_failed", error)),
+                        }
+                    }
+                    _ => Err((
+                        "invalid_arguments",
+                        "target_launch requires path, capture_directory and a valid configuration"
+                            .into(),
+                    )),
                 }
             }
             "target_connect" => {

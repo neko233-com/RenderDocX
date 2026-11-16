@@ -28,7 +28,7 @@ The machine-readable [Agent CLI](docs/agent-cli.md) supports one-shot commands a
 
 For functionality not yet migrated, RenderDocX can open `qrenderdoc` separately. It searches next to the application, the standard Windows RenderDoc installation directory, or `PATH`; the workspace can also select it explicitly.
 
-Launching from the GUI uses RenderDoc's default capture options and no application arguments; the Agent CLI also accepts a platform-specific argument string. Each GUI launch writes to a fresh session directory under the user application-data captures directory. Use the upstream UI for full capture configuration and remote workflows. Only capture applications you own or are authorized to debug, in accordance with upstream's usage policy.
+The GUI and Agent CLI offer RenderDoc capture options, an optional working directory, application arguments and ordered environment modifications. Each GUI launch writes to a fresh session directory under the user application-data captures directory. Remote workflows and some upstream configuration remain incomplete. Only capture applications you own or are authorized to debug, in accordance with upstream's usage policy.
 
 ## Unity and Tuanjie
 

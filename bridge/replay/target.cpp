@@ -59,11 +59,25 @@ bool decimal(const std::string &s, uint32_t &v)
   }
   v = uint32_t(n); return true;
 }
+bool unhex(const std::string &encoded, std::string &out)
+{
+  out.clear();
+  if(encoded == "-") return true;
+  if(encoded.empty() || encoded.size() % 2) return false;
+  auto digit = [](char c) -> int { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1; };
+  for(size_t i = 0; i < encoded.size(); i += 2)
+  {
+    int high = digit(encoded[i]), low = digit(encoded[i + 1]);
+    if(high < 0 || low < 0 || (high == 0 && low == 0)) return false;
+    out.push_back(char(high * 16 + low));
+  }
+  return true;
+}
 struct Commands { std::mutex mutex; std::queue<std::string> values; };
 
 int run(const std::vector<std::string> &args)
 {
-  if(args.size() != 2 && args.size() != 3 && args.size() != 5) { failure("Expected --enumerate, --connect IDENT or --launch APP TEMPLATE ARGS"); return 2; }
+  if(args.size() != 2 && args.size() != 3 && args.size() != 5 && args.size() != 18) { failure("Invalid target arguments"); return 2; }
   const char *version = RENDERDOC_GetVersionString(), *commit = RENDERDOC_GetCommitHash();
   if(!version || !commit || std::strcmp(version, MAJOR_MINOR_VERSION_STRING) || std::strcmp(commit, RENDERDOCX_CORE_COMMIT))
   { failure("RenderDoc core does not match the version and commit used to build this bridge"); return 1; }
@@ -85,6 +99,46 @@ int run(const std::vector<std::string> &args)
     ExecuteResult result = RENDERDOC_ExecuteAndInject(args[2].c_str(), "", args[4].c_str(), {}, args[3].c_str(), CaptureOptions(), false);
     if(!result.result.OK() || !result.ident)
     { failure(detail(result.result)); RENDERDOC_ShutdownReplay(); return 1; }
+    ident = result.ident;
+  }
+  else if(args[1] == "--launch2" && args.size() == 18)
+  {
+    uint32_t values[12] = {};
+    for(size_t i = 0; i < 12; ++i)
+    {
+      if(!decimal(args[i + 6], values[i]) || (i != 5 && i != 11 && values[i] > 1))
+      { failure("Invalid capture options"); RENDERDOC_ShutdownReplay(); return 2; }
+    }
+    std::string line, count_text, extra;
+    uint32_t count = 0;
+    if(!std::getline(std::cin, line)) { failure("Missing environment configuration"); RENDERDOC_ShutdownReplay(); return 2; }
+    std::istringstream header(line);
+    if(!(header >> count_text) || (header >> extra) || !decimal(count_text, count))
+    { failure("Invalid environment configuration"); RENDERDOC_ShutdownReplay(); return 2; }
+    rdcarray<EnvironmentModification> modifications;
+    for(uint32_t i = 0; i < count; ++i)
+    {
+      if(!std::getline(std::cin, line)) { failure("Incomplete environment configuration"); RENDERDOC_ShutdownReplay(); return 2; }
+      std::istringstream fields(line);
+      std::string mode_text, sep_text, name_hex, value_hex, name, value;
+      uint32_t mode = 0, sep = 0;
+      if(!(fields >> mode_text >> sep_text >> name_hex >> value_hex) || (fields >> extra) ||
+         !decimal(mode_text, mode) || mode > 2 || !decimal(sep_text, sep) || sep > 3 ||
+         !unhex(name_hex, name) || name.empty() || name.find('=') != std::string::npos || !unhex(value_hex, value))
+      { failure("Invalid environment configuration"); RENDERDOC_ShutdownReplay(); return 2; }
+      const rdcstr variable = name.c_str();
+      if(variable.trimmed() != variable) { failure("Invalid environment configuration"); RENDERDOC_ShutdownReplay(); return 2; }
+      modifications.push_back(EnvironmentModification(EnvMod(mode), EnvSep(sep), name.c_str(), value.c_str()));
+    }
+    CaptureOptions options;
+    options.allowVSync = values[0] != 0; options.allowFullscreen = values[1] != 0;
+    options.apiValidation = values[2] != 0; options.captureCallstacks = values[3] != 0;
+    options.captureCallstacksOnlyActions = values[4] != 0; options.delayForDebugger = values[5];
+    options.verifyBufferAccess = values[6] != 0; options.hookIntoChildren = values[7] != 0;
+    options.refAllResources = values[8] != 0; options.captureAllCmdLists = values[9] != 0;
+    options.debugOutputMute = values[10] != 0; options.softMemoryLimit = values[11];
+    ExecuteResult result = RENDERDOC_ExecuteAndInject(args[2].c_str(), args[5].c_str(), args[4].c_str(), modifications, args[3].c_str(), options, false);
+    if(!result.result.OK() || !result.ident) { failure(detail(result.result)); RENDERDOC_ShutdownReplay(); return 1; }
     ident = result.ident;
   }
   else if(args[1] == "--connect" && args.size() == 3 && decimal(args[2], ident) && ident != 0) {}

@@ -67,6 +67,9 @@ fn capabilities_advertises_versioned_machine_readable_contract() {
     assert!(success);
     assert_eq!(value["schema"], "renderdocx.cli.v1");
     assert_eq!(value["ok"], true);
+    assert_eq!(value["capture_options_default"]["allow_vsync"], true);
+    assert_eq!(value["capture_options_default"]["debug_output_mute"], true);
+    assert_eq!(value["capture_options_default"]["soft_memory_limit"], 0);
     assert!(
         value["commands"]
             .as_array()
@@ -149,12 +152,31 @@ fn native_target_launch_triggers_capture_and_disconnects_without_stopping_target
     let template = dir.path();
     let arguments = format!("\"{}\"", stop.display());
     let mut agent = Agent::new(Some(bridge.to_str().unwrap()));
-    let request = serde_json::json!({"command":"target_launch","path":fixture,"capture_directory":template,"arguments":arguments});
+    let invalid = serde_json::json!({"command":"target_launch","path":fixture,"capture_directory":template,
+        "configuration":{"environment":[{"name":"BAD=NAME","value":"fixture-private-value","operation":"set","separator":"no_sep"}]}});
+    let rejected = agent.send(&invalid.to_string());
+    assert_eq!(rejected["error"]["code"], "invalid_arguments", "{rejected}");
+    assert!(!rejected.to_string().contains("fixture-private-value"));
+    let request = serde_json::json!({"command":"target_launch","path":fixture,"capture_directory":template,
+    "configuration":{"arguments":arguments,"working_directory":dir.path(),
+        "options":{"allow_vsync":false,"allow_fullscreen":false,"capture_callstacks":true,"capture_callstacks_only_actions":true,"ref_all_resources":true,"debug_output_mute":false,"soft_memory_limit":64},
+        "environment":[
+                {"name":"RENDERDOCX_FIXTURE_MARKER","value":"中间","operation":"set","separator":"no_sep"},
+                {"name":"RENDERDOCX_FIXTURE_MARKER","value":"开始","operation":"prepend","separator":"colon"},
+                {"name":"RENDERDOCX_FIXTURE_MARKER","value":"结束","operation":"append","separator":"colon"}
+        ]}});
     let launched = agent.send(&request.to_string());
     assert_eq!(launched["ok"], true, "{launched}");
     let ident = launched["data"]["target"]["ident"].as_u64().unwrap();
     assert!(ident > 0);
     assert!(launched["data"]["target"]["pid"].as_u64().unwrap() > 0);
+    let info_path = PathBuf::from(format!("{}.info", stop.display()));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !info_path.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let info = std::fs::read_to_string(&info_path).expect("fixture launch configuration");
+    assert_eq!(info, "1 1 0 0 1 1 1 0 64");
     let discovered = agent.send(r#"{"command":"target_list"}"#);
     assert_eq!(discovered["ok"], true, "{discovered}");
     assert!(

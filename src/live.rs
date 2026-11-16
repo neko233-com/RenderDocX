@@ -1,4 +1,5 @@
 use crate::backend::{Settings, find_tool};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
@@ -12,6 +13,115 @@ use std::{
     },
     time::Duration,
 };
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct CaptureOptions {
+    pub allow_vsync: bool,
+    pub allow_fullscreen: bool,
+    pub api_validation: bool,
+    pub capture_callstacks: bool,
+    pub capture_callstacks_only_actions: bool,
+    pub delay_for_debugger: u32,
+    pub verify_buffer_access: bool,
+    pub hook_into_children: bool,
+    pub ref_all_resources: bool,
+    pub capture_all_cmd_lists: bool,
+    pub debug_output_mute: bool,
+    pub soft_memory_limit: u32,
+}
+impl Default for CaptureOptions {
+    fn default() -> Self {
+        Self {
+            allow_vsync: true,
+            allow_fullscreen: true,
+            api_validation: false,
+            capture_callstacks: false,
+            capture_callstacks_only_actions: false,
+            delay_for_debugger: 0,
+            verify_buffer_access: false,
+            hook_into_children: false,
+            ref_all_resources: false,
+            capture_all_cmd_lists: false,
+            debug_output_mute: true,
+            soft_memory_limit: 0,
+        }
+    }
+}
+impl CaptureOptions {
+    fn wire(&self) -> [u32; 12] {
+        [
+            self.allow_vsync.into(),
+            self.allow_fullscreen.into(),
+            self.api_validation.into(),
+            self.capture_callstacks.into(),
+            self.capture_callstacks_only_actions.into(),
+            self.delay_for_debugger,
+            self.verify_buffer_access.into(),
+            self.hook_into_children.into(),
+            self.ref_all_resources.into(),
+            self.capture_all_cmd_lists.into(),
+            self.debug_output_mute.into(),
+            self.soft_memory_limit,
+        ]
+    }
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvOperation {
+    Set,
+    Append,
+    Prepend,
+}
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvSeparator {
+    Platform,
+    SemiColon,
+    Colon,
+    NoSep,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvironmentModification {
+    pub name: String,
+    pub value: String,
+    pub operation: EnvOperation,
+    pub separator: EnvSeparator,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LaunchConfiguration {
+    pub arguments: String,
+    pub working_directory: Option<PathBuf>,
+    pub options: CaptureOptions,
+    pub environment: Vec<EnvironmentModification>,
+}
+impl LaunchConfiguration {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.arguments.contains('\0')
+            || self
+                .working_directory
+                .as_ref()
+                .is_some_and(|path| !path.is_absolute() || !path.is_dir())
+        {
+            return Err("Invalid arguments or working directory".into());
+        }
+        if self.environment.len() > u32::MAX as usize
+            || self.environment.iter().any(|entry| {
+                entry.name.is_empty()
+                    || entry.name.trim() != entry.name
+                    || entry.name.contains(['\0', '='])
+                    || entry.value.contains('\0')
+            })
+        {
+            return Err("Invalid environment modification".into());
+        }
+        Ok(())
+    }
+}
 
 struct Inner {
     input: Mutex<Option<ChildStdin>>,
@@ -108,7 +218,12 @@ pub fn enumerate(settings: &Settings) -> Result<Vec<u32>, String> {
 }
 
 impl LiveSession {
-    fn start(settings: &Settings, args: &[&std::ffi::OsStr]) -> Result<Self, String> {
+    fn start(
+        settings: &Settings,
+        args: &[&std::ffi::OsStr],
+        environment: Option<&[EnvironmentModification]>,
+        startup_timeout: Duration,
+    ) -> Result<Self, String> {
         let target = target_helper(settings)?;
         let mut command = Command::new(target);
         command
@@ -124,6 +239,50 @@ impl LiveSession {
         let mut child = command.spawn().map_err(|e| e.to_string())?;
         let input = child.stdin.take().ok_or("Missing target helper stdin")?;
         let output = child.stdout.take().ok_or("Missing target helper stdout")?;
+        let environment = environment.map(<[EnvironmentModification]>::to_vec);
+        let (input_tx, input_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut input = input;
+            let result = (|| -> std::io::Result<()> {
+                let Some(environment) = environment else {
+                    return Ok(());
+                };
+                fn hex(value: &str) -> String {
+                    if value.is_empty() {
+                        return "-".into();
+                    }
+                    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+                    let mut result = String::with_capacity(value.len() * 2);
+                    for byte in value.bytes() {
+                        result.push(DIGITS[(byte >> 4) as usize] as char);
+                        result.push(DIGITS[(byte & 15) as usize] as char);
+                    }
+                    result
+                }
+                writeln!(input, "{}", environment.len())?;
+                for entry in &environment {
+                    let operation = match entry.operation {
+                        EnvOperation::Set => 0,
+                        EnvOperation::Append => 1,
+                        EnvOperation::Prepend => 2,
+                    };
+                    let separator = match entry.separator {
+                        EnvSeparator::Platform => 0,
+                        EnvSeparator::SemiColon => 1,
+                        EnvSeparator::Colon => 2,
+                        EnvSeparator::NoSep => 3,
+                    };
+                    writeln!(
+                        input,
+                        "{operation} {separator} {} {}",
+                        hex(&entry.name),
+                        hex(&entry.value)
+                    )?;
+                }
+                input.flush()
+            })();
+            let _ = input_tx.send(result.map(|()| input));
+        });
         let events = Arc::new(Mutex::new(VecDeque::<Value>::new()));
         let alive = Arc::new(AtomicBool::new(false));
         let (startup_tx, startup_rx) = mpsc::channel();
@@ -185,7 +344,7 @@ impl LiveSession {
                 }
             }
         });
-        let connected = match startup_rx.recv_timeout(Duration::from_secs(30)) {
+        let connected = match startup_rx.recv_timeout(startup_timeout) {
             Ok(Ok(value)) => value,
             Ok(Err(error)) => {
                 let _ = child.wait();
@@ -197,6 +356,14 @@ impl LiveSession {
                 return Err(
                     "Target connection timed out; the application may already have started".into(),
                 );
+            }
+        };
+        let input = match input_rx.recv_timeout(startup_timeout) {
+            Ok(Ok(input)) => input,
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("Could not send target configuration".into());
             }
         };
         Ok(Self {
@@ -215,11 +382,12 @@ impl LiveSession {
         settings: &Settings,
         app: &Path,
         directory: &Path,
-        arguments: &str,
+        config: &LaunchConfiguration,
     ) -> Result<Self, String> {
         if !app.is_file() || !directory.is_absolute() || !directory.is_dir() {
             return Err("Application and absolute capture directory must exist".into());
         }
+        config.validate()?;
         // RenderDoc only checks captures from the current target, not pre-existing files.
         // A fresh directory prevents a new session from overwriting older captures.
         let folder = tempfile::Builder::new()
@@ -228,15 +396,28 @@ impl LiveSession {
             .map_err(|e| e.to_string())?
             .keep();
         let template = folder.join("capture");
-        let mut session = Self::start(
-            settings,
-            &[
-                "--launch".as_ref(),
-                app.as_os_str(),
-                template.as_os_str(),
-                arguments.as_ref(),
-            ],
-        )?;
+        let mut args: Vec<std::ffi::OsString> = vec![
+            "--launch2".into(),
+            app.as_os_str().into(),
+            template.as_os_str().into(),
+            config.arguments.as_str().into(),
+            config
+                .working_directory
+                .as_deref()
+                .unwrap_or(Path::new(""))
+                .as_os_str()
+                .into(),
+        ];
+        args.extend(
+            config
+                .options
+                .wire()
+                .into_iter()
+                .map(|value| value.to_string().into()),
+        );
+        let refs: Vec<&std::ffi::OsStr> = args.iter().map(|arg| arg.as_os_str()).collect();
+        let timeout = Duration::from_secs(30 + u64::from(config.options.delay_for_debugger));
+        let mut session = Self::start(settings, &refs, Some(&config.environment), timeout)?;
         session.capture_template = Some(template);
         Ok(session)
     }
@@ -245,7 +426,12 @@ impl LiveSession {
             return Err("Target ident must be nonzero".into());
         }
         let value = ident.to_string();
-        Self::start(settings, &["--connect".as_ref(), value.as_ref()])
+        Self::start(
+            settings,
+            &["--connect".as_ref(), value.as_ref()],
+            None,
+            Duration::from_secs(30),
+        )
     }
     pub fn is_alive(&self) -> bool {
         self.inner.alive.load(Ordering::SeqCst)
@@ -331,5 +517,22 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn launch_configuration_uses_upstream_defaults_and_rejects_bad_environment() {
+        let configuration: LaunchConfiguration = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            configuration.options.wire(),
+            [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]
+        );
+        assert!(configuration.validate().is_ok());
+        assert!(
+            serde_json::from_str::<LaunchConfiguration>(r#"{"options":{"unknown":true}}"#).is_err()
+        );
+        let invalid: LaunchConfiguration = serde_json::from_str(r#"{"environment":[{"name":"BAD=NAME","value":"value","operation":"set","separator":"no_sep"}]}"#).unwrap();
+        assert!(invalid.validate().is_err());
+        let whitespace: LaunchConfiguration = serde_json::from_str(r#"{"environment":[{"name":" NAME ","value":"value","operation":"set","separator":"no_sep"}]}"#).unwrap();
+        assert!(whitespace.validate().is_err());
     }
 }

@@ -2,16 +2,20 @@ use gpui_kit as gpui;
 use gpui_kit::TestSupportExt;
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
+    input::{Input, InputState},
     theme::{Theme, ThemeMode},
 };
 use gpui_kit::{
-    App, Bounds, Context, SharedString, Window, WindowBounds, WindowOptions, div, img, prelude::*,
-    px, rgb, size, uniform_list,
+    App, Bounds, Context, Entity, SharedString, Window, WindowBounds, WindowOptions, div, img,
+    prelude::*, px, rgb, size, uniform_list,
 };
 use renderdocx::{
     backend::{self, Settings},
     i18n::Language,
-    live::{LiveSession, capture_directory, capture_notice, enumerate},
+    live::{
+        CaptureOptions, EnvOperation, EnvSeparator, EnvironmentModification, LaunchConfiguration,
+        LiveSession, capture_directory, capture_notice, enumerate,
+    },
     replay::{Pipeline, SHADER_STAGES, Session, ShaderReport, Snapshot, TextureSelection},
 };
 use std::path::PathBuf;
@@ -65,6 +69,17 @@ struct Workspace {
     live_status: Option<String>,
     live_captures: Vec<(u32, PathBuf, bool)>,
     live_targets: Vec<u32>,
+    show_launch_config: bool,
+    launch_arguments: Entity<InputState>,
+    launch_delay: Entity<InputState>,
+    launch_memory: Entity<InputState>,
+    launch_working_directory: Option<PathBuf>,
+    capture_options: CaptureOptions,
+    launch_env_name: Entity<InputState>,
+    launch_env_value: Entity<InputState>,
+    launch_environment: Vec<EnvironmentModification>,
+    launch_env_operation: EnvOperation,
+    launch_env_separator: EnvSeparator,
 }
 
 impl Workspace {
@@ -209,6 +224,43 @@ impl Workspace {
             cx.notify();
             return;
         }
+        let delay = self.launch_delay.read(cx).value().parse::<u32>();
+        let memory = self.launch_memory.read(cx).value().parse::<u32>();
+        let (Ok(delay), Ok(memory)) = (delay, memory) else {
+            self.status = Some(
+                self.t(
+                    "Debugger delay and memory limit must be unsigned integers.",
+                    "调试器等待时间和内存限制必须是非负整数。",
+                    "デバッガー待機時間とメモリ制限は非負整数で入力してください。",
+                    "디버거 대기 시간과 메모리 제한은 음이 아닌 정수여야 합니다.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let mut options = self.capture_options.clone();
+        options.delay_for_debugger = delay;
+        options.soft_memory_limit = memory;
+        let config = LaunchConfiguration {
+            arguments: self.launch_arguments.read(cx).value().to_string(),
+            working_directory: self.launch_working_directory.clone(),
+            options,
+            environment: self.launch_environment.clone(),
+        };
+        if config.validate().is_err() {
+            self.status = Some(
+                self.t(
+                    "Invalid working directory or launch arguments.",
+                    "工作目录或启动参数无效。",
+                    "作業ディレクトリまたは起動引数が無効です。",
+                    "작업 디렉터리 또는 실행 인수가 올바르지 않습니다.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
         self.live_starting = true;
         self.live_generation += 1;
         let generation = self.live_generation;
@@ -225,7 +277,7 @@ impl Workspace {
         cx.notify();
         let task = cx.background_executor().spawn(async move {
             let directory = capture_directory()?;
-            LiveSession::launch(&settings, &path, &directory, "")
+            LiveSession::launch(&settings, &path, &directory, &config)
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -2162,6 +2214,183 @@ impl Render for Workspace {
             "ローカルターゲットを検索",
             "로컬 대상 찾기",
         );
+        let launch_config_label = self.t(
+            "Capture settings",
+            "捕获设置",
+            "キャプチャ設定",
+            "캡처 설정",
+        );
+        let arguments_label = self.t("Application arguments", "启动参数", "起動引数", "실행 인수");
+        let working_label = self.t(
+            "Working directory",
+            "工作目录",
+            "作業ディレクトリ",
+            "작업 디렉터리",
+        );
+        let working_default = self.t(
+            "Application directory",
+            "程序所在目录",
+            "アプリケーションのディレクトリ",
+            "응용 프로그램 디렉터리",
+        );
+        let choose_directory = self.t(
+            "Choose directory",
+            "选择目录",
+            "ディレクトリを選択",
+            "디렉터리 선택",
+        );
+        let clear_directory = self.t("Use default", "使用默认", "既定を使用", "기본값 사용");
+        let delay_label = self.t(
+            "Debugger delay (seconds)",
+            "等待调试器（秒）",
+            "デバッガー待機（秒）",
+            "디버거 대기（초）",
+        );
+        let memory_label = self.t(
+            "Soft memory limit (MB)",
+            "软内存限制（MB）",
+            "ソフトメモリ制限（MB）",
+            "소프트 메모리 제한（MB）",
+        );
+        let environment_label = self.t(
+            "Environment modifications",
+            "环境变量修改",
+            "環境変数の変更",
+            "환경 변수 변경",
+        );
+        let environment_name = self.t("Variable name", "变量名", "変数名", "변수 이름");
+        let environment_value = self.t("Variable value", "变量值", "変数値", "변수 값");
+        let environment_add = self.t("Add modification", "添加修改", "変更を追加", "변경 추가");
+        let environment_remove = self.t("Remove", "移除", "削除", "제거");
+        let operation_label = match self.launch_env_operation {
+            EnvOperation::Set => self.t("Set", "设置", "設定", "설정"),
+            EnvOperation::Append => self.t("Append", "追加", "末尾に追加", "뒤에 추가"),
+            EnvOperation::Prepend => self.t("Prepend", "前置", "先頭に追加", "앞에 추가"),
+        };
+        let separator_label = match self.launch_env_separator {
+            EnvSeparator::Platform => self.t(
+                "Platform separator",
+                "平台分隔符",
+                "プラットフォーム区切り",
+                "플랫폼 구분자",
+            ),
+            EnvSeparator::SemiColon => self.t("Semicolon", "分号", "セミコロン", "세미콜론"),
+            EnvSeparator::Colon => self.t("Colon", "冒号", "コロン", "콜론"),
+            EnvSeparator::NoSep => self.t("No separator", "无分隔符", "区切りなし", "구분자 없음"),
+        };
+        let environment_rows: Vec<String> = self
+            .launch_environment
+            .iter()
+            .map(|entry| {
+                let operation = match entry.operation {
+                    EnvOperation::Set => self.t("Set", "设置", "設定", "설정"),
+                    EnvOperation::Append => self.t("Append", "追加", "末尾に追加", "뒤에 추가"),
+                    EnvOperation::Prepend => self.t("Prepend", "前置", "先頭に追加", "앞에 추가"),
+                };
+                let separator = match entry.separator {
+                    EnvSeparator::Platform => {
+                        self.t("Platform", "平台", "プラットフォーム", "플랫폼")
+                    }
+                    EnvSeparator::SemiColon => ";",
+                    EnvSeparator::Colon => ":",
+                    EnvSeparator::NoSep => self.t("None", "无", "なし", "없음"),
+                };
+                format!("{} · {operation} · {separator}", entry.name)
+            })
+            .collect();
+        let opts = &self.capture_options;
+        let option_labels = vec![
+            (
+                self.t(
+                    "Allow VSync",
+                    "允许垂直同步",
+                    "VSync を許可",
+                    "수직 동기화 허용",
+                ),
+                opts.allow_vsync,
+            ),
+            (
+                self.t(
+                    "Allow fullscreen",
+                    "允许全屏",
+                    "全画面を許可",
+                    "전체 화면 허용",
+                ),
+                opts.allow_fullscreen,
+            ),
+            (
+                self.t("API validation", "API 验证", "API 検証", "API 검증"),
+                opts.api_validation,
+            ),
+            (
+                self.t(
+                    "Capture callstacks",
+                    "捕获调用栈",
+                    "コールスタックを記録",
+                    "호출 스택 캡처",
+                ),
+                opts.capture_callstacks,
+            ),
+            (
+                self.t(
+                    "Callstacks for actions only",
+                    "仅捕获操作调用栈",
+                    "アクションのみ記録",
+                    "작업 호출 스택만 캡처",
+                ),
+                opts.capture_callstacks_only_actions,
+            ),
+            (
+                self.t(
+                    "Verify buffer access",
+                    "验证缓冲访问",
+                    "バッファアクセスを検証",
+                    "버퍼 접근 검증",
+                ),
+                opts.verify_buffer_access,
+            ),
+            (
+                self.t(
+                    "Hook child processes",
+                    "接入子进程",
+                    "子プロセスをフック",
+                    "자식 프로세스 후킹",
+                ),
+                opts.hook_into_children,
+            ),
+            (
+                self.t(
+                    "Include all resources",
+                    "包含全部资源",
+                    "全リソースを含める",
+                    "모든 리소스 포함",
+                ),
+                opts.ref_all_resources,
+            ),
+            (
+                self.t(
+                    "Capture all command lists",
+                    "捕获全部命令列表",
+                    "全コマンドリストを記録",
+                    "모든 명령 목록 캡처",
+                ),
+                opts.capture_all_cmd_lists,
+            ),
+            (
+                self.t(
+                    "Mute debug output",
+                    "静音调试输出",
+                    "デバッグ出力を抑制",
+                    "디버그 출력 음소거",
+                ),
+                opts.debug_output_mute,
+            ),
+        ];
+        let working_directory = self
+            .launch_working_directory
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| working_default.to_owned());
         let connect_target = self.t("Connect", "连接", "接続", "연결");
         let upstream = self.t(
             "Open RenderDoc",
@@ -2217,6 +2446,7 @@ impl Render for Workspace {
 
         div()
             .id("home-scroll")
+            .test_support()
             .size_full()
             .overflow_y_scroll()
             .bg(rgb(0x101722))
@@ -2269,6 +2499,16 @@ impl Render for Workspace {
                         cx,
                     ))
                     .child(button(
+                        "launch-settings",
+                        launch_config_label,
+                        self.show_launch_config,
+                        |this, cx| {
+                            this.show_launch_config = !this.show_launch_config;
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(button(
                         "discover-targets",
                         discover,
                         false,
@@ -2299,6 +2539,140 @@ impl Render for Workspace {
                         cx,
                     )),
             )
+            .when(self.show_launch_config, |view| {
+                view.child(
+                    div()
+                        .bg(rgb(0x192332))
+                        .rounded_lg()
+                        .p_5()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0x82aaff))
+                                .child(launch_config_label),
+                        )
+                        .when_some(status.clone(), |view, message| view.child(div().text_color(rgb(0xd4b77c)).child(message)))
+                        .child(arguments_label)
+                        .child(
+                            Input::new(&self.launch_arguments)
+                                .id("launch-arguments")
+                                .aria_label(arguments_label)
+                                .w_full(),
+                        )
+                        .child(format!("{working_label}: {working_directory}"))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .child(button(
+                                    "launch-working-directory",
+                                    choose_directory,
+                                    false,
+                                    |this, cx| {
+                                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                            this.launch_working_directory = Some(path);
+                                            cx.notify();
+                                        }
+                                    },
+                                    cx,
+                                ))
+                                .child(button(
+                                    "launch-working-default",
+                                    clear_directory,
+                                    false,
+                                    |this, cx| {
+                                        this.launch_working_directory = None;
+                                        cx.notify();
+                                    },
+                                    cx,
+                                )),
+                        )
+                        .child(delay_label)
+                        .child(
+                            Input::new(&self.launch_delay)
+                                .id("launch-delay")
+                                .aria_label(delay_label)
+                                .w_full(),
+                        )
+                        .child(memory_label)
+                        .child(
+                            Input::new(&self.launch_memory)
+                                .id("launch-memory")
+                                .aria_label(memory_label)
+                                .w_full(),
+                        )
+                        .child(div().flex().flex_wrap().gap_2().children(
+                            option_labels.into_iter().enumerate().map(
+                                |(index, (label, enabled))| {
+                                    div()
+                                        .id(SharedString::from(format!("capture-option-{index}")))
+                                        .test_support()
+                                        .cursor_pointer()
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_md()
+                                        .bg(rgb(if enabled { 0x4169e1 } else { 0x252f40 }))
+                                        .child(format!(
+                                            "{} {label}",
+                                            if enabled { "☑" } else { "☐" }
+                                        ))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            let opts = &mut this.capture_options;
+                                            let field = match index {
+                                                0 => &mut opts.allow_vsync,
+                                                1 => &mut opts.allow_fullscreen,
+                                                2 => &mut opts.api_validation,
+                                                3 => &mut opts.capture_callstacks,
+                                                4 => &mut opts.capture_callstacks_only_actions,
+                                                5 => &mut opts.verify_buffer_access,
+                                                6 => &mut opts.hook_into_children,
+                                                7 => &mut opts.ref_all_resources,
+                                                8 => &mut opts.capture_all_cmd_lists,
+                                                _ => &mut opts.debug_output_mute,
+                                            };
+                                            *field = !*field;
+                                            cx.notify();
+                                        }))
+                                },
+                            ),
+                        ))
+                        .child(environment_label)
+                        .child(environment_name)
+                        .child(Input::new(&self.launch_env_name).id("launch-env-name").aria_label(environment_name).w_full())
+                        .child(environment_value)
+                        .child(Input::new(&self.launch_env_value).id("launch-env-value").aria_label(environment_value).w_full())
+                        .child(div().flex().flex_wrap().gap_2()
+                            .child(button("launch-env-operation", operation_label, false, |this, cx| {
+                                this.launch_env_operation = match this.launch_env_operation { EnvOperation::Set => EnvOperation::Append, EnvOperation::Append => EnvOperation::Prepend, EnvOperation::Prepend => EnvOperation::Set }; cx.notify();
+                            }, cx))
+                            .child(button("launch-env-separator", separator_label, false, |this, cx| {
+                                this.launch_env_separator = match this.launch_env_separator { EnvSeparator::Platform => EnvSeparator::SemiColon, EnvSeparator::SemiColon => EnvSeparator::Colon, EnvSeparator::Colon => EnvSeparator::NoSep, EnvSeparator::NoSep => EnvSeparator::Platform }; cx.notify();
+                            }, cx))
+                            .child(div().id("launch-env-add").test_support().cursor_pointer().px_3().py_2().rounded_md().bg(rgb(0x4169e1)).child(environment_add)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    let entry = EnvironmentModification { name: this.launch_env_name.read(cx).value().to_string(), value: this.launch_env_value.read(cx).value().to_string(), operation: this.launch_env_operation, separator: this.launch_env_separator };
+                                    let validation = LaunchConfiguration { environment: vec![entry.clone()], ..Default::default() }.validate();
+                                    if validation.is_err() {
+                                        this.status = Some(this.t("Invalid environment variable name or value.", "环境变量名或值无效。", "環境変数名または値が無効です。", "환경 변수 이름 또는 값이 올바르지 않습니다.").to_owned());
+                                    } else {
+                                        this.launch_environment.push(entry);
+                                        this.launch_env_name.update(cx, |state, cx| state.set_value("", window, cx));
+                                        this.launch_env_value.update(cx, |state, cx| state.set_value("", window, cx));
+                                        this.status = None;
+                                    }
+                                    cx.notify();
+                                }))))
+                        .children(environment_rows.into_iter().enumerate().map(|(index, label)| {
+                            div().flex().items_center().gap_3().child(label)
+                                .child(div().id(SharedString::from(format!("launch-env-remove-{index}"))).test_support().cursor_pointer().px_3().py_2().rounded_md().bg(rgb(0x252f40)).child(environment_remove)
+                                    .on_click(cx.listener(move |this, _, _, cx| { if index < this.launch_environment.len() { this.launch_environment.remove(index); cx.notify(); } })))
+                        })),
+                )
+            })
             .when(!live_targets.is_empty(), |view| {
                 view.child(
                     div()
@@ -2521,7 +2895,12 @@ fn main() {
                     ..Default::default()
                 },
                 cx,
-                |_, cx| {
+                |window, cx| {
+                    let launch_arguments = cx.new(|cx| InputState::new(window, cx));
+                    let launch_delay = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let launch_memory = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let launch_env_name = cx.new(|cx| InputState::new(window, cx));
+                    let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
                     let entity = cx.new(|_| Workspace {
                         settings,
                         status: None,
@@ -2550,6 +2929,17 @@ fn main() {
                         live_status: None,
                         live_captures: Vec::new(),
                         live_targets: Vec::new(),
+                        show_launch_config: false,
+                        launch_arguments,
+                        launch_delay,
+                        launch_memory,
+                        launch_working_directory: None,
+                        capture_options: CaptureOptions::default(),
+                        launch_env_name,
+                        launch_env_value,
+                        launch_environment: Vec::new(),
+                        launch_env_operation: EnvOperation::Set,
+                        launch_env_separator: EnvSeparator::Platform,
                     });
                     if let Some(path) = initial_capture {
                         entity.update(cx, |view, cx| view.open(path, cx));
@@ -2578,7 +2968,12 @@ mod ui_tests {
                     ..Default::default()
                 },
                 cx,
-                |_, cx| {
+                |window, cx| {
+                    let launch_arguments = cx.new(|cx| InputState::new(window, cx));
+                    let launch_delay = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let launch_memory = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let launch_env_name = cx.new(|cx| InputState::new(window, cx));
+                    let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
                     cx.new(|_| Workspace {
                         settings: Settings::default(),
                         status: None,
@@ -2618,6 +3013,17 @@ mod ui_tests {
                         live_status: None,
                         live_captures: Vec::new(),
                         live_targets: Vec::new(),
+                        show_launch_config: false,
+                        launch_arguments,
+                        launch_delay,
+                        launch_memory,
+                        launch_working_directory: None,
+                        capture_options: CaptureOptions::default(),
+                        launch_env_name,
+                        launch_env_value,
+                        launch_environment: Vec::new(),
+                        launch_env_operation: EnvOperation::Set,
+                        launch_env_separator: EnvSeparator::Platform,
                     })
                 },
             )
@@ -2633,6 +3039,80 @@ mod ui_tests {
             assert!(view.read(cx).snapshot.is_none());
             assert!(view.read(cx).capture.is_none());
         });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("launch-settings", cx);
+            window.click("launch-arguments", cx);
+            window.input("--fixture 测试", cx);
+            window.click("launch-delay", cx);
+            window.input("x", cx);
+            window.scroll(
+                "home-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(-500.))),
+                cx,
+            );
+            window.click("capture-option-0", cx);
+        })
+        .unwrap();
+        cx.update(|cx| {
+            assert_eq!(
+                view.read(cx).launch_arguments.read(cx).value().as_ref(),
+                "--fixture 测试"
+            );
+            assert!(!view.read(cx).capture_options.allow_vsync);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.scroll(
+                "home-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(-700.))),
+                cx,
+            );
+            window.click("launch-env-name", cx);
+            window.input("RENDERDOCX_TEST", cx);
+            window.click("launch-env-value", cx);
+            window.input("fixture-value", cx);
+            window.click("launch-env-operation", cx);
+            window.click("launch-env-separator", cx);
+            window.click("launch-env-separator", cx);
+            window.click("launch-env-add", cx);
+        })
+        .unwrap();
+        cx.update(|cx| {
+            let entry = &view.read(cx).launch_environment[0];
+            assert_eq!(entry.name, "RENDERDOCX_TEST");
+            assert_eq!(entry.value, "fixture-value");
+            assert!(matches!(entry.operation, EnvOperation::Append));
+            assert!(matches!(entry.separator, EnvSeparator::Colon));
+            assert!(view.read(cx).launch_env_value.read(cx).value().is_empty());
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.scroll(
+                "home-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(-700.))),
+                cx,
+            );
+            window.click("launch-env-remove-0", cx);
+        })
+        .unwrap();
+        cx.update(|cx| assert!(view.read(cx).launch_environment.is_empty()));
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.launch_live("missing-target.exe".into(), cx)
+            })
+        });
+        cx.update(|cx| {
+            assert!(!view.read(cx).live_starting);
+            assert!(view.read(cx).status.is_some());
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.scroll(
+                "home-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(1200.))),
+                cx,
+            );
+            window.click("launch-settings", cx);
+        })
+        .unwrap();
         cx.update(|cx| {
             view.update(cx, |view, cx| {
                 view.settings.replay_bridge = Some("definitely-missing-replay-bridge".into());
@@ -2670,7 +3150,12 @@ mod ui_tests {
                     ..Default::default()
                 },
                 cx,
-                |_, cx| {
+                |window, cx| {
+                    let launch_arguments = cx.new(|cx| InputState::new(window, cx));
+                    let launch_delay = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let launch_memory = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let launch_env_name = cx.new(|cx| InputState::new(window, cx));
+                    let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
                     cx.new(|_| Workspace {
                         settings: Settings::default(),
                         status: None,
@@ -2739,6 +3224,17 @@ mod ui_tests {
                         live_status: None,
                         live_captures: Vec::new(),
                         live_targets: Vec::new(),
+                        show_launch_config: false,
+                        launch_arguments,
+                        launch_delay,
+                        launch_memory,
+                        launch_working_directory: None,
+                        capture_options: CaptureOptions::default(),
+                        launch_env_name,
+                        launch_env_value,
+                        launch_environment: Vec::new(),
+                        launch_env_operation: EnvOperation::Set,
+                        launch_env_separator: EnvSeparator::Platform,
                     })
                 },
             )

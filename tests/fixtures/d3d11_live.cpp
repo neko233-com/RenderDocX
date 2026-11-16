@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <d3d11.h>
+#include "api/app/renderdoc_app.h"
 #include <filesystem>
 #include <fstream>
 
@@ -9,6 +10,23 @@ int wmain(int argc, wchar_t **argv)
   if(argc != 2) return 2;
   const std::filesystem::path stop(argv[1]);
   const std::filesystem::path done(stop.wstring() + L".done");
+  HMODULE renderdoc = GetModuleHandleW(L"renderdoc.dll");
+  auto get_api = renderdoc ? reinterpret_cast<pRENDERDOC_GetAPI>(GetProcAddress(renderdoc, "RENDERDOC_GetAPI")) : nullptr;
+  RENDERDOC_API_1_7_0 *api = nullptr;
+  if(!get_api || !get_api(eRENDERDOC_API_Version_1_7_0, reinterpret_cast<void **>(&api))) return 8;
+  wchar_t marker[128] = {};
+  GetEnvironmentVariableW(L"RENDERDOCX_FIXTURE_MARKER", marker, 128);
+  std::ofstream info(std::filesystem::path(stop.wstring() + L".info"));
+  info << (std::filesystem::equivalent(std::filesystem::current_path(), stop.parent_path()) ? 1 : 0) << ' '
+       << (std::wstring(marker) == L"开始:中间:结束" ? 1 : 0) << ' '
+       << api->GetCaptureOptionU32(eRENDERDOC_Option_AllowVSync) << ' '
+       << api->GetCaptureOptionU32(eRENDERDOC_Option_AllowFullscreen) << ' '
+       << api->GetCaptureOptionU32(eRENDERDOC_Option_CaptureCallstacks) << ' '
+       << api->GetCaptureOptionU32(eRENDERDOC_Option_CaptureCallstacksOnlyActions) << ' '
+       << api->GetCaptureOptionU32(eRENDERDOC_Option_RefAllResources) << ' '
+       << api->GetCaptureOptionU32(eRENDERDOC_Option_DebugOutputMute) << ' '
+       << api->GetCaptureOptionU32(eRENDERDOC_Option_SoftMemoryLimit);
+  info.close();
   WNDCLASSW wc = {};
   wc.lpfnWndProc = DefWindowProcW; wc.hInstance = GetModuleHandleW(nullptr); wc.lpszClassName = L"RenderDocXLiveFixture";
   if(!RegisterClassW(&wc)) return 3;
