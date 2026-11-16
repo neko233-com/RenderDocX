@@ -1,6 +1,6 @@
 use renderdocx::{
     backend::Settings,
-    replay::{Pipeline, Session, Snapshot},
+    replay::{BUFFER_PAGE_LIMIT, Pipeline, Session, Snapshot},
 };
 use serde_json::{Value, json};
 use std::{
@@ -21,7 +21,7 @@ fn usage() -> Value {
         {"name":"select","arguments":["capture.rdc","event_id"],"description":"Replay a capture to an action event."},
         {"name":"serve","arguments":[],"description":"Serve sequential JSONL requests using a persistent replay session."},
         {"name":"capabilities","arguments":[],"description":"Describe the commands currently implemented."}
-    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","export_texture","close","quit"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
+    ],"serve_commands":["capabilities","open","snapshot","select","pipeline","read_buffer","export_texture","close","quit"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]})
 }
 
 fn run(args: Vec<OsString>) -> Result<Invocation, (&'static str, String)> {
@@ -183,6 +183,57 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     }
                 }
             },
+            "read_buffer" => {
+                let index = request
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .and_then(|v| u32::try_from(v).ok());
+                let offset = request
+                    .get("offset")
+                    .and_then(Value::as_str)
+                    .and_then(|v| v.parse::<u64>().ok());
+                let length = request
+                    .get("length")
+                    .and_then(Value::as_u64)
+                    .and_then(|v| u32::try_from(v).ok());
+                match (&opened, selected_event, index, offset, length) {
+                    (None, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some(_), None, _, _, _) => {
+                        Err(("no_event", "Select an event before reading buffers".into()))
+                    }
+                    (
+                        Some((session, snapshot)),
+                        Some(event),
+                        Some(index),
+                        Some(offset),
+                        Some(length),
+                    ) => {
+                        let size = snapshot
+                            .buffers
+                            .get(index as usize)
+                            .and_then(|buffer| buffer.length.parse::<u64>().ok());
+                        if length > BUFFER_PAGE_LIMIT
+                            || size.is_none_or(|size| {
+                                offset > size || u64::from(length) > size - offset
+                            })
+                        {
+                            Err((
+                                "invalid_arguments",
+                                "Buffer range is out of bounds or exceeds the page limit".into(),
+                            ))
+                        } else {
+                            session.read_buffer(index, offset, length).map(|bytes| {
+                                let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+                                json!({"event_id":event,"index":index,"offset":offset.to_string(),"hex":hex})
+                            }).map_err(|error| ("replay_read_failed", error))
+                        }
+                    }
+                    _ => Err((
+                        "invalid_arguments",
+                        "read_buffer requires index, decimal-string offset and length".into(),
+                    )),
+                }
+            }
             "export_texture" => {
                 let index = request
                     .get("index")

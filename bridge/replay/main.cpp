@@ -9,6 +9,7 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -89,8 +90,24 @@ struct PendingAction
   int64_t parent;
 };
 
+struct BufferRef { ResourceId id; uint64_t length; };
+
+bool decimal(const std::string &text, uint64_t &value)
+{
+  value = 0;
+  if(text.empty()) return false;
+  for(char c : text)
+  {
+    if(c < '0' || c > '9') return false;
+    const uint64_t digit = uint64_t(c - '0');
+    if(value > ((std::numeric_limits<uint64_t>::max)() - digit) / 10) return false;
+    value = value * 10 + digit;
+  }
+  return true;
+}
+
 void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids,
-                    std::vector<ResourceId> &texture_ids)
+                    std::vector<ResourceId> &texture_ids, std::vector<BufferRef> &buffer_ids)
 {
   const APIProperties api = controller->GetAPIProperties();
   const FrameDescription frame = controller->GetFrameInfo();
@@ -124,7 +141,12 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
   const auto &textures = controller->GetTextures();
   const auto &buffers = controller->GetBuffers();
   std::map<ResourceId, const rdcstr *> resource_names;
-  for(const ResourceDescription &resource : resources) resource_names.emplace(resource.resourceId, &resource.name);
+  std::map<ResourceId, size_t> resource_indices;
+  for(size_t i = 0; i < resources.size(); ++i)
+  {
+    resource_names.emplace(resources[i].resourceId, &resources[i].name);
+    resource_indices.emplace(resources[i].resourceId, i);
+  }
   std::cout << "],\"resource_count\":" << resources.size() << ",\"texture_count\":"
             << textures.size() << ",\"buffer_count\":" << buffers.size() << ",\"textures\":[";
   for(size_t i = 0; i < textures.size(); ++i)
@@ -147,6 +169,20 @@ void write_snapshot(IReplayController *controller, std::set<uint32_t> &event_ids
               << ",\"component_count\":" << uint32_t(texture.format.compCount)
               << ",\"component_byte_width\":" << uint32_t(texture.format.compByteWidth)
               << '}';
+  }
+  std::cout << "],\"buffers\":[";
+  for(size_t i = 0; i < buffers.size(); ++i)
+  {
+    const BufferDescription &buffer = buffers[i];
+    buffer_ids.push_back({buffer.resourceId, buffer.length});
+    const auto name = resource_names.find(buffer.resourceId);
+    const auto resource_index = resource_indices.find(buffer.resourceId);
+    if(i) std::cout << ',';
+    std::cout << "{\"name\":";
+    if(name == resource_names.end()) json_string("", 0); else json_string(*name->second);
+    std::cout << ",\"resource_index\":";
+    if(resource_index == resource_indices.end()) std::cout << "null"; else std::cout << resource_index->second;
+    std::cout << ",\"length\":\"" << buffer.length << "\",\"creation_flags\":" << uint32_t(buffer.creationFlags) << '}';
   }
   std::cout << "]}" << std::endl;
 }
@@ -277,12 +313,36 @@ int run(const std::string &capture)
   replay.file = nullptr;
   std::set<uint32_t> event_ids;
   std::vector<ResourceId> texture_ids;
-  write_snapshot(replay.controller, event_ids, texture_ids);
+  std::vector<BufferRef> buffer_ids;
+  write_snapshot(replay.controller, event_ids, texture_ids, buffer_ids);
+  bool selected = false;
 
   std::string command;
   while(std::getline(std::cin, command))
   {
     if(command == "quit") break;
+    if(command.compare(0, 7, "buffer ") == 0)
+    {
+      std::istringstream arguments(command.substr(7));
+      std::string index_text, offset_text, length_text, extra;
+      uint64_t index = 0, offset = 0, length = 0;
+      if(!(arguments >> index_text >> offset_text >> length_text) || (arguments >> extra) ||
+         !decimal(index_text, index) || !decimal(offset_text, offset) || !decimal(length_text, length) ||
+         index >= buffer_ids.size() || length > 65536 || offset > buffer_ids[size_t(index)].length ||
+         length > buffer_ids[size_t(index)].length - offset)
+      { error("Invalid buffer range"); continue; }
+      if(!selected) { error("Select an event before reading buffers"); continue; }
+      bytebuf data;
+      if(length) data = replay.controller->GetBufferData(buffer_ids[size_t(index)].id, offset, length);
+      result = replay.controller->GetFatalErrorStatus();
+      if(!result.OK()) { error(result_message(result)); break; }
+      if(data.size() != length) { error("RenderDoc did not return the requested buffer range"); continue; }
+      static const char hex[] = "0123456789abcdef";
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"buffer_data\",\"index\":" << index << ",\"offset\":\"" << offset << "\",\"hex\":\"";
+      for(byte value : data) std::cout << hex[value >> 4] << hex[value & 15];
+      std::cout << "\"}" << std::endl;
+      continue;
+    }
     if(command.compare(0, 5, "save ") == 0)
     {
       const size_t separator = command.find(' ', 5);
@@ -329,6 +389,7 @@ int run(const std::string &capture)
     replay.controller->SetFrameEvent(uint32_t(event), false);
     result = replay.controller->GetFatalErrorStatus();
     if(!result.OK()) { error(result_message(result)); break; }
+    selected = true;
     std::cout << "\nRENDERDOCX/1 {\"type\":\"selected\",\"event_id\":" << event << ",\"pipeline\":";
     write_pipeline(replay.controller, uint32_t(event));
     std::cout << "}" << std::endl;

@@ -20,6 +20,14 @@ struct TexturePreview {
     _directory: tempfile::TempDir,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CaptureTab {
+    Events,
+    Textures,
+    Buffers,
+}
+const BUFFER_VIEW_PAGE: u64 = 256;
+
 struct Workspace {
     settings: Settings,
     status: Option<String>,
@@ -28,8 +36,12 @@ struct Workspace {
     snapshot: Option<Snapshot>,
     selected: Option<usize>,
     pipeline: Option<Pipeline>,
-    show_textures: bool,
+    tab: CaptureTab,
     selected_texture: Option<usize>,
+    selected_buffer: Option<usize>,
+    buffer_offset: u64,
+    buffer_data: Option<Vec<u8>>,
+    buffer_pending: bool,
     open_revision: u64,
     selection_revision: u64,
     replay_pending: bool,
@@ -71,7 +83,7 @@ impl Workspace {
     }
 
     fn open(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if self.replay_pending || self.export_pending {
+        if self.replay_pending || self.export_pending || self.buffer_pending {
             self.status = Some(
                 self.t(
                     "Wait for the current replay operation to finish.",
@@ -117,13 +129,18 @@ impl Workspace {
                 }
                 match result {
                     Ok((session, snapshot)) => {
+                        // Invalidate work started against the old session while this open was pending.
+                        this.open_revision += 1;
                         this.capture = Some(capture);
                         this.snapshot = Some(snapshot);
                         this.session = Some(session);
                         this.selected = None;
                         this.pipeline = None;
                         this.selected_texture = None;
-                        this.show_textures = false;
+                        this.tab = CaptureTab::Events;
+                        this.selected_buffer = None;
+                        this.buffer_data = None;
+                        this.buffer_pending = false;
                         this.replay_pending = false;
                         this.export_pending = false;
                         this.preview = None;
@@ -148,13 +165,13 @@ impl Workspace {
     }
 
     fn select(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.export_pending {
+        if self.export_pending || self.buffer_pending {
             self.status = Some(
                 self.t(
-                    "Wait for the texture export to finish.",
-                    "请等待纹理导出完成。",
-                    "テクスチャの書き出しが完了するまでお待ちください。",
-                    "텍스처 내보내기가 완료될 때까지 기다려 주세요.",
+                    "Wait for the resource operation to finish.",
+                    "请等待资源操作完成。",
+                    "リソース処理が完了するまでお待ちください。",
+                    "리소스 작업이 완료될 때까지 기다려 주세요.",
                 )
                 .to_owned(),
             );
@@ -176,6 +193,7 @@ impl Workspace {
         self.selection_revision = revision;
         self.replay_pending = true;
         self.preview = None;
+        self.buffer_data = None;
         let open_revision = self.open_revision;
         self.status = Some(
             self.t(
@@ -222,8 +240,105 @@ impl Workspace {
         .detach();
     }
 
+    fn read_buffer(&mut self, index: usize, offset: u64, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending || self.buffer_pending {
+            self.status = Some(
+                self.t(
+                    "Wait for the current operation.",
+                    "请等待当前操作完成。",
+                    "現在の処理が完了するまでお待ちください。",
+                    "현재 작업이 끝날 때까지 기다려 주세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        self.selected_buffer = Some(index);
+        self.buffer_offset = offset;
+        self.buffer_data = None;
+        if self.selected.is_none() {
+            self.status = Some(
+                self.t(
+                    "Select an event before reading a buffer.",
+                    "请先选择事件再读取缓冲区。",
+                    "バッファを読む前にイベントを選択してください。",
+                    "버퍼를 읽기 전에 이벤트를 선택하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let Some(size) = self
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.buffers.get(index))
+            .and_then(|b| b.length.parse::<u64>().ok())
+        else {
+            return;
+        };
+        if offset > size {
+            return;
+        }
+        let Ok(buffer_index) = u32::try_from(index) else {
+            return;
+        };
+        let length = (size - offset).min(BUFFER_VIEW_PAGE) as u32;
+        self.buffer_pending = true;
+        self.status = Some(
+            self.t(
+                "Reading buffer…",
+                "正在读取缓冲区…",
+                "バッファを読み込み中…",
+                "버퍼를 읽는 중…",
+            )
+            .to_owned(),
+        );
+        let revision = self.open_revision;
+        cx.notify();
+        let task = cx
+            .background_executor()
+            .spawn(async move { session.read_buffer(buffer_index, offset, length) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision {
+                    return;
+                }
+                this.buffer_pending = false;
+                match result {
+                    Ok(bytes) => {
+                        this.buffer_data = Some(bytes);
+                        this.status = None;
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Buffer read failed",
+                                "缓冲区读取失败",
+                                "バッファを読み込めません",
+                                "버퍼 읽기 실패"
+                            )
+                        ));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn export_texture(&mut self, cx: &mut Context<Self>) {
-        if self.replay_pending || self.export_pending || self.selected.is_none() {
+        if self.replay_pending
+            || self.export_pending
+            || self.buffer_pending
+            || self.selected.is_none()
+        {
             self.status = Some(
                 self.t(
                     "Select an event and wait for replay to finish before exporting.",
@@ -298,7 +413,11 @@ impl Workspace {
     }
 
     fn preview_texture(&mut self, cx: &mut Context<Self>) {
-        if self.replay_pending || self.export_pending || self.selected.is_none() {
+        if self.replay_pending
+            || self.export_pending
+            || self.buffer_pending
+            || self.selected.is_none()
+        {
             self.status = Some(
                 self.t(
                     "Select an event and wait for replay to finish before previewing.",
@@ -379,10 +498,10 @@ impl Workspace {
             .snapshot
             .as_ref()
             .expect("capture view requires a snapshot");
-        let count = if self.show_textures {
-            snapshot.textures.len()
-        } else {
-            snapshot.actions.len()
+        let count = match self.tab {
+            CaptureTab::Textures => snapshot.textures.len(),
+            CaptureTab::Buffers => snapshot.buffers.len(),
+            CaptureTab::Events => snapshot.actions.len(),
         };
         let api = match snapshot.api {
             0 => "D3D11",
@@ -400,6 +519,10 @@ impl Workspace {
         let texture_detail = self
             .selected_texture
             .and_then(|i| snapshot.textures.get(i))
+            .cloned();
+        let buffer_detail = self
+            .selected_buffer
+            .and_then(|i| snapshot.buffers.get(i))
             .cloned();
         let counts = format!(
             "{}  ·  {} {}  ·  {} {}  ·  {} {}",
@@ -441,6 +564,23 @@ impl Workspace {
         );
         let events = self.t("EVENTS", "事件", "イベント", "이벤트");
         let textures_label = self.t("Textures", "纹理", "テクスチャ", "텍스처");
+        let buffers_label = self.t("Buffers", "缓冲区", "バッファ", "버퍼");
+        let buffer_label = self.t("Buffer", "缓冲区", "バッファ", "버퍼");
+        let buffer_details = self.t(
+            "BUFFER DETAILS",
+            "缓冲区详情",
+            "バッファの詳細",
+            "버퍼 상세",
+        );
+        let previous = self.t("Previous", "上一页", "前へ", "이전");
+        let next = self.t("Next", "下一页", "次へ", "다음");
+        let read = self.t("Read", "读取", "読み込み", "읽기");
+        let buffer_empty = self.t(
+            "Select a buffer to inspect its bytes.",
+            "选择缓冲区查看字节。",
+            "バッファを選択してバイトを表示します。",
+            "버퍼를 선택해 바이트를 확인하세요.",
+        );
         let texture_label = self.t("Texture", "纹理", "テクスチャ", "텍스처");
         let array_label = self.t("Array", "数组", "配列", "배열");
         let samples_label = self.t("Samples", "采样", "サンプル", "샘플");
@@ -530,7 +670,50 @@ impl Workspace {
         let status = self.status.clone();
         let preview_path = self.preview.as_ref().map(|preview| preview.path.clone());
 
-        let list = if self.show_textures {
+        let list = if self.tab == CaptureTab::Buffers {
+            uniform_list(
+                "capture-buffers",
+                count,
+                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                    range
+                        .filter_map(|index| {
+                            let buffer = this.snapshot.as_ref()?.buffers.get(index)?;
+                            let name = if buffer.name.is_empty() {
+                                format!("{buffer_label} {index}")
+                            } else {
+                                buffer.name.clone()
+                            };
+                            let size = buffer.length.clone();
+                            Some(
+                                div()
+                                    .id(SharedString::from(format!("buffer-{index}")))
+                                    .test_support()
+                                    .h(px(32.))
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_3()
+                                    .cursor_pointer()
+                                    .bg(rgb(if this.selected_buffer == Some(index) {
+                                        0x304c7c
+                                    } else {
+                                        0x192332
+                                    }))
+                                    .hover(|row| row.bg(rgb(0x263950)))
+                                    .child(div().overflow_hidden().child(name))
+                                    .child(div().text_color(rgb(0x91a7c0)).child(size))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.read_buffer(index, 0, cx)
+                                    })),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .flex_1()
+            .into_any_element()
+        } else if self.tab == CaptureTab::Textures {
             uniform_list(
                 "capture-textures",
                 count,
@@ -623,7 +806,99 @@ impl Workspace {
             .into_any_element()
         };
 
-        let detail_view = if self.show_textures {
+        let detail_view = if self.tab == CaptureTab::Buffers {
+            let rows = self.buffer_data.as_ref().map(|data| {
+                data.chunks(8)
+                    .enumerate()
+                    .map(|(line, bytes)| {
+                        let hex: String = bytes.iter().map(|byte| format!("{byte:02x} ")).collect();
+                        format!("{:016x}  {hex}", self.buffer_offset + (line as u64 * 8))
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let prev = button(
+                "buffer-prev",
+                previous,
+                false,
+                |this, cx| {
+                    if let Some(index) = this.selected_buffer {
+                        this.read_buffer(
+                            index,
+                            this.buffer_offset.saturating_sub(BUFFER_VIEW_PAGE),
+                            cx,
+                        );
+                    }
+                },
+                cx,
+            );
+            let next_button = button(
+                "buffer-next",
+                next,
+                false,
+                |this, cx| {
+                    if let Some(index) = this.selected_buffer {
+                        let size = this
+                            .snapshot
+                            .as_ref()
+                            .and_then(|s| s.buffers.get(index))
+                            .and_then(|b| b.length.parse::<u64>().ok())
+                            .unwrap_or(0);
+                        let offset = this.buffer_offset.saturating_add(BUFFER_VIEW_PAGE);
+                        if offset < size {
+                            this.read_buffer(index, offset, cx);
+                        }
+                    }
+                },
+                cx,
+            );
+            let read_button = button(
+                "buffer-read",
+                read,
+                true,
+                |this, cx| {
+                    if let Some(index) = this.selected_buffer {
+                        this.read_buffer(index, this.buffer_offset, cx);
+                    }
+                },
+                cx,
+            );
+            div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0x82aaff))
+                        .child(buffer_details),
+                )
+                .when_some(buffer_detail, |view, buffer| {
+                    view.child(div().font_weight(gpui::FontWeight::BOLD).child(buffer.name))
+                        .child(format!("{bytes_label}: {}", buffer.length))
+                        .child(format!("{flags_label}: 0x{:08X}", buffer.creation_flags))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .child(prev)
+                                .child(read_button)
+                                .child(next_button),
+                        )
+                        .children(rows.unwrap_or_default().into_iter().enumerate().map(
+                            |(index, line)| {
+                                div()
+                                    .id(("buffer-line", index))
+                                    .test_support()
+                                    .text_sm()
+                                    .child(line)
+                            },
+                        ))
+                })
+                .when(self.selected_buffer.is_none(), |view| {
+                    view.child(div().text_color(rgb(0x9eacc0)).child(buffer_empty))
+                })
+        } else if self.tab == CaptureTab::Textures {
             let export = button(
                 "texture-export",
                 export_label,
@@ -932,6 +1207,8 @@ impl Workspace {
                             this.selected = None;
                             this.replay_pending = false;
                             this.export_pending = false;
+                            this.buffer_pending = false;
+                            this.buffer_data = None;
                             this.preview = None;
                             this.status = None;
                             cx.notify();
@@ -1000,9 +1277,9 @@ impl Workspace {
                                     .child(button(
                                         "events-tab",
                                         events,
-                                        !self.show_textures,
+                                        self.tab == CaptureTab::Events,
                                         |this, cx| {
-                                            this.show_textures = false;
+                                            this.tab = CaptureTab::Events;
                                             cx.notify();
                                         },
                                         cx,
@@ -1010,9 +1287,19 @@ impl Workspace {
                                     .child(button(
                                         "textures-tab",
                                         textures_label,
-                                        self.show_textures,
+                                        self.tab == CaptureTab::Textures,
                                         |this, cx| {
-                                            this.show_textures = true;
+                                            this.tab = CaptureTab::Textures;
+                                            cx.notify();
+                                        },
+                                        cx,
+                                    ))
+                                    .child(button(
+                                        "buffers-tab",
+                                        buffers_label,
+                                        self.tab == CaptureTab::Buffers,
+                                        |this, cx| {
+                                            this.tab = CaptureTab::Buffers;
                                             cx.notify();
                                         },
                                         cx,
@@ -1315,8 +1602,12 @@ fn main() {
                         snapshot: None,
                         selected: None,
                         pipeline: None,
-                        show_textures: false,
+                        tab: CaptureTab::Events,
                         selected_texture: None,
+                        selected_buffer: None,
+                        buffer_offset: 0,
+                        buffer_data: None,
+                        buffer_pending: false,
                         open_revision: 0,
                         selection_revision: 0,
                         replay_pending: false,
@@ -1366,11 +1657,16 @@ mod ui_tests {
                             texture_count: 0,
                             buffer_count: 0,
                             textures: Vec::new(),
+                            buffers: Vec::new(),
                         }),
                         selected: None,
                         pipeline: None,
-                        show_textures: false,
+                        tab: CaptureTab::Events,
                         selected_texture: None,
+                        selected_buffer: None,
+                        buffer_offset: 0,
+                        buffer_data: None,
+                        buffer_pending: false,
                         open_revision: 0,
                         selection_revision: 0,
                         replay_pending: false,
@@ -1428,7 +1724,7 @@ mod ui_tests {
                             }],
                             resource_count: 1,
                             texture_count: 1,
-                            buffer_count: 0,
+                            buffer_count: 1,
                             textures: vec![renderdocx::replay::Texture {
                                 name: "Color".into(),
                                 width: 16,
@@ -1445,11 +1741,21 @@ mod ui_tests {
                                 component_count: 4,
                                 component_byte_width: 1,
                             }],
+                            buffers: vec![renderdocx::replay::Buffer {
+                                name: "Vertices".into(),
+                                resource_index: Some(0),
+                                length: "300".into(),
+                                creation_flags: 1,
+                            }],
                         }),
                         selected: None,
                         pipeline: None,
-                        show_textures: false,
+                        tab: CaptureTab::Events,
                         selected_texture: None,
+                        selected_buffer: None,
+                        buffer_offset: 0,
+                        buffer_data: None,
+                        buffer_pending: false,
                         open_revision: 0,
                         selection_revision: 0,
                         replay_pending: false,
@@ -1473,6 +1779,16 @@ mod ui_tests {
             assert!(!view.read(cx).export_pending);
         });
         assert!(events.lock().unwrap().is_empty());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("buffers-tab", cx);
+            window.click("buffer-0", cx);
+        })
+        .unwrap();
+        cx.update(|cx| {
+            assert!(view.read(cx).status.is_some());
+            assert!(view.read(cx).buffer_data.is_none());
+            assert!(!view.read(cx).buffer_pending);
+        });
         cx.update_window(handle.into(), |_, window, cx| {
             window.click("events-tab", cx);
             window.click(0usize, cx);
@@ -1505,7 +1821,7 @@ mod ui_tests {
         })
         .unwrap();
         cx.update(|cx| {
-            assert!(view.read(cx).show_textures);
+            assert!(view.read(cx).tab == CaptureTab::Textures);
             assert_eq!(view.read(cx).selected_texture, Some(0));
         });
         assert_eq!(*events.lock().unwrap(), vec![42]);
@@ -1529,5 +1845,33 @@ mod ui_tests {
             assert!(window.find("texture-preview-image").bounds().size.height > px(0.));
         })
         .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("buffers-tab", cx);
+            window.click("buffer-0", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let view = view.read(cx);
+            assert_eq!(view.buffer_offset, 0);
+            assert_eq!(view.buffer_data.as_ref().unwrap().len(), 256);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(2000.))),
+                cx,
+            );
+            assert!(window.find(("buffer-line", 0usize)).visible());
+            window.click("buffer-next", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let view = view.read(cx);
+            assert_eq!(view.buffer_offset, 256);
+            assert_eq!(view.buffer_data.as_ref().unwrap().len(), 44);
+        });
     }
 }

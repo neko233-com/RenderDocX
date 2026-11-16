@@ -81,6 +81,8 @@ int wmain(int argc, wchar_t **argv)
   if(!api->IsFrameCapturing()) { std::cerr << "Capture did not start"; return 9; }
   const float color[4] = {0.25f, 0.5f, 0.75f, 1.0f};
   context->ClearRenderTargetView(view, color);
+  const float updated_vertices[] = {0, 3, 3, 3, 3, 3, 3};
+  context->UpdateSubresource(vertex_buffer, 0, nullptr, updated_vertices, 0, 0);
   context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   const UINT stride = 8, offset = 4;
   context->IASetInputLayout(layout);

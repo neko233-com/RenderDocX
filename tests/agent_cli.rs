@@ -241,6 +241,10 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         agent.send(r#"{"command":"pipeline"}"#)["error"]["code"],
         "no_event"
     );
+    assert_eq!(
+        agent.send(r#"{"command":"read_buffer","index":0,"offset":"0","length":1}"#)["error"]["code"],
+        "no_event"
+    );
     let texture_index = opened["data"]["capture"]["textures"]
         .as_array()
         .unwrap()
@@ -272,6 +276,17 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         selected["data"]["event_id"].as_u64().unwrap().to_string(),
         event
     );
+    let vertex_before = opened["data"]["capture"]["buffers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|buffer| buffer["length"] == "28")
+        .expect("fixture vertex buffer");
+    let before = agent.send(
+        &serde_json::json!({"command":"read_buffer","index":vertex_before,"offset":"4","length":8})
+            .to_string(),
+    );
+    assert_eq!(before["data"]["hex"], "0000004000000040", "{before}");
     let exported = agent.send(&export);
     assert_eq!(exported["ok"], true, "{exported}");
     let bytes = std::fs::read(&png_path).unwrap();
@@ -308,6 +323,30 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     assert_eq!(vb["bound"], true, "{pipeline}");
     assert_eq!(vb["byte_offset"], "4");
     assert_eq!(vb["byte_stride"], 8);
+    let buffers = opened["data"]["capture"]["buffers"].as_array().unwrap();
+    let vertex_index = buffers
+        .iter()
+        .position(|buffer| buffer["resource_index"] == vb["resource_index"])
+        .expect("vertex buffer metadata");
+    assert_eq!(vertex_index, vertex_before);
+    let read = |offset: &str, length: u32| {
+        serde_json::json!({"command":"read_buffer","index":vertex_index,"offset":offset,"length":length}).to_string()
+    };
+    let content = agent.send(&read("4", 8));
+    assert_eq!(content["data"]["hex"], "0000404000004040", "{content}");
+    assert_eq!(agent.send(&read("28", 0))["data"]["hex"], "");
+    assert_eq!(
+        agent.send(&read("28", 1))["error"]["code"],
+        "invalid_arguments"
+    );
+    assert_eq!(
+        agent.send(&read("18446744073709551615", 1))["error"]["code"],
+        "invalid_arguments"
+    );
+    assert_eq!(
+        agent.send(&read("0", 65537))["error"]["code"],
+        "invalid_arguments"
+    );
     let inputs = pipeline["vertex_inputs"].as_array().unwrap();
     assert!(
         inputs.iter().any(|input| input["name"] == "POSITION"

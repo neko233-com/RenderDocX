@@ -34,6 +34,19 @@ pub struct Snapshot {
     pub buffer_count: usize,
     #[serde(default)]
     pub textures: Vec<Texture>,
+    #[serde(default)]
+    pub buffers: Vec<Buffer>,
+}
+
+/// The maximum bytes per IPC response; larger buffers can be read in pages.
+pub const BUFFER_PAGE_LIMIT: u32 = 65_536;
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct Buffer {
+    pub name: String,
+    pub resource_index: Option<usize>,
+    pub length: String,
+    pub creation_flags: u32,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -123,9 +136,21 @@ pub struct Pipeline {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Reply {
     Snapshot(Snapshot),
-    Selected { event_id: u32, pipeline: Pipeline },
-    TextureSaved { index: u32 },
-    Error { message: String },
+    Selected {
+        event_id: u32,
+        pipeline: Pipeline,
+    },
+    TextureSaved {
+        index: u32,
+    },
+    BufferData {
+        index: u32,
+        offset: String,
+        hex: String,
+    },
+    Error {
+        message: String,
+    },
 }
 
 struct Process {
@@ -179,6 +204,9 @@ trait Transport: Send {
     fn save_texture(&mut self, _index: u32, _path: &Path) -> Result<(), String> {
         Err("Texture export is not supported by this transport".into())
     }
+    fn read_buffer(&mut self, _index: u32, _offset: u64, _length: u32) -> Result<Vec<u8>, String> {
+        Err("Buffer reading is not supported by this transport".into())
+    }
     fn close(&mut self) -> Result<(), String> {
         Ok(())
     }
@@ -222,6 +250,24 @@ impl Transport for Process {
         }
     }
 
+    fn read_buffer(&mut self, index: u32, offset: u64, length: u32) -> Result<Vec<u8>, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(input, "buffer {index} {offset} {length}")
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::BufferData {
+                index: actual,
+                offset: actual_offset,
+                hex,
+            } if actual == index && actual_offset == offset.to_string() => {
+                decode_buffer_hex(&hex, length)
+            }
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected buffer response".into()),
+        }
+    }
+
     fn close(&mut self) -> Result<(), String> {
         if let Some(mut input) = self.input.take() {
             let _ = writeln!(input, "quit");
@@ -239,6 +285,26 @@ impl Transport for Process {
         }
         Ok(())
     }
+}
+
+fn decode_buffer_hex(hex: &str, length: u32) -> Result<Vec<u8>, String> {
+    if hex.len() != length as usize * 2 {
+        return Err("Invalid buffer response length".into());
+    }
+    fn digit(c: u8) -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            _ => None,
+        }
+    }
+    hex.as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            Ok((digit(pair[0]).ok_or("Invalid buffer response hex")? << 4)
+                | digit(pair[1]).ok_or("Invalid buffer response hex")?)
+        })
+        .collect()
 }
 
 impl Drop for Process {
@@ -307,6 +373,16 @@ impl Session {
 
     pub fn next_revision(&self) -> u64 {
         self.revision.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    pub fn read_buffer(&self, index: u32, offset: u64, length: u32) -> Result<Vec<u8>, String> {
+        if length > BUFFER_PAGE_LIMIT || offset.checked_add(u64::from(length)).is_none() {
+            return Err("Invalid buffer range".into());
+        }
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .read_buffer(index, offset, length)
     }
 
     pub fn close(&self) -> Result<(), String> {
@@ -401,6 +477,15 @@ pub mod test_support {
             ];
             std::fs::write(path, PIXEL).map_err(|error| error.to_string())
         }
+
+        fn read_buffer(
+            &mut self,
+            _index: u32,
+            offset: u64,
+            length: u32,
+        ) -> Result<Vec<u8>, String> {
+            Ok((0..length).map(|i| (offset + u64::from(i)) as u8).collect())
+        }
     }
 
     pub fn recording_session() -> (Session, Arc<Mutex<Vec<u32>>>) {
@@ -430,6 +515,15 @@ mod tests {
         );
         assert!(pipeline.vertex_inputs.is_none());
         assert!(pipeline.viewports.unwrap()[0].x.is_none());
+    }
+
+    #[test]
+    fn buffer_response_requires_exact_lowercase_hex_and_length() {
+        assert_eq!(decode_buffer_hex("00ff20", 3).unwrap(), vec![0, 255, 32]);
+        assert!(decode_buffer_hex("00fg", 2).is_err());
+        assert!(decode_buffer_hex("00", 2).is_err());
+        assert!(decode_buffer_hex("FF", 1).is_err());
+        assert!(decode_buffer_hex("", 0).unwrap().is_empty());
     }
 
     #[test]
