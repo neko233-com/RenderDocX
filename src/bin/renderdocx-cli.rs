@@ -2719,8 +2719,8 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                                 event_times = None;
                                 mesh_selection = None;
                             }
-                            session.render_texture_png(index, selection.for_texture_display(texture), width, height, PathBuf::from(path).as_path())
-                                .map(|()| json!({"event_id":event,"path":path,"geometry":geometry,"highlight_rendered":false}))
+                            session.render_texture_context_png(index, selection.for_texture_display(texture), width, height, PathBuf::from(path).as_path())
+                                .map(|()| json!({"event_id":event,"path":path,"geometry":geometry,"highlight_rendered":true}))
                                 .map_err(|error| ("replay_texture_render_failed", error))
                         }
                         Err(error) => Err(("invalid_arguments", error)),

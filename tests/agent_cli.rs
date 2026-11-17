@@ -1861,7 +1861,7 @@ fn real_opengl_vertex_inputs_include_generic_and_normalized_values() {
     let request = serde_json::json!({"command":"texture_context","index":texture,"uv":[0.1,0.75],"preview_flip_y":true,"preview_linear_as_gamma":false,"path":context_path});
     let context = agent.send(&request.to_string());
     assert_eq!(context["ok"], true, "{context}");
-    assert_eq!(context["data"]["highlight_rendered"], false);
+    assert_eq!(context["data"]["highlight_rendered"], true);
     assert_eq!(
         context["data"]["geometry"]["texel"],
         serde_json::json!([0, 1])
@@ -1878,6 +1878,8 @@ fn real_opengl_vertex_inputs_include_generic_and_normalized_values() {
     let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
     reader.next_frame(&mut pixels).unwrap();
     assert_eq!(&pixels[(84 * 160 + 84) * 3..][..3], &[255, 0, 0]);
+    assert_eq!(&pixels[(80 * 160 + 80) * 3..][..3], &[255, 255, 255]);
+    assert_eq!(&pixels[(79 * 160 + 79) * 3..][..3], &[0, 0, 0]);
     let repeat = agent.send(&request.to_string());
     assert_eq!(repeat["error"]["code"], "replay_texture_render_failed");
     let clamped = agent.send(

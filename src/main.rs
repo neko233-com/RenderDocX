@@ -8978,7 +8978,7 @@ impl Workspace {
         let task = cx.background_executor().spawn(async move {
             let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
             let path = directory.path().join("context.png");
-            session.render_texture_png(texture_index, display, 160, 160, &path)?;
+            session.render_texture_context_png(texture_index, display, 160, 160, &path)?;
             Ok::<_, String>(TexturePreview {
                 path,
                 _directory: directory,
@@ -11100,17 +11100,6 @@ impl Workspace {
             }))
             .when_some(context, |view, context| {
                 view.child(img(context.preview.path.clone()).size_full())
-                    .child(
-                        div()
-                            .absolute()
-                            .left(px(79.))
-                            .top(px(79.))
-                            .w(px(11.))
-                            .h(px(11.))
-                            .border_1()
-                            .border_color(rgb(0x000000))
-                            .child(div().size_full().border_1().border_color(rgb(0xffffff))),
-                    )
             })
     }
 

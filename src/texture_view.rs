@@ -109,6 +109,44 @@ pub fn context_scale(base: [u32; 2], mip: u32) -> Option<f32> {
     Some(8.0 * (mip_width / base[0] as f32).max(mip_height / base[1] as f32))
 }
 
+/// Draw RenderDoc's 8-pixel white highlight with a black outline into an RGB preview.
+pub fn draw_context_highlight(rgb: &mut [u8], width: u32, height: u32) -> Result<(), &'static str> {
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or("Invalid context dimensions")?;
+    if width == 0 || height == 0 || rgb.len() != expected {
+        return Err("Invalid context image");
+    }
+    let x = (i64::from(width) + 1) / 2;
+    let y = (i64::from(height) + 1) / 2;
+    let mut rect = |left: i64, top: i64, right: i64, bottom: i64, color: u8| {
+        for row in top.max(0)..bottom.min(i64::from(height)) {
+            for column in left.max(0)..right.min(i64::from(width)) {
+                let index = (row as usize * width as usize + column as usize) * 3;
+                rgb[index..index + 3].fill(color);
+            }
+        }
+    };
+    for (l, t, r, b) in [
+        (x, y, x + 1, y + 8),
+        (x + 8, y, x + 9, y + 9),
+        (x, y, x + 8, y + 1),
+        (x, y + 8, x + 8, y + 9),
+    ] {
+        rect(l, t, r, b, 255);
+    }
+    for (l, t, r, b) in [
+        (x - 1, y - 1, x, y + 9),
+        (x + 9, y - 1, x + 10, y + 10),
+        (x - 1, y - 1, x + 9, y),
+        (x - 1, y + 9, x + 9, y + 10),
+    ] {
+        rect(l, t, r, b, 0);
+    }
+    Ok(())
+}
+
 /// Place the selected mip texel's upper-left corner at the context viewport center.
 pub fn context_offset(
     base: [u32; 2],
@@ -282,6 +320,20 @@ mod tests {
 
     #[test]
     fn uv_and_center_handle_odd_mips_flips_and_invalid_input() {
+        let mut image = vec![37; 160 * 160 * 3];
+        super::draw_context_highlight(&mut image, 160, 160).unwrap();
+        let pixel = |x: usize, y: usize| &image[(y * 160 + x) * 3..][..3];
+        assert_eq!(pixel(79, 79), &[0, 0, 0]);
+        assert_eq!(pixel(80, 80), &[255, 255, 255]);
+        assert_eq!(pixel(88, 88), &[255, 255, 255]);
+        assert_eq!(pixel(89, 89), &[0, 0, 0]);
+        assert_eq!(pixel(84, 84), &[37, 37, 37]);
+        assert!(super::draw_context_highlight(&mut [0; 2], 1, 1).is_err());
+        assert!(super::draw_context_highlight(&mut [0; 3], 1, 1).is_ok());
+        let mut small = [37; 3 * 3 * 3];
+        super::draw_context_highlight(&mut small, 3, 3).unwrap();
+        assert_eq!(&small[(1 * 3 + 1) * 3..][..3], &[0, 0, 0]);
+        assert_eq!(&small[(2 * 3 + 2) * 3..][..3], &[255, 255, 255]);
         assert_eq!(super::context_scale([16, 8], 0), Some(8.0));
         assert_eq!(super::context_scale([16, 8], 1), Some(4.0));
         assert!((super::context_scale([15, 9], 1).unwrap() - 8.0 * 7.0 / 15.0).abs() < 0.0001);

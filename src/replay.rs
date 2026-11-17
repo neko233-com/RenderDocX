@@ -4818,6 +4818,30 @@ impl Session {
         height: u32,
         destination: &Path,
     ) -> Result<(), String> {
+        self.render_texture_png_impl(index, selection, width, height, destination, false)
+    }
+
+    /// Render the context view and its highlight without replacing an existing file.
+    pub fn render_texture_context_png(
+        &self,
+        index: u32,
+        selection: TextureSelection,
+        width: u32,
+        height: u32,
+        destination: &Path,
+    ) -> Result<(), String> {
+        self.render_texture_png_impl(index, selection, width, height, destination, true)
+    }
+
+    fn render_texture_png_impl(
+        &self,
+        index: u32,
+        selection: TextureSelection,
+        width: u32,
+        height: u32,
+        destination: &Path,
+        context_highlight: bool,
+    ) -> Result<(), String> {
         if width == 0
             || height == 0
             || width > i32::MAX as u32
@@ -4835,7 +4859,7 @@ impl Session {
         if selection.preview_overlay != crate::texture_overlay::TextureOverlay::None {
             self.next_revision();
         }
-        let pixels = self
+        let mut pixels = self
             .process
             .lock()
             .map_err(|e| e.to_string())?
@@ -4846,6 +4870,10 @@ impl Session {
             .ok_or("Texture render dimensions overflow")? as usize;
         if pixels.len() != expected {
             return Err("Invalid texture render data".into());
+        }
+        if context_highlight {
+            crate::texture_view::draw_context_highlight(&mut pixels, width, height)
+                .map_err(str::to_owned)?;
         }
         let parent = destination
             .parent()
