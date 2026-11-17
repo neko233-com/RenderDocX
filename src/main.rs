@@ -623,6 +623,9 @@ struct Workspace {
     event_filter_name: Entity<InputState>,
     saved_event_filters: Vec<renderdocx::event_filters::SavedFilter>,
     event_find: Entity<InputState>,
+    event_path_input: Entity<InputState>,
+    event_path_editing: bool,
+    _event_path_subscription: gpui::Subscription,
     _event_find_subscription: gpui::Subscription,
     event_find_revision: std::sync::Arc<std::sync::atomic::AtomicU64>,
     event_find_pending: Option<u64>,
@@ -1661,6 +1664,72 @@ impl Workspace {
                 cx.notify();
             }
         })
+    }
+
+    fn watch_event_path(input: &Entity<InputState>, cx: &mut Context<Self>) -> gpui::Subscription {
+        cx.subscribe(input, |this, _, event, cx| {
+            if this.event_path_editing && matches!(event, InputEvent::PressEnter { .. }) {
+                this.navigate_event_path(cx);
+            }
+        })
+    }
+
+    fn edit_event_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let path = self
+            .selected
+            .and_then(|index| {
+                self.snapshot
+                    .as_ref()
+                    .and_then(|snapshot| renderdocx::event_path::format(&snapshot.actions, index))
+            })
+            .unwrap_or_default();
+        self.event_path_input
+            .update(cx, |input, cx| input.set_value(path, window, cx));
+        self.event_path_editing = true;
+        cx.notify();
+    }
+
+    fn navigate_event_path(&mut self, cx: &mut Context<Self>) {
+        if self.replay_pending
+            || self.export_pending
+            || self.resource_pending
+            || self.protect_shader_draft(cx)
+        {
+            return;
+        }
+        let path = self.event_path_input.read(cx).value().to_string();
+        let target = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| renderdocx::event_path::resolve(&snapshot.actions, &path));
+        match target {
+            Some(Some(index)) => {
+                if let Some(position) = self.event_tree.reveal_filtered(index) {
+                    self.event_scroll
+                        .scroll_to_item(position + 1, gpui::ScrollStrategy::Nearest);
+                }
+                self.event_path_editing = false;
+                self.select_event(index, None, cx);
+            }
+            Some(None) => {
+                self.event_path_editing = false;
+                self.event_scroll
+                    .scroll_to_item(0, gpui::ScrollStrategy::Nearest);
+                self.select_capture_start(cx);
+            }
+            None => {
+                self.status = Some(format!(
+                    "{}: {path}",
+                    self.t(
+                        "Could not find event path",
+                        "找不到事件路径",
+                        "イベントパスが見つかりません",
+                        "이벤트 경로를 찾을 수 없습니다"
+                    )
+                ));
+                cx.notify();
+            }
+        }
     }
 
     fn set_event_expansion(&mut self, collapsed: bool, cx: &mut Context<Self>) {
@@ -3260,6 +3329,7 @@ impl Workspace {
                         // Invalidate work started against the old session while this open was pending.
                         this.open_revision += 1;
                         this.capture = Some(capture);
+                        this.event_path_editing = false;
                         this.event_tree.set_use_custom_action_names(
                             this.settings.event_use_custom_action_names,
                         );
@@ -16934,6 +17004,13 @@ impl Workspace {
                                             .child(div().id(("event-breadcrumb", index)).test_support().cursor_pointer().text_color(rgb(0x8dbbff)).child(label)
                                                 .on_click(cx.listener(move |this, _, _, cx| this.select_event(index, None, cx))))
                                     }))
+                                    .child(div().id("event-path-edit").test_support().cursor_pointer().px_2().text_color(rgb(0x8dbbff))
+                                        .child(self.t("Edit path", "编辑路径", "パスを編集", "경로 편집"))
+                                        .on_click(cx.listener(|this, _, window, cx| this.edit_event_path(window, cx))))
+                                    .when(self.event_path_editing, |view| view.child(div().w_full().flex().flex_wrap().gap_2()
+                                        .child(Input::new(&self.event_path_input).id("event-path-input").aria_label(self.t("Event path", "事件路径", "イベントパス", "이벤트 경로")).w_full())
+                                        .child(button("event-path-go", self.t("Go", "跳转", "移動", "이동"), false, |this, cx| this.navigate_event_path(cx), cx))
+                                        .child(button("event-path-cancel", self.t("Cancel", "取消", "キャンセル", "취소"), false, |this, cx| { this.event_path_editing = false; cx.notify(); }, cx))))
                             ))
                             .when(self.tab == CaptureTab::Events, |view| view.child(div().flex().flex_wrap().gap_2()
                                 .child(button("event-auto-format", self.t("Automatic event names", "自动格式化事件名", "イベント名を自動整形", "이벤트 이름 자동 서식"), self.settings.event_auto_format, |this, cx| {
@@ -17798,6 +17875,7 @@ fn main() {
                     let event_annotation_key = cx.new(|cx| InputState::new(window, cx));
                     let event_filter_name = cx.new(|cx| InputState::new(window, cx));
                     let event_find = cx.new(|cx| InputState::new(window, cx));
+                    let event_path_input = cx.new(|cx| InputState::new(window, cx));
                     let buffer_seek = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let buffer_layout_input = cx.new(|cx| {
                         TextareaState::new(window, cx)
@@ -17893,6 +17971,9 @@ fn main() {
                         event_filter_name,
                         saved_event_filters: Vec::new(),
                         _event_find_subscription: Workspace::watch_event_find(&event_find, cx),
+                        _event_path_subscription: Workspace::watch_event_path(&event_path_input, cx),
+                        event_path_input,
+                        event_path_editing: false,
                         event_find_revision: Default::default(),
                         event_find_pending: None,
                         event_find,
@@ -18563,6 +18644,7 @@ mod ui_tests {
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let event_annotation_key = cx.new(|cx| InputState::new(window, cx));
                     let event_find = cx.new(|cx| InputState::new(window, cx));
+                    let event_path_input = cx.new(|cx| InputState::new(window, cx));
                     let event_filter_name = cx.new(|cx| InputState::new(window, cx));
                     let buffer_seek = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let buffer_layout_input = cx.new(|cx| {
@@ -18676,6 +18758,9 @@ mod ui_tests {
                         event_filter_pending: None,
                         event_search,
                         _event_find_subscription: Workspace::watch_event_find(&event_find, cx),
+                        _event_path_subscription: Workspace::watch_event_path(&event_path_input, cx),
+                        event_path_input,
+                        event_path_editing: false,
                         event_find_revision: Default::default(),
                         event_find_pending: None,
                         event_find,
@@ -19035,6 +19120,7 @@ mod ui_tests {
                     let event_search = cx.new(|cx| InputState::new(window, cx));
                     let event_annotation_key = cx.new(|cx| InputState::new(window, cx));
                     let event_find = cx.new(|cx| InputState::new(window, cx));
+                    let event_path_input = cx.new(|cx| InputState::new(window, cx));
                     let buffer_seek = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let event_filter_name = cx.new(|cx| InputState::new(window, cx));
                     let buffer_layout_input = cx.new(|cx| {
@@ -19270,6 +19356,9 @@ mod ui_tests {
                         event_filter_pending: None,
                         event_search,
                         _event_find_subscription: Workspace::watch_event_find(&event_find, cx),
+                        _event_path_subscription: Workspace::watch_event_path(&event_path_input, cx),
+                        event_path_input,
+                        event_path_editing: false,
                         event_find_revision: Default::default(),
                         event_find_pending: None,
                         event_find,
@@ -21709,6 +21798,44 @@ mod ui_tests {
         .unwrap();
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 0));
+
+        let path = cx.update(|cx| {
+            renderdocx::event_path::format(&view.read(cx).snapshot.as_ref().unwrap().actions, 0)
+                .unwrap()
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            reveal_details(window, "event-path-edit", cx);
+            window.click("event-path-edit", cx);
+            window.render_frame(cx);
+            window.click("event-path-input", cx);
+            window.input("no-such-action", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(view.read(cx).event_path_editing);
+            assert!(
+                view.read(cx)
+                    .status
+                    .as_deref()
+                    .unwrap()
+                    .contains("no-such-action")
+            );
+            assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 0);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("event-path-input", cx);
+            window.press("ctrl-a", cx);
+            window.input(&path, cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(!view.read(cx).event_path_editing);
+            assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 42);
+        });
 
         // When the local D3D11 fixtures are configured, repeat the interaction against
         // a real capture and replay session, not the recording transport above.
