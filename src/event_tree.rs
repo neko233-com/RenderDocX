@@ -31,6 +31,7 @@ pub struct EventTree {
     source_children: Vec<bool>,
     names: Vec<String>,
     original_names: Vec<String>,
+    format_attempted: std::collections::HashSet<u32>,
     lower_names: Vec<String>,
     marker_names: Vec<String>,
     filter: Filter,
@@ -51,6 +52,7 @@ pub struct EventTree {
 
 impl EventTree {
     pub fn reset(&mut self, actions: &[Action]) {
+        self.format_attempted.clear();
         // Match results are specific to a capture; never reuse them for another.
         self.parameter_matches.clear();
         self.annotation_matches.clear();
@@ -153,6 +155,21 @@ impl EventTree {
             .collect()
     }
 
+    pub fn unformatted_targets(&self, range: std::ops::Range<usize>) -> Vec<u32> {
+        let mut seen = std::collections::HashSet::new();
+        self.visible
+            .get(range)
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(|&row| self.format_target(row))
+            .filter(|event| !self.format_attempted.contains(event) && seen.insert(*event))
+            .collect()
+    }
+
+    pub fn record_format_attempts(&mut self, events: impl IntoIterator<Item = u32>) {
+        self.format_attempted.extend(events);
+    }
+
     pub fn apply_formatted_names(&mut self, names: &std::collections::HashMap<u32, String>) {
         for row in 0..self.rows.len() {
             if let Some(name) = self.format_target(row).and_then(|id| names.get(&id)) {
@@ -164,6 +181,7 @@ impl EventTree {
     }
 
     pub fn clear_formatted_names(&mut self) {
+        self.format_attempted.clear();
         self.names.clone_from(&self.original_names);
         self.lower_names = self.names.iter().map(|name| name.to_lowercase()).collect();
         self.rebuild();
@@ -563,6 +581,9 @@ mod tests {
         tree.reset(&[draw, marker]);
         tree.set_show_api(true);
         assert_eq!(tree.visible_format_targets(), [1, 2]);
+        assert_eq!(tree.unformatted_targets(0..1), [1]);
+        tree.record_format_attempts([1]);
+        assert!(tree.unformatted_targets(0..1).is_empty());
         tree.apply_formatted_names(
             &[
                 (1, "Bind(42)".into()),
@@ -596,6 +617,7 @@ mod tests {
         tree.clear_formatted_names();
         assert!(tree.visible.is_empty());
         tree.set_filter("");
+        assert_eq!(tree.unformatted_targets(0..1), [1]);
         assert_eq!(
             tree.display_name(tree.row_for_event(1).unwrap()),
             Some("Bind()")

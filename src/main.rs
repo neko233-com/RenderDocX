@@ -618,6 +618,7 @@ struct Workspace {
     event_annotation_values: std::collections::HashMap<u32, String>,
     event_filter_revision: std::sync::Arc<std::sync::atomic::AtomicU64>,
     event_filter_names_pending: bool,
+    event_name_worker: bool,
     event_filter_name: Entity<InputState>,
     saved_event_filters: Vec<renderdocx::event_filters::SavedFilter>,
     event_find: Entity<InputState>,
@@ -1886,6 +1887,8 @@ impl Workspace {
                         let mut names = std::collections::HashMap::new();
                         let mut failed = 0usize;
                         let mut first_error = None;
+                        this.event_tree
+                            .record_format_attempts(results.iter().map(|(event, _)| *event));
                         for (event, value) in results {
                             match value {
                                 Ok(name) => {
@@ -1921,6 +1924,75 @@ impl Workspace {
                                 "이벤트 서식 지정 실패"
                             )
                         ))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn format_viewport_events(&mut self, range: std::ops::Range<usize>, cx: &mut Context<Self>) {
+        use std::sync::atomic::Ordering;
+        if !self.settings.event_auto_format
+            || self.tab != CaptureTab::Events
+            || self.event_name_worker
+            || self.event_filter_names_pending
+            || self.resource_pending
+            || self.replay_pending
+            || self.export_pending
+        {
+            return;
+        }
+        let (Some(session), Some(snapshot)) = (self.session.clone(), self.snapshot.as_ref()) else {
+            return;
+        };
+        let events = self.event_tree.unformatted_targets(range);
+        if events.is_empty() {
+            return;
+        }
+        let resources = snapshot.resources.clone();
+        let buffers = snapshot.buffers.clone();
+        let language = self.settings.language;
+        let show_all = self.settings.event_show_all_parameters;
+        let show_names = self.settings.event_show_parameter_names;
+        let use_custom = self.settings.event_use_custom_action_names;
+        let capture_revision = self.open_revision;
+        let filter_revision = self.event_filter_revision.load(Ordering::Relaxed);
+        let generation = self.event_filter_revision.clone();
+        self.event_name_worker = true;
+        let task = cx.background_executor().spawn(async move {
+            renderdocx::event_parameters::format_events(
+                &session,
+                &events,
+                &resources,
+                &buffers,
+                language,
+                show_all,
+                show_names,
+                || generation.load(Ordering::Relaxed) != filter_revision,
+            )
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.event_name_worker = false;
+                if this.open_revision == capture_revision
+                    && this.settings.event_auto_format
+                    && this.event_filter_revision.load(Ordering::Relaxed) == filter_revision
+                    && this.settings.language == language
+                    && this.settings.event_show_all_parameters == show_all
+                    && this.settings.event_show_parameter_names == show_names
+                    && this.settings.event_use_custom_action_names == use_custom
+                {
+                    if let Ok(results) = result {
+                        this.event_tree
+                            .record_format_attempts(results.iter().map(|(event, _)| *event));
+                        let names = results
+                            .into_iter()
+                            .filter_map(|(event, result)| result.ok().map(|name| (event, name)))
+                            .collect();
+                        this.event_tree.apply_formatted_names(&names);
                     }
                 }
                 cx.notify();
@@ -12442,6 +12514,7 @@ impl Workspace {
                 "capture-actions",
                 count,
                 cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                    this.format_viewport_events(range.clone(), cx);
                     range
                         .filter_map(|row| {
                             let node = *this.event_tree.visible.get(row)?;
@@ -16491,6 +16564,10 @@ impl Workspace {
                             .p_4()
                             .child(detail_view)
                             .when(self.tab == CaptureTab::Events, |view| view.child(div().flex().flex_wrap().gap_2()
+                                .child(button("event-auto-format", self.t("Automatic event names", "自动格式化事件名", "イベント名を自動整形", "이벤트 이름 자동 서식"), self.settings.event_auto_format, |this, cx| {
+                                    this.settings.event_auto_format = !this.settings.event_auto_format;
+                                    this.save(); cx.notify();
+                                }, cx))
                                 .child(button("event-format-visible", self.t("Format visible events", "格式化可见事件", "表示イベントを整形", "표시된 이벤트 서식 지정"), false, |this, cx| this.format_visible_events(cx), cx))
                                 .child(button("event-show-param-names", self.t("Parameter names", "参数名称", "パラメーター名", "매개변수 이름"), self.settings.event_show_parameter_names, |this, cx| {
                                     if this.resource_pending || this.replay_pending || this.export_pending { return; }
@@ -17438,6 +17515,7 @@ fn main() {
                         event_annotation_values: Default::default(),
                         event_filter_revision: Default::default(),
                         event_filter_names_pending: false,
+                        event_name_worker: false,
                         event_search,
                         event_filter_name,
                         saved_event_filters: Vec::new(),
@@ -18157,7 +18235,7 @@ mod ui_tests {
                         cx.new(|cx| InputState::new(window, cx).default_value("0,0,0"));
                     let pixel_y = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     cx.new(|cx| Workspace {
-                        settings: Settings::default(),
+                        settings: Settings { event_auto_format: false, ..Settings::default() },
                         status: None,
                         capture: Some("capture.rdc".into()),
                         session: None,
@@ -18218,6 +18296,7 @@ mod ui_tests {
                         event_annotation_values: Default::default(),
                         event_filter_revision: Default::default(),
                         event_filter_names_pending: false,
+                        event_name_worker: false,
                         event_search,
                         event_find,
                         event_filter_name,
@@ -18624,7 +18703,7 @@ mod ui_tests {
                         cx.new(|cx| InputState::new(window, cx).default_value("0,0,0"));
                     let pixel_y = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     cx.new(|cx| Workspace {
-                        settings: Settings::default(),
+                        settings: Settings { event_auto_format: false, ..Settings::default() },
                         status: None,
                         capture: Some("capture.rdc".into()),
                         session: Some(session),
@@ -18807,6 +18886,7 @@ mod ui_tests {
                         event_annotation_values: Default::default(),
                         event_filter_revision: Default::default(),
                         event_filter_names_pending: false,
+                        event_name_worker: false,
                         event_search,
                         event_find,
                         selected: None,
@@ -20904,6 +20984,54 @@ mod ui_tests {
         .unwrap();
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 41));
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.settings.event_auto_format = true;
+                let count = view.event_tree.visible.len();
+                view.format_viewport_events(0..count, cx);
+                assert!(view.event_name_worker);
+                view.settings.event_auto_format = false;
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let state = view.read(cx);
+            assert!(!state.event_name_worker);
+            assert!(
+                !state
+                    .event_tree
+                    .display_name(state.event_tree.row_for_event(41).unwrap())
+                    .unwrap()
+                    .starts_with("Call(")
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.settings.event_auto_format = true;
+                view.event_tree.clear_formatted_names();
+                cx.notify();
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let state = view.read(cx);
+            let row = state.event_tree.row_for_event(41).unwrap();
+            assert!(
+                state
+                    .event_tree
+                    .display_name(row)
+                    .unwrap()
+                    .starts_with("Call(4, (300 bytes)"),
+                "automatic event formatting"
+            );
+            view.update(cx, |view, cx| {
+                view.settings.event_auto_format = false;
+                view.event_tree.clear_formatted_names();
+                cx.notify();
+            });
+        });
         cx.update_window(handle.into(), |_, window, cx| {
             reveal_details(window, "event-format-visible", cx);
             window.click("event-format-visible", cx)
@@ -21358,6 +21486,43 @@ mod ui_tests {
                     );
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    view.update(cx, |view, cx| {
+                        view.settings.event_auto_format = true;
+                        view.event_tree.clear_formatted_names();
+                        cx.notify();
+                    });
+                    window.render_frame(cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        let state = view.read(cx);
+                        state
+                            .event_tree
+                            .row_for_event(update_event)
+                            .and_then(|row| state.event_tree.display_name(row))
+                            .is_some_and(|name| {
+                                name.contains("UpdateSubresource(") && !name.ends_with("()")
+                            })
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real automatic event formatting timed out"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update(|cx| {
+                    view.update(cx, |view, cx| {
+                        view.settings.event_auto_format = false;
+                        view.event_tree.clear_formatted_names();
+                        cx.notify();
+                    })
+                });
                 cx.update_window(handle.into(), |_, window, cx| {
                     reveal_details(window, "event-format-visible", cx);
                     window.click("event-format-visible", cx);

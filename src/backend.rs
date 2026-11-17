@@ -22,6 +22,7 @@ pub struct Settings {
     pub event_show_parameter_names: bool,
     pub event_show_all_parameters: bool,
     pub event_use_custom_action_names: bool,
+    pub event_auto_format: bool,
 }
 
 impl Default for Settings {
@@ -39,6 +40,7 @@ impl Default for Settings {
             event_show_parameter_names: false,
             event_show_all_parameters: false,
             event_use_custom_action_names: true,
+            event_auto_format: true,
         }
     }
 }
@@ -132,6 +134,7 @@ mod tests {
         assert!(!settings.event_show_parameter_names);
         assert!(!settings.event_show_all_parameters);
         assert!(settings.event_use_custom_action_names);
+        assert!(settings.event_auto_format);
         let mut updated = settings;
         updated.texture_per_resource_settings = false;
         updated.texture_per_resource_flip_y = true;
@@ -139,6 +142,7 @@ mod tests {
         updated.event_show_parameter_names = true;
         updated.event_show_all_parameters = true;
         updated.event_use_custom_action_names = false;
+        updated.event_auto_format = false;
         let reloaded: Settings =
             serde_json::from_str(&serde_json::to_string(&updated).unwrap()).unwrap();
         assert!(!reloaded.texture_per_resource_settings);
@@ -147,5 +151,6 @@ mod tests {
         assert!(reloaded.event_show_parameter_names);
         assert!(reloaded.event_show_all_parameters);
         assert!(!reloaded.event_use_custom_action_names);
+        assert!(!reloaded.event_auto_format);
     }
 }
