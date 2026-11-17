@@ -65,6 +65,17 @@ struct PixelContext {
     shader_revision: u64,
 }
 
+#[derive(Clone, Copy)]
+struct PixelNavigation {
+    event: u32,
+    index: usize,
+    selection: TextureSelection,
+    open_revision: u64,
+    selection_revision: u64,
+    shader_revision: u64,
+    target: [u32; 2],
+}
+
 #[derive(Default)]
 struct AnnotationView {
     notes: Option<(AnnotationSection, serde_json::Value)>,
@@ -668,6 +679,7 @@ struct Workspace {
     pixel_debug_view: Entity<InputState>,
     pixel: Option<Pixel>,
     pixel_context: Option<PixelContext>,
+    pixel_navigation: Option<PixelNavigation>,
     texture_preview_focus: gpui::FocusHandle,
     pixel_context_focus: gpui::FocusHandle,
     pixel_history: Option<PixelHistoryPage>,
@@ -8450,6 +8462,11 @@ impl Workspace {
     }
 
     fn pick_texture_pixel(&mut self, cx: &mut Context<Self>) {
+        self.pixel_navigation = None;
+        self.pick_texture_pixel_impl(None, cx);
+    }
+
+    fn pick_texture_pixel_impl(&mut self, coordinates: Option<[u32; 2]>, cx: &mut Context<Self>) {
         if self.replay_pending || self.export_pending || self.resource_pending {
             self.status = Some(
                 self.t(
@@ -8476,10 +8493,13 @@ impl Workspace {
             cx.notify();
             return;
         };
-        let (Ok(x), Ok(y)) = (
-            self.pixel_x.read(cx).value().parse::<u32>(),
-            self.pixel_y.read(cx).value().parse::<u32>(),
-        ) else {
+        let coordinates = coordinates.or_else(|| {
+            Some([
+                self.pixel_x.read(cx).value().parse::<u32>().ok()?,
+                self.pixel_y.read(cx).value().parse::<u32>().ok()?,
+            ])
+        });
+        let Some([x, y]) = coordinates else {
             self.status = Some(
                 self.t(
                     "Enter nonnegative integer pixel coordinates.",
@@ -8509,6 +8529,16 @@ impl Workspace {
         let selection = self.texture_selection;
         let revision = self.open_revision;
         let selection_revision = self.selection_revision;
+        let shader_revision = self.texture_custom_revision;
+        self.pixel_navigation = Some(PixelNavigation {
+            event,
+            index,
+            selection,
+            open_revision: revision,
+            selection_revision,
+            shader_revision,
+            target: [x, y],
+        });
         self.pixel = None;
         self.pixel_context = None;
         self.pixel_history = None;
@@ -8551,19 +8581,33 @@ impl Workspace {
                     return;
                 }
                 this.resource_pending = false;
-                if this.selected_texture != Some(index) || this.texture_selection != selection {
+                if this.selected_texture != Some(index)
+                    || this.texture_selection != selection
+                    || this.texture_custom_revision != shader_revision
+                    || this.pipeline.as_ref().map(|p| p.event_id) != Some(event)
+                {
+                    this.pixel_navigation = None;
                     this.status = None;
                     cx.notify();
                     return;
                 }
                 match result {
                     Ok(pixel) => {
+                        if let Some(target) = this
+                            .pixel_navigation
+                            .filter(|nav| nav.target != [x, y])
+                            .map(|nav| nav.target)
+                        {
+                            this.pick_texture_pixel_impl(Some(target), cx);
+                            return;
+                        }
                         this.pixel = Some(pixel);
                         this.status = None;
                         this.render_pixel_context(cx);
                         return;
                     }
                     Err(error) => {
+                        this.pixel_navigation = None;
                         this.status = Some(format!(
                             "{}: {error}",
                             this.t(
@@ -8587,30 +8631,53 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.replay_pending || self.export_pending || self.resource_pending {
+        if self.replay_pending || self.export_pending {
             return false;
         }
-        let (Some(pixel), Some(index), Some(snapshot)) = (
-            self.pixel.as_ref(),
-            self.selected_texture,
-            self.snapshot.as_ref(),
-        ) else {
+        let (Some(index), Some(snapshot)) = (self.selected_texture, self.snapshot.as_ref()) else {
             return false;
         };
-        if pixel.index as usize != index
-            || self.pipeline.as_ref().map(|p| p.event_id) != Some(pixel.event_id)
-            || pixel.mip != self.texture_selection.mip
-            || pixel.slice != self.texture_selection.slice
-        {
-            return false;
-        }
         let Some(texture) = snapshot.textures.get(index) else {
             return false;
         };
-        if pixel.mip >= 32
+        let selection = self.texture_selection;
+        let Some(event) = self.pipeline.as_ref().map(|p| p.event_id) else {
+            return false;
+        };
+        let (start, sample) = if self.resource_pending {
+            let Some(nav) = self.pixel_navigation.filter(|nav| {
+                nav.event == event
+                    && nav.index == index
+                    && nav.selection == selection
+                    && nav.open_revision == self.open_revision
+                    && nav.selection_revision == self.selection_revision
+                    && nav.shader_revision == self.texture_custom_revision
+            }) else {
+                return false;
+            };
+            (
+                nav.target,
+                selection
+                    .sample
+                    .unwrap_or(if texture.samples > 1 { u32::MAX } else { 0 }),
+            )
+        } else {
+            let Some(pixel) = self.pixel.as_ref() else {
+                return false;
+            };
+            if pixel.index as usize != index
+                || pixel.event_id != event
+                || pixel.mip != selection.mip
+                || pixel.slice != selection.slice
+            {
+                return false;
+            }
+            ([pixel.x, pixel.y], pixel.sample)
+        };
+        if selection.mip >= 32
             || texture.width == 0
             || texture.height == 0
-            || pixel.sample
+            || sample
                 != self
                     .texture_selection
                     .sample
@@ -8618,12 +8685,12 @@ impl Workspace {
         {
             return false;
         }
-        let width = (texture.width >> pixel.mip).max(1);
-        let height = (texture.height >> pixel.mip).max(1);
-        if pixel.x >= width || pixel.y >= height {
+        let width = (texture.width >> selection.mip).max(1);
+        let height = (texture.height >> selection.mip).max(1);
+        if start[0] >= width || start[1] >= height {
             return false;
         }
-        let (mut x, mut y) = (pixel.x, pixel.y);
+        let [mut x, mut y] = start;
         match key {
             "left" if x > 0 => x -= 1,
             "right" if x < width - 1 => x += 1,
@@ -8636,7 +8703,13 @@ impl Workspace {
             .update(cx, |input, cx| input.set_value(&x.to_string(), window, cx));
         self.pixel_y
             .update(cx, |input, cx| input.set_value(&y.to_string(), window, cx));
-        self.pick_texture_pixel(cx);
+        if self.resource_pending {
+            if let Some(nav) = self.pixel_navigation.as_mut() {
+                nav.target = [x, y];
+            }
+        } else {
+            self.pick_texture_pixel_impl(Some([x, y]), cx);
+        }
         true
     }
 
@@ -8798,6 +8871,7 @@ impl Workspace {
         if !self.preview_edit_ready(cx) {
             return;
         }
+        self.pixel_navigation = None;
         let (Some(session), Some(index), Some(pixel), Some(snapshot)) = (
             self.session.clone(),
             self.selected_texture,
@@ -8867,6 +8941,15 @@ impl Workspace {
         let revision = self.open_revision;
         let selection_revision = self.selection_revision;
         let shader_revision = self.texture_custom_revision;
+        self.pixel_navigation = Some(PixelNavigation {
+            event,
+            index,
+            selection,
+            open_revision: revision,
+            selection_revision,
+            shader_revision,
+            target: coordinates,
+        });
         self.pixel_context = None;
         if selection.preview_overlay != renderdocx::texture_overlay::TextureOverlay::None {
             self.event_tree.clear_durations();
@@ -8908,6 +8991,27 @@ impl Workspace {
                     return;
                 }
                 this.resource_pending = false;
+                if let Some(target) = this
+                    .pixel_navigation
+                    .filter(|nav| {
+                        nav.event == event
+                            && nav.index == index
+                            && nav.selection == selection
+                            && nav.open_revision == revision
+                            && nav.selection_revision == selection_revision
+                            && nav.shader_revision == shader_revision
+                            && nav.target != coordinates
+                            && this.selected_texture == Some(index)
+                            && this.texture_selection == selection
+                            && this.texture_custom_revision == shader_revision
+                            && this.pipeline.as_ref().map(|p| p.event_id) == Some(event)
+                    })
+                    .map(|nav| nav.target)
+                {
+                    this.pick_texture_pixel_impl(Some(target), cx);
+                    return;
+                }
+                this.pixel_navigation = None;
                 if this.selected_texture != Some(index)
                     || this.texture_selection != selection
                     || this.texture_custom_revision != shader_revision
@@ -17143,6 +17247,7 @@ fn main() {
                         pixel_context: None,
                         texture_preview_focus: cx.focus_handle(),
                         pixel_context_focus: cx.focus_handle(),
+                        pixel_navigation: None,
                         pixel_history: None,
                         history_selected: None,
                         stats_min,
@@ -17922,6 +18027,7 @@ mod ui_tests {
                         pixel_context: None,
                         texture_preview_focus: cx.focus_handle(),
                         pixel_context_focus: cx.focus_handle(),
+                        pixel_navigation: None,
                         pixel_history: None,
                         history_selected: None,
                         stats_min,
@@ -18509,6 +18615,7 @@ mod ui_tests {
                         pixel_context: None,
                         texture_preview_focus: cx.focus_handle(),
                         pixel_context_focus: cx.focus_handle(),
+                        pixel_navigation: None,
                         pixel_history: None,
                         history_selected: None,
                         stats_min,
@@ -19009,6 +19116,55 @@ mod ui_tests {
                 view.read(cx).pixel_context.as_ref().unwrap().coordinates,
                 [15, 15]
             )
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            for _ in 0..3 {
+                window.press("left", cx);
+            }
+            for _ in 0..3 {
+                window.press("up", cx);
+            }
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                view.read(cx).pixel_context.as_ref().unwrap().coordinates,
+                [12, 12]
+            )
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.render_pixel_context(cx));
+            window.press("right", cx);
+            window.press("right", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                view.read(cx).pixel_context.as_ref().unwrap().coordinates,
+                [14, 12]
+            )
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.render_pixel_context(cx));
+            window.press("left", cx);
+            view.update(cx, |view, _| view.texture_selection.mip = 1);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let state = view.read(cx);
+            assert!(state.pixel_navigation.is_none());
+            assert!(state.pixel_context.is_none());
+            assert_eq!(
+                (
+                    state.pixel.as_ref().unwrap().x,
+                    state.pixel.as_ref().unwrap().y
+                ),
+                (14, 12)
+            );
+            view.update(cx, |state, _| state.texture_selection.mip = 0);
         });
         selections.lock().unwrap().clear();
         cx.update_window(handle.into(), |_, window, cx| {
@@ -22559,6 +22715,38 @@ mod ui_tests {
                     );
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.press("left", cx);
+                    window.press("up", cx);
+                    window.press("right", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        !view.read(cx).resource_pending
+                            && view
+                                .read(cx)
+                                .pixel_context
+                                .as_ref()
+                                .is_some_and(|context| context.coordinates == [1, 0])
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "OpenGL queued navigation failed: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update(|cx| {
+                    assert_eq!(
+                        view.read(cx).pixel.as_ref().unwrap().float_values,
+                        ["1", "1", "0", "1"]
+                    )
+                });
             }
         }
     }
