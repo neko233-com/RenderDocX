@@ -2994,6 +2994,14 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     assert_eq!(invalid["error"]["code"], "invalid_arguments");
     let update_structure = agent
         .send(&serde_json::json!({"command":"structure","event_id":update_api_id}).to_string());
+    let found_formatted = agent.send(&serde_json::json!({"command":"find_event","query":"pSrcData","show_api":true,"format_names":true,"show_all_parameters":true,"show_parameter_names":true}).to_string());
+    assert_eq!(found_formatted["ok"], true, "{found_formatted}");
+    assert!(
+        found_formatted["data"]["match"].is_object(),
+        "{found_formatted}"
+    );
+    let invalid_find = agent.send(r#"{"command":"find_event","query":"x","format_names":"yes"}"#);
+    assert_eq!(invalid_find["error"]["code"], "invalid_arguments");
     let update_children = update_structure["data"]["structure"]["children"]
         .as_array()
         .unwrap();

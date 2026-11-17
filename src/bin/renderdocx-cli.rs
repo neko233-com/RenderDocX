@@ -59,6 +59,37 @@ fn show_empty_regions(request: &serde_json::Map<String, Value>) -> Option<bool> 
     }
 }
 
+fn format_tree_names(
+    tree: &mut EventTree,
+    session: &Session,
+    snapshot: &Snapshot,
+    language: renderdocx::i18n::Language,
+    show_all: bool,
+    show_names: bool,
+) -> Result<(), String> {
+    let targets = tree.all_unformatted_targets();
+    let results = renderdocx::event_parameters::format_events(
+        session,
+        &targets,
+        &snapshot.resources,
+        &snapshot.buffers,
+        language,
+        show_all,
+        show_names,
+        || false,
+    )?;
+    let mut names = std::collections::HashMap::new();
+    for (event, result) in results {
+        names.insert(
+            event,
+            result.map_err(|error| format!("Event {event}: {error}"))?,
+        );
+    }
+    tree.record_format_attempts(names.keys().copied());
+    tree.apply_formatted_names(&names);
+    Ok(())
+}
+
 fn mesh_filter(request: &serde_json::Map<String, Value>) -> Result<mesh_draw::MeshFilter, String> {
     let parse = |name: &str| -> Result<Option<u32>, String> {
         match request.get(name) {
@@ -1020,15 +1051,25 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     Some(Value::String(s)) if s == "previous" => Some(false),
                     _ => None,
                 };
-                match (&opened, query, filter, show_api, current, forward, show_empty_regions(&request)) {
-                    (None, _, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
-                    (Some((session, snapshot)), Some(query), Some(filter), Some(show_api), Some(current), Some(forward), Some(show_empty)) => {
+                let format_names = request
+                    .get("format_names")
+                    .map_or(Some(false), Value::as_bool);
+                let show_all = request
+                    .get("show_all_parameters")
+                    .map_or(Some(false), Value::as_bool);
+                let show_names = request
+                    .get("show_parameter_names")
+                    .map_or(Some(false), Value::as_bool);
+                match (&opened, query, filter, show_api, current, forward, show_empty_regions(&request), format_names, show_all, show_names) {
+                    (None, _, _, _, _, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some((session, snapshot)), Some(query), Some(filter), Some(show_api), Some(current), Some(forward), Some(show_empty), Some(format_names), Some(show_all), Some(show_names)) => {
                         let mut tree = EventTree::default();
                         tree.reset(&snapshot.actions);
                         tree.set_show_api(show_api);
                         tree.set_show_empty_regions(show_empty);
                         if let Some(times) = &event_times { tree.set_durations(times.clone()); }
-                        if let Err(error) = apply_event_filter(&mut tree, session, snapshot, settings.language, filter) { Err(("invalid_filter", error)) }
+                        if let Err(error) = if format_names { format_tree_names(&mut tree, session, snapshot, settings.language, show_all, show_names) } else { Ok(()) } { Err(("replay_event_format_failed", error)) }
+                        else if let Err(error) = apply_event_filter(&mut tree, session, snapshot, settings.language, filter) { Err(("invalid_filter", error)) }
                         else {
                             let found = tree.find(query, current, forward).and_then(|row| {
                                 let (action_index, api_index) = match tree.row(row)? {
@@ -1040,7 +1081,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                             Ok(json!({"match":found}))
                         }
                     }
-                    _ => Err(("invalid_arguments", "find_event requires a nonempty query and valid optional filter, show_api, current_event and direction".into())),
+                    _ => Err(("invalid_arguments", "find_event requires a nonempty query and valid optional filter, show_api, current_event, direction and formatting options".into())),
                 }
             }
             "filter_events" => {

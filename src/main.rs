@@ -623,6 +623,9 @@ struct Workspace {
     event_filter_name: Entity<InputState>,
     saved_event_filters: Vec<renderdocx::event_filters::SavedFilter>,
     event_find: Entity<InputState>,
+    _event_find_subscription: gpui::Subscription,
+    event_find_revision: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    event_find_pending: Option<u64>,
     _event_search_subscription: gpui::Subscription,
     resource_search: Entity<InputState>,
     resource_rename: Entity<InputState>,
@@ -1635,6 +1638,27 @@ impl Workspace {
             if matches!(event, InputEvent::Change) {
                 let expression = input.read(cx).value().to_string();
                 this.apply_event_filter(expression, cx);
+            }
+        })
+    }
+
+    fn watch_event_find(input: &Entity<InputState>, cx: &mut Context<Self>) -> gpui::Subscription {
+        cx.subscribe(input, |this, _, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.event_find_revision
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if this.event_find_pending.take().is_some()
+                    && this.status.as_deref()
+                        == Some(this.t(
+                            "Searching event names…",
+                            "正在搜索事件名称…",
+                            "イベント名を検索中…",
+                            "이벤트 이름을 검색하는 중…",
+                        ))
+                {
+                    this.status = None;
+                }
+                cx.notify();
             }
         })
     }
@@ -5389,6 +5413,125 @@ impl Workspace {
             return;
         }
         let query = self.event_find.read(cx).value().to_string();
+        use std::sync::atomic::Ordering;
+        let find_revision = self.event_find_revision.fetch_add(1, Ordering::Relaxed) + 1;
+        self.event_find_pending = None;
+        let targets =
+            if self.settings.event_auto_format && self.event_tree.find_requires_names(&query) {
+                self.event_tree.eligible_unformatted_targets()
+            } else {
+                Vec::new()
+            };
+        if !targets.is_empty() {
+            let (Some(session), Some(snapshot)) = (self.session.clone(), self.snapshot.as_ref())
+            else {
+                return;
+            };
+            let resources = snapshot.resources.clone();
+            let buffers = snapshot.buffers.clone();
+            let language = self.settings.language;
+            let show_all = self.settings.event_show_all_parameters;
+            let show_names = self.settings.event_show_parameter_names;
+            let use_custom = self.settings.event_use_custom_action_names;
+            let capture_revision = self.open_revision;
+            let selection_revision = self.selection_revision;
+            let filter_revision = self.event_filter_revision.load(Ordering::Relaxed);
+            let filter_generation = self.event_filter_revision.clone();
+            let find_generation = self.event_find_revision.clone();
+            let task_query = query.clone();
+            self.event_find_pending = Some(find_revision);
+            self.status = Some(
+                self.t(
+                    "Searching event names…",
+                    "正在搜索事件名称…",
+                    "イベント名を検索中…",
+                    "이벤트 이름을 검색하는 중…",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            let task = cx.background_executor().spawn(async move {
+                let results = renderdocx::event_parameters::format_events(
+                    &session,
+                    &targets,
+                    &resources,
+                    &buffers,
+                    language,
+                    show_all,
+                    show_names,
+                    || {
+                        find_generation.load(Ordering::Relaxed) != find_revision
+                            || filter_generation.load(Ordering::Relaxed) != filter_revision
+                    },
+                )?;
+                let mut names = std::collections::HashMap::new();
+                for (event, result) in results {
+                    names.insert(
+                        event,
+                        result.map_err(|error| format!("Event {event}: {error}"))?,
+                    );
+                }
+                Ok::<_, String>(names)
+            });
+            cx.spawn(async move |this, cx| {
+                let result = task.await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.event_find_pending != Some(find_revision) {
+                        return;
+                    }
+                    this.event_find_pending = None;
+                    if this.open_revision != capture_revision {
+                        cx.notify();
+                        return;
+                    }
+                    if this.selection_revision != selection_revision
+                        || this.event_filter_revision.load(Ordering::Relaxed) != filter_revision
+                        || this.settings.language != language
+                        || this.settings.event_show_all_parameters != show_all
+                        || this.settings.event_show_parameter_names != show_names
+                        || this.settings.event_use_custom_action_names != use_custom
+                        || !this.settings.event_auto_format
+                        || this.event_find.read(cx).value() != task_query
+                    {
+                        if this.status.as_deref()
+                            == Some(this.t(
+                                "Searching event names…",
+                                "正在搜索事件名称…",
+                                "イベント名を検索中…",
+                                "이벤트 이름을 검색하는 중…",
+                            ))
+                        {
+                            this.status = None;
+                        }
+                        cx.notify();
+                        return;
+                    }
+                    match result {
+                        Ok(names) => {
+                            this.event_tree
+                                .record_format_attempts(names.keys().copied());
+                            this.event_tree.apply_formatted_names(&names);
+                            this.status = None;
+                            this.find_event(forward, cx);
+                        }
+                        Err(error) => {
+                            this.status = Some(format!(
+                                "{}: {error}",
+                                this.t(
+                                    "Could not search event names",
+                                    "无法搜索事件名称",
+                                    "イベント名を検索できません",
+                                    "이벤트 이름을 검색할 수 없습니다"
+                                )
+                            ))
+                        }
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+            return;
+        }
         let current = self.pipeline.as_ref().map(|pipeline| pipeline.event_id);
         let Some(row) = self.event_tree.find(&query, current, forward) else {
             if !query.is_empty() {
@@ -16413,6 +16556,7 @@ impl Workspace {
                                         .child(Input::new(&self.event_find).id("event-find").aria_label(
                                             self.t("Find name or @EID", "查找名称或 @事件 ID", "名前または @EID を検索", "이름 또는 @EID 찾기")
                                         ).w_full())
+                                        .when(self.event_find_pending.is_some(), |view| view.child(div().id("event-find-loading").test_support().text_sm().text_color(rgb(0x91a7c0)).child(self.t("Searching event names…", "正在搜索事件名称…", "イベント名を検索中…", "이벤트 이름을 검색하는 중…"))))
                                         .child(div().flex().gap_2()
                                             .child(button("event-find-prev", self.t("Previous match", "上一个匹配", "前の一致", "이전 일치"), false, |this, cx| this.find_event(false, cx), cx))
                                             .child(button("event-find-next", self.t("Next match", "下一个匹配", "次の一致", "다음 일치"), false, |this, cx| this.find_event(true, cx), cx)))
@@ -17593,6 +17737,9 @@ fn main() {
                         event_search,
                         event_filter_name,
                         saved_event_filters: Vec::new(),
+                        _event_find_subscription: Workspace::watch_event_find(&event_find, cx),
+                        event_find_revision: Default::default(),
+                        event_find_pending: None,
                         event_find,
                         selected: None,
                         pipeline: None,
@@ -18373,6 +18520,9 @@ mod ui_tests {
                         event_name_worker: false,
                         event_filter_pending: None,
                         event_search,
+                        _event_find_subscription: Workspace::watch_event_find(&event_find, cx),
+                        event_find_revision: Default::default(),
+                        event_find_pending: None,
                         event_find,
                         event_filter_name,
                         saved_event_filters: Vec::new(),
@@ -18964,6 +19114,9 @@ mod ui_tests {
                         event_name_worker: false,
                         event_filter_pending: None,
                         event_search,
+                        _event_find_subscription: Workspace::watch_event_find(&event_find, cx),
+                        event_find_revision: Default::default(),
+                        event_find_pending: None,
                         event_find,
                         selected: None,
                         event_filter_name,
@@ -21313,6 +21466,53 @@ mod ui_tests {
         })
         .unwrap();
 
+        let previous_find_events = events.lock().unwrap().len();
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.settings.event_auto_format = true;
+                view.event_tree.clear_formatted_names();
+                view.event_find
+                    .update(cx, |input, cx| input.set_value("300", window, cx));
+                view.find_event(true, cx);
+                assert!(view.event_find_pending.is_some());
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let state = view.read(cx);
+            assert!(state.event_find_pending.is_none());
+            assert!(state.event_tree.eligible_unformatted_targets().is_empty());
+            let event = state.pipeline.as_ref().unwrap().event_id;
+            assert_eq!(event, 42);
+            let row = state.event_tree.row_for_event(event).unwrap();
+            assert!(state.event_tree.display_name(row).unwrap().contains("300"));
+        });
+        assert!(events.lock().unwrap().len() > previous_find_events);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.event_tree.clear_formatted_names();
+                view.event_find
+                    .update(cx, |input, cx| input.set_value("300", window, cx));
+                view.find_event(true, cx);
+                assert!(view.event_find_pending.is_some());
+                view.event_find
+                    .update(cx, |input, cx| input.set_value("@42", window, cx));
+                view.find_event(true, cx);
+                assert!(view.event_find_pending.is_none());
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 42);
+            view.update(cx, |view, cx| {
+                view.settings.event_auto_format = false;
+                view.event_tree.clear_formatted_names();
+                cx.notify();
+            });
+        });
+
         // When the local D3D11 fixtures are configured, repeat the interaction against
         // a real capture and replay session, not the recording transport above.
         #[cfg(windows)]
@@ -21684,6 +21884,73 @@ mod ui_tests {
                         std::time::Instant::now() < deadline,
                         "real parameter text filter failed: {:?}",
                         cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    view.update(cx, |view, cx| {
+                        view.event_search
+                            .update(cx, |input, cx| input.set_value("", window, cx));
+                        view.apply_event_filter(String::new(), cx);
+                        view.event_tree.clear_formatted_names();
+                        view.event_find
+                            .update(cx, |input, cx| input.set_value("pSrcData", window, cx));
+                        view.find_event(true, cx);
+                        assert!(view.event_find_pending.is_some());
+                    });
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        let state = view.read(cx);
+                        state.event_find_pending.is_none()
+                            && !state.replay_pending
+                            && state
+                                .pipeline
+                                .as_ref()
+                                .and_then(|pipeline| {
+                                    state.event_tree.row_for_event(pipeline.event_id)
+                                })
+                                .and_then(|row| state.event_tree.display_name(row))
+                                .is_some_and(|name| name.contains("pSrcData"))
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real event find failed: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update(|cx| {
+                    view.update(cx, |view, cx| {
+                        let row = view.event_tree.row_for_event(update_event).unwrap();
+                        let (action, api) = match view.event_tree.row(row).unwrap() {
+                            EventRow::Action(action) => (action, None),
+                            EventRow::Api { action, event } => (action, Some(event)),
+                        };
+                        view.select_event(action, api, cx);
+                    })
+                });
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        !view.read(cx).replay_pending
+                            && view
+                                .read(cx)
+                                .pipeline
+                                .as_ref()
+                                .is_some_and(|pipeline| pipeline.event_id == update_event)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "restoring real event after find failed"
                     );
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }

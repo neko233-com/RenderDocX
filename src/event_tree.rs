@@ -177,6 +177,31 @@ impl EventTree {
             .collect()
     }
 
+    pub fn eligible_unformatted_targets(&self) -> Vec<u32> {
+        let mut seen = std::collections::HashSet::new();
+        self.order
+            .iter()
+            .copied()
+            .filter(|&row| self.eligible[row])
+            .filter_map(|row| self.format_target(row))
+            .filter(|event| !self.formatted_success.contains(event) && seen.insert(*event))
+            .collect()
+    }
+
+    /// Explicit and existing numeric event IDs use the upstream fast path.
+    pub fn find_requires_names(&self, query: &str) -> bool {
+        if query.is_empty() || query.starts_with('@') {
+            return false;
+        }
+        let number = query.trim();
+        let known = number
+            .parse::<u32>()
+            .ok()
+            .filter(|id| *id > 0 && number == id.to_string())
+            .is_some_and(|id| self.event_ids.contains(&id));
+        !known
+    }
+
     pub fn record_format_attempts(&mut self, events: impl IntoIterator<Item = u32>) {
         self.format_attempted.extend(events);
     }
@@ -602,6 +627,11 @@ mod tests {
         assert_eq!(tree.all_unformatted_targets(), [1, 2]);
         tree.set_show_api(true);
         assert_eq!(tree.visible_format_targets(), [1, 2]);
+        assert!(!tree.find_requires_names("@1"));
+        assert!(!tree.find_requires_names("1"));
+        assert!(tree.find_requires_names("001"));
+        assert!(tree.find_requires_names("300"));
+        assert_eq!(tree.eligible_unformatted_targets(), [1, 2]);
         assert_eq!(tree.unformatted_targets(0..1), [1]);
         tree.record_format_attempts([1]);
         assert!(tree.unformatted_targets(0..1).is_empty());
@@ -637,6 +667,7 @@ mod tests {
         );
         tree.set_filter("42");
         assert_eq!(tree.visible_format_targets(), [1, 2]);
+        assert!(tree.eligible_unformatted_targets().is_empty());
         tree.clear_formatted_names();
         assert!(tree.visible.is_empty());
         tree.set_filter("");
