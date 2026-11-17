@@ -669,6 +669,7 @@ struct Workspace {
     pixel: Option<Pixel>,
     pixel_context: Option<PixelContext>,
     texture_preview_focus: gpui::FocusHandle,
+    pixel_context_focus: gpui::FocusHandle,
     pixel_history: Option<PixelHistoryPage>,
     history_selected: Option<usize>,
     stats_min: Entity<InputState>,
@@ -10961,6 +10962,54 @@ impl Workspace {
             .into_any_element()
     }
 
+    fn pixel_context_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let context = self.pixel.as_ref().and_then(|pixel| {
+            self.pixel_context.as_ref().filter(|context| {
+                context.event == pixel.event_id
+                    && context.index == pixel.index as usize
+                    && context.coordinates == [pixel.x, pixel.y]
+                    && context.selection == self.texture_selection
+                    && context.shader_revision == self.texture_custom_revision
+            })
+        });
+        div()
+            .id("pixel-context")
+            .test_support()
+            .track_focus(&self.pixel_context_focus)
+            .relative()
+            .w(px(160.))
+            .h(px(160.))
+            .bg(rgb(0x1b2430))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    window.focus(&this.pixel_context_focus, cx);
+                }),
+            )
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if !event.keystroke.modifiers.modified()
+                    && this.nudge_texture_pixel(&event.keystroke.key, window, cx)
+                {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }
+            }))
+            .when_some(context, |view, context| {
+                view.child(img(context.preview.path.clone()).size_full())
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(75.))
+                            .top(px(75.))
+                            .w(px(10.))
+                            .h(px(10.))
+                            .border_1()
+                            .border_color(rgb(0x000000))
+                            .child(div().size_full().border_1().border_color(rgb(0xffffff))),
+                    )
+            })
+    }
+
     fn capture_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The workspace view currently builds many nested panels in one frame. Grow on the
         // same thread before constructing them when the caller's stack is nearly exhausted.
@@ -14563,6 +14612,7 @@ impl Workspace {
                         .child(Input::new(&self.pixel_debug_view).id("pixel-debug-view").aria_label(self.t("View", "视图", "ビュー", "뷰")).w(px(100.))))
                     .child(div().text_sm().text_color(rgb(0x91a7c0)).child(self.t("Leave primitive and view blank for RenderDoc's default. Fragment history uses its own primitive and the selected view. The selected texture need not be bound to the draw.", "图元和视图留空时由 RenderDoc 选择。片元历史使用该记录的图元和所选视图。所选纹理不一定绑定到当前绘制。", "プリミティブとビューを空欄にすると RenderDoc が選択します。フラグメント履歴は記録されたプリミティブと選択ビューを使います。テクスチャは描画にバインドされているとは限りません。", "프리미티브와 뷰를 비우면 RenderDoc이 선택합니다. 프래그먼트 기록은 해당 프리미티브와 선택한 뷰를 사용합니다. 텍스처가 그리기에 바인딩되어 있지 않을 수 있습니다.")))
                     .when_some(pixel_debug_panel, |view, panel| view.child(panel))
+                    .when(self.selected_texture.is_some(), |view| view.child(self.pixel_context_view(cx)))
                     .when_some(pixel, |view, pixel| {
                         let bits = pixel
                             .bits
@@ -14580,7 +14630,6 @@ impl Workspace {
                                 .test_support()
                                 .child(format!("({}, {}) · RGBA: {bits}", pixel.x, pixel.y)),
                         )
-                        .when_some(self.pixel_context.as_ref().filter(|context| context.event == pixel.event_id && context.index == pixel.index as usize && context.coordinates == [pixel.x, pixel.y] && context.selection == self.texture_selection && context.shader_revision == self.texture_custom_revision), |view, context| view.child(div().id("pixel-context").test_support().relative().w(px(160.)).h(px(160.)).child(img(context.preview.path.clone()).size_full()).child(div().absolute().left(px(75.)).top(px(75.)).w(px(10.)).h(px(10.)).border_1().border_color(rgb(0x000000)).child(div().size_full().border_1().border_color(rgb(0xffffff))))))
                         .when_some(pixel.coordinates.as_ref(), |view, coords| view.child(div().id("pixel-uv").test_support().child(format!("{}: {:.4}, {:.4} · {} × {}", self.t("Top-left UV", "左上原点 UV", "左上原点 UV", "왼쪽 위 원점 UV"), coords.normalized[0], coords.normalized[1], coords.mip_width, coords.mip_height))))
                         .when_some(pixel.depth_stencil.as_ref(), |view, value| {
                             let depth = value.depth.as_ref().map(|depth| format!("{}: {depth}", self.t("Depth", "深度", "深度", "깊이")));
@@ -14767,7 +14816,7 @@ impl Workspace {
                     .child(div().text_sm().text_color(rgb(0x91a7c0)).child(export_note))
                     .when_some(preview_path, |view, path| {
                         view.child(self.texture_preview_image(path, cx))
-                        .child(div().text_sm().text_color(rgb(0x91a7c0)).child(self.t("Click the preview, then use the arrow keys to move the selected pixel.", "点击预览后使用方向键移动所选像素。", "プレビューをクリックし、方向キーで選択ピクセルを移動します。", "미리 보기를 클릭한 뒤 방향키로 선택한 픽셀을 이동하세요.")))
+                        .child(div().text_sm().text_color(rgb(0x91a7c0)).child(self.t("Click the preview or pixel context, then use the arrow keys to move the selected pixel.", "点击预览或像素上下文后使用方向键移动所选像素。", "プレビューまたはピクセルコンテキストをクリックし、方向キーで選択ピクセルを移動します。", "미리 보기 또는 픽셀 컨텍스트를 클릭한 뒤 방향키로 선택한 픽셀을 이동하세요.")))
                         .child(
                             div()
                                 .text_sm()
@@ -17093,6 +17142,7 @@ fn main() {
                         pixel: None,
                         pixel_context: None,
                         texture_preview_focus: cx.focus_handle(),
+                        pixel_context_focus: cx.focus_handle(),
                         pixel_history: None,
                         history_selected: None,
                         stats_min,
@@ -17871,6 +17921,7 @@ mod ui_tests {
                         pixel: None,
                         pixel_context: None,
                         texture_preview_focus: cx.focus_handle(),
+                        pixel_context_focus: cx.focus_handle(),
                         pixel_history: None,
                         history_selected: None,
                         stats_min,
@@ -18457,6 +18508,7 @@ mod ui_tests {
                         pixel: None,
                         pixel_context: None,
                         texture_preview_focus: cx.focus_handle(),
+                        pixel_context_focus: cx.focus_handle(),
                         pixel_history: None,
                         history_selected: None,
                         stats_min,
@@ -18934,6 +18986,28 @@ mod ui_tests {
                     view.read(cx).pixel.as_ref().unwrap().y
                 ),
                 (14, 14)
+            )
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            reveal_details(window, "pixel-context", cx);
+            window.click("pixel-context", cx);
+            window.press("right", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                view.read(cx).pixel_context.as_ref().unwrap().coordinates,
+                [15, 14]
+            )
+        });
+        cx.update_window(handle.into(), |_, window, cx| window.press("down", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                view.read(cx).pixel_context.as_ref().unwrap().coordinates,
+                [15, 15]
             )
         });
         selections.lock().unwrap().clear();
@@ -21581,7 +21655,7 @@ mod ui_tests {
                     window.render_frame(cx);
                     window.scroll(
                         "capture-details-scroll",
-                        ScrollDelta::Pixels(point(px(0.), px(-500.))),
+                        ScrollDelta::Pixels(point(px(0.), px(-700.))),
                         cx,
                     );
                     window.click(("pixel-history-row", failed_row), cx);
@@ -22431,6 +22505,60 @@ mod ui_tests {
                     );
                     assert_eq!(state.pixel_context.as_ref().unwrap().coordinates, [0, 0]);
                 });
+                cx.update_window(handle.into(), |_, window, cx| {
+                    reveal_details(window, "pixel-context", cx);
+                    window.click("pixel-context", cx);
+                    window.press("down", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        !view.read(cx).resource_pending
+                            && view
+                                .read(cx)
+                                .pixel_context
+                                .as_ref()
+                                .is_some_and(|context| context.coordinates == [0, 1])
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "OpenGL pixel context keyboard navigation failed: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update(|cx| {
+                    assert_eq!(
+                        view.read(cx).pixel.as_ref().unwrap().float_values,
+                        ["1", "0", "0", "1"]
+                    )
+                });
+                cx.update_window(handle.into(), |_, window, cx| window.press("right", cx))
+                    .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        !view.read(cx).resource_pending
+                            && view
+                                .read(cx)
+                                .pixel_context
+                                .as_ref()
+                                .is_some_and(|context| context.coordinates == [1, 1])
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "OpenGL pixel context focus was lost: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
             }
         }
     }
