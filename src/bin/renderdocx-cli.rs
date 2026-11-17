@@ -215,6 +215,7 @@ fn usage() -> Value {
             json!("texture_fit_range"),
             json!("texture_center"),
             json!("texture_context"),
+            json!("event_format"),
             json!("custom_shader_library_import_directory"),
             json!("custom_shader_library_list"),
             json!("custom_shader_library_get"),
@@ -1225,6 +1226,26 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         "invalid_arguments",
                         "event_annotation_find requires an event_id and 1–128 string keys".into(),
                     )),
+                }
+            }
+            "event_format" => {
+                let event = request
+                    .get("event_id")
+                    .and_then(Value::as_u64)
+                    .and_then(|v| u32::try_from(v).ok());
+                let all = request
+                    .get("show_all_parameters")
+                    .map_or(Some(false), Value::as_bool);
+                let names = request
+                    .get("show_parameter_names")
+                    .map_or(Some(false), Value::as_bool);
+                match (&opened, event, all, names) {
+                    (None, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some((session, snapshot)), Some(event), Some(all), Some(names)) =>
+                        renderdocx::event_parameters::format_event(session, event, &snapshot.resources, settings.language, all, names)
+                            .map(|text| json!({"event_id":event,"text":text,"show_all_parameters":all,"show_parameter_names":names}))
+                            .map_err(|error| ("replay_event_format_failed", error)),
+                    _ => Err(("invalid_arguments", "event_format requires event_id and optional boolean formatting options".into())),
                 }
             }
             "structure" => {

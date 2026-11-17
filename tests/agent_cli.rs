@@ -33,6 +33,15 @@ fn texture_center_reports_capability_and_requires_capture() {
     let result =
         agent.send(r#"{"command":"texture_context","index":0,"x":0,"y":0,"path":"context.png"}"#);
     assert_eq!(result["error"]["code"], "no_capture");
+    assert!(
+        capabilities["data"]["serve_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|command| command == "event_format")
+    );
+    let result = agent.send(r#"{"command":"event_format","event_id":1}"#);
+    assert_eq!(result["error"]["code"], "no_capture");
     agent.quit();
 }
 
@@ -2940,6 +2949,13 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         .expect("topology parameter");
     assert_eq!(topology["basic_type"], 6); // upstream SDBasic::Enum
     assert_eq!(topology["value"], "4"); // D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST
+    let formatted = agent.send(&serde_json::json!({"command":"event_format","event_id":api_event_id,"show_parameter_names":true}).to_string());
+    assert_eq!(formatted["ok"], true, "{formatted}");
+    let text = formatted["data"]["text"].as_str().unwrap();
+    assert!(
+        text.contains("IASetPrimitiveTopology(") && text.contains("Topology="),
+        "{text}"
+    );
     let shader_structure = agent
         .send(&serde_json::json!({"command":"structure","event_id":shader_api_id}).to_string());
     let shader_resource = shader_structure["data"]["structure"]["children"]
@@ -2950,6 +2966,17 @@ fn real_d3d11_capture_is_inspected_and_selected() {
         .expect("shader parameter");
     assert_eq!(shader_resource["basic_type"], 12); // upstream SDBasic::Resource
     assert_eq!(shader_resource["resource_non_null"], true);
+    let shader_formatted = agent.send(&serde_json::json!({"command":"event_format","event_id":shader_api_id,"show_all_parameters":true,"show_parameter_names":true}).to_string());
+    assert_eq!(shader_formatted["ok"], true, "{shader_formatted}");
+    assert!(
+        shader_formatted["data"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("pShader="),
+        "{shader_formatted}"
+    );
+    let invalid = agent.send(&serde_json::json!({"command":"event_format","event_id":shader_api_id,"show_all_parameters":"yes"}).to_string());
+    assert_eq!(invalid["error"]["code"], "invalid_arguments");
     let update_structure = agent
         .send(&serde_json::json!({"command":"structure","event_id":update_api_id}).to_string());
     let update_children = update_structure["data"]["structure"]["children"]

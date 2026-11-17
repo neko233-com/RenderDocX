@@ -13,6 +13,151 @@ pub(crate) struct ResourceContext<'a> {
     pub(crate) language: Language,
 }
 
+/// Format a selected API call using the upstream important/hidden parameter rules.
+pub fn format_event(
+    session: &Session,
+    event: u32,
+    resources: &[ResourceInfo],
+    language: Language,
+    show_all_parameters: bool,
+    show_parameter_names: bool,
+) -> Result<String, String> {
+    let context = ResourceContext {
+        resources,
+        language,
+        renames: session
+            .annotation_read("renames")
+            .and_then(|section| section.document()),
+    };
+    let mut read =
+        |path: &[u64], offset| session.structure(event, path, offset, STRUCTURE_PAGE_LIMIT);
+    format_event_with(
+        &mut read,
+        &context,
+        show_all_parameters,
+        show_parameter_names,
+    )
+}
+
+fn format_event_with(
+    read: &mut impl FnMut(&[u64], u64) -> Result<StructurePage, String>,
+    context: &ResourceContext<'_>,
+    show_all: bool,
+    show_names: bool,
+) -> Result<String, String> {
+    let (root, children) = formatting_children(read, &[])?;
+    let name = root
+        .name
+        .split_once("::")
+        .map_or(root.name.as_str(), |(_, suffix)| suffix);
+    let mut arguments = Vec::new();
+    for (index, child) in children {
+        if child.flags & 2 != 0 || (root.flags & 0x80 != 0 && child.flags & 0x40 == 0 && !show_all)
+        {
+            continue;
+        }
+        let value = format_inline(read, &[index], &child, root.flags, context)?;
+        arguments.push(if show_names {
+            format!("{}={value}", child.name)
+        } else {
+            value
+        });
+    }
+    Ok(format!("{name}({})", arguments.join(", ")))
+}
+
+fn formatting_children(
+    read: &mut impl FnMut(&[u64], u64) -> Result<StructurePage, String>,
+    path: &[u64],
+) -> Result<(StructuredNode, Vec<(u64, StructuredNode)>), String> {
+    let mut offset = 0u64;
+    let mut root = None;
+    let mut all = Vec::new();
+    loop {
+        let page = read(path, offset)?;
+        let count = page
+            .node
+            .child_count
+            .parse::<u64>()
+            .map_err(|_| "Invalid structured child count")?;
+        if root.is_none() {
+            root = Some(page.node.clone());
+        }
+        if page.children.is_empty() && offset < count {
+            return Err("Incomplete structured data".into());
+        }
+        for (position, child) in page.children.into_iter().enumerate() {
+            let index = offset
+                .checked_add(position as u64)
+                .ok_or("Structured index overflow")?;
+            if index >= count {
+                return Err("Invalid structured child range".into());
+            }
+            all.push((index, child));
+        }
+        offset = u64::try_from(all.len()).map_err(|_| "Structured index overflow")?;
+        if offset >= count {
+            break;
+        }
+    }
+    Ok((root.ok_or("Missing structured node")?, all))
+}
+
+fn format_inline(
+    read: &mut impl FnMut(&[u64], u64) -> Result<StructurePage, String>,
+    path: &[u64],
+    node: &StructuredNode,
+    parent_flags: u32,
+    context: &ResourceContext<'_>,
+) -> Result<String, String> {
+    // Keep the same precedence as SDObject2Variant: resource and custom values bypass traversal.
+    if node.basic_type == 13 {
+        let value = node
+            .value
+            .as_deref()
+            .ok_or("Missing GPU address")?
+            .parse::<u64>()
+            .map_err(|_| "Invalid GPU address")?;
+        return Ok(format!("0x{value:x}"));
+    }
+    if node.flags & (1 | 8) != 0 || !(node.basic_type == 1 || node.basic_type == 2) {
+        return format_value(node, parent_flags, context);
+    }
+    let count = node
+        .child_count
+        .parse::<u64>()
+        .map_err(|_| "Invalid structured child count")?;
+    if node.basic_type == 2 && count > 4 {
+        return format_value(node, parent_flags, context);
+    }
+    if count == 0 {
+        return Ok("{}".into());
+    }
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        let (_, children) = formatting_children(read, path)?;
+        let mut values = Vec::new();
+        for (index, child) in children {
+            if node.flags & 0x80 != 0 && child.flags & 0x40 == 0 {
+                continue;
+            }
+            let mut child_path = path.to_vec();
+            child_path.push(index);
+            values.push(format_inline(
+                read,
+                &child_path,
+                &child,
+                node.flags,
+                context,
+            )?);
+        }
+        if node.basic_type == 1 && node.flags & 0x80 != 0 && values.len() == 1 {
+            Ok(values.remove(0))
+        } else {
+            Ok(format!("{{ {} }}", values.join(", ")))
+        }
+    })
+}
+
 /// Resolve every predicate completely or return an error; partial results are never applied.
 pub fn resolve(
     session: &Session,
@@ -404,6 +549,57 @@ mod tests {
             resource_id: None,
             resource_edited: None,
         }
+    }
+
+    #[test]
+    fn formats_calls_with_upstream_visibility_and_nested_rules() {
+        let mut root = node("ID3D11Device::Draw", 0, None, 4);
+        root.flags = 0x80;
+        let mut count = node("count", 7, Some("7"), 0);
+        count.flags = 0x40;
+        let mut hidden = node("hidden", 7, Some("9"), 0);
+        hidden.flags = 0x42;
+        let mut nested = node("nested", 1, None, 2);
+        nested.flags = 0xc0;
+        let array = node("data", 2, None, 5);
+        let mut value = node("value", 7, Some("3"), 0);
+        value.flags = 0x40;
+        let other = node("ignored", 7, Some("4"), 0);
+        let root_children = vec![count, hidden, nested.clone(), array];
+        let nested_children = vec![value, other];
+        let mut read = |path: &[u64], offset: u64| {
+            let (parent, children) = match path {
+                [] => (&root, &root_children),
+                [2] => (&nested, &nested_children),
+                _ => panic!("unexpected path"),
+            };
+            Ok(StructurePage {
+                event_id: 1,
+                path: path.iter().map(u64::to_string).collect(),
+                offset: offset.to_string(),
+                node: parent.clone(),
+                children: children
+                    .iter()
+                    .skip(offset as usize)
+                    .take(STRUCTURE_PAGE_LIMIT as usize)
+                    .cloned()
+                    .collect(),
+                chunk_metadata: None,
+            })
+        };
+        let context = ResourceContext {
+            resources: &[],
+            renames: Ok(serde_json::json!({})),
+            language: Language::English,
+        };
+        assert_eq!(
+            format_event_with(&mut read, &context, false, false).unwrap(),
+            "Draw(7, 3)"
+        );
+        assert_eq!(
+            format_event_with(&mut read, &context, true, true).unwrap(),
+            "Draw(count=7, nested=3, data=T[5])"
+        );
     }
 
     #[test]

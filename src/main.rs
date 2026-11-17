@@ -237,6 +237,7 @@ fn collect_shader_debug(
 #[derive(Default)]
 struct StructureView {
     page: Option<StructurePage>,
+    formatted_event: Option<String>,
     path: Vec<u64>,
     offset: u64,
     bytes: Option<Vec<u8>>,
@@ -5817,6 +5818,7 @@ impl Workspace {
                     Ok(page) => {
                         this.structure = StructureView {
                             page: Some(page),
+                            formatted_event: None,
                             path,
                             offset,
                             bytes: None,
@@ -5835,6 +5837,73 @@ impl Workspace {
                                 "이벤트 매개변수를 확인할 수 없습니다"
                             )
                         ));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn format_selected_event(&mut self, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            return;
+        }
+        let (Some(event), Some(session), Some(snapshot)) = (
+            self.pipeline.as_ref().map(|p| p.event_id),
+            self.session.clone(),
+            self.snapshot.as_ref(),
+        ) else {
+            return;
+        };
+        let resources = snapshot.resources.clone();
+        let language = self.settings.language;
+        let revision = self.open_revision;
+        let selection_revision = self.selection_revision;
+        self.resource_pending = true;
+        self.structure.formatted_event = None;
+        self.status = Some(
+            self.t(
+                "Formatting event parameters…",
+                "正在格式化事件参数…",
+                "イベントパラメーターを整形中…",
+                "이벤트 매개변수를 서식 지정하는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            renderdocx::event_parameters::format_event(
+                &session, event, &resources, language, false, true,
+            )
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision || this.selection_revision != selection_revision {
+                    return;
+                }
+                this.resource_pending = false;
+                if this.settings.language != language {
+                    this.status = None;
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok(text) => {
+                        this.structure.formatted_event = Some(text);
+                        this.status = None;
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Could not format event",
+                                "无法格式化事件",
+                                "イベントを整形できません",
+                                "이벤트 서식 지정 실패"
+                            )
+                        ))
                     }
                 }
                 cx.notify();
@@ -13394,6 +13463,26 @@ impl Workspace {
                 .flex_col()
                 .gap_3()
                 .child(div().text_sm().text_color(rgb(0x82aaff)).child(heading))
+                .child(button(
+                    "event-format",
+                    self.t(
+                        "Format API call",
+                        "格式化 API 调用",
+                        "API 呼び出しを整形",
+                        "API 호출 서식 지정",
+                    ),
+                    false,
+                    |this, cx| this.format_selected_event(cx),
+                    cx,
+                ))
+                .when_some(self.structure.formatted_event.as_ref(), |view, text| {
+                    view.child(
+                        div()
+                            .id("event-formatted")
+                            .test_support()
+                            .child(text.clone()),
+                    )
+                })
                 .when_some(page, |view, page| {
                     let value = structured_value(&page.node);
                     view.child(
@@ -17043,6 +17132,7 @@ impl Render for Workspace {
                         .child(lang.label())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.settings.language = lang;
+                            this.structure.formatted_event = None;
                             this.save();
                             let expression = this.event_search.read(cx).value().to_string();
                             this.apply_event_filter(expression, cx);
@@ -20500,6 +20590,23 @@ mod ui_tests {
             assert_eq!(page.children.len(), 128);
         });
         cx.update_window(handle.into(), |_, window, cx| {
+            window.click("event-format", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let text = view.read(cx).structure.formatted_event.as_ref().unwrap();
+            assert!(
+                text.starts_with("Call(Topology=4, Upload=(300 bytes), Param2=1"),
+                "{text}"
+            );
+            assert!(text.ends_with("Param129=1)"), "{text}");
+            view.update(cx, |view, cx| {
+                view.structure.formatted_event = None;
+                cx.notify();
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
             window.click("callstack-load", cx)
         })
         .unwrap();
@@ -21051,6 +21158,32 @@ mod ui_tests {
                     );
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 };
+                cx.update_window(handle.into(), |_, window, cx| {
+                    reveal_details(window, "event-format", cx);
+                    window.click("event-format", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| view.read(cx).structure.formatted_event.is_some()) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real event formatting failed: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update(|cx| {
+                    let text = view.read(cx).structure.formatted_event.as_ref().unwrap();
+                    assert!(text.contains("UpdateSubresource("), "{text}");
+                    view.update(cx, |view, cx| {
+                        view.structure.formatted_event = None;
+                        cx.notify();
+                    });
+                });
                 cx.update_window(handle.into(), |_, window, cx| {
                     window.click(
                         SharedString::from(format!("structure-child-{source_index}")),
