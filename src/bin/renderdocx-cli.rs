@@ -2594,8 +2594,15 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                                     {
                                         None
                                     }
-                                    None if command == "texture_fit_range" => {
-                                        Some(selection.effective_preview_channels())
+                                    None if command == "texture_fit_range"
+                                        || (texture.is_alpha_only()
+                                            && selection.channel.is_none()) =>
+                                    {
+                                        Some(
+                                            selection
+                                                .for_texture_display(texture)
+                                                .effective_preview_channels(),
+                                        )
                                     }
                                     None => Some(std::array::from_fn(|i| {
                                         selection.channel.map_or(
@@ -2618,7 +2625,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                                             Ok(()) => (if command == "texture_fit_range" { session.texture_minmax(event, index, texture, selection, channels) } else { session.texture_statistics(event, index, texture, selection, histogram) })
                                                 .and_then(|stats| {
                                                     if command == "texture_fit_range" {
-                                                        let range = renderdocx::texture_view::fit_range(&stats, texture.component_type, selection.analysis_type_cast, texture.component_count, channels).map_err(str::to_owned)?;
+                                                        let range = renderdocx::texture_view::fit_range(&stats, texture.component_type, selection.analysis_type_cast, texture.component_count, channels, texture.is_alpha_only()).map_err(str::to_owned)?;
                                                         Ok(json!({"range":range,"statistics":stats,"histogram_computed":false,"selection":selection}))
                                                     } else { Ok(json!({"statistics":stats,"selection":selection})) }
                                                 })
@@ -2906,8 +2913,9 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                                         event_times = None;
                                         mesh_selection = None;
                                     }
-                                    session.render_texture_png(index, selection, width, height, PathBuf::from(path).as_path())
-                                    .map(|_| json!({"index":index,"event_id":event,"path":path,"width":width,"height":height,"selection":selection}))
+                                    let display_selection = selection.for_texture_display(texture);
+                                    session.render_texture_png(index, display_selection, width, height, PathBuf::from(path).as_path())
+                                    .map(|_| json!({"index":index,"event_id":event,"path":path,"width":width,"height":height,"selection":selection,"display_selection":display_selection}))
                                     .map_err(|error| ("replay_render_failed", error))
                                 }
                                 Err(error) => Err(("invalid_arguments", error)),

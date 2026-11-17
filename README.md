@@ -20,6 +20,8 @@ The event browser has a separate find field for names or `@EID`, with next/previ
 
 Select an action and open **API calls** to inspect its associated API events, or select those events in the main hierarchy after enabling them. Both views can replay the selected event. **Parameters** browses structured capture data on demand, including nested children and pages. Buffer nodes offer a paged byte view; the first read creates an isolated worker and exports the full structured capture, which can require substantial extra memory and time. Event names still use structured chunk names rather than RenderDoc's fully formatted call summaries.
 
+A8 textures default to the alpha channel and expose the picked alpha value. The viewer applies RenderDoc's fixed gamma behavior for sRGB and swap-chain textures; the Agent response reports the effective display selection. Swap-chain category detection requires an updated replay bridge.
+
 The texture viewer identifies depth/stencil targets from RenderDoc's texture category and format and exposes separate depth and stencil preview controls. Packed depth/stencil formats can also be identified with older bridge snapshots; category-based identification requires an updated bridge. D3D11 D24S8 depth and stencil preview paths have targeted coverage; S8 and other APIs still need real-capture verification.
 
 The texture details view can pick a pixel at explicit top-left coordinates for the selected mip, slice and sample. For depth/stencil textures it also shows interpreted depth and stencil values alongside the raw component interpretations. It shows RenderDoc's returned component bits and their float, signed and unsigned interpretations; these are not necessarily the texture's original storage bytes.

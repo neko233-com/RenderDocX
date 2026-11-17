@@ -16,6 +16,7 @@ pub fn fit_range(
     type_cast: u32,
     component_count: u32,
     channels: [bool; 4],
+    alpha_only: bool,
 ) -> Result<[f32; 2], &'static str> {
     let effective = if stats.custom_shader {
         1
@@ -28,7 +29,10 @@ pub fn fit_range(
     let mut max = -f32::MAX;
     let mut found = false;
     for index in 0..4 {
-        if !channels[index] || index >= component_count as usize {
+        if !channels[index]
+            || (index >= component_count as usize
+                && !(alpha_only && !stats.custom_shader && index == 3))
+        {
             continue;
         }
         let (lo, hi) = match effective {
@@ -147,18 +151,18 @@ mod tests {
         assert_eq!(super::default_range(0, 3), [-1.0, 1.0]);
         assert_eq!(super::default_range(2, 0), [0.0, 1.0]);
         assert_eq!(
-            super::fit_range(&stats, 5, 0, 2, [true, true, false, false]).unwrap(),
+            super::fit_range(&stats, 5, 0, 2, [true, true, false, false], false).unwrap(),
             [-5.0, 10.0]
         );
         assert_eq!(
-            super::fit_range(&stats, 0, 4, 2, [false, true, false, false]).unwrap(),
+            super::fit_range(&stats, 0, 4, 2, [false, true, false, false], false).unwrap(),
             [3.0, 8.0]
         );
-        assert!(super::fit_range(&stats, 5, 0, 2, [false; 4]).is_err());
+        assert!(super::fit_range(&stats, 5, 0, 2, [false; 4], false).is_err());
         stats.min = [1f32.to_bits(); 4].into();
         stats.max = [1f32.to_bits(); 4].into();
         stats.custom_shader = true;
-        let range = super::fit_range(&stats, 4, 0, 1, [true; 4]).unwrap();
+        let range = super::fit_range(&stats, 4, 0, 1, [true; 4], false).unwrap();
         assert_eq!(range[0], 1.0);
         assert!(range[1] > 1.0);
     }

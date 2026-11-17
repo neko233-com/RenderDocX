@@ -1093,6 +1093,73 @@ fn real_d3d11_mesh_draw_order() {
         depth_pixels, stencil_pixels,
         "depth and stencil previews must differ"
     );
+    let alpha_index = opened["data"]["capture"]["textures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|texture| texture["format_type"] == 28)
+        .expect("A8 texture");
+    let alpha_pixel = agent.send(
+        &serde_json::json!({"command":"pick_pixel","index":alpha_index,"x":0,"y":0}).to_string(),
+    );
+    assert_eq!(alpha_pixel["ok"], true, "{alpha_pixel}");
+    let alpha = alpha_pixel["data"]["pixel"]["alpha"]
+        .as_str()
+        .unwrap()
+        .parse::<f32>()
+        .unwrap();
+    assert!((alpha - 128.0 / 255.0).abs() < 0.00001, "{alpha_pixel}");
+    let alpha_stats = agent.send(&serde_json::json!({"command":"texture_statistics","index":alpha_index,"channels":[false,false,false,true]}).to_string());
+    assert_eq!(alpha_stats["ok"], true, "{alpha_stats}");
+    let alpha_min = alpha_stats["data"]["statistics"]["min"]["float_values"][3]
+        .as_str()
+        .unwrap()
+        .parse::<f32>()
+        .unwrap();
+    assert!((alpha_min - 128.0 / 255.0).abs() < 0.00001, "{alpha_stats}");
+    let alpha_fit = agent
+        .send(&serde_json::json!({"command":"texture_fit_range","index":alpha_index}).to_string());
+    assert_eq!(alpha_fit["ok"], true, "{alpha_fit}");
+    let alpha_black = alpha_fit["data"]["range"][0].as_f64().unwrap();
+    assert!((alpha_black - 128.0 / 255.0).abs() < 0.00001, "{alpha_fit}");
+    let alpha_default_stats = agent
+        .send(&serde_json::json!({"command":"texture_statistics","index":alpha_index}).to_string());
+    assert_eq!(
+        alpha_default_stats["data"]["statistics"]["request"]["channels"],
+        serde_json::json!([false, false, false, true]),
+        "{alpha_default_stats}"
+    );
+    let alpha_path = dir.path().join("alpha-default.png");
+    let alpha_result = agent.send(&serde_json::json!({"command":"render_texture","index":alpha_index,"width":8,"height":8,"path":alpha_path}).to_string());
+    assert_eq!(alpha_result["ok"], true, "{alpha_result}");
+    assert_eq!(
+        alpha_result["data"]["display_selection"]["preview_channels"],
+        serde_json::json!([false, false, false, true])
+    );
+    let alpha_explicit_path = dir.path().join("alpha-explicit.png");
+    let alpha_explicit = agent.send(&serde_json::json!({"command":"render_texture","index":alpha_index,"width":8,"height":8,"path":alpha_explicit_path,"preview_channels":[false,false,false,true]}).to_string());
+    assert_eq!(alpha_explicit["ok"], true, "{alpha_explicit}");
+    assert_eq!(
+        decode_preview(&alpha_path),
+        decode_preview(&alpha_explicit_path)
+    );
+    let srgb_index = opened["data"]["capture"]["textures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|texture| texture["component_type"] == 9 && texture["width"] == 8)
+        .expect("sRGB texture");
+    let srgb_on = dir.path().join("srgb-on.png");
+    let srgb_off = dir.path().join("srgb-off.png");
+    let srgb_on_result = agent.send(&serde_json::json!({"command":"render_texture","index":srgb_index,"width":8,"height":8,"path":srgb_on,"preview_linear_as_gamma":true}).to_string());
+    let srgb_off_result = agent.send(&serde_json::json!({"command":"render_texture","index":srgb_index,"width":8,"height":8,"path":srgb_off,"preview_linear_as_gamma":false}).to_string());
+    assert_eq!(srgb_on_result["ok"], true, "{srgb_on_result}");
+    assert_eq!(srgb_off_result["ok"], true, "{srgb_off_result}");
+    assert_eq!(
+        srgb_on_result["data"]["display_selection"]["preview_linear_as_gamma"],
+        false
+    );
+    assert_eq!(decode_preview(&srgb_on), decode_preview(&srgb_off));
     let ordinary_fit = agent
         .send(&serde_json::json!({"command":"texture_fit_range","index":float_index}).to_string());
     assert_eq!(ordinary_fit["ok"], true, "{ordinary_fit}");

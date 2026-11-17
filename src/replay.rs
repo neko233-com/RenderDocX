@@ -898,6 +898,19 @@ impl Texture {
     pub fn is_stencil_only(&self) -> bool {
         self.format_type == 22
     }
+    pub fn is_alpha_only(&self) -> bool {
+        self.format_type == 28
+    }
+    /// None means the user's gamma choice is available, as in TextureViewer.
+    pub fn forced_preview_gamma(&self) -> Option<bool> {
+        if self.component_type == 9 {
+            Some(false)
+        } else if self.creation_flags & 0x10 != 0 {
+            Some(!(self.format_type == 0 && self.component_byte_width == 2))
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize, Serialize)]
@@ -1037,6 +1050,9 @@ pub struct Pixel {
     /// Interpretation of the original depth/stencil value, absent for overlay pixels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depth_stencil: Option<DepthStencilValue>,
+    /// A8 source alpha in RenderDoc's pixel-value mapping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alpha: Option<String>,
     pub event_id: u32,
     pub index: u32,
     pub mip: u32,
@@ -1059,6 +1075,11 @@ pub struct DepthStencilValue {
 
 impl Pixel {
     fn interpret_depth_stencil(&mut self, texture: &Texture, selection: TextureSelection) {
+        self.alpha = if !self.overlay && texture.is_alpha_only() {
+            Some(self.float_values[3].clone())
+        } else {
+            None
+        };
         if self.overlay || !texture.is_depth_stencil() {
             self.depth_stencil = None;
             return;
@@ -1210,6 +1231,21 @@ pub struct PixelHistoryPage {
 }
 
 impl TextureSelection {
+    /// Apply RenderDoc's format-dependent defaults for a displayed texture.
+    pub fn for_texture_display(mut self, texture: &Texture) -> Self {
+        if let Some(gamma) = texture.forced_preview_gamma() {
+            self.preview_linear_as_gamma = Some(gamma);
+        }
+        if texture.is_alpha_only()
+            && !self.preview_custom_shader
+            && self.preview_channels.is_none()
+            && self.channel.is_none()
+        {
+            self.preview_channels = Some([false, false, false, true]);
+        }
+        self
+    }
+
     pub fn effective_preview_channels(&self) -> [bool; 4] {
         let mut result = self.preview_channels.unwrap_or_else(|| {
             let mut channels = [true, true, true, false];
@@ -2750,6 +2786,7 @@ impl Transport for Process {
                     overlay,
                     custom: custom_bits.map(PixelComponents::from),
                     depth_stencil: None,
+                    alpha: None,
                     event_id,
                     index,
                     mip,
@@ -2816,6 +2853,7 @@ impl Transport for Process {
                     overlay,
                     custom: custom_bits.map(PixelComponents::from),
                     depth_stencil: None,
+                    alpha: None,
                     event_id,
                     index,
                     mip,
@@ -2883,6 +2921,7 @@ impl Transport for Process {
                     overlay,
                     custom: custom_bits.map(PixelComponents::from),
                     depth_stencil: None,
+                    alpha: None,
                     event_id,
                     index,
                     mip,
@@ -5186,6 +5225,7 @@ pub mod test_support {
                 overlay: false,
                 custom: None,
                 depth_stencil: None,
+                alpha: None,
                 event_id: event,
                 index,
                 mip: selection.mip,
@@ -6009,10 +6049,42 @@ mod tests {
             ..packed
         };
         assert!(stencil.is_stencil_only());
+        let alpha_texture = Texture {
+            format_type: 28,
+            component_type: 2,
+            component_count: 1,
+            ..stencil.clone()
+        };
+        assert_eq!(
+            TextureSelection::default()
+                .for_texture_display(&alpha_texture)
+                .preview_channels,
+            Some([false, false, false, true])
+        );
+        let srgb = Texture {
+            format_type: 0,
+            component_type: 9,
+            creation_flags: 0,
+            ..stencil.clone()
+        };
+        assert_eq!(srgb.forced_preview_gamma(), Some(false));
+        let swap16 = Texture {
+            component_type: 1,
+            component_byte_width: 2,
+            creation_flags: 16,
+            ..srgb.clone()
+        };
+        assert_eq!(swap16.forced_preview_gamma(), Some(false));
+        let swap8 = Texture {
+            component_byte_width: 1,
+            ..swap16
+        };
+        assert_eq!(swap8.forced_preview_gamma(), Some(true));
         let mut pixel = Pixel {
             overlay: false,
             custom: None,
             depth_stencil: None,
+            alpha: None,
             event_id: 1,
             index: 0,
             mip: 0,
@@ -6055,9 +6127,13 @@ mod tests {
                 stencil: Some(101)
             })
         );
+        pixel.float_values[3] = "0.5".into();
+        pixel.interpret_depth_stencil(&alpha_texture, TextureSelection::default());
+        assert_eq!(pixel.alpha.as_deref(), Some("0.5"));
         pixel.overlay = true;
         pixel.interpret_depth_stencil(&depth, TextureSelection::default());
         assert!(pixel.depth_stencil.is_none());
+        assert!(pixel.alpha.is_none());
         let mut selection = TextureSelection {
             mip: 2,
             slice: 1,

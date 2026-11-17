@@ -2,6 +2,7 @@ use gpui_kit as gpui;
 use gpui_kit::TestSupportExt;
 use gpui_kit::base::ElementExt;
 use gpui_kit::component::{
+    Disableable,
     button::{Button, ButtonVariants},
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
     theme::{Theme, ThemeMode},
@@ -835,6 +836,11 @@ impl Workspace {
                 .is_some_and(|(saved, _)| {
                     saved.preview_custom_shader && !selection.preview_custom_shader
                 });
+        if new_texture && texture.is_alpha_only() && !selection.preview_custom_shader && !has_saved
+        {
+            selection.channel = None;
+            selection.preview_channels = Some([false, false, false, true]);
+        }
         if new_texture
             && texture.is_depth_stencil()
             && !selection.preview_custom_shader
@@ -6096,11 +6102,12 @@ impl Workspace {
         };
         let selection = self.texture_selection;
         let channels = selection.effective_preview_channels();
-        if !channels
-            .iter()
-            .take(texture.component_count as usize)
-            .any(|enabled| *enabled)
-        {
+        let channel_count = if texture.is_alpha_only() && !selection.preview_custom_shader {
+            4
+        } else {
+            texture.component_count as usize
+        };
+        if !channels.iter().take(channel_count).any(|enabled| *enabled) {
             self.status = Some(
                 self.t(
                     "Enable a texture channel before fitting the range.",
@@ -6138,6 +6145,7 @@ impl Workspace {
                 selection.analysis_type_cast,
                 texture.component_count,
                 channels,
+                texture.is_alpha_only(),
             )
             .map_err(str::to_owned)?;
             Ok::<_, String>((stats, range))
@@ -6299,6 +6307,18 @@ impl Workspace {
     }
 
     fn change_preview_gamma(&mut self, cx: &mut Context<Self>) {
+        if self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                self.selected_texture
+                    .and_then(|index| snapshot.textures.get(index))
+            })
+            .and_then(|texture| texture.forced_preview_gamma())
+            .is_some()
+        {
+            return;
+        }
         if !self.preview_edit_ready(cx) {
             return;
         }
@@ -6339,8 +6359,21 @@ impl Workspace {
             .filter(|texture| texture.is_depth_stencil())
     }
 
+    fn selected_alpha_texture(&self) -> bool {
+        self.snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                self.selected_texture
+                    .and_then(|index| snapshot.textures.get(index))
+            })
+            .is_some_and(|texture| texture.is_alpha_only())
+    }
+
     fn reset_depth_channels(&mut self) {
-        if let Some(texture) = self.selected_depth_texture() {
+        if self.selected_alpha_texture() {
+            self.texture_selection.preview_channels = Some([false, false, false, true]);
+            self.texture_selection.channel = None;
+        } else if let Some(texture) = self.selected_depth_texture() {
             self.texture_selection.preview_channels = Some(if texture.is_stencil_only() {
                 [false, true, false, false]
             } else {
@@ -6735,7 +6768,8 @@ impl Workspace {
                             this.normalize_texture_channel();
                             this.preview = None;
                         } else if result.compiled {
-                            if this.selected_depth_texture().is_some()
+                            if (this.selected_depth_texture().is_some()
+                                || this.selected_alpha_texture())
                                 && !this.texture_selection.preview_custom_shader
                             {
                                 this.texture_selection.preview_channels = None;
@@ -6771,7 +6805,7 @@ impl Workspace {
                 .to_owned(),
             );
         } else {
-            if self.selected_depth_texture().is_some()
+            if (self.selected_depth_texture().is_some() || self.selected_alpha_texture())
                 && !self.texture_selection.preview_custom_shader
             {
                 self.texture_selection.preview_channels = None;
@@ -8328,8 +8362,12 @@ impl Workspace {
             return;
         };
         let selection = self.texture_selection;
-        let channels = if selection.preview_custom_shader {
-            selection.effective_preview_channels()
+        let channels = if selection.preview_custom_shader
+            || (texture.is_alpha_only() && selection.channel.is_none())
+        {
+            selection
+                .for_texture_display(&texture)
+                .effective_preview_channels()
         } else {
             std::array::from_fn(|channel| {
                 selection
@@ -8566,6 +8604,7 @@ impl Workspace {
         else {
             return;
         };
+        let display_selection = selection.for_texture_display(texture);
         if selection.validate(texture).is_err() {
             self.status = Some(
                 self.t(
@@ -8610,7 +8649,7 @@ impl Workspace {
             let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
             let path = directory.path().join("preview.png");
             // The preview widget is 180 logical pixels high; render at 2x for HiDPI.
-            session.render_texture_png(texture_index, selection, 512, 360, &path)?;
+            session.render_texture_png(texture_index, display_selection, 512, 360, &path)?;
             Ok::<_, String>(TexturePreview {
                 path,
                 _directory: directory,
@@ -10178,6 +10217,14 @@ impl Workspace {
 
     fn texture_preview_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let channels = self.texture_selection.effective_preview_channels();
+        let forced_gamma = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                self.selected_texture
+                    .and_then(|index| snapshot.textures.get(index))
+            })
+            .and_then(|texture| texture.forced_preview_gamma());
         let depth = self
             .snapshot
             .as_ref()
@@ -10309,20 +10356,25 @@ impl Workspace {
                         |this, cx| this.change_preview_flip(cx),
                         cx,
                     ))
-                    .child(button(
-                        "texture-preview-gamma",
-                        self.t(
-                            "Linear as gamma",
-                            "线性转 Gamma",
-                            "リニアをガンマ表示",
-                            "선형을 감마로 표시",
-                        ),
-                        self.texture_selection
-                            .preview_linear_as_gamma
-                            .unwrap_or(true),
-                        |this, cx| this.change_preview_gamma(cx),
-                        cx,
-                    )),
+                    .child(
+                        button(
+                            "texture-preview-gamma",
+                            self.t(
+                                "Linear as gamma",
+                                "线性转 Gamma",
+                                "リニアをガンマ表示",
+                                "선형을 감마로 표시",
+                            ),
+                            forced_gamma.unwrap_or(
+                                self.texture_selection
+                                    .preview_linear_as_gamma
+                                    .unwrap_or(true),
+                            ),
+                            |this, cx| this.change_preview_gamma(cx),
+                            cx,
+                        )
+                        .disabled(forced_gamma.is_some()),
+                    ),
             )
             .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
                 "Channel combinations, flip and gamma affect the preview only.",
@@ -14133,6 +14185,7 @@ impl Workspace {
                             let stencil = value.stencil.map(|stencil| format!("{}: {stencil} / 0x{stencil:02X} / 0b{stencil:08b}", self.t("Stencil", "模板", "ステンシル", "스텐실")));
                             view.child(div().id("pixel-depth-stencil").test_support().child([depth, stencil].into_iter().flatten().collect::<Vec<_>>().join(" · ")))
                         })
+                        .when_some(pixel.alpha.as_ref(), |view, alpha| view.child(div().id("pixel-alpha").test_support().child(format!("{}: {alpha}", self.t("Alpha", "透明度", "アルファ", "알파")))))
                         .child(format!("{float_label}: {}", pixel.float_values.join(", ")))
                         .when_some(pixel.custom, |view, custom| view
                             .child(div().id("custom-pixel-result").test_support().text_sm().text_color(rgb(0x82aaff)).child(self.t("Custom shader output", "自定义着色器输出", "カスタムシェーダー出力", "사용자 셰이더 출력")))
@@ -18746,6 +18799,37 @@ mod ui_tests {
                 assert_eq!(
                     view.texture_selection.effective_preview_channels(),
                     [false, true, false, false]
+                );
+                assert!(view.switch_texture(old_index, None, window, cx));
+                let alpha = &mut view.snapshot.as_mut().unwrap().textures[count];
+                alpha.format_type = 28;
+                alpha.creation_flags = 0;
+                alpha.component_type = 2;
+                alpha.component_count = 1;
+                view.texture_saved_selection.remove(&count);
+                assert!(view.switch_texture(count, None, window, cx));
+                assert_eq!(
+                    view.texture_selection.effective_preview_channels(),
+                    [false, false, false, true]
+                );
+                view.texture_selection.preview_custom_shader = true;
+                view.texture_selection.preview_channels = None;
+                view.change_preview_mode(0, cx);
+                assert_eq!(
+                    view.texture_selection.effective_preview_channels(),
+                    [false, false, false, true]
+                );
+                let alpha = &mut view.snapshot.as_mut().unwrap().textures[count];
+                alpha.format_type = 0;
+                alpha.component_type = 9;
+                view.texture_selection.preview_linear_as_gamma = Some(true);
+                view.change_preview_gamma(cx);
+                assert_eq!(view.texture_selection.preview_linear_as_gamma, Some(true));
+                assert_eq!(
+                    view.texture_selection
+                        .for_texture_display(&view.snapshot.as_ref().unwrap().textures[count])
+                        .preview_linear_as_gamma,
+                    Some(false)
                 );
                 assert!(view.switch_texture(old_index, None, window, cx));
                 view.snapshot.as_mut().unwrap().textures.pop();

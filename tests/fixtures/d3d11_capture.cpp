@@ -58,6 +58,19 @@ int wmain(int argc, wchar_t **argv)
   hr = device->CreateTexture2D(&depth_desc, nullptr, &depth_texture);
   if(SUCCEEDED(hr)) hr = device->CreateDepthStencilView(depth_texture, nullptr, &depth_view);
   if(FAILED(hr)) { std::cerr << "Could not create depth stencil texture"; return 28; }
+  D3D11_TEXTURE2D_DESC alpha_desc = desc;
+  alpha_desc.Width = 8; alpha_desc.Height = 8; alpha_desc.Format = DXGI_FORMAT_A8_UNORM;
+  alpha_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+  ID3D11Texture2D *alpha_texture = nullptr;
+  hr = device->CreateTexture2D(&alpha_desc, nullptr, &alpha_texture);
+  if(FAILED(hr)) { std::cerr << "Could not create alpha texture"; return 29; }
+  D3D11_TEXTURE2D_DESC srgb_desc = desc;
+  srgb_desc.Width = 8; srgb_desc.Height = 8; srgb_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+  ID3D11Texture2D *srgb_texture = nullptr;
+  ID3D11RenderTargetView *srgb_view = nullptr;
+  hr = device->CreateTexture2D(&srgb_desc, nullptr, &srgb_texture);
+  if(SUCCEEDED(hr)) hr = device->CreateRenderTargetView(srgb_texture, nullptr, &srgb_view);
+  if(FAILED(hr)) { std::cerr << "Could not create sRGB texture"; return 30; }
   D3D11_TEXTURE2D_DESC layered_desc = desc;
   layered_desc.Width = 8; layered_desc.Height = 8; layered_desc.MipLevels = 2; layered_desc.ArraySize = 2;
   ID3D11Texture2D *layered = nullptr;
@@ -209,6 +222,8 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint3 id : 
   const float color[4] = {0.25f, 0.5f, 0.75f, 1.0f};
   context->ClearRenderTargetView(view, color);
   context->ClearDepthStencilView(depth_view, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 0.375f, 0x65);
+  const uint8_t alpha_values[64] = {128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128};
+  context->ClearRenderTargetView(srgb_view, color);
   const float integer_color[4] = {1, 2, 3, 4};
   context->ClearRenderTargetView(integer_view, integer_color);
   context->ClearRenderTargetView(float_view, color);
@@ -219,6 +234,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint3 id : 
   for(unsigned i = 0; i < 4; ++i) context->ClearRenderTargetView(layered_views[i], layer_colors[i]);
   const float updated_vertices[] = {0, 3, 3, 3, 3, 3, 3};
   context->UpdateSubresource(vertex_buffer, 0, nullptr, updated_vertices, 0, 0);
+  context->UpdateSubresource(alpha_texture, 0, nullptr, alpha_values, 8, 64);
   float pattern[4 * 4 * 4] = {};
   for(unsigned y = 0; y < 4; ++y) for(unsigned x = 0; x < 4; ++x)
   {
@@ -275,6 +291,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint3 id : 
   for(auto *layer_view : layered_views) layer_view->Release();
   for(auto *volume_view : volume_views) volume_view->Release();
   if(msaa_view) msaa_view->Release(); if(msaa_texture) msaa_texture->Release();
+  srgb_view->Release(); srgb_texture->Release(); alpha_texture->Release();
   depth_view->Release(); depth_texture->Release();
   single_texture->Release(); strip_texture->Release(); constant_buffer->Release(); compute_uav->Release(); compute_buffer->Release(); compute_shader->Release();
   scissor_rasterizer->Release(); history_rasterizer->Release(); history_shader->Release(); volume->Release(); float_view->Release(); float_texture->Release(); integer_view->Release(); integer_texture->Release(); layered->Release(); index_buffer->Release(); vertex_buffer->Release(); layout->Release(); vertex->Release(); pixel->Release(); view->Release(); texture->Release(); context->Release(); device->Release();
