@@ -12949,24 +12949,57 @@ impl Workspace {
                                         .px_3()
                                         .flex()
                                         .items_center()
-                                        .gap_3()
                                         .cursor_pointer()
                                         .bg(rgb(if selected { 0x304c7c } else { 0x192332 }))
                                         .hover(|row| row.bg(rgb(0x263950)))
-                                        .when(this.settings.event_columns.event_id, |row| {
-                                            row.child("0")
-                                        })
-                                        .when(this.settings.event_columns.action, |row| {
-                                            row.child("0")
-                                        })
-                                        .when(this.settings.event_columns.name, |row| {
-                                            row.child(this.t(
-                                                "Capture Start",
-                                                "捕获开始",
-                                                "キャプチャ開始",
-                                                "캡처 시작",
-                                            ))
-                                        })
+                                        .child(div().w(px(22.)).flex_none())
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .flex()
+                                                .items_center()
+                                                .gap_3()
+                                                .when(this.settings.event_columns.event_id, |row| {
+                                                    row.child(
+                                                        div()
+                                                            .id("event-eid-0")
+                                                            .test_support()
+                                                            .w(px(108.))
+                                                            .flex_none()
+                                                            .child("0"),
+                                                    )
+                                                })
+                                                .when(this.settings.event_columns.action, |row| {
+                                                    row.child(
+                                                        div().w(px(76.)).flex_none().child("0"),
+                                                    )
+                                                })
+                                                .child(div().flex_1().min_w_0().when(
+                                                    this.settings.event_columns.name,
+                                                    |row| {
+                                                        row.child(this.t(
+                                                            "Capture Start",
+                                                            "捕获开始",
+                                                            "キャプチャ開始",
+                                                            "캡처 시작",
+                                                        ))
+                                                    },
+                                                ))
+                                                .when(
+                                                    this.settings.event_columns.annotation
+                                                        && !this
+                                                            .event_annotation_key
+                                                            .read(cx)
+                                                            .value()
+                                                            .is_empty(),
+                                                    |row| row.child(div().w(px(112.)).flex_none()),
+                                                )
+                                                .when(
+                                                    this.settings.event_columns.duration
+                                                        && this.event_tree.has_durations(),
+                                                    |row| row.child(div().w(px(80.)).flex_none()),
+                                                ),
+                                        )
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.select_capture_start(cx)
                                         }))
@@ -13016,11 +13049,11 @@ impl Workspace {
                             };
                             let selected = this.selected == Some(index)
                                 && this.selected_event_id() == Some(event);
-                            let indent = action.depth as f32 * 14.0 + 12.0;
+                            let indent = action.depth as f32 * 14.0;
                             Some(
                                 div()
                                     .h(px(32.))
-                                    .pl(px(indent))
+                                    .pl_3()
                                     .pr_3()
                                     .flex()
                                     .items_center()
@@ -13058,6 +13091,10 @@ impl Workspace {
                                             .when(this.settings.event_columns.event_id, |row| {
                                                 row.child(
                                                     div()
+                                                        .id(SharedString::from(format!(
+                                                            "event-eid-{event}"
+                                                        )))
+                                                        .test_support()
                                                         .w(px(108.))
                                                         .flex_none()
                                                         .text_color(rgb(0x91a7c0))
@@ -13087,34 +13124,53 @@ impl Workspace {
                                                         ),
                                                 )
                                             })
-                                            .when(this.settings.event_columns.name, |row| {
-                                                row.child(div().overflow_hidden().child(name))
-                                            })
-                                            .when(this.settings.event_columns.annotation, |row| {
-                                                row.when_some(
-                                                    this.event_annotation_values
-                                                        .get(&event)
-                                                        .cloned(),
-                                                    |row, value| {
-                                                        row.child(
-                                                            div()
-                                                                .id(SharedString::from(format!(
-                                                                    "event-annotation-{event}"
-                                                                )))
-                                                                .test_support()
-                                                                .text_sm()
-                                                                .text_color(rgb(0xb9dca8))
-                                                                .child(value),
-                                                        )
-                                                    },
-                                                )
-                                            })
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .overflow_hidden()
+                                                    .pl(px(indent))
+                                                    .when(
+                                                        this.settings.event_columns.name,
+                                                        |row| row.child(name),
+                                                    ),
+                                            )
+                                            .when(
+                                                this.settings.event_columns.annotation
+                                                    && !this
+                                                        .event_annotation_key
+                                                        .read(cx)
+                                                        .value()
+                                                        .is_empty(),
+                                                |row| {
+                                                    row.child(
+                                                        div()
+                                                            .id(SharedString::from(format!(
+                                                                "event-annotation-{event}"
+                                                            )))
+                                                            .test_support()
+                                                            .w(px(112.))
+                                                            .flex_none()
+                                                            .overflow_hidden()
+                                                            .text_sm()
+                                                            .text_color(rgb(0xb9dca8))
+                                                            .child(
+                                                                this.event_annotation_values
+                                                                    .get(&event)
+                                                                    .cloned()
+                                                                    .unwrap_or_default(),
+                                                            ),
+                                                    )
+                                                },
+                                            )
                                             .when(
                                                 this.settings.event_columns.duration
                                                     && this.event_tree.has_durations(),
                                                 |row| {
                                                     row.child(
                                                         div()
+                                                            .w(px(80.))
+                                                            .flex_none()
                                                             .text_sm()
                                                             .text_color(rgb(0x9eacc0))
                                                             .child(
@@ -16820,7 +16876,6 @@ impl Workspace {
                                 view.child(
                                     div()
                                         .px_3()
-                                        .pb_2()
                                         .child(div().text_sm().text_color(rgb(0x9eacc0)).child(
                                             self.t("Find name or @EID", "查找名称或 @事件 ID", "名前または @EID を検索", "이름 또는 @EID 찾기")
                                         ))
@@ -16856,12 +16911,6 @@ impl Workspace {
                                         })))
                                         .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t("Annotation column key (empty hides column)", "注释列键路径（留空隐藏）", "注釈列のキーパス（空欄で非表示）", "주석 열 키 경로 (비우면 숨김)")))
                                         .child(Input::new(&self.event_annotation_key).id("event-annotation-key").aria_label(self.t("Annotation column key", "注释列键路径", "注釈列のキーパス", "주석 열 키 경로")).w_full())
-                                        .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
-                                            "Examples: +$action() +$event(EID >= 100), \"draw indexed\"",
-                                            "示例：+$action() +$event(EID >= 100)、\"draw indexed\"",
-                                            "例：+$action() +$event(EID >= 100)、\"draw indexed\"",
-                                            "예: +$action() +$event(EID >= 100), \"draw indexed\"",
-                                        )))
                                         .when(self.event_tree.filter_error(), |view| {
                                             view.child(
                                                 div().text_sm().text_color(rgb(0xef7777)).child(self.t(
@@ -17037,6 +17086,16 @@ impl Workspace {
                                     )
                                 },
                             )
+                            .when(self.tab == CaptureTab::Events, |view| view.child(
+                                div().id("event-columns-header").test_support().h(px(24.)).px_3().flex().items_center().text_sm().text_color(rgb(0x9eacc0)).bg(rgb(0x202d3e))
+                                    .child(div().w(px(22.)).flex_none())
+                                    .child(div().flex_1().min_w_0().flex().items_center().gap_3()
+                                        .when(self.settings.event_columns.event_id, |row| row.child(div().id("event-header-eid").test_support().w(px(108.)).flex_none().child("EID")))
+                                        .when(self.settings.event_columns.action, |row| row.child(div().id("event-header-action").test_support().w(px(76.)).flex_none().child(self.t("Action #", "动作编号", "アクション番号", "동작 번호"))))
+                                        .child(div().flex_1().min_w_0().when(self.settings.event_columns.name, |row| row.child(self.t("Name", "名称", "名前", "이름"))))
+                                        .when(self.settings.event_columns.annotation && !self.event_annotation_key.read(cx).value().is_empty(), |row| row.child(div().w(px(112.)).flex_none().child(self.t("Annotation", "注释", "注釈", "주석"))))
+                                        .when(self.settings.event_columns.duration && self.event_tree.has_durations(), |row| row.child(div().w(px(80.)).flex_none().child(self.t("Duration", "耗时", "時間", "소요 시간")))))
+                            ))
                             .child(list),
                     )
                     .child(
@@ -19701,6 +19760,10 @@ mod ui_tests {
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(window.find(1usize).visible());
+            assert_eq!(
+                window.find("event-eid-42").bounds().origin.x,
+                window.find("event-eid-43").bounds().origin.x
+            );
             window.click("event-toggle-0", cx);
             window.render_frame(cx);
             assert_eq!(view.read(cx).event_tree.visible, [0, 2]);
@@ -21930,6 +21993,14 @@ mod ui_tests {
             });
             window.render_frame(cx);
             assert!(window.find("event-action-42").visible());
+            assert_eq!(
+                window.find("event-header-eid").bounds().origin.x,
+                window.find("event-eid-42").bounds().origin.x
+            );
+            assert_eq!(
+                window.find("event-header-action").bounds().origin.x,
+                window.find("event-action-42").bounds().origin.x
+            );
             reveal_details(window, "event-column-action", cx);
             window.click("event-column-action", cx);
             window.render_frame(cx);
