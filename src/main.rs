@@ -14180,6 +14180,7 @@ impl Workspace {
                                 .test_support()
                                 .child(format!("({}, {}) · RGBA: {bits}", pixel.x, pixel.y)),
                         )
+                        .when_some(pixel.coordinates.as_ref(), |view, coords| view.child(div().id("pixel-uv").test_support().child(format!("{}: {:.4}, {:.4} · {} × {}", self.t("Top-left UV", "左上原点 UV", "左上原点 UV", "왼쪽 위 원점 UV"), coords.normalized[0], coords.normalized[1], coords.mip_width, coords.mip_height))))
                         .when_some(pixel.depth_stencil.as_ref(), |view, value| {
                             let depth = value.depth.as_ref().map(|depth| format!("{}: {depth}", self.t("Depth", "深度", "深度", "깊이")));
                             let stencil = value.stencil.map(|stencil| format!("{}: {stencil} / 0x{stencil:02X} / 0b{stencil:08b}", self.t("Stencil", "模板", "ステンシル", "스텐실")));
@@ -21548,6 +21549,11 @@ mod ui_tests {
                     ..Settings::default()
                 };
                 let (session, snapshot) = Session::open(&settings, &capture).unwrap();
+                let texture_index = snapshot
+                    .textures
+                    .iter()
+                    .position(|texture| texture.width == 2 && texture.height == 2)
+                    .expect("OpenGL fixture texture");
                 let (draw_index, draw_event) = snapshot
                     .actions
                     .iter()
@@ -21561,6 +21567,12 @@ mod ui_tests {
                         view.event_tree.reset(&snapshot.actions);
                         view.snapshot = Some(snapshot);
                         view.session = Some(session);
+                        view.selected_texture = None;
+                        view.texture_selection = TextureSelection::default();
+                        view.texture_saved_selection.clear();
+                        view.texture_custom_active = false;
+                        view.texture_auto_fit = false;
+                        view.texture_auto_fit_last = None;
                         view.selected = None;
                         view.pipeline = None;
                         view.input_page = None;
@@ -21634,6 +21646,119 @@ mod ui_tests {
                     assert!(window.find(("vertex-input-row", 0usize)).visible());
                 })
                 .unwrap();
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.click("textures-tab", cx);
+                    window.click(SharedString::from(format!("texture-{texture_index}")), cx);
+                    reveal_details(window, "texture-preview", cx);
+                    window.click("texture-preview", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| view.read(cx).preview.is_some()) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "OpenGL preview did not load: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    reveal_details(window, "texture-preview-image", cx);
+                    let bounds = window.find("texture-preview-image").bounds();
+                    window.click_at(
+                        "texture-preview-image",
+                        point(bounds.size.width / 2. - px(45.), px(45.)),
+                        cx,
+                    );
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx).pixel.as_ref().is_some_and(|pixel| {
+                            pixel.event_id == draw_event && pixel.x == 0 && pixel.y == 0
+                        })
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "OpenGL top preview click failed: {:?}",
+                        cx.update(|cx| view.read(cx).pixel.as_ref().map(|pixel| (
+                            pixel.x,
+                            pixel.y,
+                            pixel.float_values.clone()
+                        )))
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update(|cx| {
+                    assert_eq!(
+                        view.read(cx).pixel.as_ref().unwrap().float_values,
+                        ["0", "0", "1", "1"]
+                    )
+                });
+                cx.update_window(handle.into(), |_, window, cx| {
+                    reveal_details(window, "texture-preview-flip", cx);
+                    window.click("texture-preview-flip", cx);
+                    reveal_details(window, "texture-preview", cx);
+                    window.click("texture-preview", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| view.read(cx).preview.is_some()) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "OpenGL flipped preview did not load"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    reveal_details(window, "texture-preview-image", cx);
+                    let bounds = window.find("texture-preview-image").bounds();
+                    window.click_at(
+                        "texture-preview-image",
+                        point(bounds.size.width / 2. - px(45.), px(45.)),
+                        cx,
+                    );
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        view.read(cx).pixel.as_ref().is_some_and(|pixel| {
+                            pixel.event_id == draw_event && pixel.x == 0 && pixel.y == 1
+                        })
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "OpenGL flipped preview click failed: {:?}",
+                        cx.update(|cx| view.read(cx).pixel.as_ref().map(|pixel| (
+                            pixel.x,
+                            pixel.y,
+                            pixel.float_values.clone()
+                        )))
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update(|cx| {
+                    assert_eq!(
+                        view.read(cx).pixel.as_ref().unwrap().float_values,
+                        ["1", "0", "0", "1"]
+                    )
+                });
             }
         }
     }

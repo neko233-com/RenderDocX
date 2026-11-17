@@ -1053,6 +1053,9 @@ pub struct Pixel {
     /// A8 source alpha in RenderDoc's pixel-value mapping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alpha: Option<String>,
+    /// Mip-space dimensions and normalized top-left coordinates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinates: Option<PixelCoordinates>,
     pub event_id: u32,
     pub index: u32,
     pub mip: u32,
@@ -1066,6 +1069,14 @@ pub struct Pixel {
     pub int_values: [i32; 4],
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PixelCoordinates {
+    pub mip_width: u32,
+    pub mip_height: u32,
+    /// Coordinates divided by mip extent, matching RenderDoc's status display.
+    pub normalized: [f64; 2],
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct DepthStencilValue {
     /// A decimal float or unsigned integer string according to the analysis cast.
@@ -1074,7 +1085,17 @@ pub struct DepthStencilValue {
 }
 
 impl Pixel {
-    fn interpret_depth_stencil(&mut self, texture: &Texture, selection: TextureSelection) {
+    fn populate_texture_semantics(&mut self, texture: &Texture, selection: TextureSelection) {
+        let width = texture.width.checked_shr(self.mip).unwrap_or(0).max(1);
+        let height = texture.height.checked_shr(self.mip).unwrap_or(0).max(1);
+        self.coordinates = Some(PixelCoordinates {
+            mip_width: width,
+            mip_height: height,
+            normalized: [
+                f64::from(self.x) / f64::from(width),
+                f64::from(self.y) / f64::from(height),
+            ],
+        });
         self.alpha = if !self.overlay && texture.is_alpha_only() {
             Some(self.float_values[3].clone())
         } else {
@@ -2787,6 +2808,7 @@ impl Transport for Process {
                     custom: custom_bits.map(PixelComponents::from),
                     depth_stencil: None,
                     alpha: None,
+                    coordinates: None,
                     event_id,
                     index,
                     mip,
@@ -2854,6 +2876,7 @@ impl Transport for Process {
                     custom: custom_bits.map(PixelComponents::from),
                     depth_stencil: None,
                     alpha: None,
+                    coordinates: None,
                     event_id,
                     index,
                     mip,
@@ -2922,6 +2945,7 @@ impl Transport for Process {
                     custom: custom_bits.map(PixelComponents::from),
                     depth_stencil: None,
                     alpha: None,
+                    coordinates: None,
                     event_id,
                     index,
                     mip,
@@ -4335,7 +4359,7 @@ impl Session {
         if self.revision.load(Ordering::SeqCst) != revision {
             return Err("Replay selection changed".into());
         }
-        pixel.interpret_depth_stencil(texture, selection);
+        pixel.populate_texture_semantics(texture, selection);
         Ok(pixel)
     }
 
@@ -4364,7 +4388,7 @@ impl Session {
         if self.revision.load(Ordering::SeqCst) != revision {
             return Err("Replay selection changed".into());
         }
-        pixel.interpret_depth_stencil(texture, selection);
+        pixel.populate_texture_semantics(texture, selection);
         Ok(pixel)
     }
 
@@ -4397,7 +4421,7 @@ impl Session {
         if self.revision.load(Ordering::SeqCst) != revision {
             return Err("Replay selection changed".into());
         }
-        pixel.interpret_depth_stencil(texture, selection);
+        pixel.populate_texture_semantics(texture, selection);
         Ok(pixel)
     }
 
@@ -5226,6 +5250,7 @@ pub mod test_support {
                 custom: None,
                 depth_stencil: None,
                 alpha: None,
+                coordinates: None,
                 event_id: event,
                 index,
                 mip: selection.mip,
@@ -6085,6 +6110,7 @@ mod tests {
             custom: None,
             depth_stencil: None,
             alpha: None,
+            coordinates: None,
             event_id: 1,
             index: 0,
             mip: 0,
@@ -6101,7 +6127,12 @@ mod tests {
             format_type: 20,
             ..stencil.clone()
         };
-        pixel.interpret_depth_stencil(&depth, TextureSelection::default());
+        pixel.mip = 2;
+        pixel.x = 1;
+        pixel.y = 1;
+        pixel.populate_texture_semantics(&depth, TextureSelection::default());
+        assert_eq!(pixel.coordinates.as_ref().unwrap().mip_width, 2);
+        assert_eq!(pixel.coordinates.as_ref().unwrap().normalized, [0.5, 0.5]);
         assert_eq!(
             pixel.depth_stencil,
             Some(DepthStencilValue {
@@ -6114,12 +6145,12 @@ mod tests {
             analysis_type_cast: 4,
             ..TextureSelection::default()
         };
-        pixel.interpret_depth_stencil(&depth, cast_uint);
+        pixel.populate_texture_semantics(&depth, cast_uint);
         assert_eq!(
             pixel.depth_stencil.as_ref().unwrap().depth.as_deref(),
             Some("357")
         );
-        pixel.interpret_depth_stencil(&stencil, TextureSelection::default());
+        pixel.populate_texture_semantics(&stencil, TextureSelection::default());
         assert_eq!(
             pixel.depth_stencil,
             Some(DepthStencilValue {
@@ -6128,10 +6159,10 @@ mod tests {
             })
         );
         pixel.float_values[3] = "0.5".into();
-        pixel.interpret_depth_stencil(&alpha_texture, TextureSelection::default());
+        pixel.populate_texture_semantics(&alpha_texture, TextureSelection::default());
         assert_eq!(pixel.alpha.as_deref(), Some("0.5"));
         pixel.overlay = true;
-        pixel.interpret_depth_stencil(&depth, TextureSelection::default());
+        pixel.populate_texture_semantics(&depth, TextureSelection::default());
         assert!(pixel.depth_stencil.is_none());
         assert!(pixel.alpha.is_none());
         let mut selection = TextureSelection {

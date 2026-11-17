@@ -1805,6 +1805,43 @@ fn real_opengl_vertex_inputs_include_generic_and_normalized_values() {
         serde_json::json!(["1", "0", "0", "1"]),
         "{bottom}"
     );
+    assert_eq!(bottom["data"]["pixel"]["coordinates"]["mip_height"], 2);
+    assert_eq!(
+        bottom["data"]["pixel"]["coordinates"]["normalized"],
+        serde_json::json!([0.0, 0.5])
+    );
+    let preview_path = dir.path().join("gl-preview.png");
+    let rendered = agent.send(&serde_json::json!({"command":"render_texture","index":texture,"width":2,"height":2,"path":preview_path,"preview_linear_as_gamma":false}).to_string());
+    assert_eq!(rendered["ok"], true, "{rendered}");
+    let read_preview = |path: &std::path::Path| {
+        let mut reader =
+            png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path).unwrap()))
+                .read_info()
+                .unwrap();
+        let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut pixels).unwrap();
+        pixels
+    };
+    let preview = read_preview(&preview_path);
+    assert_eq!(
+        &preview[..3],
+        &[0, 0, 255],
+        "OpenGL preview top should match top-left PickPixel: {preview:?}"
+    );
+    assert_eq!(
+        &preview[6..9],
+        &[255, 0, 0],
+        "OpenGL preview bottom should match bottom-left PickPixel: {preview:?}"
+    );
+    let flip_path = dir.path().join("gl-preview-flipped.png");
+    let flipped = agent.send(&serde_json::json!({"command":"render_texture","index":texture,"width":2,"height":2,"path":flip_path,"preview_linear_as_gamma":false,"preview_flip_y":true}).to_string());
+    assert_eq!(flipped["ok"], true, "{flipped}");
+    let preview = read_preview(&flip_path);
+    assert_eq!(
+        &preview[..3],
+        &[255, 0, 0],
+        "OpenGL flip should display bottom at top: {preview:?}"
+    );
     let stats = agent.send(&serde_json::json!({"command":"texture_statistics","index":texture,"min":0,"max":1,"channels":[true,false,false,false]}).to_string());
     assert_eq!(stats["ok"], true, "{stats}");
     let histogram = stats["data"]["statistics"]["histogram"].as_array().unwrap();
