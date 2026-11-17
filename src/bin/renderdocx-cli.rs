@@ -59,6 +59,26 @@ fn show_empty_regions(request: &serde_json::Map<String, Value>) -> Option<bool> 
     }
 }
 
+#[derive(Clone, Copy)]
+struct EventNameOptions {
+    enabled: bool,
+    all: bool,
+    parameter_names: bool,
+    use_custom: bool,
+}
+
+fn event_name_options(request: &serde_json::Map<String, Value>) -> Option<EventNameOptions> {
+    let boolean = |key: &str| request.get(key).map_or(Some(false), Value::as_bool);
+    Some(EventNameOptions {
+        enabled: boolean("format_names")?,
+        all: boolean("show_all_parameters")?,
+        parameter_names: boolean("show_parameter_names")?,
+        use_custom: request
+            .get("use_custom_action_names")
+            .map_or(Some(true), Value::as_bool)?,
+    })
+}
+
 fn format_tree_names(
     tree: &mut EventTree,
     session: &Session,
@@ -950,23 +970,28 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     filter,
                     show_api,
                     show_empty_regions(&request),
+                    event_name_options(&request),
                 ) {
-                    (None, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (None, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
                     (
                         Some((session, snapshot)),
                         Some(path),
                         Some(filter),
                         Some(show_api),
                         Some(show_empty),
+                        Some(name_options),
                     ) => {
                         let mut tree = EventTree::default();
+                        tree.set_use_custom_action_names(name_options.use_custom);
                         tree.reset(&snapshot.actions);
                         tree.set_show_api(show_api);
                         tree.set_show_empty_regions(show_empty);
                         if let Some(times) = &event_times {
                             tree.set_durations(times.clone());
                         }
-                        if let Err(error) = apply_event_filter(
+                        if let Err(error) = if name_options.enabled { format_tree_names(&mut tree, session, snapshot, settings.language, name_options.all, name_options.parameter_names) } else { Ok(()) } {
+                            Err(("replay_event_format_failed", error))
+                        } else if let Err(error) = apply_event_filter(
                             &mut tree,
                             session,
                             snapshot,
@@ -988,7 +1013,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     }
                     _ => Err((
                         "invalid_arguments",
-                        "export_events requires a path and valid optional filter and show_api"
+                        "export_events requires a path and valid optional filter, show_api and formatting options"
                             .into(),
                     )),
                 }
@@ -1007,17 +1032,19 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     Some(Value::String(s)) if s == "previous" => Some(false),
                     _ => None,
                 };
-                match (&opened, event, filter, forward, show_empty_regions(&request)) {
-                    (None, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
-                    (Some((session, snapshot)), Some(event), Some(filter), Some(forward), Some(show_empty)) => {
+                match (&opened, event, filter, forward, show_empty_regions(&request), event_name_options(&request)) {
+                    (None, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some((session, snapshot)), Some(event), Some(filter), Some(forward), Some(show_empty), Some(name_options)) => {
                         let known = snapshot.actions.iter().any(|action| action.event_id == event || action.api_events.iter().any(|e| e.event_id == event));
                         if !known { Err(("invalid_arguments", "Unknown event".into())) }
                         else {
                             let mut tree = EventTree::default();
+                            tree.set_use_custom_action_names(name_options.use_custom);
                             tree.reset(&snapshot.actions);
                             tree.set_show_empty_regions(show_empty);
                             if let Some(times) = &event_times { tree.set_durations(times.clone()); }
-                            if let Err(error) = apply_event_filter(&mut tree, session, snapshot, settings.language, filter) { Err(("invalid_filter", error)) }
+                            if let Err(error) = if name_options.enabled { format_tree_names(&mut tree, session, snapshot, settings.language, name_options.all, name_options.parameter_names) } else { Ok(()) } { Err(("replay_event_format_failed", error)) }
+                            else if let Err(error) = apply_event_filter(&mut tree, session, snapshot, settings.language, filter) { Err(("invalid_filter", error)) }
                             else {
                                 let action = tree.step_action(event, forward).map(|index|
                                     json!({"action_index":index,"event_id":snapshot.actions[index].event_id}));
@@ -1025,7 +1052,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                             }
                         }
                     }
-                    _ => Err(("invalid_arguments", "step_action requires a current event and direction next or previous, with an optional filter".into())),
+                    _ => Err(("invalid_arguments", "step_action requires a current event and direction next or previous, with optional filter and formatting options".into())),
                 }
             }
             "find_event" => {
@@ -1051,24 +1078,16 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     Some(Value::String(s)) if s == "previous" => Some(false),
                     _ => None,
                 };
-                let format_names = request
-                    .get("format_names")
-                    .map_or(Some(false), Value::as_bool);
-                let show_all = request
-                    .get("show_all_parameters")
-                    .map_or(Some(false), Value::as_bool);
-                let show_names = request
-                    .get("show_parameter_names")
-                    .map_or(Some(false), Value::as_bool);
-                match (&opened, query, filter, show_api, current, forward, show_empty_regions(&request), format_names, show_all, show_names) {
-                    (None, _, _, _, _, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
-                    (Some((session, snapshot)), Some(query), Some(filter), Some(show_api), Some(current), Some(forward), Some(show_empty), Some(format_names), Some(show_all), Some(show_names)) => {
+                match (&opened, query, filter, show_api, current, forward, show_empty_regions(&request), event_name_options(&request)) {
+                    (None, _, _, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some((session, snapshot)), Some(query), Some(filter), Some(show_api), Some(current), Some(forward), Some(show_empty), Some(name_options)) => {
                         let mut tree = EventTree::default();
+                        tree.set_use_custom_action_names(name_options.use_custom);
                         tree.reset(&snapshot.actions);
                         tree.set_show_api(show_api);
                         tree.set_show_empty_regions(show_empty);
                         if let Some(times) = &event_times { tree.set_durations(times.clone()); }
-                        if let Err(error) = if format_names { format_tree_names(&mut tree, session, snapshot, settings.language, show_all, show_names) } else { Ok(()) } { Err(("replay_event_format_failed", error)) }
+                        if let Err(error) = if name_options.enabled { format_tree_names(&mut tree, session, snapshot, settings.language, name_options.all, name_options.parameter_names) } else { Ok(()) } { Err(("replay_event_format_failed", error)) }
                         else if let Err(error) = apply_event_filter(&mut tree, session, snapshot, settings.language, filter) { Err(("invalid_filter", error)) }
                         else {
                             let found = tree.find(query, current, forward).and_then(|row| {
@@ -1115,15 +1134,18 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                             .collect::<Option<Vec<_>>>()
                     }),
                 };
-                match (&opened, expression, show_api, offset, limit, annotation_key, show_empty, collapsed) {
-                    (None, _, _, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
-                    (Some((session, snapshot)), Some(expression), Some(show_api), Some(offset), Some(limit), Some(annotation_key), Some(show_empty), Some(collapsed)) => {
+                match (&opened, expression, show_api, offset, limit, annotation_key, show_empty, collapsed, event_name_options(&request)) {
+                    (None, _, _, _, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some((session, snapshot)), Some(expression), Some(show_api), Some(offset), Some(limit), Some(annotation_key), Some(show_empty), Some(collapsed), Some(name_options)) => {
                         let mut tree = EventTree::default();
+                        tree.set_use_custom_action_names(name_options.use_custom);
                         tree.reset(&snapshot.actions);
                         tree.set_show_api(show_api);
                         tree.set_show_empty_regions(show_empty);
                         if let Some(times) = &event_times { tree.set_durations(times.clone()); }
-                        if let Err(error) = apply_event_filter(&mut tree, session, snapshot, settings.language, expression) {
+                        if let Err(error) = if name_options.enabled { format_tree_names(&mut tree, session, snapshot, settings.language, name_options.all, name_options.parameter_names) } else { Ok(()) } {
+                            Err(("replay_event_format_failed", error))
+                        } else if let Err(error) = apply_event_filter(&mut tree, session, snapshot, settings.language, expression) {
                             Err(("invalid_filter", error))
                         } else if collapsed.iter().any(|event| tree.row_for_event(*event).is_none()) {
                             Err(("invalid_arguments", "Unknown collapsed event".into()))
@@ -1141,20 +1163,18 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                                     EventRow::Api { action, event } => (action, Some(event)),
                                 };
                                 let action = &snapshot.actions[action_index];
-                                let (event_id, name) = api_index.map(|index| {
-                                    let event = &action.api_events[index];
-                                    (event.event_id, &event.name)
-                                }).unwrap_or((action.event_id, &action.name));
+                                let event_id = api_index.map(|index| action.api_events[index].event_id).unwrap_or(action.event_id);
+                                let name = tree.display_name(row).unwrap_or("");
                                 json!({"action_index":action_index,"api_index":api_index,"event_id":event_id,
                                     "parent_action_index": if action.parent < 0 { None } else { Some(action.parent) },
                                     "name":name,"direct_match":tree.directly_matches(row),"duration_seconds":tree.duration(event_id),"annotation":annotations.get(&event_id),
                                     "group_range":tree.action_range(row),"has_children":tree.has_children(row),"collapsed":tree.is_collapsed(row)})
                             }).collect();
-                            Ok(json!({"events":{"expression":expression,"show_api":show_api,"show_empty_regions":show_empty,"annotation_key":annotation_key,"offset":offset.to_string(),
+                            Ok(json!({"events":{"expression":expression,"show_api":show_api,"show_empty_regions":show_empty,"format_names":name_options.enabled,"annotation_key":annotation_key,"offset":offset.to_string(),
                                 "total":tree.visible.len().to_string(),"items":items}}))
                         })() }
                     }
-                    _ => Err(("invalid_arguments", "filter_events requires an expression, optional show_api boolean, decimal-string offset, and limit 1–128".into())),
+                    _ => Err(("invalid_arguments", "filter_events requires an expression, optional show_api boolean, decimal-string offset, limit 1–128 and valid formatting options".into())),
                 }
             }
             "timeline_usage" => {

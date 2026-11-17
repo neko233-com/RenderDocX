@@ -5035,6 +5035,19 @@ impl Workspace {
         if self.export_pending || self.resource_pending || self.replay_pending {
             return;
         }
+        if self.event_filter_pending.is_some() {
+            self.status = Some(
+                self.t(
+                    "Wait for the event filter to finish.",
+                    "请等待事件筛选完成。",
+                    "イベントフィルターの完了をお待ちください。",
+                    "이벤트 필터가 끝날 때까지 기다려 주세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
         let (Some(snapshot), Some(capture)) = (self.snapshot.as_ref(), self.capture.as_ref())
         else {
             return;
@@ -5048,7 +5061,18 @@ impl Workspace {
         };
         let frame = snapshot.frame;
         let capture = capture.display().to_string();
-        let rows = self.event_tree.export_rows();
+        let mut rows = self.event_tree.export_rows();
+        let targets = if self.settings.event_auto_format {
+            self.event_tree.eligible_unformatted_targets()
+        } else {
+            Vec::new()
+        };
+        let session = self.session.clone();
+        let resources = snapshot.resources.clone();
+        let buffers = snapshot.buffers.clone();
+        let language = self.settings.language;
+        let show_all = self.settings.event_show_all_parameters;
+        let show_names = self.settings.event_show_parameter_names;
         let has_times = self.event_tree.has_durations();
         let label = destination.display().to_string();
         let revision = self.open_revision;
@@ -5064,6 +5088,13 @@ impl Workspace {
         );
         cx.notify();
         let task = cx.background_executor().spawn(async move {
+            if !targets.is_empty() {
+                let session = session.as_ref().ok_or("Replay session is unavailable")?;
+                renderdocx::event_parameters::format_export_rows(
+                    session, &mut rows, &targets, &resources, &buffers, language, show_all,
+                    show_names,
+                )?;
+            }
             renderdocx::event_export::write_new(&destination, &capture, frame, &rows, has_times)
         });
         cx.spawn(async move |this, cx| {

@@ -3002,6 +3002,54 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     );
     let invalid_find = agent.send(r#"{"command":"find_event","query":"x","format_names":"yes"}"#);
     assert_eq!(invalid_find["error"]["code"], "invalid_arguments");
+    let formatted_filter = agent.send(&serde_json::json!({"command":"filter_events","expression":"pSrcData","show_api":true,"format_names":true,"show_all_parameters":true,"show_parameter_names":true,"use_custom_action_names":false}).to_string());
+    assert_eq!(formatted_filter["ok"], true, "{formatted_filter}");
+    let invalid_filter_options =
+        agent.send(r#"{"command":"filter_events","expression":"","format_names":"yes"}"#);
+    assert_eq!(invalid_filter_options["error"]["code"], "invalid_arguments");
+    let invalid_custom = agent
+        .send(r#"{"command":"filter_events","expression":"","use_custom_action_names":"yes"}"#);
+    assert_eq!(invalid_custom["error"]["code"], "invalid_arguments");
+    assert_eq!(formatted_filter["data"]["events"]["format_names"], true);
+    assert!(
+        formatted_filter["data"]["events"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["direct_match"] == true
+                && item["name"]
+                    .as_str()
+                    .is_some_and(|name| name.contains("pSrcData"))),
+        "{formatted_filter}"
+    );
+    let event_export_path = dir.path().join("formatted-events.txt");
+    let formatted_export = agent.send(&serde_json::json!({"command":"export_events","path":event_export_path,"filter":"pSrcData","show_api":true,"format_names":true,"show_all_parameters":true,"show_parameter_names":true}).to_string());
+    assert_eq!(formatted_export["ok"], true, "{formatted_export}");
+    assert!(
+        std::fs::read_to_string(&event_export_path)
+            .unwrap()
+            .contains("pSrcData")
+    );
+    let repeated_export = agent.send(&serde_json::json!({"command":"export_events","path":event_export_path,"format_names":true}).to_string());
+    assert_eq!(repeated_export["error"]["code"], "event_export_failed");
+    let invalid_export_path = dir.path().join("invalid-formatted-events.txt");
+    let invalid_export = agent.send(&serde_json::json!({"command":"export_events","path":invalid_export_path,"format_names":"yes"}).to_string());
+    assert_eq!(invalid_export["error"]["code"], "invalid_arguments");
+    assert!(!invalid_export_path.exists());
+    let formatted_step = agent.send(&serde_json::json!({"command":"step_action","event_id":api_event_id,"direction":"next","filter":"IndexCount","format_names":true,"show_all_parameters":true,"show_parameter_names":true}).to_string());
+    assert_eq!(formatted_step["ok"], true, "{formatted_step}");
+    let invalid_step_options = agent.send(&serde_json::json!({"command":"step_action","event_id":api_event_id,"direction":"next","format_names":"yes"}).to_string());
+    assert_eq!(invalid_step_options["error"]["code"], "invalid_arguments");
+    let stepped_event = formatted_step["data"]["action"]["event_id"]
+        .as_u64()
+        .expect("next matching draw");
+    let stepped_name = agent.send(&serde_json::json!({"command":"event_format","event_id":stepped_event,"show_all_parameters":true,"show_parameter_names":true}).to_string());
+    assert!(
+        stepped_name["data"]["text"]
+            .as_str()
+            .is_some_and(|name| name.contains("IndexCount")),
+        "{stepped_name}"
+    );
     let update_children = update_structure["data"]["structure"]["children"]
         .as_array()
         .unwrap();

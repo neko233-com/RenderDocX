@@ -81,6 +81,45 @@ pub fn format_events(
     Ok(results)
 }
 
+/// Complete names for the already-selected export rows before publishing any file.
+pub fn format_export_rows(
+    session: &Session,
+    rows: &mut [crate::event_tree::ExportRow],
+    targets: &[u32],
+    resources: &[ResourceInfo],
+    buffers: &[Buffer],
+    language: Language,
+    show_all_parameters: bool,
+    show_parameter_names: bool,
+) -> Result<(), String> {
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let results = format_events(
+        session,
+        targets,
+        resources,
+        buffers,
+        language,
+        show_all_parameters,
+        show_parameter_names,
+        || false,
+    )?;
+    let mut names = HashMap::new();
+    for (event, result) in results {
+        names.insert(
+            event,
+            result.map_err(|error| format!("Event {event}: {error}"))?,
+        );
+    }
+    for row in rows {
+        if let Some(name) = names.get(&row.event_id) {
+            row.name.clone_from(name);
+        }
+    }
+    Ok(())
+}
+
 fn format_event_with(
     read: &mut impl FnMut(&[u64], u64) -> Result<StructurePage, String>,
     context: &ResourceContext<'_>,
@@ -713,6 +752,38 @@ mod tests {
             language: Language::English,
         };
         assert_eq!(format_gpu_address(4100, &mixed_context).unwrap(), "0x1004");
+    }
+
+    #[test]
+    #[cfg(feature = "ui-tests")]
+    fn export_completes_uncached_names_before_writing() {
+        let (session, _, _) = crate::replay::test_support::recording_remote_session();
+        let mut rows = vec![crate::event_tree::ExportRow {
+            event_id: 41,
+            action_id: None,
+            action_range: None,
+            name: "Call()".into(),
+            depth: 0,
+            first_child: false,
+            duration: None,
+        }];
+        format_export_rows(
+            &session,
+            &mut rows,
+            &[41],
+            &[],
+            &[],
+            Language::English,
+            false,
+            true,
+        )
+        .unwrap();
+        assert!(
+            rows[0]
+                .name
+                .starts_with("Call(Topology=4, Upload=(300 bytes)")
+        );
+        assert!(rows[0].name.ends_with("Param129=1)"));
     }
 
     #[test]
