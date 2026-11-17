@@ -2532,6 +2532,59 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let (success, result) = invoke(&["--bridge", bridge, "inspect", capture]);
     assert!(success, "inspect failed: {result}");
     assert_eq!(result["capture"]["api"], 0);
+    let mut start_agent = Agent::new(Some(bridge));
+    let start_open =
+        start_agent.send(&serde_json::json!({"command":"open","path":capture}).to_string());
+    assert_eq!(start_open["ok"], true, "{start_open}");
+    let start = start_agent.send(r#"{"command":"select","event_id":0}"#);
+    assert_eq!(start["ok"], true, "{start}");
+    assert_eq!(start["data"]["pipeline"]["event_id"], 0);
+    let filtered_start = start_agent.send(
+        r#"{"command":"filter_events","expression":"no-such-event","include_capture_start":true}"#,
+    );
+    assert_eq!(
+        filtered_start["data"]["events"]["total"], "1",
+        "{filtered_start}"
+    );
+    assert_eq!(
+        filtered_start["data"]["events"]["items"][0]["capture_start"],
+        true
+    );
+    let first_page = start_agent.send(r#"{"command":"filter_events","expression":"","include_capture_start":true,"collapsed_events":[0],"limit":1}"#);
+    assert_eq!(first_page["data"]["events"]["items"][0]["event_id"], 0);
+    let second_page = start_agent.send(r#"{"command":"filter_events","expression":"","include_capture_start":true,"offset":"1","limit":1}"#);
+    assert_ne!(second_page["data"]["events"]["items"][0]["event_id"], 0);
+    let forward_start = start_agent.send(
+        r#"{"command":"step_action","event_id":0,"direction":"next","include_capture_start":true}"#,
+    );
+    assert_eq!(forward_start["ok"], true, "{forward_start}");
+    let first_event = forward_start["data"]["action"]["event_id"]
+        .as_u64()
+        .unwrap();
+    let previous = start_agent.send(&serde_json::json!({"command":"step_action","event_id":first_event,"direction":"previous","include_capture_start":true}).to_string());
+    assert_eq!(
+        previous["data"]["action"]["capture_start"], true,
+        "{previous}"
+    );
+    let found_start = start_agent
+        .send(r#"{"command":"find_event","query":"Capture Start","include_capture_start":true}"#);
+    assert_eq!(
+        found_start["data"]["match"]["capture_start"], true,
+        "{found_start}"
+    );
+    let explicit_zero =
+        start_agent.send(r#"{"command":"find_event","query":"@0","include_capture_start":true}"#);
+    assert!(explicit_zero["data"]["match"].is_null());
+    let start_export_path = dir.path().join("capture-start-excluded.txt");
+    let start_export = start_agent
+        .send(&serde_json::json!({"command":"export_events","path":start_export_path}).to_string());
+    assert_eq!(start_export["ok"], true, "{start_export}");
+    assert!(
+        !std::fs::read_to_string(start_export_path)
+            .unwrap()
+            .contains("Capture Start")
+    );
+    start_agent.quit();
     let buffers = result["capture"]["buffers"].as_array().unwrap();
     assert!(!buffers.is_empty());
     assert!(buffers.iter().all(|buffer| {

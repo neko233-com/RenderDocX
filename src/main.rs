@@ -15,7 +15,7 @@ use renderdocx::{
     annotations,
     backend::{self, Settings},
     debug_navigation::{DebugNavigator, SourceStep},
-    event_tree::{EventRow, EventTree},
+    event_tree::{EventRow, EventTarget, EventTree},
     i18n::Language,
     live::{
         CaptureOptions, EnvOperation, EnvSeparator, EnvironmentModification, LaunchConfiguration,
@@ -3381,6 +3381,28 @@ impl Workspace {
     }
 
     fn select_event(&mut self, index: usize, api_index: Option<usize>, cx: &mut Context<Self>) {
+        let Some(action) = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.actions.get(index))
+        else {
+            return;
+        };
+        let event = match api_index {
+            Some(api_index) => match action.api_events.get(api_index) {
+                Some(event) => event.event_id,
+                None => return,
+            },
+            None => action.event_id,
+        };
+        self.select_replay_event(Some(index), event, cx);
+    }
+
+    fn select_capture_start(&mut self, cx: &mut Context<Self>) {
+        self.select_replay_event(None, 0, cx);
+    }
+
+    fn select_replay_event(&mut self, index: Option<usize>, event: u32, cx: &mut Context<Self>) {
         self.timeline.pending_scrub = None;
         if self.protect_shader_draft(cx) {
             return;
@@ -3401,20 +3423,6 @@ impl Workspace {
         }
         let Some(session) = self.session.clone() else {
             return;
-        };
-        let Some(action) = self
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.actions.get(index))
-        else {
-            return;
-        };
-        let event = match api_index {
-            Some(api_index) => match action.api_events.get(api_index) {
-                Some(event) => event.event_id,
-                None => return,
-            },
-            None => action.event_id,
         };
         let revision = session.next_revision();
         self.selection_revision = revision;
@@ -3461,7 +3469,7 @@ impl Workspace {
                 this.replay_pending = false;
                 match result {
                     Ok(Some(pipeline)) => {
-                        this.selected = Some(index);
+                        this.selected = index;
                         this.pipeline = Some(pipeline);
                         this.status = None;
                     }
@@ -5402,7 +5410,7 @@ impl Workspace {
         let Some(event) = self.pipeline.as_ref().map(|pipeline| pipeline.event_id) else {
             return;
         };
-        let Some(action) = self.event_tree.step_action(event, forward) else {
+        let Some(target) = self.event_tree.step_including_start(event, forward) else {
             self.status = Some(
                 self.t(
                     "No further action in this direction.",
@@ -5415,10 +5423,19 @@ impl Workspace {
             cx.notify();
             return;
         };
-        if let Some(position) = self.event_tree.reveal_filtered(action) {
-            self.event_scroll
-                .scroll_to_item(position, gpui::ScrollStrategy::Nearest);
-            self.select_event(action, None, cx);
+        match target {
+            EventTarget::CaptureStart => {
+                self.event_scroll
+                    .scroll_to_item(0, gpui::ScrollStrategy::Nearest);
+                self.select_capture_start(cx);
+            }
+            EventTarget::Row(action) => {
+                if let Some(position) = self.event_tree.reveal_filtered(action) {
+                    self.event_scroll
+                        .scroll_to_item(position + 1, gpui::ScrollStrategy::Nearest);
+                    self.select_event(action, None, cx);
+                }
+            }
         }
     }
 
@@ -5564,7 +5581,12 @@ impl Workspace {
             return;
         }
         let current = self.pipeline.as_ref().map(|pipeline| pipeline.event_id);
-        let Some(row) = self.event_tree.find(&query, current, forward) else {
+        let Some(target) = self.event_tree.find_including_start(
+            &query,
+            current,
+            forward,
+            self.t("Capture Start", "捕获开始", "キャプチャ開始", "캡처 시작"),
+        ) else {
             if !query.is_empty() {
                 self.status = Some(
                     self.t(
@@ -5579,6 +5601,12 @@ impl Workspace {
             }
             return;
         };
+        let EventTarget::Row(row) = target else {
+            self.event_scroll
+                .scroll_to_item(0, gpui::ScrollStrategy::Nearest);
+            self.select_capture_start(cx);
+            return;
+        };
         let Some(target) = self.event_tree.row(row) else {
             return;
         };
@@ -5586,7 +5614,7 @@ impl Workspace {
             return;
         };
         self.event_scroll
-            .scroll_to_item(position, gpui::ScrollStrategy::Nearest);
+            .scroll_to_item(position + 1, gpui::ScrollStrategy::Nearest);
         let (action, api) = match target {
             EventRow::Action(action) => (action, None),
             EventRow::Api { action, event } => (action, Some(event)),
@@ -5647,7 +5675,7 @@ impl Workspace {
             .update(cx, |state, cx| state.set_value("", window, cx));
         if let Some(row) = self.event_tree.reveal(action, api) {
             self.event_scroll
-                .scroll_to_item(row, gpui::ScrollStrategy::Nearest);
+                .scroll_to_item(row + 1, gpui::ScrollStrategy::Nearest);
         }
         self.tab = CaptureTab::Events;
         self.select_event(action, api, cx);
@@ -10343,7 +10371,7 @@ impl Workspace {
             .update(cx, |state, cx| state.set_value("", window, cx));
         if let Some(row) = self.event_tree.reveal(index, None) {
             self.event_scroll
-                .scroll_to_item(row, gpui::ScrollStrategy::Nearest);
+                .scroll_to_item(row + 1, gpui::ScrollStrategy::Nearest);
         }
         self.tab = CaptureTab::Events;
         if self.replay_pending {
@@ -11863,7 +11891,7 @@ impl Workspace {
             CaptureTab::Mesh => mesh_lines.len(),
             CaptureTab::Textures => snapshot.textures.len(),
             CaptureTab::Buffers => snapshot.buffers.len(),
-            CaptureTab::Events => self.event_tree.visible.len(),
+            CaptureTab::Events => self.event_tree.visible.len() + 1,
             CaptureTab::ApiCalls => self
                 .selected
                 .and_then(|i| snapshot.actions.get(i))
@@ -12760,10 +12788,44 @@ impl Workspace {
                 "capture-actions",
                 count,
                 cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
-                    this.format_viewport_events(range.clone(), cx);
+                    this.format_viewport_events(
+                        range.start.saturating_sub(1)..range.end.saturating_sub(1),
+                        cx,
+                    );
                     range
                         .filter_map(|row| {
-                            let node = *this.event_tree.visible.get(row)?;
+                            if row == 0 {
+                                let selected = this.selected.is_none()
+                                    && this
+                                        .pipeline
+                                        .as_ref()
+                                        .is_some_and(|pipeline| pipeline.event_id == 0);
+                                return Some(
+                                    div()
+                                        .id("capture-start")
+                                        .test_support()
+                                        .h(px(32.))
+                                        .px_3()
+                                        .flex()
+                                        .items_center()
+                                        .gap_3()
+                                        .cursor_pointer()
+                                        .bg(rgb(if selected { 0x304c7c } else { 0x192332 }))
+                                        .hover(|row| row.bg(rgb(0x263950)))
+                                        .child("0")
+                                        .child(this.t(
+                                            "Capture Start",
+                                            "捕获开始",
+                                            "キャプチャ開始",
+                                            "캡처 시작",
+                                        ))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.select_capture_start(cx)
+                                        }))
+                                        .into_any_element(),
+                                );
+                            }
+                            let node = *this.event_tree.visible.get(row - 1)?;
                             let (index, api_index) = match this.event_tree.row(node)? {
                                 EventRow::Action(index) => (index, None),
                                 EventRow::Api { action, event } => (action, Some(event)),
@@ -12896,7 +12958,8 @@ impl Workspace {
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.select_event(index, api_index, cx)
                                             })),
-                                    ),
+                                    )
+                                    .into_any_element(),
                             )
                         })
                         .collect::<Vec<_>>()
@@ -21543,6 +21606,33 @@ mod ui_tests {
                 cx.notify();
             });
         });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, _| {
+                view.event_scroll
+                    .scroll_to_item(0, gpui::ScrollStrategy::Nearest)
+            });
+            window.render_frame(cx);
+            assert!(window.find("capture-start").visible());
+            window.click("capture-start", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(view.read(cx).selected.is_none());
+            assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 0);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("event-step-next", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 42));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("event-step-prev", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 0));
 
         // When the local D3D11 fixtures are configured, repeat the interaction against
         // a real capture and replay session, not the recording transport above.
@@ -21683,6 +21773,28 @@ mod ui_tests {
                     })
                 });
                 cx.update_window(handle.into(), |_, window, cx| {
+                    view.update(cx, |view, _| {
+                        view.event_scroll.scroll_to_item(0, gpui::ScrollStrategy::Nearest);
+                    });
+                    window.render_frame(cx);
+                    window.click("capture-start", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        let view = view.read(cx);
+                        !view.replay_pending
+                            && view.selected.is_none()
+                            && view.pipeline.as_ref().is_some_and(|pipeline| pipeline.event_id == 0)
+                    }) {
+                        break;
+                    }
+                    assert!(std::time::Instant::now() < deadline, "real capture start replay timed out");
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
                     window.render_frame(cx);
                     window.click("resources-tab", cx);
                     window.click("resource-filter", cx);
@@ -21795,7 +21907,7 @@ mod ui_tests {
                             })
                             .expect("filtered API event row");
                         view.event_scroll
-                            .scroll_to_item(row, gpui::ScrollStrategy::Center);
+                            .scroll_to_item(row + 1, gpui::ScrollStrategy::Center);
                         cx.notify();
                     });
                     window.render_frame(cx);

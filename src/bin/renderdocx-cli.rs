@@ -1,7 +1,7 @@
 use renderdocx::{
     backend::Settings,
     debug_navigation::{Breakpoint, DebugNavigator, SourceStep, StopReason},
-    event_tree::{EventRow, EventTree},
+    event_tree::{EventRow, EventTarget, EventTree},
     live::{
         CaptureOptions, LaunchConfiguration, LiveSession, browse_remote, download_remote_capture,
         enumerate_gpus, enumerate_target,
@@ -57,6 +57,12 @@ fn show_empty_regions(request: &serde_json::Map<String, Value>) -> Option<bool> 
         None => Some(true),
         Some(value) => value.as_bool(),
     }
+}
+
+fn include_capture_start(request: &serde_json::Map<String, Value>) -> Option<bool> {
+    request
+        .get("include_capture_start")
+        .map_or(Some(false), Value::as_bool)
 }
 
 #[derive(Clone, Copy)]
@@ -1032,10 +1038,10 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     Some(Value::String(s)) if s == "previous" => Some(false),
                     _ => None,
                 };
-                match (&opened, event, filter, forward, show_empty_regions(&request), event_name_options(&request)) {
-                    (None, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
-                    (Some((session, snapshot)), Some(event), Some(filter), Some(forward), Some(show_empty), Some(name_options)) => {
-                        let known = snapshot.actions.iter().any(|action| action.event_id == event || action.api_events.iter().any(|e| e.event_id == event));
+                match (&opened, event, filter, forward, show_empty_regions(&request), event_name_options(&request), include_capture_start(&request)) {
+                    (None, _, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some((session, snapshot)), Some(event), Some(filter), Some(forward), Some(show_empty), Some(name_options), Some(include_start)) => {
+                        let known = (include_start && event == 0) || snapshot.actions.iter().any(|action| action.event_id == event || action.api_events.iter().any(|e| e.event_id == event));
                         if !known { Err(("invalid_arguments", "Unknown event".into())) }
                         else {
                             let mut tree = EventTree::default();
@@ -1046,8 +1052,10 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                             if let Err(error) = if name_options.enabled { format_tree_names(&mut tree, session, snapshot, settings.language, name_options.all, name_options.parameter_names) } else { Ok(()) } { Err(("replay_event_format_failed", error)) }
                             else if let Err(error) = apply_event_filter(&mut tree, session, snapshot, settings.language, filter) { Err(("invalid_filter", error)) }
                             else {
-                                let action = tree.step_action(event, forward).map(|index|
-                                    json!({"action_index":index,"event_id":snapshot.actions[index].event_id}));
+                                let action = (if include_start { tree.step_including_start(event, forward) } else { tree.step_action(event, forward).map(EventTarget::Row) }).map(|target| match target {
+                                    EventTarget::CaptureStart => json!({"action_index":null,"event_id":0,"capture_start":true}),
+                                    EventTarget::Row(index) => json!({"action_index":index,"event_id":snapshot.actions[index].event_id,"capture_start":false}),
+                                });
                                 Ok(json!({"action":action}))
                             }
                         }
@@ -1078,9 +1086,9 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     Some(Value::String(s)) if s == "previous" => Some(false),
                     _ => None,
                 };
-                match (&opened, query, filter, show_api, current, forward, show_empty_regions(&request), event_name_options(&request)) {
-                    (None, _, _, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
-                    (Some((session, snapshot)), Some(query), Some(filter), Some(show_api), Some(current), Some(forward), Some(show_empty), Some(name_options)) => {
+                match (&opened, query, filter, show_api, current, forward, show_empty_regions(&request), event_name_options(&request), include_capture_start(&request)) {
+                    (None, _, _, _, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some((session, snapshot)), Some(query), Some(filter), Some(show_api), Some(current), Some(forward), Some(show_empty), Some(name_options), Some(include_start)) => {
                         let mut tree = EventTree::default();
                         tree.set_use_custom_action_names(name_options.use_custom);
                         tree.reset(&snapshot.actions);
@@ -1090,12 +1098,13 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         if let Err(error) = if name_options.enabled { format_tree_names(&mut tree, session, snapshot, settings.language, name_options.all, name_options.parameter_names) } else { Ok(()) } { Err(("replay_event_format_failed", error)) }
                         else if let Err(error) = apply_event_filter(&mut tree, session, snapshot, settings.language, filter) { Err(("invalid_filter", error)) }
                         else {
-                            let found = tree.find(query, current, forward).and_then(|row| {
+                            let found = (if include_start { tree.find_including_start(query, current, forward, "Capture Start") } else { tree.find(query, current, forward).map(EventTarget::Row) }).and_then(|target| {
+                                let EventTarget::Row(row) = target else { return Some(json!({"event_id":0,"action_index":null,"api_index":null,"group_range":null,"capture_start":true})); };
                                 let (action_index, api_index) = match tree.row(row)? {
                                     EventRow::Action(action) => (action, None),
                                     EventRow::Api { action, event } => (action, Some(event)),
                                 };
-                                Some(json!({"event_id":tree.event_id(row)?,"action_index":action_index,"api_index":api_index,"group_range":tree.action_range(row)}))
+                                Some(json!({"event_id":tree.event_id(row)?,"action_index":action_index,"api_index":api_index,"group_range":tree.action_range(row),"capture_start":false}))
                             });
                             Ok(json!({"match":found}))
                         }
@@ -1134,9 +1143,9 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                             .collect::<Option<Vec<_>>>()
                     }),
                 };
-                match (&opened, expression, show_api, offset, limit, annotation_key, show_empty, collapsed, event_name_options(&request)) {
-                    (None, _, _, _, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
-                    (Some((session, snapshot)), Some(expression), Some(show_api), Some(offset), Some(limit), Some(annotation_key), Some(show_empty), Some(collapsed), Some(name_options)) => {
+                match (&opened, expression, show_api, offset, limit, annotation_key, show_empty, collapsed, event_name_options(&request), include_capture_start(&request)) {
+                    (None, _, _, _, _, _, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some((session, snapshot)), Some(expression), Some(show_api), Some(offset), Some(limit), Some(annotation_key), Some(show_empty), Some(collapsed), Some(name_options), Some(include_start)) => {
                         let mut tree = EventTree::default();
                         tree.set_use_custom_action_names(name_options.use_custom);
                         tree.reset(&snapshot.actions);
@@ -1147,9 +1156,9 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                             Err(("replay_event_format_failed", error))
                         } else if let Err(error) = apply_event_filter(&mut tree, session, snapshot, settings.language, expression) {
                             Err(("invalid_filter", error))
-                        } else if collapsed.iter().any(|event| tree.row_for_event(*event).is_none()) {
+                        } else if collapsed.iter().any(|event| !(include_start && *event == 0) && tree.row_for_event(*event).is_none()) {
                             Err(("invalid_arguments", "Unknown collapsed event".into()))
-                        } else if { for event in &collapsed { if let Some(row) = tree.row_for_event(*event) { tree.set_subtree_collapsed(row, true); } } offset > tree.visible.len() } {
+                        } else if { for event in &collapsed { if let Some(row) = tree.row_for_event(*event) { tree.set_subtree_collapsed(row, true); } } offset > tree.visible.len() + usize::from(include_start) } {
                             Err(("invalid_arguments", "Event offset exceeds the filtered item count".into()))
                         } else { (|| {
                             let annotations = match annotation_key {
@@ -1157,7 +1166,10 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                                     .map_err(|error| ("replay_event_annotation_failed", error))?,
                                 None => Default::default(),
                             };
-                            let items: Vec<Value> = tree.visible.iter().skip(offset).take(limit).map(|&row| {
+                            let total = tree.visible.len() + usize::from(include_start);
+                            let items: Vec<Value> = (0..total).skip(offset).take(limit).map(|position| {
+                                if include_start && position == 0 { return json!({"action_index":null,"api_index":null,"event_id":0,"parent_action_index":null,"name":"Capture Start","direct_match":false,"always_visible":true,"capture_start":true,"duration_seconds":null,"annotation":null,"group_range":null,"has_children":false,"collapsed":false}); }
+                                let row = tree.visible[position - usize::from(include_start)];
                                 let (action_index, api_index) = match tree.row(row).expect("visible row") {
                                     EventRow::Action(action) => (action, None),
                                     EventRow::Api { action, event } => (action, Some(event)),
@@ -1165,13 +1177,13 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                                 let action = &snapshot.actions[action_index];
                                 let event_id = api_index.map(|index| action.api_events[index].event_id).unwrap_or(action.event_id);
                                 let name = tree.display_name(row).unwrap_or("");
-                                json!({"action_index":action_index,"api_index":api_index,"event_id":event_id,
+                                json!({"action_index":action_index,"api_index":api_index,"event_id":event_id,"capture_start":false,
                                     "parent_action_index": if action.parent < 0 { None } else { Some(action.parent) },
                                     "name":name,"direct_match":tree.directly_matches(row),"duration_seconds":tree.duration(event_id),"annotation":annotations.get(&event_id),
                                     "group_range":tree.action_range(row),"has_children":tree.has_children(row),"collapsed":tree.is_collapsed(row)})
                             }).collect();
                             Ok(json!({"events":{"expression":expression,"show_api":show_api,"show_empty_regions":show_empty,"format_names":name_options.enabled,"annotation_key":annotation_key,"offset":offset.to_string(),
-                                "total":tree.visible.len().to_string(),"items":items}}))
+                                "total":total.to_string(),"items":items}}))
                         })() }
                     }
                     _ => Err(("invalid_arguments", "filter_events requires an expression, optional show_api boolean, decimal-string offset, limit 1–128 and valid formatting options".into())),

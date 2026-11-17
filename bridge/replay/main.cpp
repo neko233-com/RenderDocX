@@ -2801,7 +2801,7 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       event = event * 10 + uint64_t(c - '0');
       if(event > (std::numeric_limits<uint32_t>::max)()) { valid = false; break; }
     }
-    if(!valid || event_ids.count(uint32_t(event)) == 0) { error("Unknown capture event"); continue; }
+    if(!valid || (event != 0 && event_ids.count(uint32_t(event)) == 0)) { error("Unknown capture event"); continue; }
     debug.reset();
     mesh_ready = false;
     history_ready = false;

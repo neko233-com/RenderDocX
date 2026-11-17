@@ -7,6 +7,12 @@ pub enum EventRow {
     Api { action: usize, event: usize },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventTarget {
+    CaptureStart,
+    Row(usize),
+}
+
 #[derive(Clone, Debug)]
 pub struct ExportRow {
     pub event_id: u32,
@@ -200,6 +206,67 @@ impl EventTree {
             .filter(|id| *id > 0 && number == id.to_string())
             .is_some_and(|id| self.event_ids.contains(&id));
         !known
+    }
+
+    /// Search the always-visible virtual capture-start row together with eligible events.
+    pub fn find_including_start(
+        &self,
+        query: &str,
+        current: Option<u32>,
+        forward: bool,
+        start_label: &str,
+    ) -> Option<EventTarget> {
+        if !self.find_requires_names(query) {
+            return self.find(query, current, forward).map(EventTarget::Row);
+        }
+        let text = query.to_lowercase();
+        let mut matches = Vec::new();
+        if start_label.to_lowercase().contains(&text) {
+            matches.push(EventTarget::CaptureStart);
+        }
+        matches.extend(
+            self.order
+                .iter()
+                .copied()
+                .filter(|&row| self.eligible[row] && self.lower_names[row].contains(&text))
+                .map(EventTarget::Row),
+        );
+        if matches.is_empty() {
+            return None;
+        }
+        let id = |target: EventTarget| match target {
+            EventTarget::CaptureStart => 0,
+            EventTarget::Row(row) => self.event_ids[row],
+        };
+        if let Some(current) = current {
+            if let Some(index) = matches.iter().position(|&target| id(target) == current) {
+                return Some(
+                    matches[if forward {
+                        (index + 1) % matches.len()
+                    } else {
+                        (index + matches.len() - 1) % matches.len()
+                    }],
+                );
+            }
+            if forward {
+                return matches
+                    .iter()
+                    .copied()
+                    .find(|target| id(*target) >= current)
+                    .or_else(|| matches.first().copied());
+            }
+            return matches
+                .iter()
+                .rev()
+                .copied()
+                .find(|target| id(*target) <= current)
+                .or_else(|| matches.last().copied());
+        }
+        if forward {
+            matches.first().copied()
+        } else {
+            matches.last().copied()
+        }
     }
 
     pub fn record_format_attempts(&mut self, events: impl IntoIterator<Item = u32>) {
@@ -449,6 +516,16 @@ impl EventTree {
     }
 
     pub fn step_action(&self, current_event: u32, forward: bool) -> Option<usize> {
+        if current_event == 0 {
+            if !forward || self.actions.is_empty() {
+                return None;
+            }
+            return if self.eligible.first().copied().unwrap_or(false) {
+                Some(0)
+            } else {
+                self.links.step(0, true, &self.eligible)
+            };
+        }
         let action = self
             .actions
             .iter()
@@ -459,6 +536,15 @@ impl EventTree {
                     .position(|a| a.api_events.iter().any(|e| e.event_id == current_event))
             })?;
         self.links.step(action, forward, &self.eligible)
+    }
+
+    pub fn step_including_start(&self, current_event: u32, forward: bool) -> Option<EventTarget> {
+        if current_event != 0 && self.row_for_event(current_event).is_none() {
+            return None;
+        }
+        self.step_action(current_event, forward)
+            .map(EventTarget::Row)
+            .or_else(|| (!forward && current_event != 0).then_some(EventTarget::CaptureStart))
     }
 
     pub fn action_range(&self, row: usize) -> Option<&crate::event_ranges::ActionRange> {
@@ -587,6 +673,47 @@ impl EventTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn virtual_capture_start_navigation_keeps_filter_and_upstream_id_rules() {
+        let mut first = action(-1);
+        first.event_id = 1;
+        first.name = "First Draw".into();
+        first.flags = 2;
+        let mut second = action(-1);
+        second.event_id = 2;
+        second.name = "Second Draw".into();
+        second.flags = 2;
+        let mut tree = EventTree::default();
+        tree.reset(&[first, second]);
+        assert_eq!(
+            tree.step_including_start(0, true),
+            Some(EventTarget::Row(0))
+        );
+        assert_eq!(
+            tree.step_including_start(1, false),
+            Some(EventTarget::CaptureStart)
+        );
+        assert_eq!(tree.step_including_start(0, false), None);
+        assert_eq!(tree.step_including_start(999, false), None);
+        assert_eq!(
+            tree.find_including_start("Capture", Some(1), true, "Capture Start"),
+            Some(EventTarget::CaptureStart)
+        );
+        assert_eq!(
+            tree.find_including_start("@0", None, true, "Capture Start"),
+            None
+        );
+        tree.set_filter("Second");
+        assert_eq!(
+            tree.step_including_start(0, true),
+            Some(EventTarget::Row(1))
+        );
+        assert_eq!(
+            tree.find_including_start("Capture", None, true, "Capture Start"),
+            Some(EventTarget::CaptureStart)
+        );
+    }
 
     #[test]
     fn formatted_names_follow_visibility_filter_and_marker_rules() {
