@@ -4387,20 +4387,27 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let Some(session) = self.session.clone() else {
-            self.log_messages.clear();
-            self.status = Some(
-                self.t("Open a capture first to read the RenderDoc log.", "请先打开捕获再读取 RenderDoc 日志。")
-                    .to_owned(),
-            );
-            cx.notify();
-            return;
-        };
+        // Prefer the pure-Rust path: read RenderDoc's on-disk log directly,
+        // with no C++ replay bridge involved at all.
         let revision = self.open_revision;
         self.log_pending = true;
-        let task = cx.background_executor().spawn(async move { session.log() });
+        let task = cx.background_executor().spawn(async move {
+            match renderdocx::renderdoc_log::load_latest_log() {
+                Ok((_path, text)) => return Ok::<_, String>(text),
+                Err(_) => {
+                    // Fall back to the bridge-backed session, if any.
+                    Err("no-local-log".to_owned())
+                }
+            }
+        });
+        let session = self.session.clone();
         cx.spawn(async move |this, cx| {
-            let result = task.await;
+            let mut result = task.await;
+            if result.is_err() {
+                if let Some(session) = session {
+                    result = session.log();
+                }
+            }
             let _ = this.update(cx, |this, cx| {
                 this.log_pending = false;
                 if this.open_revision != revision {
@@ -4410,6 +4417,16 @@ impl Workspace {
                     Ok(text) => {
                         this.log_messages = renderdocx::log_view::parse_log(&text);
                         this.status = None;
+                    }
+                    Err(error) if error == "no-local-log" => {
+                        this.log_messages.clear();
+                        this.status = Some(
+                            this.t(
+                                "No RenderDoc log file found. Configure RENDERDOC_LOG_FILE or open a capture.",
+                                "未找到 RenderDoc 日志文件。请设置 RENDERDOC_LOG_FILE 或打开捕获。",
+                            )
+                            .to_owned(),
+                        );
                     }
                     Err(error) => {
                         this.status = Some(format!(

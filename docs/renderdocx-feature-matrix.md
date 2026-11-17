@@ -27,7 +27,7 @@
 | A12 | StatisticsViewer | 🟡 | `src/frame_statistics.rs`：概览/分类/直方图/本地化导出；概览与报告未复现全部上游格式细节，实机 GUI 验证未完成 |
 | A13 | PerformanceCounterViewer | 🟡 | README：GPU counter 选择/采样/分页（GUI+CLI）；驱动/厂商 counter 与完整上游 counter 工作流未完成 |
 | A14 | DebugMessageView（Errors and Warnings） | 🟡 | `src/debug_message_view.rs`：轮询/过滤/隐藏/跳转/复制；HTML/URL、多单元格选择、实机验证未完成 |
-| A15 | LogView（核心日志输出窗口） | ✅ | `bridge/replay/main.cpp` 新增 `log` 命令读取 `RENDERDOC_GetLogFileContents`；`src/log_view.rs` 按上游 LogView 正则语义解析 Source/PID/时间/位置/类型/消息（2 项单测）；`src/replay.rs` `Session::log` + `Reply::Log` + 传输层测试；GUI 日志面板含过滤输入、刷新、关闭与级别着色，GPUI 交互测试通过。**有意差异**：面板内嵌而非独立顶层窗口；桥接 C++ 改动未在本地实机编译（需上游 CMake 构建），因此真实日志读取尚未实机验证 |
+| A15 | LogView（核心日志输出窗口） | ✅ | **已去除 C++ 桥接依赖**：`src/renderdoc_log.rs` 纯 Rust 定位并读取上游日志文件（`%TEMP%\RenderDoc\RenderDoc_*.log`，对齐 `win32_stringio.cpp::GetDefaultFiles`；`RENDERDOC_LOG_FILE` 可覆盖），2 项单测；`src/log_view.rs` 按上游正则语义解析各列；GUI 日志面板含过滤/刷新/关闭/级别着色，GPUI 测试通过。桥接 `log` 命令降级为回退。**有意差异**：内嵌面板而非顶层窗口 |
 | A16 | CommentView（捕获注释/书签） | ✅ | `src/annotations.rs`：notes/bookmarks 读取与显式保存，GUI+CLI，D3D11 覆盖 |
 | A17 | PythonShell | 🟡 | `src/python_shell.rs` 实现脚本执行层（外部 Python 子进程、`RENDERDOCX_PYTHON` 可配置、stdout/stderr 捕获与格式化，3 项单测含真实 Python 执行）；GUI 提供脚本控制台（表达式执行/多行脚本运行/输出/清除）。**未完成**：未嵌入 CPython 与 `pyrenderdoc` 绑定，脚本无法访问已打开捕获、无 REPL 状态/调试器附加/帮助浏览器/项目浏览器 |
 

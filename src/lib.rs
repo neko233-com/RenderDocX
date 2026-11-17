@@ -34,6 +34,7 @@ pub mod mesh_positions;
 pub mod packed_format;
 pub mod python_shell;
 pub mod replay;
+pub mod renderdoc_log;
 pub mod replay_loop;
 pub mod rich_message;
 pub mod sampler_view;
