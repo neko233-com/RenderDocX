@@ -1,5 +1,6 @@
 #include "api/replay/renderdoc_replay.h"
 #include "api/replay/version.h"
+#include "descriptor_batch.h"
 
 #include <cstdint>
 #include <algorithm>
@@ -350,6 +351,7 @@ void write_snapshot(IReplayController *controller, const ReplayOptions &options,
                     std::map<uint32_t, const SDObject *> &event_annotations,
                     std::map<uint32_t, uint32_t> &draw_instances,
                     std::map<uint32_t, uint32_t> &draw_vertices,
+                    std::map<uint32_t, uint32_t> &draw_vertex_offsets,
                     std::set<uint32_t> &indexed_draws,
                     std::map<uint32_t, const ActionDescription *> &dispatch_actions)
 {
@@ -495,7 +497,10 @@ void write_snapshot(IReplayController *controller, const ReplayOptions &options,
     if(action.flags & (ActionFlags::Drawcall | ActionFlags::MeshDispatch))
       draw_instances.emplace(action.eventId, (std::max)(1U, action.numInstances));
     if(action.flags & ActionFlags::Drawcall)
+    {
       draw_vertices.emplace(action.eventId, action.numIndices);
+      draw_vertex_offsets.emplace(action.eventId, action.vertexOffset);
+    }
     if((action.flags & ActionFlags::Drawcall) && (action.flags & ActionFlags::Indexed))
       indexed_draws.insert(action.eventId);
     if(action.flags & (ActionFlags::Dispatch | ActionFlags::MeshDispatch))
@@ -1122,9 +1127,10 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
   std::map<uint32_t, const SDObject *> event_annotations;
   std::map<uint32_t, uint32_t> draw_instances;
   std::map<uint32_t, uint32_t> draw_vertices;
+  std::map<uint32_t, uint32_t> draw_vertex_offsets;
   std::set<uint32_t> indexed_draws;
   std::map<uint32_t, const ActionDescription *> dispatch_actions;
-  write_snapshot(replay.controller, options, event_ids, texture_ids, buffer_ids, event_chunks, event_annotations, draw_instances, draw_vertices, indexed_draws, dispatch_actions);
+  write_snapshot(replay.controller, options, event_ids, texture_ids, buffer_ids, event_chunks, event_annotations, draw_instances, draw_vertices, draw_vertex_offsets, indexed_draws, dispatch_actions);
   std::map<ResourceId, size_t> resource_indices;
   const auto &resources = replay.controller->GetResources();
   for(size_t i = 0; i < resources.size(); ++i) resource_indices.emplace(resources[i].resourceId, i);
@@ -1151,7 +1157,7 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
     if(command == "quit") break;
     // A live debugger can hold backend replay state. Do not allow unrelated replay
     // operations to mutate that state between ContinueDebug calls.
-    if(debug.trace && command != "debug_next" && command != "debug_stop" && command != "debug_messages" &&
+    if(debug.trace && command != "debug_next" && command != "debug_stop" && command != "debug_messages" && command.compare(0, 16, "shader_messages ") != 0 &&
        command.compare(0, 13, "debug_vertex ") != 0 && command.compare(0, 12, "debug_pixel ") != 0 &&
        command.compare(0, 14, "debug_compute ") != 0 && command.compare(0, 11, "debug_mesh ") != 0 &&
        command.compare(0, 7, "select ") != 0)
@@ -1163,6 +1169,64 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       if(!result.OK()) { error(result_message(result)); break; }
       std::cout << "\nRENDERDOCX/1 {\"type\":\"debug_messages\",\"messages\":[";
       for(size_t i = 0; i < messages.size(); ++i) { if(i) std::cout << ','; write_debug_message(messages[i]); }
+      std::cout << "]}" << std::endl;
+      continue;
+    }
+    if(command.compare(0, 16, "shader_messages ") == 0)
+    {
+      std::istringstream args(command.substr(16));
+      std::string offset_text, limit_text, extra;
+      uint64_t offset = 0, limit = 0;
+      if(!selected || !(args >> offset_text >> limit_text) || (args >> extra) ||
+         !decimal(offset_text, offset) || !decimal(limit_text, limit) || limit == 0 || limit > 128)
+      { error("Invalid shader message page request"); continue; }
+      const rdcarray<ShaderMessage> &messages = replay.controller->GetPipelineState().GetShaderMessages();
+      if(offset > messages.size()) { error("Shader message offset is out of range"); continue; }
+      const size_t start = size_t(offset);
+      const size_t end = start + (std::min)(size_t(limit), messages.size() - start);
+      auto vec3 = [](const rdcfixedarray<uint32_t, 3> &value) {
+        std::cout << '[' << value[0] << ',' << value[1] << ',' << value[2] << ']';
+      };
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"shader_messages\",\"event_id\":" << selected_event
+                << ",\"offset\":\"" << offset << "\",\"total\":\"" << messages.size() << "\",\"messages\":[";
+      for(size_t i = start; i < end; ++i)
+      {
+        if(i != start) std::cout << ',';
+        const ShaderMessage &message = messages[i];
+        std::cout << "{\"stage\":" << uint32_t(message.stage) << ",\"disassembly_line\":" << message.disassemblyLine << ",\"message\":";
+        json_string(message.message);
+        std::cout << ",\"location\":";
+        switch(message.stage)
+        {
+          case ShaderStage::Vertex:
+            std::cout << "{\"vertex\":" << message.location.vertex.vertexIndex << ",\"instance\":" << message.location.vertex.instance << ",\"view\":" << message.location.vertex.view << '}'; break;
+          case ShaderStage::Geometry:
+            std::cout << "{\"primitive\":" << message.location.geometry.primitive << ",\"view\":" << message.location.geometry.view << '}'; break;
+          case ShaderStage::Pixel:
+            std::cout << "{\"x\":" << message.location.pixel.x << ",\"y\":" << message.location.pixel.y << ",\"sample\":" << message.location.pixel.sample << ",\"primitive\":" << message.location.pixel.primitive << ",\"view\":" << message.location.pixel.view << '}'; break;
+          case ShaderStage::Compute:
+            std::cout << "{\"workgroup\":"; vec3(message.location.compute.workgroup); std::cout << ",\"thread\":"; vec3(message.location.compute.thread); std::cout << '}'; break;
+          case ShaderStage::Task:
+            // A task message has no mesh workgroup. Older cores leave this
+            // union field uninitialised, so never copy it to the protocol.
+            std::cout << "{\"task_group\":"; vec3(message.location.mesh.taskGroup);
+            std::cout << ",\"mesh_group\":[4294967295,4294967295,4294967295],\"thread\":";
+            vec3(message.location.mesh.thread); std::cout << '}'; break;
+          case ShaderStage::Mesh:
+            std::cout << "{\"task_group\":"; vec3(message.location.mesh.taskGroup);
+            // Current Vulkan feedback uses a placeholder when a task shader
+            // is bound. Preserve the raw value but identify it as unreliable.
+            std::cout << ",\"task_group_reliable\":"
+                      << ((replay.controller->GetPipelineState().GetShader(ShaderStage::Task) == ResourceId() &&
+                           message.location.mesh.taskGroup[0] == ShaderMeshMessageLocation::NotUsed &&
+                           message.location.mesh.taskGroup[1] == ShaderMeshMessageLocation::NotUsed &&
+                           message.location.mesh.taskGroup[2] == ShaderMeshMessageLocation::NotUsed) ? "true" : "false")
+                      << ",\"mesh_group\":"; vec3(message.location.mesh.meshGroup);
+            std::cout << ",\"thread\":"; vec3(message.location.mesh.thread); std::cout << '}'; break;
+          default: std::cout << "null"; break;
+        }
+        std::cout << '}';
+      }
       std::cout << "]}" << std::endl;
       continue;
     }
@@ -1281,6 +1345,48 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       std::cout << "]}" << std::endl;
       continue;
     }
+    if(command.compare(0, 11, "recompress ") == 0)
+    {
+      std::string encoded, extra;
+      bytebuf bytes;
+      std::istringstream args(command.substr(11));
+      if(!(args >> encoded) || (args >> extra) || !decode_section_hex(encoded, bytes) || bytes.empty() ||
+         std::find(bytes.begin(), bytes.end(), byte(0)) != bytes.end())
+      { error("Invalid recompress request"); continue; }
+      std::string output(bytes.begin(), bytes.end());
+      ICaptureFile *file = RENDERDOC_OpenCaptureFile();
+      if(!file) { error("Could not open capture for recompression"); continue; }
+      ResultDetails opened = file->OpenFile(capture.c_str(), "rdc", nullptr);
+      if(!opened.OK()) { std::string message = result_message(opened); file->Shutdown(); error(message); continue; }
+      const int section = file->FindSectionByType(SectionType::FrameCapture);
+      if(section >= 0 && (file->GetSectionProperties(section).flags & SectionFlags::ZstdCompressed))
+      {
+        file->Shutdown();
+        std::cout << "\nRENDERDOCX/1 {\"type\":\"recompress\",\"already_compressed\":true}" << std::endl;
+        continue;
+      }
+      ResultDetails converted = file->Convert(output, "rdc", nullptr, nullptr);
+      std::string message = converted.OK() ? std::string() : result_message(converted);
+      uint64_t size = 0;
+      if(message.empty())
+      {
+        FILE *f = fopen(output.c_str(), "rb");
+        if(f) { fseek(f, 0, SEEK_END); size = uint64_t(ftell(f)); fclose(f); }
+      }
+      file->Shutdown();
+      if(!message.empty()) { error(message); continue; }
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"recompress\",\"already_compressed\":false,\"size\":" << size << "}" << std::endl;
+      continue;
+    }
+    if(command == "log")
+    {
+      rdcstr contents;
+      RENDERDOC_GetLogFileContents(0, contents);
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"log\",\"log\":";
+      json_string(contents.c_str(), contents.size());
+      std::cout << "}" << std::endl;
+      continue;
+    }
     if(command.compare(0, 10, "callstack ") == 0)
     {
       std::istringstream args(command.substr(10));
@@ -1392,8 +1498,10 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       for(const auto &access : accesses)
         if(access.descriptorStore != ResourceId() && access_stores.find(access.descriptorStore) == access_stores.end())
           access_stores.emplace(access.descriptorStore, access_stores.size());
-      struct DescriptorRow { DescriptorAccess access; bool has_access = false; rdcarray<Descriptor> descriptors; rdcarray<SamplerDescriptor> samplers; rdcarray<DescriptorLogicalLocation> locations; uint32_t byte_offset = 0; };
+      struct DescriptorRow { DescriptorAccess access; bool has_access = false; rdcarray<Descriptor> descriptors; rdcarray<SamplerDescriptor> samplers; rdcarray<DescriptorLogicalLocation> locations; DescriptorRange range; uint32_t byte_offset = 0; };
+      struct DescriptorBatch { std::vector<size_t> rows; rdcarray<DescriptorRange> ranges; };
       std::vector<DescriptorRow> rows(count);
+      std::map<ResourceId, DescriptorBatch> batches;
       for(size_t i = 0; i < count; ++i)
       {
         DescriptorRow &row = rows[i];
@@ -1412,12 +1520,37 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
         }
         row.byte_offset = range.offset;
         if(store == ResourceId() || range.descriptorSize == 0) continue;
-        rdcarray<DescriptorRange> ranges = {range};
-        row.descriptors = replay.controller->GetDescriptors(store, ranges);
-        row.locations = replay.controller->GetDescriptorLocations(store, ranges);
-        DescriptorType sampler_type = row.has_access ? row.access.type : (row.descriptors.empty() ? DescriptorType::Unknown : row.descriptors[0].type);
-        if(sampler_type == DescriptorType::Sampler || sampler_type == DescriptorType::ImageSampler)
-        { range.type = sampler_type; ranges[0] = range; row.samplers = replay.controller->GetSamplerDescriptors(store, ranges); }
+        row.range = range;
+        batches[store].rows.push_back(i);
+        batches[store].ranges.push_back(range);
+      }
+      for(const auto &batch : batches)
+      {
+        const ResourceId store = batch.first;
+        const DescriptorBatch &group = batch.second;
+        distribute_descriptor_batch(group.rows.size(),
+          [&] { return replay.controller->GetDescriptors(store, group.ranges); },
+          [&](size_t i) { return replay.controller->GetDescriptors(store, {rows[group.rows[i]].range}); },
+          [&](size_t i, const Descriptor &value) { rows[group.rows[i]].descriptors.push_back(value); });
+        distribute_descriptor_batch(group.rows.size(),
+          [&] { return replay.controller->GetDescriptorLocations(store, group.ranges); },
+          [&](size_t i) { return replay.controller->GetDescriptorLocations(store, {rows[group.rows[i]].range}); },
+          [&](size_t i, const DescriptorLogicalLocation &value) { rows[group.rows[i]].locations.push_back(value); });
+        DescriptorBatch samplers;
+        for(size_t i : group.rows)
+        {
+          DescriptorRow &row = rows[i];
+          DescriptorType type = row.has_access ? row.access.type : (row.descriptors.empty() ? DescriptorType::Unknown : row.descriptors[0].type);
+          if(type == DescriptorType::Sampler || type == DescriptorType::ImageSampler)
+          { DescriptorRange range = row.range; range.type = type; samplers.rows.push_back(i); samplers.ranges.push_back(range); }
+        }
+        if(!samplers.rows.empty())
+        {
+          distribute_descriptor_batch(samplers.rows.size(),
+            [&] { return replay.controller->GetSamplerDescriptors(store, samplers.ranges); },
+            [&](size_t i) { return replay.controller->GetSamplerDescriptors(store, {samplers.ranges[i]}); },
+            [&](size_t i, const SamplerDescriptor &value) { rows[samplers.rows[i]].samplers.push_back(value); });
+        }
       }
       result = replay.controller->GetFatalErrorStatus();
       if(!result.OK()) { error(result_message(result)); break; }
@@ -1478,7 +1611,20 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       debug.reset();
       debug_finished = false;
       mesh_ready = false;
-      debug.trace = replay.controller->DebugVertex(uint32_t(vertex), uint32_t(instance), uint32_t(index), uint32_t(view));
+      uint32_t replay_index = uint32_t(index);
+#ifdef RENDERDOCX_VULKAN_VERTEX_OFFSET_WORKAROUND
+      // The API receives the effective index. This upstream Vulkan implementation
+      // adds firstVertex again when manually fetching non-indexed input attributes.
+      // Its subgroup path uses vertid instead, so this does not alter that path.
+      if(replay.controller->GetAPIProperties().pipelineType == GraphicsAPI::Vulkan &&
+         indexed_draws.count(selected_event) == 0)
+      {
+        const auto offset = draw_vertex_offsets.find(selected_event);
+        if(offset == draw_vertex_offsets.end()) { error("Vertex offset is unavailable"); continue; }
+        replay_index -= offset->second;
+      }
+#endif
+      debug.trace = replay.controller->DebugVertex(uint32_t(vertex), uint32_t(instance), replay_index, uint32_t(view));
       result = replay.controller->GetFatalErrorStatus();
       if(!result.OK()) { error(result_message(result)); break; }
       if(!debug.trace || !debug.trace->debugger)
@@ -1571,6 +1717,9 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       { error("Select a mesh dispatch event first"); continue; }
       const PipeState &state = replay.controller->GetPipelineState();
       if(state.GetShader(ShaderStage::Mesh) == ResourceId()) { error("No mesh shader is bound"); continue; }
+      if(replay.controller->GetAPIProperties().pipelineType == GraphicsAPI::Vulkan &&
+         state.GetShader(ShaderStage::Task) != ResourceId())
+      { error("Mesh debugging with a task shader cannot identify the parent task group or payload"); continue; }
       const ShaderReflection *reflection = state.GetShaderReflection(ShaderStage::Mesh);
       if(!reflection) { error("Mesh shader reflection is unavailable"); continue; }
       const auto &groups = action->second->dispatchDimension;

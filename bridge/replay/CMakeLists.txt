@@ -16,6 +16,19 @@ endif()
 
 add_executable(renderdocx-replay main.cpp)
 add_executable(renderdocx-target target.cpp)
+# Some matching Vulkan cores add firstVertex to DebugVertex's already-offset
+# index during manual attribute fetch. Detect that exact implementation in the
+# checked-out core so the public API can keep RenderDoc's documented contract.
+set(VULKAN_SHADERDEBUG_SOURCE "${CMAKE_CURRENT_LIST_DIR}/../../renderdoc/driver/vulkan/vk_shaderdebug.cpp")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${VULKAN_SHADERDEBUG_SOURCE}")
+if(EXISTS "${VULKAN_SHADERDEBUG_SOURCE}")
+  file(READ "${VULKAN_SHADERDEBUG_SOURCE}" VULKAN_SHADERDEBUG_TEXT)
+  string(FIND "${VULKAN_SHADERDEBUG_TEXT}" "vertexOffset = (idx + vertOffset) * vb.stride;" VULKAN_VERTEX_OFFSET_BUG)
+  string(FIND "${VULKAN_SHADERDEBUG_TEXT}" "vertOffset = action->vertexOffset;" VULKAN_FIRST_VERTEX_OFFSET)
+  if(NOT VULKAN_VERTEX_OFFSET_BUG EQUAL -1 AND NOT VULKAN_FIRST_VERTEX_OFFSET EQUAL -1)
+    target_compile_definitions(renderdocx-replay PRIVATE RENDERDOCX_VULKAN_VERTEX_OFFSET_WORKAROUND=1)
+  endif()
+endif()
 foreach(target renderdocx-replay renderdocx-target)
 target_compile_features(${target} PRIVATE cxx_std_17)
 target_compile_definitions(${target} PRIVATE RENDERDOCX_CORE_COMMIT="${RENDERDOC_CORE_COMMIT}")
@@ -35,6 +48,8 @@ endforeach()
 
 option(RENDERDOCX_BUILD_FIXTURES "Build real capture fixtures for integration tests" OFF)
 if(RENDERDOCX_BUILD_FIXTURES)
+  add_executable(renderdocx-descriptor-batch-fixture ../../tests/fixtures/descriptor_batch.cpp)
+  target_compile_features(renderdocx-descriptor-batch-fixture PRIVATE cxx_std_17)
   add_executable(renderdocx-remote-server-fixture ../../tests/fixtures/remote_server.cpp)
   target_compile_features(renderdocx-remote-server-fixture PRIVATE cxx_std_17)
   target_include_directories(renderdocx-remote-server-fixture PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../../renderdoc")
