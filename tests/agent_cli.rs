@@ -23,6 +23,16 @@ fn texture_center_reports_capability_and_requires_capture() {
     );
     let result = agent.send(r#"{"command":"texture_center","index":0,"x":0,"y":0}"#);
     assert_eq!(result["error"]["code"], "no_capture");
+    assert!(
+        capabilities["data"]["serve_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|command| command == "texture_context")
+    );
+    let result =
+        agent.send(r#"{"command":"texture_context","index":0,"x":0,"y":0,"path":"context.png"}"#);
+    assert_eq!(result["error"]["code"], "no_capture");
     agent.quit();
 }
 
@@ -1847,6 +1857,25 @@ fn real_opengl_vertex_inputs_include_generic_and_normalized_values() {
         &[255, 0, 0],
         "centered OpenGL texel"
     );
+    let context_path = dir.path().join("gl-context.png");
+    let request = serde_json::json!({"command":"texture_context","index":texture,"uv":[0.1,0.75],"preview_flip_y":true,"preview_linear_as_gamma":false,"path":context_path});
+    let context = agent.send(&request.to_string());
+    assert_eq!(context["ok"], true, "{context}");
+    assert_eq!(context["data"]["highlight_rendered"], false);
+    assert_eq!(
+        context["data"]["geometry"]["texel"],
+        serde_json::json!([0, 1])
+    );
+    let mut reader = png::Decoder::new(std::io::BufReader::new(
+        std::fs::File::open(&context_path).unwrap(),
+    ))
+    .read_info()
+    .unwrap();
+    let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+    reader.next_frame(&mut pixels).unwrap();
+    assert_eq!(&pixels[(80 * 160 + 80) * 3..][..3], &[255, 0, 0]);
+    let repeat = agent.send(&request.to_string());
+    assert_eq!(repeat["error"]["code"], "replay_texture_render_failed");
     let clamped = agent.send(
         &serde_json::json!({"command":"texture_center","index":texture,"x":99,"y":99}).to_string(),
     );

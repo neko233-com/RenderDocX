@@ -56,6 +56,15 @@ struct TexturePreview {
     _directory: tempfile::TempDir,
 }
 
+struct PixelContext {
+    preview: TexturePreview,
+    event: u32,
+    index: usize,
+    coordinates: [u32; 2],
+    selection: TextureSelection,
+    shader_revision: u64,
+}
+
 #[derive(Default)]
 struct AnnotationView {
     notes: Option<(AnnotationSection, serde_json::Value)>,
@@ -658,6 +667,7 @@ struct Workspace {
     pixel_debug_primitive: Entity<InputState>,
     pixel_debug_view: Entity<InputState>,
     pixel: Option<Pixel>,
+    pixel_context: Option<PixelContext>,
     pixel_history: Option<PixelHistoryPage>,
     history_selected: Option<usize>,
     stats_min: Entity<InputState>,
@@ -8498,6 +8508,7 @@ impl Workspace {
         let revision = self.open_revision;
         let selection_revision = self.selection_revision;
         self.pixel = None;
+        self.pixel_context = None;
         self.pixel_history = None;
         self.history_selected = None;
         if selection.preview_overlay.uses_overlay_pixel() {
@@ -8718,6 +8729,160 @@ impl Workspace {
 
     fn preview_texture(&mut self, cx: &mut Context<Self>) {
         self.preview_texture_impl(None, cx);
+    }
+
+    fn render_pixel_context(&mut self, cx: &mut Context<Self>) {
+        if !self.preview_edit_ready(cx) {
+            return;
+        }
+        let (Some(session), Some(index), Some(pixel), Some(snapshot)) = (
+            self.session.clone(),
+            self.selected_texture,
+            self.pixel.as_ref(),
+            self.snapshot.as_ref(),
+        ) else {
+            return;
+        };
+        let selection = self.texture_selection;
+        if self.pipeline.as_ref().map(|p| p.event_id) != Some(pixel.event_id)
+            || pixel.index as usize != index
+            || pixel.mip != selection.mip
+            || pixel.slice != selection.slice
+        {
+            return;
+        }
+        let Some(texture) = snapshot.textures.get(index) else {
+            return;
+        };
+        if pixel.sample
+            != selection
+                .sample
+                .unwrap_or(if texture.samples > 1 { u32::MAX } else { 0 })
+        {
+            return;
+        }
+        let base = [texture.width, texture.height];
+        let Some(extent) = renderdocx::texture_view::display_extent(
+            base,
+            texture.dimension,
+            snapshot.local_renderer,
+        ) else {
+            self.status = Some(
+                self.t(
+                    "Pixel context is unavailable for this texture renderer.",
+                    "当前纹理渲染器不支持像素上下文。",
+                    "このレンダラーではピクセルコンテキストを利用できません。",
+                    "이 렌더러에서는 픽셀 컨텍스트를 사용할 수 없습니다.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let Some(scale) = renderdocx::texture_view::context_scale(base, selection.mip) else {
+            return;
+        };
+        let coordinates = [pixel.x, pixel.y];
+        let event = pixel.event_id;
+        let Some(offset) = renderdocx::texture_view::center_texel_in_viewport(
+            base,
+            extent,
+            selection.mip,
+            coordinates,
+            selection.preview_flip_y,
+            scale,
+            [160, 160],
+        ) else {
+            return;
+        };
+        let mut display = selection.for_texture_display(texture);
+        display.preview_scale = Some(scale);
+        display.preview_offset = offset;
+        let Ok(texture_index) = u32::try_from(index) else {
+            return;
+        };
+        let revision = self.open_revision;
+        let selection_revision = self.selection_revision;
+        let shader_revision = self.texture_custom_revision;
+        self.pixel_context = None;
+        if selection.preview_overlay != renderdocx::texture_overlay::TextureOverlay::None {
+            self.event_tree.clear_durations();
+            self.counter_page = None;
+            self.descriptor_page = None;
+            self.mesh.info = None;
+            self.mesh.bytes = None;
+            self.mesh.draw = None;
+            self.pixel_history = None;
+            self.history_selected = None;
+            self.timeline.history = None;
+            self.texture_raw_page = None;
+            self.texture_raw_last = None;
+        }
+        self.resource_pending = true;
+        self.status = Some(
+            self.t(
+                "Rendering pixel context…",
+                "正在渲染像素上下文…",
+                "ピクセルコンテキストを描画中…",
+                "픽셀 컨텍스트를 렌더링하는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
+            let path = directory.path().join("context.png");
+            session.render_texture_png(texture_index, display, 160, 160, &path)?;
+            Ok::<_, String>(TexturePreview {
+                path,
+                _directory: directory,
+            })
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision || this.selection_revision != selection_revision {
+                    return;
+                }
+                this.resource_pending = false;
+                if this.selected_texture != Some(index)
+                    || this.texture_selection != selection
+                    || this.texture_custom_revision != shader_revision
+                    || !this.pixel.as_ref().is_some_and(|pixel| {
+                        pixel.event_id == event && [pixel.x, pixel.y] == coordinates
+                    })
+                {
+                    this.status = None;
+                } else {
+                    match result {
+                        Ok(preview) => {
+                            this.pixel_context = Some(PixelContext {
+                                preview,
+                                event,
+                                index,
+                                coordinates,
+                                selection,
+                                shader_revision,
+                            });
+                            this.status = None;
+                        }
+                        Err(error) => {
+                            this.status = Some(format!(
+                                "{}: {error}",
+                                this.t(
+                                    "Pixel context failed",
+                                    "像素上下文失败",
+                                    "ピクセルコンテキストの描画に失敗しました",
+                                    "픽셀 컨텍스트 렌더링 실패"
+                                )
+                            ))
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn preview_texture_impl(&mut self, pick_after: Option<[u32; 2]>, cx: &mut Context<Self>) {
@@ -14310,6 +14475,7 @@ impl Workspace {
                                 cx,
                             ))
                             .child(Button::new("pixel-center").label(self.t("Center and pick", "居中并拾取", "中央に移動して取得", "중앙 이동 및 선택")).secondary().on_click(cx.listener(|this, _, window, cx| this.center_texture_pixel(window, cx))))
+                            .child(button("pixel-context-render", self.t("Pixel context", "像素上下文", "ピクセルコンテキスト", "픽셀 컨텍스트"), false, |this, cx| this.render_pixel_context(cx), cx))
                             .child(button("pixel-history", history_label, false, |this, cx| this.read_pixel_history(0, false, cx), cx))
                             .child(button("pixel-debug-start", self.t("Debug pixel", "调试像素", "ピクセルをデバッグ", "픽셀 디버깅"), true, |this, cx| this.debug_selected_pixel(cx), cx)),
                     )
@@ -14342,6 +14508,7 @@ impl Workspace {
                                 .test_support()
                                 .child(format!("({}, {}) · RGBA: {bits}", pixel.x, pixel.y)),
                         )
+                        .when_some(self.pixel_context.as_ref().filter(|context| context.event == pixel.event_id && context.index == pixel.index as usize && context.coordinates == [pixel.x, pixel.y] && context.selection == self.texture_selection && context.shader_revision == self.texture_custom_revision), |view, context| view.child(div().id("pixel-context").test_support().w(px(160.)).h(px(160.)).child(img(context.preview.path.clone()).size_full())))
                         .when_some(pixel.coordinates.as_ref(), |view, coords| view.child(div().id("pixel-uv").test_support().child(format!("{}: {:.4}, {:.4} · {} × {}", self.t("Top-left UV", "左上原点 UV", "左上原点 UV", "왼쪽 위 원점 UV"), coords.normalized[0], coords.normalized[1], coords.mip_width, coords.mip_height))))
                         .when_some(pixel.depth_stencil.as_ref(), |view, value| {
                             let depth = value.depth.as_ref().map(|depth| format!("{}: {depth}", self.t("Depth", "深度", "深度", "깊이")));
@@ -16851,6 +17018,7 @@ fn main() {
                         pixel_debug_primitive,
                         pixel_debug_view,
                         pixel: None,
+                        pixel_context: None,
                         pixel_history: None,
                         history_selected: None,
                         stats_min,
@@ -17627,6 +17795,7 @@ mod ui_tests {
                         pixel_debug_primitive,
                         pixel_debug_view,
                         pixel: None,
+                        pixel_context: None,
                         pixel_history: None,
                         history_selected: None,
                         stats_min,
@@ -18211,6 +18380,7 @@ mod ui_tests {
                         pixel_debug_primitive,
                         pixel_debug_view,
                         pixel: None,
+                        pixel_context: None,
                         pixel_history: None,
                         history_selected: None,
                         stats_min,
@@ -18559,6 +18729,22 @@ mod ui_tests {
             assert_eq!((pixel.event_id, pixel.x, pixel.y), (42, 3, 4));
             assert_eq!(pixel.float_values, ["0.25", "0.5", "0.75", "1"]);
         });
+        cx.update_window(handle.into(), |_, window, cx| {
+            reveal_details(window, "pixel-context-render", cx);
+            window.click("pixel-context-render", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let context = view.read(cx).pixel_context.as_ref().expect("pixel context");
+            assert_eq!(context.coordinates, [3, 4]);
+            assert!(context.preview.path.exists());
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            reveal_details(window, "pixel-context", cx);
+            assert!(window.find("pixel-context").visible());
+        })
+        .unwrap();
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| {
                 view.pixel.as_mut().unwrap().depth_stencil =

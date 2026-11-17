@@ -99,6 +99,16 @@ pub fn fitted_transform(extent: [u32; 2], viewport: [u32; 2]) -> Option<(f32, [f
     ))
 }
 
+/// Match RenderDoc's eight-pixel context zoom including odd-sized mip adjustment.
+pub fn context_scale(base: [u32; 2], mip: u32) -> Option<f32> {
+    if base.contains(&0) || mip >= 32 {
+        return None;
+    }
+    let mip_width = (base[0] >> mip).max(1) as f32;
+    let mip_height = (base[1] >> mip).max(1) as f32;
+    Some(8.0 * (mip_width / base[0] as f32).max(mip_height / base[1] as f32))
+}
+
 /// Center a texel in the 512×360 headless preview at the current scale.
 pub fn center_texel(
     base: [u32; 2],
@@ -249,6 +259,11 @@ mod tests {
 
     #[test]
     fn uv_and_center_handle_odd_mips_flips_and_invalid_input() {
+        assert_eq!(super::context_scale([16, 8], 0), Some(8.0));
+        assert_eq!(super::context_scale([16, 8], 1), Some(4.0));
+        assert!((super::context_scale([15, 9], 1).unwrap() - 8.0 * 7.0 / 15.0).abs() < 0.0001);
+        assert_eq!(super::context_scale([0, 8], 0), None);
+        assert_eq!(super::context_scale([16, 8], 32), None);
         assert_eq!(
             super::fitted_transform([2, 2], [64, 64]),
             Some((32.0, [0.0, 0.0]))

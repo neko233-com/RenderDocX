@@ -214,6 +214,7 @@ fn usage() -> Value {
         .extend([
             json!("texture_fit_range"),
             json!("texture_center"),
+            json!("texture_context"),
             json!("custom_shader_library_import_directory"),
             json!("custom_shader_library_list"),
             json!("custom_shader_library_get"),
@@ -2640,6 +2641,75 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     _ => Err(("invalid_arguments", "pixel_history requires a texture index, x/y, decimal-string offset and valid page limit".into())),
                 }
             }
+            "texture_context" => match (&opened, selected_event) {
+                (None, _) => Err(("no_capture", "No capture is open".into())),
+                (Some(_), None) => Err((
+                    "no_event",
+                    "Select an event before rendering pixel context".into(),
+                )),
+                (Some((session, snapshot)), Some(event)) => {
+                    let prepared = (|| -> Result<_, String> {
+                        let path = request
+                            .get("path")
+                            .and_then(Value::as_str)
+                            .filter(|path| !path.is_empty())
+                            .ok_or("path must be a nonempty string")?;
+                        let index = request
+                            .get("index")
+                            .and_then(Value::as_u64)
+                            .and_then(|value| u32::try_from(value).ok())
+                            .ok_or("Invalid texture index")?;
+                        let texture = snapshot
+                            .textures
+                            .get(index as usize)
+                            .ok_or("Invalid texture index")?;
+                        let mip = match request.get("mip") {
+                            None => 0,
+                            Some(value) => value
+                                .as_u64()
+                                .and_then(|value| u32::try_from(value).ok())
+                                .ok_or("Invalid mip")?,
+                        };
+                        let scale = renderdocx::texture_view::context_scale(
+                            [texture.width, texture.height],
+                            mip,
+                        )
+                        .ok_or("Invalid texture extent or mip")?;
+                        let mut center = request.clone();
+                        center.insert(
+                            "width".into(),
+                            request.get("width").cloned().unwrap_or(json!(160)),
+                        );
+                        center.insert(
+                            "height".into(),
+                            request.get("height").cloned().unwrap_or(json!(160)),
+                        );
+                        center.insert("preview_scale".into(), json!(scale));
+                        center.insert("preview_offset".into(), json!([0.0, 0.0]));
+                        let geometry = center_texture_request(snapshot, &center)?;
+                        let selection: TextureSelection =
+                            serde_json::from_value(geometry["selection"].clone())
+                                .map_err(|error| error.to_string())?;
+                        let width = geometry["viewport"][0].as_u64().unwrap() as u32;
+                        let height = geometry["viewport"][1].as_u64().unwrap() as u32;
+                        Ok((path, index, texture, selection, width, height, geometry))
+                    })();
+                    match prepared {
+                        Ok((path, index, texture, selection, width, height, geometry)) => {
+                            if selection.preview_overlay
+                                != renderdocx::texture_overlay::TextureOverlay::None
+                            {
+                                event_times = None;
+                                mesh_selection = None;
+                            }
+                            session.render_texture_png(index, selection.for_texture_display(texture), width, height, PathBuf::from(path).as_path())
+                                .map(|()| json!({"event_id":event,"path":path,"geometry":geometry,"highlight_rendered":false}))
+                                .map_err(|error| ("replay_texture_render_failed", error))
+                        }
+                        Err(error) => Err(("invalid_arguments", error)),
+                    }
+                }
+            },
             "texture_center" => match &opened {
                 None => Err(("no_capture", "No capture is open".into())),
                 Some((_, snapshot)) => center_texture_request(snapshot, &request)
