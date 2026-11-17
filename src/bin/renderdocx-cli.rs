@@ -1060,12 +1060,19 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     };
                     match target {
                         Some(index) => {
+                            let effective_event = index
+                                .map(|i| {
+                                    renderdocx::event_ranges::calculate(actions)[i]
+                                        .as_ref()
+                                        .map_or(actions[i].event_id, |range| range.last_event)
+                                })
+                                .unwrap_or(0);
                             let ancestors = index
                                 .and_then(|i| renderdocx::event_path::ancestry(actions, i))
                                 .unwrap_or_default();
                             let segments: Vec<_> = ancestors.into_iter().map(|i| json!({"action_index": i, "event_id": actions[i].event_id, "name": renderdocx::event_path::label(&actions[i])})).collect();
                             Ok(
-                                json!({"action_index":index,"event_id":index.map(|i| actions[i].event_id).unwrap_or(0),"path":index.and_then(|i| renderdocx::event_path::format(actions, i)).unwrap_or_default(),"segments":segments}),
+                                json!({"action_index":index,"event_id":index.map(|i| actions[i].event_id).unwrap_or(0),"effective_event_id":effective_event,"path":index.and_then(|i| renderdocx::event_path::format(actions, i)).unwrap_or_default(),"segments":segments}),
                             )
                         }
                         None => Err(("invalid_arguments", "Unknown event or action path".into())),

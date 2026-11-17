@@ -626,6 +626,7 @@ struct Workspace {
     event_path_input: Entity<InputState>,
     event_path_editing: bool,
     _event_path_subscription: gpui::Subscription,
+    selected_event_id: Option<u32>,
     _event_find_subscription: gpui::Subscription,
     event_find_revision: std::sync::Arc<std::sync::atomic::AtomicU64>,
     event_find_pending: Option<u64>,
@@ -3348,11 +3349,13 @@ impl Workspace {
                         this.refresh_messages();
                         this.poll_messages(session, this.message_generation, cx);
                         this.selected = None;
+                        this.selected_event_id = None;
                         this.pipeline = None;
                         let initial_error = match initial {
                             Some((index, revision, Ok(Some(pipeline)))) => {
                                 this.selection_revision = revision;
                                 this.selected = Some(index);
+                                this.selected_event_id = Some(pipeline.event_id);
                                 this.pipeline = Some(pipeline);
                                 if let Some(position) = this.event_tree.reveal_filtered(index) {
                                     this.event_scroll.scroll_to_item(
@@ -3469,6 +3472,8 @@ impl Workspace {
                             this.session = None;
                             this.snapshot = None;
                             this.capture = None;
+                            this.selected = None;
+                            this.selected_event_id = None;
                             this.pipeline = None;
                         }
                         this.status = Some(format!(
@@ -3503,14 +3508,32 @@ impl Workspace {
             },
             None => action.event_id,
         };
-        self.select_replay_event(Some(index), event, cx);
+        let replay_event = if api_index.is_none() {
+            self.event_tree
+                .action_range(index)
+                .map_or(event, |range| range.last_event)
+        } else {
+            event
+        };
+        self.select_replay_event(Some(index), event, replay_event, cx);
     }
 
     fn select_capture_start(&mut self, cx: &mut Context<Self>) {
-        self.select_replay_event(None, 0, cx);
+        self.select_replay_event(None, 0, 0, cx);
     }
 
-    fn select_replay_event(&mut self, index: Option<usize>, event: u32, cx: &mut Context<Self>) {
+    fn selected_event_id(&self) -> Option<u32> {
+        self.selected_event_id
+            .or_else(|| self.pipeline.as_ref().map(|pipeline| pipeline.event_id))
+    }
+
+    fn select_replay_event(
+        &mut self,
+        index: Option<usize>,
+        selected_event: u32,
+        event: u32,
+        cx: &mut Context<Self>,
+    ) {
         self.timeline.pending_scrub = None;
         if self.protect_shader_draft(cx) {
             return;
@@ -3578,6 +3601,7 @@ impl Workspace {
                 match result {
                     Ok(Some(pipeline)) => {
                         this.selected = index;
+                        this.selected_event_id = Some(selected_event);
                         this.pipeline = Some(pipeline);
                         this.status = None;
                     }
@@ -5515,7 +5539,7 @@ impl Workspace {
         {
             return;
         }
-        let Some(event) = self.pipeline.as_ref().map(|pipeline| pipeline.event_id) else {
+        let Some(event) = self.selected_event_id() else {
             return;
         };
         let Some(target) = self.event_tree.step_including_start(event, forward) else {
@@ -5688,7 +5712,7 @@ impl Workspace {
             .detach();
             return;
         }
-        let current = self.pipeline.as_ref().map(|pipeline| pipeline.event_id);
+        let current = self.selected_event_id();
         let Some(target) = self.event_tree.find_including_start(
             &query,
             current,
@@ -6282,7 +6306,7 @@ impl Workspace {
         if self.replay_pending || self.export_pending || self.resource_pending {
             return;
         }
-        let Some(event) = self.pipeline.as_ref().map(|pipeline| pipeline.event_id) else {
+        let Some(event) = self.selected_event_id() else {
             self.status = Some(
                 self.t(
                     "Select an event first.",
@@ -6358,7 +6382,7 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let Some(event) = self.pipeline.as_ref().map(|pipeline| pipeline.event_id) else {
+        let Some(event) = self.selected_event_id() else {
             self.status = Some(
                 self.t(
                     "Select an event before inspecting parameters.",
@@ -6434,7 +6458,7 @@ impl Workspace {
             return;
         }
         let (Some(event), Some(session), Some(snapshot)) = (
-            self.pipeline.as_ref().map(|p| p.event_id),
+            self.selected_event_id(),
             self.session.clone(),
             self.snapshot.as_ref(),
         ) else {
@@ -12270,7 +12294,7 @@ impl Workspace {
         let disabled_label = self.t("disabled", "禁用", "無効", "비활성");
         let depth_label = self.t("depth", "深度", "深度", "깊이");
         let pipeline = self.pipeline.clone();
-        let selected_event = pipeline.as_ref().map(|state| state.event_id);
+        let selected_event = self.selected_event_id();
         let status = self.status.clone();
         let preview_path = self.preview.as_ref().map(|preview| preview.path.clone());
 
@@ -12915,11 +12939,8 @@ impl Workspace {
                     range
                         .filter_map(|row| {
                             if row == 0 {
-                                let selected = this.selected.is_none()
-                                    && this
-                                        .pipeline
-                                        .as_ref()
-                                        .is_some_and(|pipeline| pipeline.event_id == 0);
+                                let selected =
+                                    this.selected.is_none() && this.selected_event_id() == Some(0);
                                 return Some(
                                     div()
                                         .id("capture-start")
@@ -12987,10 +13008,7 @@ impl Workspace {
                                 ),
                             };
                             let selected = this.selected == Some(index)
-                                && this
-                                    .pipeline
-                                    .as_ref()
-                                    .is_some_and(|state| state.event_id == event);
+                                && this.selected_event_id() == Some(event);
                             let indent = action.depth as f32 * 14.0 + 12.0;
                             Some(
                                 div()
@@ -13181,7 +13199,7 @@ impl Workspace {
                     ),
                     false,
                     |this, cx| {
-                        let event = this.pipeline.as_ref().map(|p| p.event_id);
+                        let event = this.selected_event_id();
                         let text = this.bookmark_text.read(cx).value().to_string();
                         let doc = this
                             .annotations
@@ -13210,7 +13228,7 @@ impl Workspace {
                     ),
                     false,
                     |this, cx| {
-                        let event = this.pipeline.as_ref().map(|p| p.event_id);
+                        let event = this.selected_event_id();
                         let doc = this
                             .annotations
                             .bookmarks
@@ -16255,6 +16273,7 @@ impl Workspace {
                             this.event_tree.reset(&[]);
                             this.capture = None;
                             this.selected = None;
+                            this.selected_event_id = None;
                             this.replay_pending = false;
                             this.export_pending = false;
                             this.resource_pending = false;
@@ -17974,6 +17993,7 @@ fn main() {
                         _event_path_subscription: Workspace::watch_event_path(&event_path_input, cx),
                         event_path_input,
                         event_path_editing: false,
+                        selected_event_id: None,
                         event_find_revision: Default::default(),
                         event_find_pending: None,
                         event_find,
@@ -18761,6 +18781,7 @@ mod ui_tests {
                         _event_path_subscription: Workspace::watch_event_path(&event_path_input, cx),
                         event_path_input,
                         event_path_editing: false,
+                        selected_event_id: None,
                         event_find_revision: Default::default(),
                         event_find_pending: None,
                         event_find,
@@ -19359,6 +19380,7 @@ mod ui_tests {
                         _event_path_subscription: Workspace::watch_event_path(&event_path_input, cx),
                         event_path_input,
                         event_path_editing: false,
+                        selected_event_id: None,
                         event_find_revision: Default::default(),
                         event_find_pending: None,
                         event_find,
@@ -19670,6 +19692,13 @@ mod ui_tests {
         })
         .unwrap();
         cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(view.read(cx).selected_event_id(), Some(42));
+            assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 43);
+            view.update(cx, |view, cx| view.select_replay_event(Some(0), 42, 42, cx));
+        });
+        cx.run_until_parked();
+        events.lock().unwrap().retain(|event| *event != 43);
         cx.update(|cx| {
             assert_eq!(view.read(cx).selected, Some(0));
             let pipeline = view.read(cx).pipeline.as_ref().expect("selected pipeline");
@@ -21276,7 +21305,10 @@ mod ui_tests {
         })
         .unwrap();
         cx.run_until_parked();
-        cx.update(|cx| assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 42));
+        cx.update(|cx| {
+            assert_eq!(view.read(cx).selected_event_id(), Some(42));
+            assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 43);
+        });
         cx.update_window(handle.into(), |_, window, cx| {
             window.click("api-calls-tab", cx);
             window.click("api-event-0", cx);
@@ -21446,7 +21478,7 @@ mod ui_tests {
         .unwrap();
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(view.read(cx).shader_data.as_ref().unwrap().event_id, 41));
-        assert_eq!(*events.lock().unwrap(), vec![42, 77, 43, 42, 41]);
+        assert_eq!(*events.lock().unwrap(), vec![42, 77, 43, 43, 41]);
         cx.update_window(handle.into(), |_, window, cx| {
             window.click("events-tab", cx);
             window.click("toggle-api-events", cx);
@@ -21650,7 +21682,7 @@ mod ui_tests {
         .unwrap();
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(view.read(cx).event_tree.visible, [0, 1, 2]));
-        assert_eq!(*events.lock().unwrap(), vec![42, 77, 43, 42, 41, 41]);
+        assert_eq!(*events.lock().unwrap(), vec![42, 77, 43, 43, 41, 41]);
 
         cx.update_window(handle.into(), |_, window, cx| {
             window.click("resources-tab", cx);
@@ -21727,8 +21759,9 @@ mod ui_tests {
             let state = view.read(cx);
             assert!(state.event_find_pending.is_none());
             assert!(state.event_tree.eligible_unformatted_targets().is_empty());
-            let event = state.pipeline.as_ref().unwrap().event_id;
+            let event = state.selected_event_id().unwrap();
             assert_eq!(event, 42);
+            assert_eq!(state.pipeline.as_ref().unwrap().event_id, 43);
             let row = state.event_tree.row_for_event(event).unwrap();
             assert!(state.event_tree.display_name(row).unwrap().contains("300"));
         });
@@ -21749,7 +21782,8 @@ mod ui_tests {
         .unwrap();
         cx.run_until_parked();
         cx.update(|cx| {
-            assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 42);
+            assert_eq!(view.read(cx).selected_event_id(), Some(42));
+            assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 43);
             view.update(cx, |view, cx| {
                 view.settings.event_auto_format = false;
                 view.event_tree.clear_formatted_names();
@@ -21776,7 +21810,10 @@ mod ui_tests {
         })
         .unwrap();
         cx.run_until_parked();
-        cx.update(|cx| assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 42));
+        cx.update(|cx| {
+            assert_eq!(view.read(cx).selected_event_id(), Some(42));
+            assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 43);
+        });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             reveal_details(window, "event-breadcrumb-root", cx);
@@ -21791,7 +21828,10 @@ mod ui_tests {
         })
         .unwrap();
         cx.run_until_parked();
-        cx.update(|cx| assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 42));
+        cx.update(|cx| {
+            assert_eq!(view.read(cx).selected_event_id(), Some(42));
+            assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 43);
+        });
         cx.update_window(handle.into(), |_, window, cx| {
             window.click("event-step-prev", cx)
         })
@@ -21834,7 +21874,8 @@ mod ui_tests {
         cx.run_until_parked();
         cx.update(|cx| {
             assert!(!view.read(cx).event_path_editing);
-            assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 42);
+            assert_eq!(view.read(cx).selected_event_id(), Some(42));
+            assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 43);
         });
 
         // When the local D3D11 fixtures are configured, repeat the interaction against

@@ -480,6 +480,18 @@ void write_snapshot(IReplayController *controller, const ReplayOptions &options,
     }
     std::cout << "]}";
     event_ids.insert(action.eventId);
+    // EventBrowser selects a group's last child (or the event before a pop
+    // marker), which need not itself appear in the flattened API event list.
+    if(!action.children.empty())
+    {
+      const ActionDescription *last = &action.children.back();
+      while(!last->children.empty() && !(last->flags & ActionFlags::PopMarker))
+        last = &last->children.back();
+      uint32_t effective = last->eventId;
+      if((last->flags & ActionFlags::PopMarker) && effective > 0)
+        --effective;
+      event_ids.insert(effective);
+    }
     if(action.flags & (ActionFlags::Drawcall | ActionFlags::MeshDispatch))
       draw_instances.emplace(action.eventId, (std::max)(1U, action.numInstances));
     if(action.flags & ActionFlags::Drawcall)
