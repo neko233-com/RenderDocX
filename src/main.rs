@@ -1837,6 +1837,8 @@ impl Workspace {
         let resources = snapshot.resources.clone();
         let buffers = snapshot.buffers.clone();
         let language = self.settings.language;
+        let show_all = self.settings.event_show_all_parameters;
+        let show_names = self.settings.event_show_parameter_names;
         let capture_revision = self.open_revision;
         let filter_revision = self.event_filter_revision.load(Ordering::Relaxed);
         let generation = self.event_filter_revision.clone();
@@ -1858,8 +1860,8 @@ impl Workspace {
                 &resources,
                 &buffers,
                 language,
-                false,
-                false,
+                show_all,
+                show_names,
                 || generation.load(Ordering::Relaxed) != filter_revision,
             )
         });
@@ -1872,6 +1874,8 @@ impl Workspace {
                 this.resource_pending = false;
                 if this.event_filter_revision.load(Ordering::Relaxed) != filter_revision
                     || this.settings.language != language
+                    || this.settings.event_show_all_parameters != show_all
+                    || this.settings.event_show_parameter_names != show_names
                 {
                     this.status = None;
                     cx.notify();
@@ -3094,6 +3098,9 @@ impl Workspace {
                         // Invalidate work started against the old session while this open was pending.
                         this.open_revision += 1;
                         this.capture = Some(capture);
+                        this.event_tree.set_use_custom_action_names(
+                            this.settings.event_use_custom_action_names,
+                        );
                         this.event_tree.reset(&snapshot.actions);
                         this.refresh_event_filters(cx);
                         this.timeline.reset(&snapshot.actions);
@@ -11329,6 +11336,8 @@ impl Workspace {
                 self.timeline.reset(&snapshot.actions);
             }
             if self.event_tree.len() != snapshot.actions.len() {
+                self.event_tree
+                    .set_use_custom_action_names(self.settings.event_use_custom_action_names);
                 self.event_tree.reset(&snapshot.actions);
             }
         }
@@ -16483,6 +16492,22 @@ impl Workspace {
                             .child(detail_view)
                             .when(self.tab == CaptureTab::Events, |view| view.child(div().flex().flex_wrap().gap_2()
                                 .child(button("event-format-visible", self.t("Format visible events", "格式化可见事件", "表示イベントを整形", "표시된 이벤트 서식 지정"), false, |this, cx| this.format_visible_events(cx), cx))
+                                .child(button("event-show-param-names", self.t("Parameter names", "参数名称", "パラメーター名", "매개변수 이름"), self.settings.event_show_parameter_names, |this, cx| {
+                                    if this.resource_pending || this.replay_pending || this.export_pending { return; }
+                                    this.settings.event_show_parameter_names = !this.settings.event_show_parameter_names;
+                                    this.event_tree.clear_formatted_names(); this.save(); this.format_visible_events(cx);
+                                }, cx))
+                                .child(button("event-show-all-params", self.t("All parameters", "全部参数", "すべてのパラメーター", "모든 매개변수"), self.settings.event_show_all_parameters, |this, cx| {
+                                    if this.resource_pending || this.replay_pending || this.export_pending { return; }
+                                    this.settings.event_show_all_parameters = !this.settings.event_show_all_parameters;
+                                    this.event_tree.clear_formatted_names(); this.save(); this.format_visible_events(cx);
+                                }, cx))
+                                .child(button("event-use-custom-names", self.t("Custom action names", "自定义动作名称", "カスタムアクション名", "사용자 작업 이름"), self.settings.event_use_custom_action_names, |this, cx| {
+                                    if this.resource_pending || this.replay_pending || this.export_pending { return; }
+                                    this.settings.event_use_custom_action_names = !this.settings.event_use_custom_action_names;
+                                    this.event_tree.set_use_custom_action_names(this.settings.event_use_custom_action_names);
+                                    this.save(); this.format_visible_events(cx);
+                                }, cx))
                                 .child(button("event-expand-subtree", self.t("Expand subtree", "展开分组", "グループを展開", "그룹 펼치기"), false, |this, cx| this.set_event_expansion(false, cx), cx))
                                 .child(button("event-collapse-subtree", self.t("Collapse subtree", "折叠分组", "グループを折りたたむ", "그룹 접기"), false, |this, cx| this.set_event_expansion(true, cx), cx))
                                 .child(button("event-show-empty", self.t("Show empty regions", "显示空分组", "空の領域を表示", "빈 영역 표시"), self.event_tree.show_empty_regions(), |this, cx| { this.event_tree.set_show_empty_regions(!this.event_tree.show_empty_regions()); cx.notify(); }, cx)))),
@@ -20893,7 +20918,54 @@ mod ui_tests {
                     .unwrap()
                     .starts_with("Call(4, (300 bytes)")
             );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            reveal_details(window, "event-show-param-names", cx);
+            window.click("event-show-param-names", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let state = view.read(cx);
+            let row = state.event_tree.row_for_event(41).unwrap();
+            assert!(state.settings.event_show_parameter_names);
+            assert!(
+                state
+                    .event_tree
+                    .display_name(row)
+                    .unwrap()
+                    .starts_with("Call(Topology=4")
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            reveal_details(window, "event-show-all-params", cx);
+            window.click("event-show-all-params", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert!(view.read(cx).settings.event_show_all_parameters));
+        cx.update_window(handle.into(), |_, window, cx| {
+            reveal_details(window, "event-use-custom-names", cx);
+            window.click("event-use-custom-names", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert!(!view.read(cx).settings.event_use_custom_action_names));
+        let saved: Settings = serde_json::from_slice(
+            &std::fs::read(format_dir.path().join("preferences/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            saved.event_show_parameter_names
+                && saved.event_show_all_parameters
+                && !saved.event_use_custom_action_names
+        );
+        cx.update(|cx| {
             view.update(cx, |view, cx| {
+                view.settings.event_show_parameter_names = false;
+                view.settings.event_show_all_parameters = false;
+                view.settings.event_use_custom_action_names = true;
+                view.event_tree.set_use_custom_action_names(true);
                 view.event_tree.clear_formatted_names();
                 cx.notify();
             });

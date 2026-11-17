@@ -19,6 +19,9 @@ pub struct Settings {
     pub texture_per_resource_settings: bool,
     pub texture_per_resource_flip_y: bool,
     pub texture_reset_range: bool,
+    pub event_show_parameter_names: bool,
+    pub event_show_all_parameters: bool,
+    pub event_use_custom_action_names: bool,
 }
 
 impl Default for Settings {
@@ -33,6 +36,9 @@ impl Default for Settings {
             texture_per_resource_settings: true,
             texture_per_resource_flip_y: false,
             texture_reset_range: false,
+            event_show_parameter_names: false,
+            event_show_all_parameters: false,
+            event_use_custom_action_names: true,
         }
     }
 }
@@ -123,14 +129,23 @@ mod tests {
         assert!(settings.texture_per_resource_settings);
         assert!(!settings.texture_per_resource_flip_y);
         assert!(!settings.texture_reset_range);
+        assert!(!settings.event_show_parameter_names);
+        assert!(!settings.event_show_all_parameters);
+        assert!(settings.event_use_custom_action_names);
         let mut updated = settings;
         updated.texture_per_resource_settings = false;
         updated.texture_per_resource_flip_y = true;
         updated.texture_reset_range = true;
+        updated.event_show_parameter_names = true;
+        updated.event_show_all_parameters = true;
+        updated.event_use_custom_action_names = false;
         let reloaded: Settings =
             serde_json::from_str(&serde_json::to_string(&updated).unwrap()).unwrap();
         assert!(!reloaded.texture_per_resource_settings);
         assert!(reloaded.texture_per_resource_flip_y);
         assert!(reloaded.texture_reset_range);
+        assert!(reloaded.event_show_parameter_names);
+        assert!(reloaded.event_show_all_parameters);
+        assert!(!reloaded.event_use_custom_action_names);
     }
 }

@@ -25,6 +25,7 @@ pub struct EventTree {
     rows: Vec<EventRow>,
     order: Vec<usize>,
     show_api: bool,
+    use_custom_action_names: Option<bool>,
     hide_empty_regions: bool,
     parents: Vec<Option<usize>>,
     source_children: Vec<bool>,
@@ -125,13 +126,13 @@ impl EventTree {
             EventRow::Api { action, event } => self.actions.get(*action)?.api_events.get(*event)?,
             EventRow::Action(action) => {
                 let entry = self.actions.get(*action)?;
-                if entry.flags & (0x20 | 0x40) != 0
-                    && entry.flags & (0x10 | 0x200 | 0x2000 | 0x1000000) == 0
-                    && entry
-                        .marker_name
-                        .as_deref()
-                        .is_some_and(|name| !name.is_empty())
-                {
+                let custom = entry
+                    .marker_name
+                    .as_deref()
+                    .is_some_and(|name| !name.is_empty());
+                let is_marker = entry.flags & (0x20 | 0x40) != 0
+                    && entry.flags & (0x10 | 0x200 | 0x2000 | 0x1000000) == 0;
+                if custom && (self.use_custom_action_names.unwrap_or(true) || is_marker) {
                     return None;
                 }
                 entry
@@ -166,6 +167,13 @@ impl EventTree {
         self.names.clone_from(&self.original_names);
         self.lower_names = self.names.iter().map(|name| name.to_lowercase()).collect();
         self.rebuild();
+    }
+
+    pub fn set_use_custom_action_names(&mut self, use_custom: bool) {
+        if self.use_custom_action_names.unwrap_or(true) != use_custom {
+            self.use_custom_action_names = Some(use_custom);
+            self.clear_formatted_names();
+        }
     }
 
     pub fn directly_matches(&self, index: usize) -> bool {
@@ -591,6 +599,60 @@ mod tests {
         assert_eq!(
             tree.display_name(tree.row_for_event(1).unwrap()),
             Some("Bind()")
+        );
+    }
+
+    #[test]
+    fn custom_action_names_follow_upstream_toggle_and_preserve_markers() {
+        use crate::replay::ApiEvent;
+        let event = |id| ApiEvent {
+            event_id: id,
+            chunk_index: Some(id),
+            file_offset: "0".into(),
+            name: "Call()".into(),
+        };
+        let mut custom = action(-1);
+        custom.event_id = 1;
+        custom.name = "custom draw".into();
+        custom.marker_name = Some("custom draw".into());
+        custom.api_events = vec![event(1)];
+        let mut marker = action(-1);
+        marker.event_id = 2;
+        marker.flags = 0x40;
+        marker.name = "marker".into();
+        marker.marker_name = Some("marker".into());
+        marker.api_events = vec![event(2)];
+        let mut boundary = action(-1);
+        boundary.event_id = 3;
+        boundary.flags = 0x40 | 0x2000;
+        boundary.name = "boundary".into();
+        boundary.marker_name = Some("boundary".into());
+        boundary.api_events = vec![event(3)];
+        let mut tree = EventTree::default();
+        tree.reset(&[custom, marker, boundary]);
+        assert!(tree.visible_format_targets().is_empty());
+        tree.set_use_custom_action_names(false);
+        assert_eq!(tree.visible_format_targets(), [1, 3]);
+        tree.apply_formatted_names(
+            &[
+                (1, "Call(1)".into()),
+                (2, "Call(2)".into()),
+                (3, "Call(3)".into()),
+            ]
+            .into(),
+        );
+        assert_eq!(
+            tree.display_name(tree.row_for_event(1).unwrap()),
+            Some("Call(1)")
+        );
+        assert_eq!(
+            tree.display_name(tree.row_for_event(2).unwrap()),
+            Some("marker")
+        );
+        tree.set_use_custom_action_names(true);
+        assert_eq!(
+            tree.display_name(tree.row_for_event(1).unwrap()),
+            Some("custom draw")
         );
     }
 
