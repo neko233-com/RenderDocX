@@ -11,6 +11,22 @@ struct Agent {
 }
 
 #[test]
+fn texture_center_reports_capability_and_requires_capture() {
+    let mut agent = Agent::new(None);
+    let capabilities = agent.send(r#"{"command":"capabilities"}"#);
+    assert!(
+        capabilities["data"]["serve_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|command| command == "texture_center")
+    );
+    let result = agent.send(r#"{"command":"texture_center","index":0,"x":0,"y":0}"#);
+    assert_eq!(result["error"]["code"], "no_capture");
+    agent.quit();
+}
+
+#[test]
 fn saved_event_filters_survive_restart_and_stay_separate_from_formats() {
     let dir = tempfile::tempdir().unwrap();
     let mut agent = Agent::with_config(None, false, Some(dir.path()));
@@ -1810,6 +1826,44 @@ fn real_opengl_vertex_inputs_include_generic_and_normalized_values() {
         bottom["data"]["pixel"]["coordinates"]["normalized"],
         serde_json::json!([0.0, 0.5])
     );
+    let centered = agent.send(&serde_json::json!({"command":"texture_center","index":texture,"uv":[0.1,0.75],"width":64,"height":64,"preview_flip_y":true}).to_string());
+    assert_eq!(centered["ok"], true, "{centered}");
+    assert_eq!(centered["data"]["texel"], serde_json::json!([0, 1]));
+    assert_eq!(centered["data"]["viewport"], serde_json::json!([64, 64]));
+    let center_path = dir.path().join("gl-centered.png");
+    let mut centered_render = centered["data"]["selection"].clone();
+    centered_render.as_object_mut().unwrap().extend(serde_json::json!({"command":"render_texture","index":texture,"width":64,"height":64,"path":center_path,"preview_linear_as_gamma":false}).as_object().unwrap().clone());
+    let rendered_center = agent.send(&centered_render.to_string());
+    assert_eq!(rendered_center["ok"], true, "{rendered_center}");
+    let mut reader = png::Decoder::new(std::io::BufReader::new(
+        std::fs::File::open(center_path).unwrap(),
+    ))
+    .read_info()
+    .unwrap();
+    let mut center_pixels = vec![0; reader.output_buffer_size().unwrap()];
+    reader.next_frame(&mut center_pixels).unwrap();
+    assert_eq!(
+        &center_pixels[(32 * 64 + 32) * 3..][..3],
+        &[255, 0, 0],
+        "centered OpenGL texel"
+    );
+    let clamped = agent.send(
+        &serde_json::json!({"command":"texture_center","index":texture,"x":99,"y":99}).to_string(),
+    );
+    assert_eq!(
+        clamped["data"]["texel"],
+        serde_json::json!([1, 1]),
+        "{clamped}"
+    );
+    let invalid = agent.send(
+        &serde_json::json!({"command":"texture_center","index":texture,"uv":[1.0,0.0]}).to_string(),
+    );
+    assert_eq!(invalid["error"]["code"], "invalid_arguments");
+    let ambiguous = agent.send(
+        &serde_json::json!({"command":"texture_center","index":texture,"x":0,"y":0,"uv":[0.0,0.0]})
+            .to_string(),
+    );
+    assert_eq!(ambiguous["error"]["code"], "invalid_arguments");
     let uv_pick = agent.send(
         &serde_json::json!({"command":"pick_pixel","index":texture,"uv":[0.1,0.75]}).to_string(),
     );

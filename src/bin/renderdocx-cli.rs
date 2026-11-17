@@ -128,6 +128,79 @@ fn custom_shader_processor(
     }
 }
 
+fn center_texture_request(
+    snapshot: &Snapshot,
+    request: &serde_json::Map<String, Value>,
+) -> Result<Value, String> {
+    let integer = |key: &str| {
+        request
+            .get(key)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+    };
+    let index = integer("index").ok_or("index must be an unsigned integer")?;
+    let texture = snapshot
+        .textures
+        .get(index as usize)
+        .ok_or("Invalid texture index")?;
+    let mut selection: TextureSelection = serde_json::from_value(Value::Object(request.clone()))
+        .map_err(|error| error.to_string())?;
+    selection.validate(texture)?;
+    if selection.mip >= 32 || texture.width == 0 || texture.height == 0 {
+        return Err("Invalid texture extent or mip".into());
+    }
+    let viewport_dimension = |key: &str, default| match request.get(key) {
+        None => Some(default),
+        Some(value) => value
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value > 0 && *value <= i32::MAX as u32),
+    };
+    let width = viewport_dimension("width", 512).ok_or("Invalid viewport width")?;
+    let height = viewport_dimension("height", 360).ok_or("Invalid viewport height")?;
+    width
+        .checked_mul(height)
+        .and_then(|value| value.checked_mul(3))
+        .ok_or("Viewport is too large")?;
+    let base = [texture.width, texture.height];
+    let texel = if let Some(uv) = request.get("uv") {
+        if request.contains_key("x") || request.contains_key("y") {
+            return Err("Use either uv or x/y, not both".into());
+        }
+        let uv: [f64; 2] = serde_json::from_value(uv.clone()).map_err(|error| error.to_string())?;
+        renderdocx::texture_view::uv_to_texel(base, selection.mip, uv)
+            .ok_or("UV must be finite and in [0,1)")?
+    } else {
+        let x = integer("x").ok_or("x must be an unsigned integer")?;
+        let y = integer("y").ok_or("y must be an unsigned integer")?;
+        [
+            x.min((base[0] >> selection.mip).max(1) - 1),
+            y.min((base[1] >> selection.mip).max(1) - 1),
+        ]
+    };
+    let extent =
+        renderdocx::texture_view::display_extent(base, texture.dimension, snapshot.local_renderer)
+            .ok_or("Texture preview geometry is unavailable for this renderer")?;
+    let fitted = renderdocx::texture_view::fitted_transform(extent, [width, height])
+        .ok_or("Invalid preview geometry")?;
+    let scale = selection.preview_scale.unwrap_or(fitted.0);
+    let offset = renderdocx::texture_view::center_texel_in_viewport(
+        base,
+        extent,
+        selection.mip,
+        texel,
+        selection.preview_flip_y,
+        scale,
+        [width, height],
+    )
+    .ok_or("Cannot center this texel")?;
+    selection.preview_scale = Some(scale);
+    selection.preview_offset = offset;
+    Ok(
+        json!({"index":index,"texel":texel,"viewport":[width,height],"display_extent":extent,"selection":selection}),
+    )
+}
+
 fn usage() -> Value {
     let mut capabilities = json!({"schema":"renderdocx.cli.v1","ok":true,"commands":[
         {"name":"inspect","arguments":["capture.rdc"],"description":"Open a capture and return its action tree and resource counts."},
@@ -140,6 +213,7 @@ fn usage() -> Value {
         .expect("capabilities commands")
         .extend([
             json!("texture_fit_range"),
+            json!("texture_center"),
             json!("custom_shader_library_import_directory"),
             json!("custom_shader_library_list"),
             json!("custom_shader_library_get"),
@@ -2566,6 +2640,11 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     _ => Err(("invalid_arguments", "pixel_history requires a texture index, x/y, decimal-string offset and valid page limit".into())),
                 }
             }
+            "texture_center" => match &opened {
+                None => Err(("no_capture", "No capture is open".into())),
+                Some((_, snapshot)) => center_texture_request(snapshot, &request)
+                    .map_err(|error| ("invalid_arguments", error)),
+            },
             "texture_statistics" | "texture_fit_range" => {
                 let index = request
                     .get("index")

@@ -6977,20 +6977,12 @@ impl Workspace {
             .as_ref()?
             .textures
             .get(self.selected_texture?)?;
-        let [width, height] = renderdocx::texture_view::display_extent(
+        let extent = renderdocx::texture_view::display_extent(
             [texture.width, texture.height],
             texture.dimension,
             self.snapshot.as_ref()?.local_renderer,
-        )?
-        .map(|value| value as f32);
-        let scale = (512.0 / width).min(360.0 / height);
-        Some((
-            scale,
-            [
-                (512.0 - width * scale) / 2.0,
-                (360.0 - height * scale) / 2.0,
-            ],
-        ))
+        )?;
+        renderdocx::texture_view::fitted_transform(extent, [512, 360])
     }
 
     fn preview_transform(&self) -> Option<(f32, [f32; 2])> {

@@ -84,6 +84,21 @@ pub fn uv_to_texel(base: [u32; 2], mip: u32, uv: [f64; 2]) -> Option<[u32; 2]> {
     }))
 }
 
+/// Fit the native display extent into an output viewport.
+pub fn fitted_transform(extent: [u32; 2], viewport: [u32; 2]) -> Option<(f32, [f32; 2])> {
+    if extent.contains(&0) || viewport.contains(&0) {
+        return None;
+    }
+    let scale = (viewport[0] as f32 / extent[0] as f32).min(viewport[1] as f32 / extent[1] as f32);
+    Some((
+        scale,
+        [
+            (viewport[0] as f32 - extent[0] as f32 * scale) / 2.0,
+            (viewport[1] as f32 - extent[1] as f32 * scale) / 2.0,
+        ],
+    ))
+}
+
 /// Center a texel in the 512×360 headless preview at the current scale.
 pub fn center_texel(
     base: [u32; 2],
@@ -93,7 +108,26 @@ pub fn center_texel(
     flip_y: bool,
     scale: f32,
 ) -> Option<[f32; 2]> {
-    if base.contains(&0) || extent.contains(&0) || mip >= 32 || !scale.is_finite() || scale <= 0.0 {
+    center_texel_in_viewport(base, extent, mip, texel, flip_y, scale, [512, 360])
+}
+
+/// Center a selected texel in an arbitrary native preview output.
+pub fn center_texel_in_viewport(
+    base: [u32; 2],
+    extent: [u32; 2],
+    mip: u32,
+    texel: [u32; 2],
+    flip_y: bool,
+    scale: f32,
+    viewport: [u32; 2],
+) -> Option<[f32; 2]> {
+    if base.contains(&0)
+        || extent.contains(&0)
+        || viewport.contains(&0)
+        || mip >= 32
+        || !scale.is_finite()
+        || scale <= 0.0
+    {
         return None;
     }
     let mut offset = [0.0; 2];
@@ -108,7 +142,7 @@ pub fn center_texel(
             texel[axis]
         };
         let position = (coordinate as f64 + 0.5) * f64::from(extent[axis]) / f64::from(size);
-        let target = if axis == 0 { 256.0 } else { 180.0 };
+        let target = f64::from(viewport[axis]) / 2.0;
         let value = target - position * f64::from(scale);
         if !value.is_finite() || value.abs() > f64::from(f32::MAX) {
             return None;
@@ -215,6 +249,15 @@ mod tests {
 
     #[test]
     fn uv_and_center_handle_odd_mips_flips_and_invalid_input() {
+        assert_eq!(
+            super::fitted_transform([2, 2], [64, 64]),
+            Some((32.0, [0.0, 0.0]))
+        );
+        assert_eq!(
+            super::center_texel_in_viewport([2, 2], [2, 2], 0, [0, 1], true, 32.0, [64, 64]),
+            Some([16.0, 16.0])
+        );
+        assert!(super::fitted_transform([0, 2], [64, 64]).is_none());
         assert_eq!(super::uv_to_texel([15, 9], 1, [0.999, 0.5]), Some([6, 2]));
         assert_eq!(super::uv_to_texel([15, 9], 1, [1.0, 0.5]), None);
         assert_eq!(super::uv_to_texel([15, 9], 1, [f64::NAN, 0.5]), None);
