@@ -89,6 +89,16 @@ impl Filter {
     pub fn matches(&self, context: &EventContext<'_>) -> bool {
         evaluate(&self.0, context)
     }
+    pub fn uses_event_names(&self) -> bool {
+        fn uses(terms: &[Term]) -> bool {
+            terms.iter().any(|term| match &term.expr {
+                Expr::Text(_) | Expr::Regex(_) => true,
+                Expr::Group(group) => uses(group),
+                _ => false,
+            })
+        }
+        uses(&self.0)
+    }
     pub fn parameter_queries(&self) -> HashSet<ParamQuery> {
         fn collect(terms: &[Term], queries: &mut HashSet<ParamQuery>) {
             for term in terms {

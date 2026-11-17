@@ -32,6 +32,7 @@ pub struct EventTree {
     names: Vec<String>,
     original_names: Vec<String>,
     format_attempted: std::collections::HashSet<u32>,
+    formatted_success: std::collections::HashSet<u32>,
     lower_names: Vec<String>,
     marker_names: Vec<String>,
     filter: Filter,
@@ -53,6 +54,7 @@ pub struct EventTree {
 impl EventTree {
     pub fn reset(&mut self, actions: &[Action]) {
         self.format_attempted.clear();
+        self.formatted_success.clear();
         // Match results are specific to a capture; never reuse them for another.
         self.parameter_matches.clear();
         self.annotation_matches.clear();
@@ -166,11 +168,21 @@ impl EventTree {
             .collect()
     }
 
+    pub fn all_unformatted_targets(&self) -> Vec<u32> {
+        let mut seen = std::collections::HashSet::new();
+        self.order
+            .iter()
+            .filter_map(|&row| self.format_target(row))
+            .filter(|event| !self.formatted_success.contains(event) && seen.insert(*event))
+            .collect()
+    }
+
     pub fn record_format_attempts(&mut self, events: impl IntoIterator<Item = u32>) {
         self.format_attempted.extend(events);
     }
 
     pub fn apply_formatted_names(&mut self, names: &std::collections::HashMap<u32, String>) {
+        self.formatted_success.extend(names.keys().copied());
         for row in 0..self.rows.len() {
             if let Some(name) = self.format_target(row).and_then(|id| names.get(&id)) {
                 self.names[row] = name.clone();
@@ -182,6 +194,7 @@ impl EventTree {
 
     pub fn clear_formatted_names(&mut self) {
         self.format_attempted.clear();
+        self.formatted_success.clear();
         self.names.clone_from(&self.original_names);
         self.lower_names = self.names.iter().map(|name| name.to_lowercase()).collect();
         self.rebuild();
@@ -319,6 +332,10 @@ impl EventTree {
 
     pub fn filter_error(&self) -> bool {
         self.filter_error
+    }
+
+    pub fn clear_filter_error(&mut self) {
+        self.filter_error = false;
     }
 
     /// Find among rows admitted by the current filter, including collapsed rows.
@@ -548,6 +565,9 @@ mod tests {
 
     #[test]
     fn formatted_names_follow_visibility_filter_and_marker_rules() {
+        assert!(Filter::parse("Draw").unwrap().uses_event_names());
+        assert!(Filter::parse("$regex(/draw/)").unwrap().uses_event_names());
+        assert!(!Filter::parse("$action()").unwrap().uses_event_names());
         use crate::replay::ApiEvent;
         let mut draw = action(-1);
         draw.event_id = 2;
@@ -579,11 +599,13 @@ mod tests {
         }];
         let mut tree = EventTree::default();
         tree.reset(&[draw, marker]);
+        assert_eq!(tree.all_unformatted_targets(), [1, 2]);
         tree.set_show_api(true);
         assert_eq!(tree.visible_format_targets(), [1, 2]);
         assert_eq!(tree.unformatted_targets(0..1), [1]);
         tree.record_format_attempts([1]);
         assert!(tree.unformatted_targets(0..1).is_empty());
+        assert_eq!(tree.all_unformatted_targets(), [1, 2]);
         tree.apply_formatted_names(
             &[
                 (1, "Bind(42)".into()),
@@ -592,6 +614,7 @@ mod tests {
             ]
             .into(),
         );
+        assert!(tree.all_unformatted_targets().is_empty());
         assert_eq!(
             tree.display_name(tree.row_for_event(1).unwrap()),
             Some("Bind(42)")

@@ -619,6 +619,7 @@ struct Workspace {
     event_filter_revision: std::sync::Arc<std::sync::atomic::AtomicU64>,
     event_filter_names_pending: bool,
     event_name_worker: bool,
+    event_filter_pending: Option<u64>,
     event_filter_name: Entity<InputState>,
     saved_event_filters: Vec<renderdocx::event_filters::SavedFilter>,
     event_find: Entity<InputState>,
@@ -1738,11 +1739,25 @@ impl Workspace {
     fn apply_event_filter(&mut self, expression: String, cx: &mut Context<Self>) {
         use std::sync::atomic::Ordering;
         let revision = self.event_filter_revision.fetch_add(1, Ordering::Relaxed) + 1;
-        self.event_tree.set_filter(&expression);
-        let needs_parameters =
-            renderdocx::event_filter::Filter::parse(&expression).is_ok_and(|filter| {
-                !filter.parameter_queries().is_empty() || !filter.annotation_queries().is_empty()
-            });
+        self.event_filter_pending = None;
+        let parsed = renderdocx::event_filter::Filter::parse(&expression);
+        let needs_parameters = parsed.as_ref().is_ok_and(|filter| {
+            !filter.parameter_queries().is_empty() || !filter.annotation_queries().is_empty()
+        });
+        let needs_names = self.settings.event_auto_format
+            && parsed
+                .as_ref()
+                .is_ok_and(|filter| filter.uses_event_names());
+        let targets = if needs_names {
+            self.event_tree.all_unformatted_targets()
+        } else {
+            Vec::new()
+        };
+        if targets.is_empty() {
+            self.event_tree.set_filter(&expression);
+        } else {
+            self.event_tree.clear_filter_error();
+        }
         let Some((session, (actions, resources, buffers))) = self.session.clone().zip(
             self.snapshot
                 .as_ref()
@@ -1751,7 +1766,7 @@ impl Workspace {
             cx.notify();
             return;
         };
-        if !needs_parameters {
+        if !needs_parameters && targets.is_empty() {
             cx.notify();
             return;
         }
@@ -1762,8 +1777,34 @@ impl Workspace {
         let capture_revision = self.open_revision;
         let generation = self.event_filter_revision.clone();
         let language = self.settings.language;
+        let show_all = self.settings.event_show_all_parameters;
+        let show_names = self.settings.event_show_parameter_names;
+        let use_custom = self.settings.event_use_custom_action_names;
+        let auto_format = self.settings.event_auto_format;
         let task_expression = expression.clone();
+        self.event_filter_pending = Some(revision);
         let task = cx.background_executor().spawn(async move {
+            let formatted = if targets.is_empty() {
+                Vec::new()
+            } else {
+                renderdocx::event_parameters::format_events(
+                    &session,
+                    &targets,
+                    &resources,
+                    &buffers,
+                    language,
+                    show_all,
+                    show_names,
+                    || generation.load(Ordering::Relaxed) != revision,
+                )?
+            };
+            let mut names = std::collections::HashMap::new();
+            for (event, value) in formatted {
+                names.insert(
+                    event,
+                    value.map_err(|error| format!("Event {event}: {error}"))?,
+                );
+            }
             let parameters = renderdocx::event_parameters::resolve(
                 &session,
                 &actions,
@@ -1779,7 +1820,7 @@ impl Workspace {
                 &task_expression,
                 || generation.load(Ordering::Relaxed) != revision,
             )?;
-            Ok::<_, String>((parameters, annotations))
+            Ok::<_, String>((names, parameters, annotations))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -1789,8 +1830,21 @@ impl Workspace {
                 {
                     return;
                 }
+                this.event_filter_pending = None;
+                if this.settings.language != language
+                    || this.settings.event_show_all_parameters != show_all
+                    || this.settings.event_show_parameter_names != show_names
+                    || this.settings.event_use_custom_action_names != use_custom
+                    || this.settings.event_auto_format != auto_format
+                {
+                    cx.notify();
+                    return;
+                }
                 match result {
-                    Ok((matches, annotations)) => {
+                    Ok((names, matches, annotations)) => {
+                        this.event_tree
+                            .record_format_attempts(names.keys().copied());
+                        this.event_tree.apply_formatted_names(&names);
                         this.event_tree
                             .set_filter_with_data(&expression, matches, annotations)
                     }
@@ -1815,7 +1869,11 @@ impl Workspace {
 
     fn format_visible_events(&mut self, cx: &mut Context<Self>) {
         use std::sync::atomic::Ordering;
-        if self.replay_pending || self.export_pending || self.resource_pending {
+        if self.replay_pending
+            || self.export_pending
+            || self.resource_pending
+            || self.event_filter_pending.is_some()
+        {
             return;
         }
         let (Some(session), Some(snapshot)) = (self.session.clone(), self.snapshot.as_ref()) else {
@@ -1937,6 +1995,7 @@ impl Workspace {
         if !self.settings.event_auto_format
             || self.tab != CaptureTab::Events
             || self.event_name_worker
+            || self.event_filter_pending.is_some()
             || self.event_filter_names_pending
             || self.resource_pending
             || self.replay_pending
@@ -5309,6 +5368,19 @@ impl Workspace {
     }
 
     fn find_event(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if self.event_filter_pending.is_some() {
+            self.status = Some(
+                self.t(
+                    "Wait for the event filter to finish.",
+                    "请等待事件筛选完成。",
+                    "イベントフィルターの完了をお待ちください。",
+                    "이벤트 필터가 끝날 때까지 기다려 주세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
         if self.replay_pending
             || self.export_pending
             || self.resource_pending
@@ -16356,6 +16428,7 @@ impl Workspace {
                                                 .aria_label(event_filter_label)
                                                 .w_full(),
                                         )
+                                        .when(self.event_filter_pending.is_some(), |view| view.child(div().id("event-filter-loading").test_support().text_sm().text_color(rgb(0x91a7c0)).child(self.t("Searching event details…", "正在搜索事件详情…", "イベント詳細を検索中…", "이벤트 세부 정보를 검색하는 중…"))))
                                         .child(div().flex().flex_wrap().gap_2()
                                             .child(Input::new(&self.event_filter_name).id("event-filter-name").aria_label(self.t("Saved filter name", "已保存筛选名称", "保存フィルター名", "저장된 필터 이름")).w(px(180.)))
                                             .child(button("event-filter-save", self.t("Save filter", "保存筛选", "フィルターを保存", "필터 저장"), false, |this, cx| this.save_event_filter(cx), cx))
@@ -16566,24 +16639,24 @@ impl Workspace {
                             .when(self.tab == CaptureTab::Events, |view| view.child(div().flex().flex_wrap().gap_2()
                                 .child(button("event-auto-format", self.t("Automatic event names", "自动格式化事件名", "イベント名を自動整形", "이벤트 이름 자동 서식"), self.settings.event_auto_format, |this, cx| {
                                     this.settings.event_auto_format = !this.settings.event_auto_format;
-                                    this.save(); cx.notify();
+                                    this.save(); let expression = this.event_search.read(cx).value().to_string(); this.apply_event_filter(expression, cx);
                                 }, cx))
                                 .child(button("event-format-visible", self.t("Format visible events", "格式化可见事件", "表示イベントを整形", "표시된 이벤트 서식 지정"), false, |this, cx| this.format_visible_events(cx), cx))
                                 .child(button("event-show-param-names", self.t("Parameter names", "参数名称", "パラメーター名", "매개변수 이름"), self.settings.event_show_parameter_names, |this, cx| {
                                     if this.resource_pending || this.replay_pending || this.export_pending { return; }
                                     this.settings.event_show_parameter_names = !this.settings.event_show_parameter_names;
-                                    this.event_tree.clear_formatted_names(); this.save(); this.format_visible_events(cx);
+                                    this.event_tree.clear_formatted_names(); this.save(); let expression = this.event_search.read(cx).value().to_string(); let empty = expression.is_empty(); this.apply_event_filter(expression, cx); if empty { this.format_visible_events(cx); }
                                 }, cx))
                                 .child(button("event-show-all-params", self.t("All parameters", "全部参数", "すべてのパラメーター", "모든 매개변수"), self.settings.event_show_all_parameters, |this, cx| {
                                     if this.resource_pending || this.replay_pending || this.export_pending { return; }
                                     this.settings.event_show_all_parameters = !this.settings.event_show_all_parameters;
-                                    this.event_tree.clear_formatted_names(); this.save(); this.format_visible_events(cx);
+                                    this.event_tree.clear_formatted_names(); this.save(); let expression = this.event_search.read(cx).value().to_string(); let empty = expression.is_empty(); this.apply_event_filter(expression, cx); if empty { this.format_visible_events(cx); }
                                 }, cx))
                                 .child(button("event-use-custom-names", self.t("Custom action names", "自定义动作名称", "カスタムアクション名", "사용자 작업 이름"), self.settings.event_use_custom_action_names, |this, cx| {
                                     if this.resource_pending || this.replay_pending || this.export_pending { return; }
                                     this.settings.event_use_custom_action_names = !this.settings.event_use_custom_action_names;
                                     this.event_tree.set_use_custom_action_names(this.settings.event_use_custom_action_names);
-                                    this.save(); this.format_visible_events(cx);
+                                    this.save(); let expression = this.event_search.read(cx).value().to_string(); let empty = expression.is_empty(); this.apply_event_filter(expression, cx); if empty { this.format_visible_events(cx); }
                                 }, cx))
                                 .child(button("event-expand-subtree", self.t("Expand subtree", "展开分组", "グループを展開", "그룹 펼치기"), false, |this, cx| this.set_event_expansion(false, cx), cx))
                                 .child(button("event-collapse-subtree", self.t("Collapse subtree", "折叠分组", "グループを折りたたむ", "그룹 접기"), false, |this, cx| this.set_event_expansion(true, cx), cx))
@@ -17516,6 +17589,7 @@ fn main() {
                         event_filter_revision: Default::default(),
                         event_filter_names_pending: false,
                         event_name_worker: false,
+                        event_filter_pending: None,
                         event_search,
                         event_filter_name,
                         saved_event_filters: Vec::new(),
@@ -18297,6 +18371,7 @@ mod ui_tests {
                         event_filter_revision: Default::default(),
                         event_filter_names_pending: false,
                         event_name_worker: false,
+                        event_filter_pending: None,
                         event_search,
                         event_find,
                         event_filter_name,
@@ -18887,6 +18962,7 @@ mod ui_tests {
                         event_filter_revision: Default::default(),
                         event_filter_names_pending: false,
                         event_name_worker: false,
+                        event_filter_pending: None,
                         event_search,
                         event_find,
                         selected: None,
@@ -21026,12 +21102,68 @@ mod ui_tests {
                     .starts_with("Call(4, (300 bytes)"),
                 "automatic event formatting"
             );
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.event_tree.clear_formatted_names();
+                view.apply_event_filter("300".into(), cx);
+                assert!(view.event_filter_pending.is_some());
+                view.apply_event_filter("$event(EID=43)".into(), cx);
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let state = view.read(cx);
+            assert!(state.event_filter_pending.is_none());
+            assert!(!state.event_tree.filter_error());
+            assert!(
+                state
+                    .event_tree
+                    .visible
+                    .contains(&state.event_tree.row_for_event(43).unwrap())
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.event_tree.clear_formatted_names();
+                view.event_search
+                    .update(cx, |input, cx| input.set_value("300", window, cx));
+                view.apply_event_filter("300".into(), cx);
+                cx.notify();
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let state = view.read(cx);
+            assert!(state.event_filter_pending.is_none());
+            assert!(
+                state.event_tree.all_unformatted_targets().is_empty(),
+                "pending={:?}, targets={:?}, status={:?}, input={:?}",
+                state.event_filter_pending,
+                state.event_tree.all_unformatted_targets(),
+                state.status,
+                state.event_search.read(cx).value()
+            );
+            assert!(
+                state
+                    .event_tree
+                    .visible
+                    .contains(&state.event_tree.row_for_event(41).unwrap())
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| {
                 view.settings.event_auto_format = false;
                 view.event_tree.clear_formatted_names();
+                view.event_search
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                view.apply_event_filter(String::new(), cx);
                 cx.notify();
             });
-        });
+        })
+        .unwrap();
+        cx.run_until_parked();
         cx.update_window(handle.into(), |_, window, cx| {
             reveal_details(window, "event-format-visible", cx);
             window.click("event-format-visible", cx)
@@ -21516,13 +21648,60 @@ mod ui_tests {
                     );
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
-                cx.update(|cx| {
+                cx.update_window(handle.into(), |_, window, cx| {
+                    view.update(cx, |view, cx| {
+                        view.settings.event_show_all_parameters = true;
+                        view.settings.event_show_parameter_names = true;
+                        view.event_tree.clear_formatted_names();
+                        view.event_search
+                            .update(cx, |input, cx| input.set_value("pSrcData", window, cx));
+                        view.apply_event_filter("pSrcData".into(), cx);
+                        cx.notify();
+                    });
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        let state = view.read(cx);
+                        state.event_filter_pending.is_none()
+                            && state.event_tree.all_unformatted_targets().is_empty()
+                            && state
+                                .event_tree
+                                .row_for_event(update_event)
+                                .is_some_and(|row| {
+                                    state.event_tree.visible.contains(&row)
+                                        && state
+                                            .event_tree
+                                            .display_name(row)
+                                            .is_some_and(|name| name.contains("pSrcData"))
+                                })
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real parameter text filter failed: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
                     view.update(cx, |view, cx| {
                         view.settings.event_auto_format = false;
+                        view.settings.event_show_all_parameters = false;
+                        view.settings.event_show_parameter_names = false;
                         view.event_tree.clear_formatted_names();
+                        view.event_search.update(cx, |input, cx| {
+                            input.set_value("UpdateSubresource", window, cx)
+                        });
+                        view.apply_event_filter("UpdateSubresource".into(), cx);
                         cx.notify();
-                    })
-                });
+                    });
+                })
+                .unwrap();
+                cx.run_until_parked();
                 cx.update_window(handle.into(), |_, window, cx| {
                     reveal_details(window, "event-format-visible", cx);
                     window.click("event-format-visible", cx);
