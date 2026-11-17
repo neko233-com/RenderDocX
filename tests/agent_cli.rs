@@ -2479,6 +2479,69 @@ fn incompatible_core_is_rejected_before_capture_open() {
 
 #[cfg(windows)]
 #[test]
+#[ignore = "requires built D3D11 fixture and matching RenderDoc replay bridge"]
+fn real_d3d11_nested_markers_resolve_and_replay_effective_events() {
+    use std::{os::windows::process::CommandExt, path::PathBuf};
+    let bridge = PathBuf::from(
+        std::env::var_os("RENDERDOCX_TEST_BRIDGE").expect("set RENDERDOCX_TEST_BRIDGE"),
+    );
+    let fixture = PathBuf::from(
+        std::env::var_os("RENDERDOCX_TEST_FIXTURE").expect("set RENDERDOCX_TEST_FIXTURE"),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(fixture)
+        .arg(bridge.parent().unwrap().join("renderdoc.dll"))
+        .arg(dir.path().join("markers"))
+        .arg("--markers")
+        .creation_flags(0x08000000)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "fixture: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let capture = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("RENDERDOCX_CAPTURE="))
+        .unwrap();
+    let mut agent = Agent::new(Some(bridge.to_str().unwrap()));
+    let opened = agent.send(&serde_json::json!({"command":"open","path":capture}).to_string());
+    assert_eq!(opened["ok"], true, "{opened}");
+    let actions = opened["data"]["capture"]["actions"].as_array().unwrap();
+    let last_draw = actions
+        .iter()
+        .filter(|a| {
+            a["name"]
+                .as_str()
+                .is_some_and(|n| n.contains("DrawIndexed"))
+        })
+        .last()
+        .unwrap()["event_id"]
+        .as_u64()
+        .unwrap();
+    for (path, expected) in [
+        ("RenderDocX Outer", last_draw + 1),
+        ("RenderDocX Outer/RenderDocX Inner", last_draw),
+    ] {
+        let result =
+            agent.send(&serde_json::json!({"command":"event_path","path":path}).to_string());
+        assert_eq!(result["ok"], true, "{result}");
+        let selected = result["data"]["event_id"].as_u64().unwrap();
+        let effective = result["data"]["effective_event_id"].as_u64().unwrap();
+        assert_ne!(selected, effective);
+        assert_eq!(effective, expected, "{result}");
+        let replay =
+            agent.send(&serde_json::json!({"command":"select","event_id":effective}).to_string());
+        assert_eq!(replay["ok"], true, "{replay}");
+        assert_eq!(replay["data"]["pipeline"]["event_id"], effective);
+    }
+    agent.quit();
+}
+
+#[cfg(windows)]
+#[test]
 #[ignore = "requires built D3D11 and shader processor fixtures and matching RenderDoc replay bridge"]
 fn real_d3d11_capture_is_inspected_and_selected() {
     use std::{os::windows::process::CommandExt, path::PathBuf};

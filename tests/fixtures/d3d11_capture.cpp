@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d11_1.h>
 #include <d3dcompiler.h>
 #include "api/app/renderdoc_app.h"
 #include <iostream>
@@ -19,7 +20,8 @@ static std::string utf8(const wchar_t *text)
 
 int wmain(int argc, wchar_t **argv)
 {
-  if(argc != 3 && !(argc == 4 && std::wstring(argv[3]) == L"--callstacks")) { std::cerr << "Expected renderdoc.dll, capture path template and optional --callstacks"; return 2; }
+  if(argc != 3 && !(argc == 4 && (std::wstring(argv[3]) == L"--callstacks" || std::wstring(argv[3]) == L"--markers"))) { std::cerr << "Expected renderdoc.dll, capture path template and optional --callstacks or --markers"; return 2; }
+  const bool markers = argc == 4 && std::wstring(argv[3]) == L"--markers";
   HMODULE renderdoc = LoadLibraryW(argv[1]);
   if(!renderdoc) { std::cerr << "Could not load RenderDoc"; return 3; }
   auto get_api = reinterpret_cast<pRENDERDOC_GetAPI>(GetProcAddress(renderdoc, "RENDERDOC_GetAPI"));
@@ -29,7 +31,7 @@ int wmain(int argc, wchar_t **argv)
   const std::string path = utf8(argv[2]);
   if(path.empty()) { std::cerr << "Invalid capture path"; return 5; }
   api->SetCaptureFilePathTemplate(path.c_str());
-  if(argc == 4 && !api->SetCaptureOptionU32(eRENDERDOC_Option_CaptureCallstacks, 1))
+  if(argc == 4 && !markers && !api->SetCaptureOptionU32(eRENDERDOC_Option_CaptureCallstacks, 1))
   { std::cerr << "Could not enable callstacks"; return 5; }
 
   HMODULE d3d = LoadLibraryW(L"d3d11.dll");
@@ -217,6 +219,10 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint3 id : 
   if(SUCCEEDED(hr)) hr = device->CreateBuffer(&buffer_desc, &initial, &index_buffer);
   if(FAILED(hr)) { std::cerr << "Could not create fixture buffers"; return 16; }
 
+  ID3DUserDefinedAnnotation *marker = nullptr;
+  if(markers && FAILED(context->QueryInterface(__uuidof(ID3DUserDefinedAnnotation), reinterpret_cast<void **>(&marker))))
+  { std::cerr << "D3D11 annotations unavailable"; return 31; }
+
   api->StartFrameCapture(device, nullptr);
   if(!api->IsFrameCapturing()) { std::cerr << "Capture did not start"; return 9; }
   const float color[4] = {0.25f, 0.5f, 0.75f, 1.0f};
@@ -265,6 +271,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint3 id : 
   if(api->SetCommandAnnotation(device, context, "renderdocx.pass", eRENDERDOC_String, 0, &annotation_label) != 0 ||
      api->SetCommandAnnotation(device, context, "renderdocx.count", eRENDERDOC_UInt32, 0, &annotation_count) != 0)
   { std::cerr << "Could not set command annotations"; return 24; }
+  if(marker) { marker->BeginEvent(L"RenderDocX Outer"); marker->BeginEvent(L"RenderDocX Inner"); }
   context->DrawIndexed(3, 0, 0);
   const float history_vertices[] = {0, -1, -1, 3, -1, -1, 3};
   context->UpdateSubresource(vertex_buffer, 0, nullptr, history_vertices, 0, 0);
@@ -275,12 +282,14 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint3 id : 
   context->RSSetState(scissor_rasterizer);
   context->RSSetScissorRects(1, &clipped);
   context->DrawIndexed(3, 0, 0);
+  if(marker) { marker->EndEvent(); marker->EndEvent(); }
   context->CSSetShader(compute_shader, nullptr, 0);
   context->CSSetConstantBuffers(0, 1, &constant_buffer);
   context->CSSetUnorderedAccessViews(0, 1, &compute_uav, nullptr);
   context->Dispatch(2, 1, 1);
   context->Flush();
   if(!api->EndFrameCapture(device, nullptr)) { std::cerr << "Capture did not complete"; return 10; }
+  if(marker) marker->Release();
   if(api->GetNumCaptures() == 0) { std::cerr << "No capture was recorded"; return 11; }
   uint32_t length = 0;
   if(!api->GetCapture(0, nullptr, &length, nullptr) || length == 0) { std::cerr << "Could not read capture path"; return 12; }

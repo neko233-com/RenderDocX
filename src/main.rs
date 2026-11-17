@@ -21893,7 +21893,7 @@ mod ui_tests {
                 use std::os::windows::process::CommandExt;
                 let bridge = PathBuf::from(bridge);
                 let dir = tempfile::tempdir().unwrap();
-                let result = std::process::Command::new(fixture)
+                let result = std::process::Command::new(&fixture)
                     .arg(bridge.parent().unwrap().join("renderdoc.dll"))
                     .arg(dir.path().join("frame"))
                     .creation_flags(0x08000000)
@@ -21941,6 +21941,93 @@ mod ui_tests {
                     assert!(
                         std::time::Instant::now() < deadline,
                         "initial capture replay timed out: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                let marker_result = std::process::Command::new(&fixture)
+                    .arg(
+                        settings
+                            .replay_bridge
+                            .as_ref()
+                            .unwrap()
+                            .parent()
+                            .unwrap()
+                            .join("renderdoc.dll"),
+                    )
+                    .arg(dir.path().join("marked-frame"))
+                    .arg("--markers")
+                    .creation_flags(0x08000000)
+                    .output()
+                    .unwrap();
+                assert!(
+                    marker_result.status.success(),
+                    "marked fixture: {}",
+                    String::from_utf8_lossy(&marker_result.stderr)
+                );
+                let marker_output = String::from_utf8(marker_result.stdout).unwrap();
+                let marked_capture = PathBuf::from(
+                    marker_output
+                        .lines()
+                        .find_map(|line| line.strip_prefix("RENDERDOCX_CAPTURE="))
+                        .unwrap(),
+                );
+                let (marker_session, marker_snapshot) =
+                    Session::open(&settings, &marked_capture).unwrap();
+                let group_index = marker_snapshot
+                    .actions
+                    .iter()
+                    .position(|action| action.name == "RenderDocX Outer")
+                    .unwrap();
+                let group_event = marker_snapshot.actions[group_index].event_id;
+                let last_draw = marker_snapshot
+                    .actions
+                    .iter()
+                    .filter(|action| action.name.contains("DrawIndexed"))
+                    .last()
+                    .unwrap()
+                    .event_id;
+                let effective_event = last_draw + 1;
+                cx.update(|cx| {
+                    view.update(cx, |view, cx| {
+                        view.open_revision += 1;
+                        view.event_tree.reset(&marker_snapshot.actions);
+                        view.snapshot = Some(marker_snapshot);
+                        view.session = Some(marker_session);
+                        view.selected = None;
+                        view.selected_event_id = None;
+                        view.pipeline = None;
+                        view.tab = CaptureTab::Events;
+                        let row = view
+                            .event_tree
+                            .reveal_filtered(group_index)
+                            .expect("visible marker");
+                        view.event_scroll
+                            .scroll_to_item(row + 1, gpui::ScrollStrategy::Nearest);
+                        cx.notify();
+                    })
+                });
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    window.click(group_index, cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        let view = view.read(cx);
+                        view.selected_event_id() == Some(group_event)
+                            && view
+                                .pipeline
+                                .as_ref()
+                                .is_some_and(|pipeline| pipeline.event_id == effective_event)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real marker replay failed: {:?}",
                         cx.update(|cx| view.read(cx).status.clone())
                     );
                     std::thread::sleep(std::time::Duration::from_millis(20));
