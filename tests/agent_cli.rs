@@ -1810,6 +1810,25 @@ fn real_opengl_vertex_inputs_include_generic_and_normalized_values() {
         bottom["data"]["pixel"]["coordinates"]["normalized"],
         serde_json::json!([0.0, 0.5])
     );
+    let uv_pick = agent.send(
+        &serde_json::json!({"command":"pick_pixel","index":texture,"uv":[0.1,0.75]}).to_string(),
+    );
+    assert_eq!(uv_pick["ok"], true, "{uv_pick}");
+    assert_eq!(uv_pick["data"]["pixel"]["x"], 0);
+    assert_eq!(uv_pick["data"]["pixel"]["y"], 1);
+    assert_eq!(
+        uv_pick["data"]["pixel"]["float_values"],
+        serde_json::json!(["1", "0", "0", "1"])
+    );
+    let invalid_uv = agent.send(
+        &serde_json::json!({"command":"pick_pixel","index":texture,"uv":[1.0,0.0]}).to_string(),
+    );
+    assert_eq!(invalid_uv["error"]["code"], "invalid_arguments");
+    let ambiguous = agent.send(
+        &serde_json::json!({"command":"pick_pixel","index":texture,"x":0,"y":0,"uv":[0.0,0.0]})
+            .to_string(),
+    );
+    assert_eq!(ambiguous["error"]["code"], "invalid_arguments");
     let preview_path = dir.path().join("gl-preview.png");
     let rendered = agent.send(&serde_json::json!({"command":"render_texture","index":texture,"width":2,"height":2,"path":preview_path,"preview_linear_as_gamma":false}).to_string());
     assert_eq!(rendered["ok"], true, "{rendered}");

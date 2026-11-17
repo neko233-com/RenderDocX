@@ -653,6 +653,8 @@ struct Workspace {
     texture_raw_last: Option<RawTextureSearchHit>,
     pixel_x: Entity<InputState>,
     pixel_y: Entity<InputState>,
+    pixel_u: Entity<InputState>,
+    pixel_v: Entity<InputState>,
     pixel_debug_primitive: Entity<InputState>,
     pixel_debug_view: Entity<InputState>,
     pixel: Option<Pixel>,
@@ -8572,7 +8574,161 @@ impl Workspace {
         .detach();
     }
 
+    fn pick_texture_uv(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.preview_edit_ready(cx) {
+            return;
+        }
+        let uv = self
+            .pixel_u
+            .read(cx)
+            .value()
+            .parse::<f64>()
+            .ok()
+            .zip(self.pixel_v.read(cx).value().parse::<f64>().ok());
+        let point = uv.and_then(|(u, v)| {
+            self.snapshot
+                .as_ref()
+                .and_then(|snapshot| {
+                    self.selected_texture
+                        .and_then(|index| snapshot.textures.get(index))
+                })
+                .and_then(|texture| {
+                    renderdocx::texture_view::uv_to_texel(
+                        [texture.width, texture.height],
+                        self.texture_selection.mip,
+                        [u, v],
+                    )
+                })
+        });
+        if let Some([x, y]) = point {
+            self.pixel_x
+                .update(cx, |input, cx| input.set_value(x.to_string(), window, cx));
+            self.pixel_y
+                .update(cx, |input, cx| input.set_value(y.to_string(), window, cx));
+            self.pick_texture_pixel(cx);
+        } else {
+            self.status = Some(
+                self.t(
+                    "Enter finite UV coordinates from 0 inclusive to 1 exclusive.",
+                    "请输入大于等于 0 且小于 1 的有限 UV 坐标。",
+                    "0以上1未満の有限なUV座標を入力してください。",
+                    "0 이상 1 미만의 유한한 UV 좌표를 입력하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+        }
+    }
+
+    fn center_texture_pixel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.preview_edit_ready(cx) {
+            return;
+        }
+        if self.selected.is_none() || self.pipeline.is_none() {
+            self.status = Some(
+                self.t(
+                    "Select an event before centering a pixel.",
+                    "请先选择事件再居中像素。",
+                    "ピクセルを中央に移動する前にイベントを選択してください。",
+                    "픽셀을 중앙에 놓기 전에 이벤트를 선택하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let point = self
+            .pixel_x
+            .read(cx)
+            .value()
+            .parse::<u32>()
+            .ok()
+            .zip(self.pixel_y.read(cx).value().parse::<u32>().ok());
+        let Some((x, y)) = point else {
+            self.status = Some(
+                self.t(
+                    "Enter valid pixel coordinates.",
+                    "请输入有效的像素坐标。",
+                    "有効なピクセル座標を入力してください。",
+                    "올바른 픽셀 좌표를 입력하세요.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return;
+        };
+        let Some(texture) = self
+            .selected_texture
+            .and_then(|index| snapshot.textures.get(index))
+        else {
+            return;
+        };
+        if self.texture_selection.validate(texture).is_err()
+            || self.texture_selection.mip >= 32
+            || texture.width == 0
+            || texture.height == 0
+        {
+            self.status = Some(
+                self.t(
+                    "Pixel coordinates are outside the selected mip.",
+                    "像素坐标超出所选 mip。",
+                    "ピクセル座標が選択した mip の範囲外です。",
+                    "픽셀 좌표가 선택한 mip 범위를 벗어났습니다.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let Some(extent) = renderdocx::texture_view::display_extent(
+            [texture.width, texture.height],
+            texture.dimension,
+            snapshot.local_renderer,
+        ) else {
+            self.status = Some(
+                self.t(
+                    "Texture preview geometry is unavailable.",
+                    "纹理预览尺寸不可用。",
+                    "テクスチャプレビューの寸法を取得できません。",
+                    "텍스처 미리보기 크기를 사용할 수 없습니다.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let x = x.min((texture.width >> self.texture_selection.mip).max(1) - 1);
+        let y = y.min((texture.height >> self.texture_selection.mip).max(1) - 1);
+        let Some((scale, _)) = self.preview_transform() else {
+            return;
+        };
+        let Some(offset) = renderdocx::texture_view::center_texel(
+            [texture.width, texture.height],
+            extent,
+            self.texture_selection.mip,
+            [x, y],
+            self.texture_selection.preview_flip_y,
+            scale,
+        ) else {
+            return;
+        };
+        self.texture_selection.preview_scale = Some(scale);
+        self.texture_selection.preview_offset = offset;
+        self.pixel_x
+            .update(cx, |input, cx| input.set_value(x.to_string(), window, cx));
+        self.pixel_y
+            .update(cx, |input, cx| input.set_value(y.to_string(), window, cx));
+        self.preview_texture_impl(Some([x, y]), cx);
+    }
+
     fn preview_texture(&mut self, cx: &mut Context<Self>) {
+        self.preview_texture_impl(None, cx);
+    }
+
+    fn preview_texture_impl(&mut self, pick_after: Option<[u32; 2]>, cx: &mut Context<Self>) {
         if self.replay_pending
             || self.export_pending
             || self.resource_pending
@@ -8671,6 +8827,14 @@ impl Workspace {
                     Ok(preview) => {
                         this.preview = Some(preview);
                         this.status = None;
+                        if let Some([x, y]) = pick_after {
+                            if this.pixel_x.read(cx).value().parse::<u32>().ok() == Some(x)
+                                && this.pixel_y.read(cx).value().parse::<u32>().ok() == Some(y)
+                            {
+                                this.pick_texture_pixel(cx);
+                                return;
+                            }
+                        }
                     }
                     Err(error) => {
                         this.status = Some(format!(
@@ -14153,9 +14317,15 @@ impl Workspace {
                                 |this, cx| this.pick_texture_pixel(cx),
                                 cx,
                             ))
+                            .child(Button::new("pixel-center").label(self.t("Center and pick", "居中并拾取", "中央に移動して取得", "중앙 이동 및 선택")).secondary().on_click(cx.listener(|this, _, window, cx| this.center_texture_pixel(window, cx))))
                             .child(button("pixel-history", history_label, false, |this, cx| this.read_pixel_history(0, false, cx), cx))
                             .child(button("pixel-debug-start", self.t("Debug pixel", "调试像素", "ピクセルをデバッグ", "픽셀 디버깅"), true, |this, cx| this.debug_selected_pixel(cx), cx)),
                     )
+                    .child(div().flex().flex_wrap().items_center().gap_2()
+                        .child(self.t("Top-left UV [0, 1)", "左上原点 UV [0, 1)", "左上原点 UV [0, 1)", "왼쪽 위 원점 UV [0, 1)"))
+                        .child(Input::new(&self.pixel_u).id("pixel-u").aria_label("U").w(px(75.)))
+                        .child(Input::new(&self.pixel_v).id("pixel-v").aria_label("V").w(px(75.)))
+                        .child(Button::new("pixel-pick-uv").label(self.t("Pick UV", "按 UV 拾取", "UV で取得", "UV로 선택")).secondary().on_click(cx.listener(|this, _, window, cx| this.pick_texture_uv(window, cx)))))
                     .child(div().flex().flex_wrap().items_center().gap_2()
                         .child(self.t("Primitive", "图元", "プリミティブ", "프리미티브"))
                         .child(Input::new(&self.pixel_debug_primitive).id("pixel-debug-primitive").aria_label(self.t("Primitive", "图元", "プリミティブ", "프리미티브")).w(px(100.)))
@@ -16594,6 +16764,8 @@ fn main() {
                     let pixel_debug_primitive = cx.new(|cx| InputState::new(window, cx));
                     let pixel_debug_view = cx.new(|cx| InputState::new(window, cx));
                     let pixel_x = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let pixel_u = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let pixel_v = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let compute_group =
                         cx.new(|cx| InputState::new(window, cx).default_value("0,0,0"));
                     let compute_thread =
@@ -16682,6 +16854,8 @@ fn main() {
                         texture_raw_last: None,
                         pixel_x,
                         pixel_y,
+                        pixel_u,
+                        pixel_v,
                         pixel_debug_primitive,
                         pixel_debug_view,
                         pixel: None,
@@ -17347,6 +17521,8 @@ mod ui_tests {
                     let pixel_debug_primitive = cx.new(|cx| InputState::new(window, cx));
                     let pixel_debug_view = cx.new(|cx| InputState::new(window, cx));
                     let pixel_x = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let pixel_u = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let pixel_v = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let compute_group =
                         cx.new(|cx| InputState::new(window, cx).default_value("0,0,0"));
                     let compute_thread =
@@ -17454,6 +17630,8 @@ mod ui_tests {
                         texture_raw_last: None,
                         pixel_x,
                         pixel_y,
+                        pixel_u,
+                        pixel_v,
                         pixel_debug_primitive,
                         pixel_debug_view,
                         pixel: None,
@@ -17806,6 +17984,8 @@ mod ui_tests {
                     let pixel_debug_primitive = cx.new(|cx| InputState::new(window, cx));
                     let pixel_debug_view = cx.new(|cx| InputState::new(window, cx));
                     let pixel_x = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let pixel_u = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let pixel_v = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let compute_group =
                         cx.new(|cx| InputState::new(window, cx).default_value("0,0,0"));
                     let compute_thread =
@@ -18034,6 +18214,8 @@ mod ui_tests {
                         texture_raw_last: None,
                         pixel_x,
                         pixel_y,
+                        pixel_u,
+                        pixel_v,
                         pixel_debug_primitive,
                         pixel_debug_view,
                         pixel: None,
@@ -18402,6 +18584,92 @@ mod ui_tests {
             });
         })
         .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.pixel_u
+                    .update(cx, |input, cx| input.set_value("0.125", window, cx));
+                view.pixel_v
+                    .update(cx, |input, cx| input.set_value("0.25", window, cx));
+            });
+            reveal_details(window, "pixel-pick-uv", cx);
+            window.click("pixel-pick-uv", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                (
+                    view.read(cx).pixel.as_ref().unwrap().x,
+                    view.read(cx).pixel.as_ref().unwrap().y
+                ),
+                (2, 4)
+            )
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            reveal_details(window, "pixel-center", cx);
+            window.click("pixel-center", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let state = view.read(cx);
+            assert_eq!(
+                (
+                    state.pixel.as_ref().unwrap().x,
+                    state.pixel.as_ref().unwrap().y
+                ),
+                (2, 4)
+            );
+            assert!(state.preview.is_some());
+            let transform = state.texture_selection;
+            assert_eq!(
+                renderdocx::texture_view::texel_at(
+                    [256.0, 180.0],
+                    transform.preview_scale.unwrap(),
+                    transform.preview_offset,
+                    [16, 16],
+                    [16, 16],
+                    0,
+                    false
+                ),
+                Some([2, 4])
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.pixel_x
+                    .update(cx, |input, cx| input.set_value("99", window, cx));
+                view.pixel_y
+                    .update(cx, |input, cx| input.set_value("99", window, cx));
+            });
+            reveal_details(window, "pixel-center", cx);
+            window.click("pixel-center", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                (
+                    view.read(cx).pixel.as_ref().unwrap().x,
+                    view.read(cx).pixel.as_ref().unwrap().y
+                ),
+                (15, 15)
+            )
+        });
+        selections.lock().unwrap().clear();
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.texture_selection.preview_scale = None;
+                view.texture_selection.preview_offset = [0.0, 0.0];
+                view.pixel_x
+                    .update(cx, |input, cx| input.set_value("3", window, cx));
+                view.pixel_y
+                    .update(cx, |input, cx| input.set_value("4", window, cx));
+                view.pick_texture_pixel(cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             window.click("pixel-history", cx);
@@ -21757,6 +22025,74 @@ mod ui_tests {
                     assert_eq!(
                         view.read(cx).pixel.as_ref().unwrap().float_values,
                         ["1", "0", "0", "1"]
+                    )
+                });
+                cx.update_window(handle.into(), |_, window, cx| {
+                    view.update(cx, |view, cx| {
+                        view.pixel_x
+                            .update(cx, |input, cx| input.set_value("1", window, cx));
+                        view.pixel_y
+                            .update(cx, |input, cx| input.set_value("0", window, cx));
+                    });
+                    reveal_details(window, "pixel-center", cx);
+                    window.click("pixel-center", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        !view.read(cx).resource_pending
+                            && !view.read(cx).export_pending
+                            && view.read(cx).preview.is_some()
+                            && view
+                                .read(cx)
+                                .pixel
+                                .as_ref()
+                                .is_some_and(|pixel| pixel.x == 1 && pixel.y == 0)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "OpenGL center and pick failed: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    view.update(cx, |view, cx| {
+                        view.pixel = None;
+                        cx.notify();
+                    });
+                    reveal_details(window, "texture-preview-image", cx);
+                    window.click("texture-preview-image", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        !view.read(cx).resource_pending
+                            && view
+                                .read(cx)
+                                .pixel
+                                .as_ref()
+                                .is_some_and(|pixel| pixel.x == 1 && pixel.y == 0)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "OpenGL centered preview click failed: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update(|cx| {
+                    assert_eq!(
+                        view.read(cx).pixel.as_ref().unwrap().float_values,
+                        ["1", "1", "0", "1"]
                     )
                 });
             }

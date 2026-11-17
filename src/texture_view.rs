@@ -72,6 +72,52 @@ pub fn fit_range(
     Ok([min, max])
 }
 
+/// Convert top-left normalized coordinates to a selected mip texel.
+pub fn uv_to_texel(base: [u32; 2], mip: u32, uv: [f64; 2]) -> Option<[u32; 2]> {
+    if base.contains(&0) || mip >= 32 || uv.iter().any(|v| !v.is_finite() || *v < 0.0 || *v >= 1.0)
+    {
+        return None;
+    }
+    Some(std::array::from_fn(|axis| {
+        let size = (base[axis] >> mip).max(1);
+        ((uv[axis] * f64::from(size)).floor() as u32).min(size - 1)
+    }))
+}
+
+/// Center a texel in the 512×360 headless preview at the current scale.
+pub fn center_texel(
+    base: [u32; 2],
+    extent: [u32; 2],
+    mip: u32,
+    texel: [u32; 2],
+    flip_y: bool,
+    scale: f32,
+) -> Option<[f32; 2]> {
+    if base.contains(&0) || extent.contains(&0) || mip >= 32 || !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let mut offset = [0.0; 2];
+    for axis in 0..2 {
+        let size = (base[axis] >> mip).max(1);
+        if texel[axis] >= size {
+            return None;
+        }
+        let coordinate = if axis == 1 && flip_y {
+            size - 1 - texel[axis]
+        } else {
+            texel[axis]
+        };
+        let position = (coordinate as f64 + 0.5) * f64::from(extent[axis]) / f64::from(size);
+        let target = if axis == 0 { 256.0 } else { 180.0 };
+        let value = target - position * f64::from(scale);
+        if !value.is_finite() || value.abs() > f64::from(f32::MAX) {
+            return None;
+        }
+        offset[axis] = value as f32;
+    }
+    Some(offset)
+}
+
 /// RenderDoc D3D replay draws 1D textures as 100-pixel-high strips.
 /// Other renderer behavior is deliberately left unknown until verified.
 pub fn display_extent(base: [u32; 2], dimension: u32, renderer: Option<u32>) -> Option<[u32; 2]> {
@@ -165,6 +211,26 @@ mod tests {
         let range = super::fit_range(&stats, 4, 0, 1, [true; 4], false).unwrap();
         assert_eq!(range[0], 1.0);
         assert!(range[1] > 1.0);
+    }
+
+    #[test]
+    fn uv_and_center_handle_odd_mips_flips_and_invalid_input() {
+        assert_eq!(super::uv_to_texel([15, 9], 1, [0.999, 0.5]), Some([6, 2]));
+        assert_eq!(super::uv_to_texel([15, 9], 1, [1.0, 0.5]), None);
+        assert_eq!(super::uv_to_texel([15, 9], 1, [f64::NAN, 0.5]), None);
+        for flip in [false, true] {
+            let offset = super::center_texel([15, 9], [15, 9], 1, [6, 2], flip, 3.0).unwrap();
+            assert_eq!(
+                texel_at([256.0, 180.0], 3.0, offset, [15, 9], [15, 9], 1, flip),
+                Some([6, 2])
+            );
+        }
+        let offset = super::center_texel([16, 1], [16, 100], 0, [3, 0], true, 2.0).unwrap();
+        assert_eq!(
+            texel_at([256.0, 180.0], 2.0, offset, [16, 1], [16, 100], 0, true),
+            Some([3, 0])
+        );
+        assert!(super::center_texel([16, 1], [16, 100], 0, [16, 0], false, 2.0).is_none());
     }
 
     #[test]

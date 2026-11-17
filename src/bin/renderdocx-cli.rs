@@ -2658,12 +2658,38 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         .and_then(Value::as_u64)
                         .and_then(|v| u32::try_from(v).ok())
                 };
+                let index = number("index");
+                let coords = if let Some(uv) = request.get("uv") {
+                    if request.contains_key("x") || request.contains_key("y") {
+                        None
+                    } else {
+                        let uv = serde_json::from_value::<[f64; 2]>(uv.clone()).ok();
+                        let mip = match request.get("mip") {
+                            None => Some(0),
+                            Some(value) => value.as_u64().and_then(|v| u32::try_from(v).ok()),
+                        };
+                        uv.zip(mip).and_then(|(uv, mip)| {
+                            opened
+                                .as_ref()
+                                .and_then(|(_, snapshot)| snapshot.textures.get(index? as usize))
+                                .and_then(|texture| {
+                                    renderdocx::texture_view::uv_to_texel(
+                                        [texture.width, texture.height],
+                                        mip,
+                                        uv,
+                                    )
+                                })
+                        })
+                    }
+                } else {
+                    number("x").zip(number("y")).map(|(x, y)| [x, y])
+                };
                 match (
                     &opened,
                     selected_event,
-                    number("index"),
-                    number("x"),
-                    number("y"),
+                    index,
+                    coords.map(|point| point[0]),
+                    coords.map(|point| point[1]),
                 ) {
                     (None, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
                     (Some(_), None, _, _, _) => {
@@ -2728,7 +2754,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     }
                     _ => Err((
                         "invalid_arguments",
-                        "pick_pixel requires a texture index and unsigned x/y".into(),
+                        "pick_pixel requires a texture index and either unsigned x/y or normalized uv in [0,1)".into(),
                     )),
                 }
             }
