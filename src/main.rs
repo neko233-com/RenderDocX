@@ -8558,6 +8558,8 @@ impl Workspace {
                     Ok(pixel) => {
                         this.pixel = Some(pixel);
                         this.status = None;
+                        this.render_pixel_context(cx);
+                        return;
                     }
                     Err(error) => {
                         this.status = Some(format!(
@@ -14508,7 +14510,7 @@ impl Workspace {
                                 .test_support()
                                 .child(format!("({}, {}) · RGBA: {bits}", pixel.x, pixel.y)),
                         )
-                        .when_some(self.pixel_context.as_ref().filter(|context| context.event == pixel.event_id && context.index == pixel.index as usize && context.coordinates == [pixel.x, pixel.y] && context.selection == self.texture_selection && context.shader_revision == self.texture_custom_revision), |view, context| view.child(div().id("pixel-context").test_support().w(px(160.)).h(px(160.)).child(img(context.preview.path.clone()).size_full())))
+                        .when_some(self.pixel_context.as_ref().filter(|context| context.event == pixel.event_id && context.index == pixel.index as usize && context.coordinates == [pixel.x, pixel.y] && context.selection == self.texture_selection && context.shader_revision == self.texture_custom_revision), |view, context| view.child(div().id("pixel-context").test_support().relative().w(px(160.)).h(px(160.)).child(img(context.preview.path.clone()).size_full()).child(div().absolute().left(px(75.)).top(px(75.)).w(px(10.)).h(px(10.)).border_1().border_color(rgb(0x000000)).child(div().size_full().border_1().border_color(rgb(0xffffff))))))
                         .when_some(pixel.coordinates.as_ref(), |view, coords| view.child(div().id("pixel-uv").test_support().child(format!("{}: {:.4}, {:.4} · {} × {}", self.t("Top-left UV", "左上原点 UV", "左上原点 UV", "왼쪽 위 원점 UV"), coords.normalized[0], coords.normalized[1], coords.mip_width, coords.mip_height))))
                         .when_some(pixel.depth_stencil.as_ref(), |view, value| {
                             let depth = value.depth.as_ref().map(|depth| format!("{}: {depth}", self.t("Depth", "深度", "深度", "깊이")));
@@ -18729,12 +18731,6 @@ mod ui_tests {
             assert_eq!((pixel.event_id, pixel.x, pixel.y), (42, 3, 4));
             assert_eq!(pixel.float_values, ["0.25", "0.5", "0.75", "1"]);
         });
-        cx.update_window(handle.into(), |_, window, cx| {
-            reveal_details(window, "pixel-context-render", cx);
-            window.click("pixel-context-render", cx);
-        })
-        .unwrap();
-        cx.run_until_parked();
         cx.update(|cx| {
             let context = view.read(cx).pixel_context.as_ref().expect("pixel context");
             assert_eq!(context.coordinates, [3, 4]);
@@ -18885,7 +18881,7 @@ mod ui_tests {
             window.render_frame(cx);
             window.scroll(
                 "capture-details-scroll",
-                ScrollDelta::Pixels(point(px(0.), px(-500.))),
+                ScrollDelta::Pixels(point(px(0.), px(-700.))),
                 cx,
             );
             window.click(("pixel-history-row", 1usize), cx);
@@ -18996,6 +18992,7 @@ mod ui_tests {
         })
         .unwrap();
         assert_eq!(*events.lock().unwrap(), vec![42]);
+        selections.lock().unwrap().clear();
         cx.update_window(handle.into(), |_, window, cx| {
             reveal_details(window, "texture-next-mip", cx);
             window.click("texture-next-mip", cx);
@@ -20869,9 +20866,10 @@ mod ui_tests {
                 loop {
                     cx.run_until_parked();
                     if cx.update(|cx| {
-                        view.read(cx).pixel.as_ref().is_some_and(|pixel| {
-                            pixel.event_id == draw_event && pixel.x == 8 && pixel.y == 8
-                        })
+                        !view.read(cx).resource_pending
+                            && view.read(cx).pixel.as_ref().is_some_and(|pixel| {
+                                pixel.event_id == draw_event && pixel.x == 8 && pixel.y == 8
+                            })
                     }) {
                         break;
                     }
@@ -21180,9 +21178,10 @@ mod ui_tests {
                 loop {
                     cx.run_until_parked();
                     if cx.update(|cx| {
-                        view.read(cx).pixel.as_ref().is_some_and(|pixel| {
-                            pixel.index as usize == strip_index && pixel.x == 8 && pixel.y == 0
-                        })
+                        !view.read(cx).resource_pending
+                            && view.read(cx).pixel.as_ref().is_some_and(|pixel| {
+                                pixel.index as usize == strip_index && pixel.x == 8 && pixel.y == 0
+                            })
                     }) {
                         break;
                     }
@@ -22126,9 +22125,10 @@ mod ui_tests {
                 loop {
                     cx.run_until_parked();
                     if cx.update(|cx| {
-                        view.read(cx).pixel.as_ref().is_some_and(|pixel| {
-                            pixel.event_id == draw_event && pixel.x == 0 && pixel.y == 0
-                        })
+                        view.read(cx).pixel_context.is_some()
+                            && view.read(cx).pixel.as_ref().is_some_and(|pixel| {
+                                pixel.event_id == draw_event && pixel.x == 0 && pixel.y == 0
+                            })
                     }) {
                         break;
                     }
@@ -22182,9 +22182,10 @@ mod ui_tests {
                 loop {
                     cx.run_until_parked();
                     if cx.update(|cx| {
-                        view.read(cx).pixel.as_ref().is_some_and(|pixel| {
-                            pixel.event_id == draw_event && pixel.x == 0 && pixel.y == 1
-                        })
+                        view.read(cx).pixel_context.is_some()
+                            && view.read(cx).pixel.as_ref().is_some_and(|pixel| {
+                                pixel.event_id == draw_event && pixel.x == 0 && pixel.y == 1
+                            })
                     }) {
                         break;
                     }
@@ -22205,6 +22206,27 @@ mod ui_tests {
                         ["1", "0", "0", "1"]
                     )
                 });
+                let context_path = cx.update(|cx| {
+                    view.read(cx)
+                        .pixel_context
+                        .as_ref()
+                        .unwrap()
+                        .preview
+                        .path
+                        .clone()
+                });
+                let mut reader = png::Decoder::new(std::io::BufReader::new(
+                    std::fs::File::open(context_path).unwrap(),
+                ))
+                .read_info()
+                .unwrap();
+                let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+                reader.next_frame(&mut pixels).unwrap();
+                assert_eq!(
+                    &pixels[(80 * 160 + 80) * 3..][..3],
+                    &[255, 0, 0],
+                    "automatic OpenGL pixel context"
+                );
                 cx.update_window(handle.into(), |_, window, cx| {
                     view.update(cx, |view, cx| {
                         view.pixel_x
