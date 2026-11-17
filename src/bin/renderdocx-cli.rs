@@ -338,6 +338,10 @@ fn usage() -> Value {
     capabilities["serve_commands"]
         .as_array_mut()
         .expect("capabilities commands")
+        .push(json!("event_path"));
+    capabilities["serve_commands"]
+        .as_array_mut()
+        .expect("capabilities commands")
         .push(json!("debug_mesh"));
     capabilities["serve_commands"]
         .as_array_mut()
@@ -1024,6 +1028,50 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     )),
                 }
             }
+            "event_path" => match (&opened, request.get("path"), request.get("event_id")) {
+                (None, _, _) => Err(("no_capture", "No capture is open".into())),
+                (Some((_, snapshot)), path, event) => {
+                    let actions = &snapshot.actions;
+                    let target = match (path, event) {
+                        (Some(Value::String(path)), None) => {
+                            renderdocx::event_path::resolve(actions, path)
+                        }
+                        (None, event) => {
+                            let event = match event {
+                                Some(value) => value.as_u64().and_then(|n| u32::try_from(n).ok()),
+                                None => selected_event,
+                            };
+                            match event {
+                                Some(0) => Some(None),
+                                Some(event) => actions
+                                    .iter()
+                                    .position(|action| {
+                                        action.event_id == event
+                                            || action
+                                                .api_events
+                                                .iter()
+                                                .any(|api| api.event_id == event)
+                                    })
+                                    .map(Some),
+                                None => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    match target {
+                        Some(index) => {
+                            let ancestors = index
+                                .and_then(|i| renderdocx::event_path::ancestry(actions, i))
+                                .unwrap_or_default();
+                            let segments: Vec<_> = ancestors.into_iter().map(|i| json!({"action_index": i, "event_id": actions[i].event_id, "name": renderdocx::event_path::label(&actions[i])})).collect();
+                            Ok(
+                                json!({"action_index":index,"event_id":index.map(|i| actions[i].event_id).unwrap_or(0),"path":index.and_then(|i| renderdocx::event_path::format(actions, i)).unwrap_or_default(),"segments":segments}),
+                            )
+                        }
+                        None => Err(("invalid_arguments", "Unknown event or action path".into())),
+                    }
+                }
+            },
             "step_action" => {
                 let event = match request.get("event_id") {
                     None => selected_event,

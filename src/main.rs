@@ -11947,6 +11947,18 @@ impl Workspace {
                 }
             }
         };
+        let breadcrumbs: Vec<_> = self
+            .selected
+            .and_then(|index| renderdocx::event_path::ancestry(&snapshot.actions, index))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|index| {
+                (
+                    index,
+                    renderdocx::event_path::label(&snapshot.actions[index]),
+                )
+            })
+            .collect();
         let api = match snapshot.api {
             0 => "D3D11",
             1 => "D3D12",
@@ -16912,6 +16924,17 @@ impl Workspace {
                             .rounded_lg()
                             .p_4()
                             .child(detail_view)
+                            .when(self.tab == CaptureTab::Events, |view| view.child(
+                                div().id("event-breadcrumbs").test_support().flex().flex_wrap().items_center().gap_2()
+                                    .child(div().id("event-breadcrumb-root").test_support().cursor_pointer().text_color(rgb(0x8dbbff))
+                                        .child(self.t("Capture start", "捕获开始", "キャプチャ開始", "캡처 시작"))
+                                        .on_click(cx.listener(|this, _, _, cx| this.select_capture_start(cx))))
+                                    .children(breadcrumbs.into_iter().map(|(index, label)| {
+                                        div().flex().items_center().gap_2().child("/")
+                                            .child(div().id(("event-breadcrumb", index)).test_support().cursor_pointer().text_color(rgb(0x8dbbff)).child(label)
+                                                .on_click(cx.listener(move |this, _, _, cx| this.select_event(index, None, cx))))
+                                    }))
+                            ))
                             .when(self.tab == CaptureTab::Events, |view| view.child(div().flex().flex_wrap().gap_2()
                                 .child(button("event-auto-format", self.t("Automatic event names", "自动格式化事件名", "イベント名を自動整形", "이벤트 이름 자동 서식"), self.settings.event_auto_format, |this, cx| {
                                     this.settings.event_auto_format = !this.settings.event_auto_format;
@@ -21659,6 +21682,21 @@ mod ui_tests {
             assert!(view.read(cx).selected.is_none());
             assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 0);
         });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("event-step-next", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 42));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            reveal_details(window, "event-breadcrumb-root", cx);
+            assert!(window.find("event-breadcrumbs").visible());
+            window.click("event-breadcrumb-root", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 0));
         cx.update_window(handle.into(), |_, window, cx| {
             window.click("event-step-next", cx)
         })

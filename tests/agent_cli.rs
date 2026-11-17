@@ -2561,6 +2561,17 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let first_event = forward_start["data"]["action"]["event_id"]
         .as_u64()
         .unwrap();
+    let action_path = start_agent
+        .send(&serde_json::json!({"command":"event_path","event_id":first_event}).to_string());
+    assert_eq!(action_path["ok"], true, "{action_path}");
+    let path = action_path["data"]["path"].as_str().unwrap();
+    let resolved =
+        start_agent.send(&serde_json::json!({"command":"event_path","path":path}).to_string());
+    assert_eq!(resolved["data"]["event_id"], first_event, "{resolved}");
+    let root = start_agent.send(r#"{"command":"event_path","path":"/"}"#);
+    assert_eq!(root["data"]["event_id"], 0);
+    let missing = start_agent.send(r#"{"command":"event_path","path":"not-a-real-action"}"#);
+    assert_eq!(missing["ok"], false);
     let previous = start_agent.send(&serde_json::json!({"command":"step_action","event_id":first_event,"direction":"previous","include_capture_start":true}).to_string());
     assert_eq!(
         previous["data"]["action"]["capture_start"], true,
