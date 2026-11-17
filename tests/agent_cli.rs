@@ -1866,6 +1866,10 @@ fn real_opengl_vertex_inputs_include_generic_and_normalized_values() {
         context["data"]["geometry"]["texel"],
         serde_json::json!([0, 1])
     );
+    assert_eq!(
+        context["data"]["geometry"]["selection"]["preview_offset"],
+        serde_json::json!([80.0, 80.0])
+    );
     let mut reader = png::Decoder::new(std::io::BufReader::new(
         std::fs::File::open(&context_path).unwrap(),
     ))
@@ -1873,7 +1877,7 @@ fn real_opengl_vertex_inputs_include_generic_and_normalized_values() {
     .unwrap();
     let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
     reader.next_frame(&mut pixels).unwrap();
-    assert_eq!(&pixels[(80 * 160 + 80) * 3..][..3], &[255, 0, 0]);
+    assert_eq!(&pixels[(84 * 160 + 84) * 3..][..3], &[255, 0, 0]);
     let repeat = agent.send(&request.to_string());
     assert_eq!(repeat["error"]["code"], "replay_texture_render_failed");
     let clamped = agent.send(

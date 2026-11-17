@@ -2686,12 +2686,29 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         );
                         center.insert("preview_scale".into(), json!(scale));
                         center.insert("preview_offset".into(), json!([0.0, 0.0]));
-                        let geometry = center_texture_request(snapshot, &center)?;
-                        let selection: TextureSelection =
+                        let mut geometry = center_texture_request(snapshot, &center)?;
+                        let mut selection: TextureSelection =
                             serde_json::from_value(geometry["selection"].clone())
                                 .map_err(|error| error.to_string())?;
                         let width = geometry["viewport"][0].as_u64().unwrap() as u32;
                         let height = geometry["viewport"][1].as_u64().unwrap() as u32;
+                        let texel: [u32; 2] = serde_json::from_value(geometry["texel"].clone())
+                            .map_err(|error| error.to_string())?;
+                        let extent: [u32; 2] =
+                            serde_json::from_value(geometry["display_extent"].clone())
+                                .map_err(|error| error.to_string())?;
+                        selection.preview_offset = renderdocx::texture_view::context_offset(
+                            [texture.width, texture.height],
+                            extent,
+                            selection.mip,
+                            texel,
+                            selection.preview_flip_y,
+                            scale,
+                            [width, height],
+                        )
+                        .ok_or("Cannot position this context texel")?;
+                        geometry["selection"] =
+                            serde_json::to_value(selection).map_err(|error| error.to_string())?;
                         Ok((path, index, texture, selection, width, height, geometry))
                     })();
                     match prepared {

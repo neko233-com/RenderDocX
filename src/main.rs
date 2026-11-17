@@ -8921,7 +8921,7 @@ impl Workspace {
         };
         let coordinates = [pixel.x, pixel.y];
         let event = pixel.event_id;
-        let Some(offset) = renderdocx::texture_view::center_texel_in_viewport(
+        let Some(offset) = renderdocx::texture_view::context_offset(
             base,
             extent,
             selection.mip,
@@ -11103,10 +11103,10 @@ impl Workspace {
                     .child(
                         div()
                             .absolute()
-                            .left(px(75.))
-                            .top(px(75.))
-                            .w(px(10.))
-                            .h(px(10.))
+                            .left(px(79.))
+                            .top(px(79.))
+                            .w(px(11.))
+                            .h(px(11.))
                             .border_1()
                             .border_color(rgb(0x000000))
                             .child(div().size_full().border_1().border_color(rgb(0xffffff))),
@@ -22559,7 +22559,7 @@ mod ui_tests {
                 let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
                 reader.next_frame(&mut pixels).unwrap();
                 assert_eq!(
-                    &pixels[(80 * 160 + 80) * 3..][..3],
+                    &pixels[(84 * 160 + 84) * 3..][..3],
                     &[255, 0, 0],
                     "automatic OpenGL pixel context"
                 );

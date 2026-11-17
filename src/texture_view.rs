@@ -109,6 +109,29 @@ pub fn context_scale(base: [u32; 2], mip: u32) -> Option<f32> {
     Some(8.0 * (mip_width / base[0] as f32).max(mip_height / base[1] as f32))
 }
 
+/// Place the selected mip texel's upper-left corner at the context viewport center.
+pub fn context_offset(
+    base: [u32; 2],
+    extent: [u32; 2],
+    mip: u32,
+    texel: [u32; 2],
+    flip_y: bool,
+    scale: f32,
+    viewport: [u32; 2],
+) -> Option<[f32; 2]> {
+    let mut offset = center_texel_in_viewport(base, extent, mip, texel, flip_y, scale, viewport)?;
+    for axis in 0..2 {
+        let mip_size = (base[axis] >> mip).max(1);
+        let value = f64::from(offset[axis])
+            + 0.5 * f64::from(extent[axis]) / f64::from(mip_size) * f64::from(scale);
+        if !value.is_finite() || value.abs() > f64::from(f32::MAX) {
+            return None;
+        }
+        offset[axis] = value as f32;
+    }
+    Some(offset)
+}
+
 /// Center a texel in the 512×360 headless preview at the current scale.
 pub fn center_texel(
     base: [u32; 2],
@@ -264,6 +287,20 @@ mod tests {
         assert!((super::context_scale([15, 9], 1).unwrap() - 8.0 * 7.0 / 15.0).abs() < 0.0001);
         assert_eq!(super::context_scale([0, 8], 0), None);
         assert_eq!(super::context_scale([16, 8], 32), None);
+        let context =
+            super::context_offset([2, 2], [2, 2], 0, [0, 1], true, 8.0, [160, 160]).unwrap();
+        assert_eq!(context, [80.0, 80.0]);
+        assert_eq!(
+            texel_at([84.0, 84.0], 8.0, context, [2, 2], [2, 2], 0, true),
+            Some([0, 1])
+        );
+        let scale = super::context_scale([15, 9], 1).unwrap();
+        let context =
+            super::context_offset([15, 9], [15, 9], 1, [6, 2], false, scale, [160, 160]).unwrap();
+        assert_eq!(
+            texel_at([84.0, 84.0], scale, context, [15, 9], [15, 9], 1, false),
+            Some([6, 2])
+        );
         assert_eq!(
             super::fitted_transform([2, 2], [64, 64]),
             Some((32.0, [0.0, 0.0]))
