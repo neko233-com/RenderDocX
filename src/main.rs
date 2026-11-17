@@ -668,6 +668,7 @@ struct Workspace {
     pixel_debug_view: Entity<InputState>,
     pixel: Option<Pixel>,
     pixel_context: Option<PixelContext>,
+    texture_preview_focus: gpui::FocusHandle,
     pixel_history: Option<PixelHistoryPage>,
     history_selected: Option<usize>,
     stats_min: Entity<InputState>,
@@ -8579,6 +8580,65 @@ impl Workspace {
         .detach();
     }
 
+    fn nudge_texture_pixel(
+        &mut self,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            return false;
+        }
+        let (Some(pixel), Some(index), Some(snapshot)) = (
+            self.pixel.as_ref(),
+            self.selected_texture,
+            self.snapshot.as_ref(),
+        ) else {
+            return false;
+        };
+        if pixel.index as usize != index
+            || self.pipeline.as_ref().map(|p| p.event_id) != Some(pixel.event_id)
+            || pixel.mip != self.texture_selection.mip
+            || pixel.slice != self.texture_selection.slice
+        {
+            return false;
+        }
+        let Some(texture) = snapshot.textures.get(index) else {
+            return false;
+        };
+        if pixel.mip >= 32
+            || texture.width == 0
+            || texture.height == 0
+            || pixel.sample
+                != self
+                    .texture_selection
+                    .sample
+                    .unwrap_or(if texture.samples > 1 { u32::MAX } else { 0 })
+        {
+            return false;
+        }
+        let width = (texture.width >> pixel.mip).max(1);
+        let height = (texture.height >> pixel.mip).max(1);
+        if pixel.x >= width || pixel.y >= height {
+            return false;
+        }
+        let (mut x, mut y) = (pixel.x, pixel.y);
+        match key {
+            "left" if x > 0 => x -= 1,
+            "right" if x < width - 1 => x += 1,
+            "up" if y > 0 => y -= 1,
+            "down" if y < height - 1 => y += 1,
+            "left" | "right" | "up" | "down" => return true,
+            _ => return false,
+        }
+        self.pixel_x
+            .update(cx, |input, cx| input.set_value(&x.to_string(), window, cx));
+        self.pixel_y
+            .update(cx, |input, cx| input.set_value(&y.to_string(), window, cx));
+        self.pick_texture_pixel(cx);
+        true
+    }
+
     fn pick_texture_uv(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.preview_edit_ready(cx) {
             return;
@@ -10825,6 +10885,15 @@ impl Workspace {
         div()
             .id("texture-preview-image")
             .test_support()
+            .track_focus(&self.texture_preview_focus)
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if !event.keystroke.modifiers.modified()
+                    && this.nudge_texture_pixel(&event.keystroke.key, window, cx)
+                {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }
+            }))
             .w_full()
             .h(px(180.))
             .on_prepaint(move |bounds, _, _| paint.set(bounds))
@@ -10866,10 +10935,11 @@ impl Workspace {
             }))
             .on_mouse_down(
                 gpui::MouseButton::Left,
-                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                     if !this.preview_edit_ready(cx) {
                         return;
                     }
+                    window.focus(&this.texture_preview_focus, cx);
                     if let Some((scale, offset)) = this.preview_transform() {
                         this.preview_drag = Some((event.position, scale, offset));
                     }
@@ -14697,6 +14767,7 @@ impl Workspace {
                     .child(div().text_sm().text_color(rgb(0x91a7c0)).child(export_note))
                     .when_some(preview_path, |view, path| {
                         view.child(self.texture_preview_image(path, cx))
+                        .child(div().text_sm().text_color(rgb(0x91a7c0)).child(self.t("Click the preview, then use the arrow keys to move the selected pixel.", "点击预览后使用方向键移动所选像素。", "プレビューをクリックし、方向キーで選択ピクセルを移動します。", "미리 보기를 클릭한 뒤 방향키로 선택한 픽셀을 이동하세요.")))
                         .child(
                             div()
                                 .text_sm()
@@ -17021,6 +17092,7 @@ fn main() {
                         pixel_debug_view,
                         pixel: None,
                         pixel_context: None,
+                        texture_preview_focus: cx.focus_handle(),
                         pixel_history: None,
                         history_selected: None,
                         stats_min,
@@ -17798,6 +17870,7 @@ mod ui_tests {
                         pixel_debug_view,
                         pixel: None,
                         pixel_context: None,
+                        texture_preview_focus: cx.focus_handle(),
                         pixel_history: None,
                         history_selected: None,
                         stats_min,
@@ -18383,6 +18456,7 @@ mod ui_tests {
                         pixel_debug_view,
                         pixel: None,
                         pixel_context: None,
+                        texture_preview_focus: cx.focus_handle(),
                         pixel_history: None,
                         history_selected: None,
                         stats_min,
@@ -18830,6 +18904,38 @@ mod ui_tests {
                 (15, 15)
             )
         });
+        cx.update_window(handle.into(), |_, window, cx| {
+            reveal_details(window, "texture-preview-image", cx);
+            let focus = view.read(cx).texture_preview_focus.clone();
+            window.focus(&focus, cx);
+            window.press("right", cx);
+            window.press("left", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let state = view.read(cx);
+            assert_eq!(
+                (
+                    state.pixel.as_ref().unwrap().x,
+                    state.pixel.as_ref().unwrap().y
+                ),
+                (14, 15)
+            );
+            assert_eq!(state.pixel_context.as_ref().unwrap().coordinates, [14, 15]);
+        });
+        cx.update_window(handle.into(), |_, window, cx| window.press("up", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                (
+                    view.read(cx).pixel.as_ref().unwrap().x,
+                    view.read(cx).pixel.as_ref().unwrap().y
+                ),
+                (14, 14)
+            )
+        });
         selections.lock().unwrap().clear();
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| {
@@ -18845,7 +18951,7 @@ mod ui_tests {
         .unwrap();
         cx.run_until_parked();
         cx.update_window(handle.into(), |_, window, cx| {
-            window.render_frame(cx);
+            reveal_details(window, "pixel-history", cx);
             window.click("pixel-history", cx);
         })
         .unwrap();
@@ -22294,6 +22400,36 @@ mod ui_tests {
                         view.read(cx).pixel.as_ref().unwrap().float_values,
                         ["1", "1", "0", "1"]
                     )
+                });
+                cx.update_window(handle.into(), |_, window, cx| window.press("left", cx))
+                    .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        !view.read(cx).resource_pending
+                            && view
+                                .read(cx)
+                                .pixel
+                                .as_ref()
+                                .is_some_and(|pixel| pixel.x == 0 && pixel.y == 0)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "OpenGL keyboard pixel navigation failed: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update(|cx| {
+                    let state = view.read(cx);
+                    assert_eq!(
+                        state.pixel.as_ref().unwrap().float_values,
+                        ["0", "0", "1", "1"]
+                    );
+                    assert_eq!(state.pixel_context.as_ref().unwrap().coordinates, [0, 0]);
                 });
             }
         }
