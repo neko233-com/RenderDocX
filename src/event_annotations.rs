@@ -1,7 +1,7 @@
 //! RenderDoc API-event annotations, distinct from bookmarks and notes.
 use crate::event_filter::{AnnotationCondition, AnnotationMatches, AnnotationQuery, Filter};
 use crate::i18n::Language;
-use crate::replay::{Action, ResourceInfo, Session, StructuredNode};
+use crate::replay::{Action, Buffer, ResourceInfo, Session, StructuredNode};
 use std::collections::{HashMap, HashSet};
 
 /// Resolve one annotation column completely before exposing it to the caller.
@@ -9,6 +9,7 @@ pub fn display_column(
     session: &Session,
     actions: &[Action],
     resources: &[ResourceInfo],
+    buffers: &[Buffer],
     language: Language,
     key: &str,
     cancelled: impl Fn() -> bool,
@@ -18,6 +19,7 @@ pub fn display_column(
     }
     let context = crate::event_parameters::ResourceContext {
         resources,
+        buffers,
         language,
         renames: session
             .annotation_read("renames")

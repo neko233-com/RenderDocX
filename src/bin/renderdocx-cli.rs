@@ -37,6 +37,7 @@ fn apply_event_filter(
         session,
         &snapshot.actions,
         &snapshot.resources,
+        &snapshot.buffers,
         language,
         expression,
         || false,
@@ -1089,7 +1090,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                             Err(("invalid_arguments", "Event offset exceeds the filtered item count".into()))
                         } else { (|| {
                             let annotations = match annotation_key {
-                                Some(key) => renderdocx::event_annotations::display_column(session, &snapshot.actions, &snapshot.resources, settings.language, key, || false)
+                                Some(key) => renderdocx::event_annotations::display_column(session, &snapshot.actions, &snapshot.resources, &snapshot.buffers, settings.language, key, || false)
                                     .map_err(|error| ("replay_event_annotation_failed", error))?,
                                 None => Default::default(),
                             };
@@ -1248,7 +1249,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                 match (&opened, ids, all, names) {
                     (None, _, _, _) => Err(("no_capture", "No capture is open".into())),
                     (Some((session, snapshot)), Some(ids), Some(all), Some(names)) =>
-                        renderdocx::event_parameters::format_events(session, &ids, &snapshot.resources, settings.language, all, names, || false)
+                        renderdocx::event_parameters::format_events(session, &ids, &snapshot.resources, &snapshot.buffers, settings.language, all, names, || false)
                             .map(|events| json!({"events":events.into_iter().map(|(event_id, result)| match result { Ok(text) => json!({"event_id":event_id,"ok":true,"text":text}), Err(error) => json!({"event_id":event_id,"ok":false,"error":error}) }).collect::<Vec<_>>(),"show_all_parameters":all,"show_parameter_names":names}))
                             .map_err(|error| ("replay_event_format_failed", error)),
                     _ => Err(("invalid_arguments", "event_format_batch requires 1–128 event IDs and optional boolean formatting options".into())),
@@ -1268,7 +1269,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                 match (&opened, event, all, names) {
                     (None, _, _, _) => Err(("no_capture", "No capture is open".into())),
                     (Some((session, snapshot)), Some(event), Some(all), Some(names)) =>
-                        renderdocx::event_parameters::format_event(session, event, &snapshot.resources, settings.language, all, names)
+                        renderdocx::event_parameters::format_event(session, event, &snapshot.resources, &snapshot.buffers, settings.language, all, names)
                             .map(|text| json!({"event_id":event,"text":text,"show_all_parameters":all,"show_parameter_names":names}))
                             .map_err(|error| ("replay_event_format_failed", error)),
                     _ => Err(("invalid_arguments", "event_format requires event_id and optional boolean formatting options".into())),

@@ -2532,6 +2532,13 @@ fn real_d3d11_capture_is_inspected_and_selected() {
     let (success, result) = invoke(&["--bridge", bridge, "inspect", capture]);
     assert!(success, "inspect failed: {result}");
     assert_eq!(result["capture"]["api"], 0);
+    let buffers = result["capture"]["buffers"].as_array().unwrap();
+    assert!(!buffers.is_empty());
+    assert!(buffers.iter().all(|buffer| {
+        buffer["gpu_address"]
+            .as_str()
+            .is_some_and(|value| value.parse::<u64>().is_ok())
+    }));
     assert!(result["capture"]["texture_count"].as_u64().unwrap() > 0);
     assert!(
         result["capture"]["textures"]

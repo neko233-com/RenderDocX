@@ -860,6 +860,9 @@ pub struct Buffer {
     pub name: String,
     pub resource_index: Option<usize>,
     pub length: String,
+    /// Decimal u64; older bridges omit this field.
+    #[serde(default)]
+    pub gpu_address: Option<String>,
     pub creation_flags: u32,
 }
 

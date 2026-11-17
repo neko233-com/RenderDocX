@@ -581,7 +581,7 @@ void write_snapshot(IReplayController *controller, const ReplayOptions &options,
     if(name == resource_names.end()) json_string("", 0); else json_string(*name->second);
     std::cout << ",\"resource_index\":";
     if(resource_index == resource_indices.end()) std::cout << "null"; else std::cout << resource_index->second;
-    std::cout << ",\"length\":\"" << buffer.length << "\",\"creation_flags\":" << uint32_t(buffer.creationFlags) << '}';
+    std::cout << ",\"length\":\"" << buffer.length << "\",\"gpu_address\":\"" << buffer.gpuAddress << "\",\"creation_flags\":" << uint32_t(buffer.creationFlags) << '}';
   }
   std::cout << "]}" << std::endl;
 }

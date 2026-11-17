@@ -91,6 +91,7 @@ mod tests {
             name: "buffer".into(),
             resource_index: Some(7),
             length: "300".into(),
+            gpu_address: None,
             creation_flags: 0,
         }];
         let mut value =

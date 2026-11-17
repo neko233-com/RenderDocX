@@ -1677,11 +1677,17 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let Some((session, (actions, resources))) = self.session.clone().zip(
-            self.snapshot
-                .as_ref()
-                .map(|snapshot| (snapshot.actions.clone(), snapshot.resources.clone())),
-        ) else {
+        let Some((session, (actions, resources, buffers))) =
+            self.session
+                .clone()
+                .zip(self.snapshot.as_ref().map(|snapshot| {
+                    (
+                        snapshot.actions.clone(),
+                        snapshot.resources.clone(),
+                        snapshot.buffers.clone(),
+                    )
+                }))
+        else {
             cx.notify();
             return;
         };
@@ -1693,6 +1699,7 @@ impl Workspace {
                 &session,
                 &actions,
                 &resources,
+                &buffers,
                 language,
                 &key,
                 || generation.load(Ordering::Relaxed) != revision,
@@ -1735,10 +1742,10 @@ impl Workspace {
             renderdocx::event_filter::Filter::parse(&expression).is_ok_and(|filter| {
                 !filter.parameter_queries().is_empty() || !filter.annotation_queries().is_empty()
             });
-        let Some((session, (actions, resources))) = self.session.clone().zip(
+        let Some((session, (actions, resources, buffers))) = self.session.clone().zip(
             self.snapshot
                 .as_ref()
-                .map(|s| (s.actions.clone(), s.resources.clone())),
+                .map(|s| (s.actions.clone(), s.resources.clone(), s.buffers.clone())),
         ) else {
             cx.notify();
             return;
@@ -1760,6 +1767,7 @@ impl Workspace {
                 &session,
                 &actions,
                 &resources,
+                &buffers,
                 language,
                 &task_expression,
                 || generation.load(Ordering::Relaxed) != revision,
@@ -1827,6 +1835,7 @@ impl Workspace {
             return;
         }
         let resources = snapshot.resources.clone();
+        let buffers = snapshot.buffers.clone();
         let language = self.settings.language;
         let capture_revision = self.open_revision;
         let filter_revision = self.event_filter_revision.load(Ordering::Relaxed);
@@ -1847,6 +1856,7 @@ impl Workspace {
                 &session,
                 &events,
                 &resources,
+                &buffers,
                 language,
                 false,
                 false,
@@ -5970,6 +5980,7 @@ impl Workspace {
             return;
         };
         let resources = snapshot.resources.clone();
+        let buffers = snapshot.buffers.clone();
         let language = self.settings.language;
         let revision = self.open_revision;
         let selection_revision = self.selection_revision;
@@ -5987,7 +5998,7 @@ impl Workspace {
         cx.notify();
         let task = cx.background_executor().spawn(async move {
             renderdocx::event_parameters::format_event(
-                &session, event, &resources, language, false, true,
+                &session, event, &resources, &buffers, language, false, true,
             )
         });
         cx.spawn(async move |this, cx| {
@@ -18730,6 +18741,7 @@ mod ui_tests {
                                 name: "Vertices".into(),
                                 resource_index: Some(0),
                                 length: "300".into(),
+                                gpu_address: None,
                                 creation_flags: 1,
                             }],
                         }),

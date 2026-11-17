@@ -2,13 +2,14 @@
 use crate::event_filter::{Filter, ParamQuery, ParameterMatches};
 use crate::i18n::Language;
 use crate::replay::{
-    Action, ResourceInfo, STRUCTURE_PAGE_LIMIT, Session, StructurePage, StructuredNode,
+    Action, Buffer, ResourceInfo, STRUCTURE_PAGE_LIMIT, Session, StructurePage, StructuredNode,
 };
 use std::collections::{HashMap, HashSet};
 use unicode_segmentation::UnicodeSegmentation;
 
 pub(crate) struct ResourceContext<'a> {
     pub(crate) resources: &'a [ResourceInfo],
+    pub(crate) buffers: &'a [Buffer],
     pub(crate) renames: Result<serde_json::Value, String>,
     pub(crate) language: Language,
 }
@@ -18,12 +19,14 @@ pub fn format_event(
     session: &Session,
     event: u32,
     resources: &[ResourceInfo],
+    buffers: &[Buffer],
     language: Language,
     show_all_parameters: bool,
     show_parameter_names: bool,
 ) -> Result<String, String> {
     let context = ResourceContext {
         resources,
+        buffers,
         language,
         renames: session
             .annotation_read("renames")
@@ -44,6 +47,7 @@ pub fn format_events(
     session: &Session,
     events: &[u32],
     resources: &[ResourceInfo],
+    buffers: &[Buffer],
     language: Language,
     show_all_parameters: bool,
     show_parameter_names: bool,
@@ -51,6 +55,7 @@ pub fn format_events(
 ) -> Result<Vec<(u32, Result<String, String>)>, String> {
     let context = ResourceContext {
         resources,
+        buffers,
         language,
         renames: session
             .annotation_read("renames")
@@ -148,15 +153,6 @@ fn format_inline(
     context: &ResourceContext<'_>,
 ) -> Result<String, String> {
     // Keep the same precedence as SDObject2Variant: resource and custom values bypass traversal.
-    if node.basic_type == 13 {
-        let value = node
-            .value
-            .as_deref()
-            .ok_or("Missing GPU address")?
-            .parse::<u64>()
-            .map_err(|_| "Invalid GPU address")?;
-        return Ok(format!("0x{value:x}"));
-    }
     if node.flags & (1 | 8) != 0 || !(node.basic_type == 1 || node.basic_type == 2) {
         return format_value(node, parent_flags, context);
     }
@@ -195,11 +191,65 @@ fn format_inline(
     })
 }
 
+fn format_gpu_address(value: u64, context: &ResourceContext<'_>) -> Result<String, String> {
+    for buffer in context.buffers {
+        let Some(address) = buffer.gpu_address.as_deref() else {
+            // A missing earlier base could be the upstream first match.
+            return Ok(format!("0x{value:x}"));
+        };
+        let base = address
+            .parse::<u64>()
+            .map_err(|_| "Invalid buffer GPU address")?;
+        if base == 0 || value < base {
+            continue;
+        }
+        let length = buffer
+            .length
+            .parse::<u64>()
+            .map_err(|_| "Invalid buffer length")?;
+        let offset = value - base;
+        if offset >= length {
+            continue;
+        }
+        let Some(index) = buffer.resource_index else {
+            return Ok(format!("0x{value:x}"));
+        };
+        let resource = context
+            .resources
+            .get(index)
+            .ok_or("Invalid buffer resource index")?;
+        let Some(id) = resource
+            .rename_key
+            .as_deref()
+            .and_then(|key| key.strip_prefix("ResourceId::"))
+        else {
+            return Ok(format!("0x{value:x}"));
+        };
+        let node = StructuredNode {
+            name: String::new(),
+            type_name: String::new(),
+            basic_type: 12,
+            flags: 0,
+            byte_size: "0".into(),
+            child_count: "0".into(),
+            value: None,
+            custom_string: None,
+            resource_non_null: Some(true),
+            resource_index: Some(index),
+            resource_id: Some(id.into()),
+            resource_edited: Some(false),
+        };
+        return Ok(format!("{}+{offset}", resource_name(&node, context)?));
+    }
+    Ok(format!("0x{value:x}"))
+}
+
 /// Resolve every predicate completely or return an error; partial results are never applied.
 pub fn resolve(
     session: &Session,
     actions: &[Action],
     resources: &[ResourceInfo],
+    buffers: &[Buffer],
     language: Language,
     expression: &str,
     cancelled: impl Fn() -> bool,
@@ -216,6 +266,7 @@ pub fn resolve(
     }
     let context = ResourceContext {
         resources,
+        buffers,
         language,
         renames: session
             .annotation_read("renames")
@@ -406,7 +457,13 @@ pub(crate) fn format_value(
         return resource_name(node, context);
     }
     if node.basic_type == 13 {
-        return Err("GPU address parameter formatting is not supported yet".into());
+        let value = node
+            .value
+            .as_deref()
+            .ok_or("Missing GPU address")?
+            .parse::<u64>()
+            .map_err(|_| "Invalid GPU address")?;
+        return format_gpu_address(value, context);
     }
     if node.flags & 8 != 0 {
         return Ok("NULL".into());
@@ -589,6 +646,76 @@ mod tests {
     }
 
     #[test]
+    fn gpu_addresses_resolve_first_matching_buffer_and_fall_back_safely() {
+        let resources = vec![ResourceInfo {
+            name: "original".into(),
+            rename_key: Some("ResourceId::7".into()),
+            resource_type: 0,
+            autogenerated_name: false,
+            initialisation_chunks: vec![],
+            parents: vec![],
+            derived: vec![],
+        }];
+        let buffers = vec![
+            Buffer {
+                name: "buffer".into(),
+                resource_index: Some(0),
+                length: "16".into(),
+                gpu_address: Some("4096".into()),
+                creation_flags: 0,
+            },
+            Buffer {
+                name: "overlap".into(),
+                resource_index: None,
+                length: "16".into(),
+                gpu_address: Some("4098".into()),
+                creation_flags: 0,
+            },
+            Buffer {
+                name: "high".into(),
+                resource_index: Some(0),
+                length: "8".into(),
+                gpu_address: Some((u64::MAX - 3).to_string()),
+                creation_flags: 0,
+            },
+        ];
+        let context = ResourceContext {
+            resources: &resources,
+            buffers: &buffers,
+            renames: Ok(serde_json::json!({"CustomResourceNames":{"ResourceId::7":"renamed"}})),
+            language: Language::English,
+        };
+        assert_eq!(format_gpu_address(4096, &context).unwrap(), "renamed+0");
+        assert_eq!(format_gpu_address(4100, &context).unwrap(), "renamed+4");
+        assert_eq!(format_gpu_address(4112, &context).unwrap(), "0x1010");
+        assert_eq!(format_gpu_address(u64::MAX, &context).unwrap(), "renamed+3");
+        assert_eq!(format_gpu_address(0, &context).unwrap(), "0x0");
+        let value = node("address", 13, Some("4100"), 0);
+        assert_eq!(format_value(&value, 0, &context).unwrap(), "renamed+4");
+        let old: Buffer = serde_json::from_value(
+            serde_json::json!({"name":"old","resource_index":0,"length":"4","creation_flags":0}),
+        )
+        .unwrap();
+        assert!(old.gpu_address.is_none());
+        let old_buffers = [old];
+        let old_context = ResourceContext {
+            resources: &resources,
+            buffers: &old_buffers,
+            renames: Ok(serde_json::json!({})),
+            language: Language::English,
+        };
+        assert_eq!(format_gpu_address(4100, &old_context).unwrap(), "0x1004");
+        let mixed = [old_buffers[0].clone(), buffers[0].clone()];
+        let mixed_context = ResourceContext {
+            resources: &resources,
+            buffers: &mixed,
+            renames: Ok(serde_json::json!({})),
+            language: Language::English,
+        };
+        assert_eq!(format_gpu_address(4100, &mixed_context).unwrap(), "0x1004");
+    }
+
+    #[test]
     fn formats_calls_with_upstream_visibility_and_nested_rules() {
         let mut root = node("ID3D11Device::Draw", 0, None, 4);
         root.flags = 0x80;
@@ -626,6 +753,7 @@ mod tests {
         };
         let context = ResourceContext {
             resources: &[],
+            buffers: &[],
             renames: Ok(serde_json::json!({})),
             language: Language::English,
         };
@@ -674,6 +802,7 @@ mod tests {
             .collect();
         let context = ResourceContext {
             resources: &[],
+            buffers: &[],
             renames: Ok(serde_json::json!({})),
             language: Language::English,
         };
@@ -705,6 +834,7 @@ mod tests {
         };
         let context = ResourceContext {
             resources: &[],
+            buffers: &[],
             renames: Ok(serde_json::json!({})),
             language: Language::English,
         };
@@ -727,6 +857,7 @@ mod tests {
         let resources = vec![resource];
         let context = ResourceContext {
             resources: &resources,
+            buffers: &[],
             renames: Ok(serde_json::json!({"CustomResourceNames":{"ResourceId::7":"renamed"}})),
             language: Language::English,
         };
@@ -745,6 +876,7 @@ mod tests {
         let long_name = format!("{}👩‍💻tail", "a".repeat(63));
         let context = ResourceContext {
             resources: &resources,
+            buffers: &[],
             renames: Ok(serde_json::json!({"CustomResourceNames":{"ResourceId::7":long_name}})),
             language: Language::English,
         };
@@ -762,6 +894,7 @@ mod tests {
     fn default_numeric_format_matches_renderdoc_thresholds_and_offsets() {
         let context = ResourceContext {
             resources: &[],
+            buffers: &[],
             renames: Ok(serde_json::json!({})),
             language: Language::English,
         };
