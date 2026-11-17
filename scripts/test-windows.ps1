@@ -16,6 +16,8 @@ $previousShaderProcessor = $env:RENDERDOCX_TEST_SHADER_PROCESSOR
 Push-Location $root
 try {
     & (Join-Path $PSScriptRoot 'build-replay-bridge.ps1') -WithFixtures
+    & (Join-Path $root 'target/replay-bridge/Release/renderdocx-descriptor-batch-fixture.exe')
+    if ($LASTEXITCODE -ne 0) { throw 'Descriptor batching fallback test failed.' }
     $library = Join-Path $root 'x64/Development/renderdoc.lib'
     cmake -S bridge/replay -B target/replay-mismatch -A x64 "-DRENDERDOC_LIBRARY=$library" -DRENDERDOC_CORE_COMMIT=0000000000000000000000000000000000000000
     if ($LASTEXITCODE -ne 0) { throw 'Mismatch bridge configuration failed.' }

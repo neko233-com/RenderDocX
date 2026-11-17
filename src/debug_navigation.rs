@@ -23,6 +23,13 @@ pub enum StopReason {
     Boundary,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct MessageJump {
+    pub requested_line: u32,
+    pub breakpoint_line: Option<u32>,
+    pub reason: StopReason,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceStep {
     Into,
@@ -52,6 +59,44 @@ fn source_key(info: &InstructionSourceInfo) -> (i32, u32, u32, u32, u32) {
 }
 
 impl DebugNavigator {
+    /// Match ShaderViewer's message handoff: set the next mapped disassembly
+    /// breakpoint and run forward, including when no mapped line exists.
+    pub fn run_to_message_line(
+        &mut self,
+        trace: &DebugTrace,
+        states: &[DebugState],
+        disassembly: &str,
+        line: i32,
+    ) -> Option<MessageJump> {
+        let requested_line = u32::try_from(line).ok()?;
+        if states.is_empty() {
+            return Some(MessageJump {
+                requested_line,
+                breakpoint_line: None,
+                reason: StopReason::Boundary,
+            });
+        }
+        // Scintilla reports one line after each newline, including a final empty line.
+        let line_count = disassembly.bytes().filter(|&byte| byte == b'\n').count() + 1;
+        let breakpoint_line = trace
+            .instructions
+            .iter()
+            .map(|info| info.disassembly_line)
+            .filter(|&mapped| {
+                mapped > 0 && mapped >= requested_line && (mapped as usize) < line_count
+            })
+            .min();
+        if let Some(line) = breakpoint_line {
+            self.breakpoints.insert(Breakpoint::Disassembly { line });
+        }
+        let reason = self.run(trace, states, true, 0);
+        Some(MessageJump {
+            requested_line,
+            breakpoint_line,
+            reason,
+        })
+    }
+
     /// Reconstruct mutable variables from RenderDoc's ordered change stream.
     pub fn variables(&self, states: &[DebugState]) -> Vec<DebugVariable> {
         if states.is_empty() {
@@ -381,6 +426,52 @@ mod tests {
             })
             .collect();
         (trace, states)
+    }
+
+    #[test]
+    fn shader_message_jump_sets_next_mapped_breakpoint_and_reports_stop() {
+        let (trace, mut states) = fixture();
+        let disassembly = "one\ntwo\nthree\nfour\nfive\n";
+        let mut nav = DebugNavigator::default();
+        assert_eq!(
+            nav.run_to_message_line(&trace, &states, disassembly, -1),
+            None
+        );
+        assert_eq!(nav.position, 0);
+        let jump = nav
+            .run_to_message_line(&trace, &states, disassembly, 2)
+            .unwrap();
+        assert_eq!(jump.breakpoint_line, Some(3));
+        assert_eq!(jump.reason, StopReason::Breakpoint);
+        assert_eq!(nav.position, 2);
+        assert!(
+            nav.breakpoints
+                .contains(&Breakpoint::Disassembly { line: 3 })
+        );
+
+        let mut nav = DebugNavigator::default();
+        let missing = nav
+            .run_to_message_line(&trace, &states, disassembly, 99)
+            .unwrap();
+        assert_eq!(missing.breakpoint_line, None);
+        assert_eq!(missing.reason, StopReason::Boundary);
+        assert_eq!(nav.position, states.len() - 1);
+
+        states[1].flags = DEBUG_BREAK;
+        let mut nav = DebugNavigator::default();
+        let stopped = nav
+            .run_to_message_line(&trace, &states, disassembly, 4)
+            .unwrap();
+        assert_eq!(stopped.breakpoint_line, Some(4));
+        assert_eq!(stopped.reason, StopReason::Event);
+        assert_eq!(nav.position, 1);
+
+        let mut nav = DebugNavigator::default();
+        let empty = nav
+            .run_to_message_line(&trace, &[], disassembly, 1)
+            .unwrap();
+        assert_eq!(empty.reason, StopReason::Boundary);
+        assert_eq!(empty.breakpoint_line, None);
     }
 
     #[test]

@@ -1927,7 +1927,10 @@ bool VulkanReplay::FetchShaderFeedback(uint32_t eventId)
         if(printfBuf >= printfBufEnd)
           break;
 
-        ShaderMessage msg;
+        // The location is a union and only the current stage's fields are
+        // populated below. Initialise the entire value so sorting and consumers
+        // never observe uninitialised coordinates from another stage.
+        ShaderMessage msg = {};
 
         msg.stage = stage;
 
@@ -1959,6 +1962,9 @@ bool VulkanReplay::FetchShaderFeedback(uint32_t eventId)
         }
         else if(stage == ShaderStage::Task)
         {
+          msg.location.mesh.meshGroup = {ShaderMeshMessageLocation::NotUsed,
+                                          ShaderMeshMessageLocation::NotUsed,
+                                          ShaderMeshMessageLocation::NotUsed};
           for(int x = 0; x < 3; x++)
           {
             uint32_t threadDimX = sh.refl->dispatchThreadsDimension[x];
@@ -1997,9 +2003,9 @@ bool VulkanReplay::FetchShaderFeedback(uint32_t eventId)
           msg.location.mesh.thread[2] = meshThread / (sh.refl->dispatchThreadsDimension[0] *
                                                       sh.refl->dispatchThreadsDimension[1]);
 
-          const VulkanCreationInfo::ShaderEntry &tasksh = *shaderEntries[(uint32_t)ShaderStage::Task];
+          const VulkanCreationInfo::ShaderEntry *tasksh = shaderEntries[(uint32_t)ShaderStage::Task];
 
-          if(tasksh.module == ResourceId())
+          if(!tasksh || tasksh->module == ResourceId())
           {
             msg.location.mesh.taskGroup = {ShaderMeshMessageLocation::NotUsed,
                                            ShaderMeshMessageLocation::NotUsed,
@@ -2009,11 +2015,11 @@ bool VulkanReplay::FetchShaderFeedback(uint32_t eventId)
           {
             uint32_t taskGroup = location[3];
 
-            msg.location.mesh.taskGroup[0] = taskGroup % tasksh.refl->dispatchThreadsDimension[0];
-            msg.location.mesh.taskGroup[1] = (taskGroup / tasksh.refl->dispatchThreadsDimension[0]) %
-                                             tasksh.refl->dispatchThreadsDimension[1];
-            msg.location.mesh.taskGroup[2] = taskGroup / (tasksh.refl->dispatchThreadsDimension[0] *
-                                                          tasksh.refl->dispatchThreadsDimension[1]);
+            msg.location.mesh.taskGroup[0] = taskGroup % tasksh->refl->dispatchThreadsDimension[0];
+            msg.location.mesh.taskGroup[1] = (taskGroup / tasksh->refl->dispatchThreadsDimension[0]) %
+                                             tasksh->refl->dispatchThreadsDimension[1];
+            msg.location.mesh.taskGroup[2] = taskGroup / (tasksh->refl->dispatchThreadsDimension[0] *
+                                                          tasksh->refl->dispatchThreadsDimension[1]);
           }
         }
         else

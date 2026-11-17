@@ -55,69 +55,51 @@ impl TextureOverlay {
     }
     pub fn label(self, language: Language) -> &'static str {
         match self {
-            Self::None => language.text("None", "无", "なし", "없음"),
-            Self::Drawcall => language.text("Drawcall", "绘制覆盖", "描画範囲", "그리기 영역"),
+            Self::None => language.text("None", "无"),
+            Self::Drawcall => language.text("Drawcall", "绘制覆盖"),
             Self::Wireframe => {
-                language.text("Wireframe", "线框", "ワイヤーフレーム", "와이어프레임")
+                language.text("Wireframe", "线框")
             }
-            Self::Depth => language.text("Depth test", "深度测试", "深度テスト", "깊이 테스트"),
+            Self::Depth => language.text("Depth test", "深度测试"),
             Self::Stencil => language.text(
                 "Stencil test",
                 "模板测试",
-                "ステンシルテスト",
-                "스텐실 테스트",
             ),
             Self::BackfaceCull => {
-                language.text("Backface culling", "背面剔除", "背面カリング", "뒷면 컬링")
+                language.text("Backface culling", "背面剔除")
             }
             Self::ViewportScissor => language.text(
                 "Viewport and scissor",
                 "视口与裁剪",
-                "ビューポートとシザー",
-                "뷰포트와 시저",
             ),
             Self::Nan => language.text(
                 "NaN and infinity",
                 "NaN 与无穷值",
-                "NaN と無限大",
-                "NaN 및 무한대",
             ),
-            Self::Clipping => language.text("Clipping", "范围裁剪", "クリッピング", "클리핑"),
+            Self::Clipping => language.text("Clipping", "范围裁剪"),
             Self::ClearBeforePass => language.text(
                 "Clear before pass",
                 "通道前清除",
-                "パス前にクリア",
-                "패스 전 지우기",
             ),
             Self::ClearBeforeDraw => language.text(
                 "Clear before draw",
                 "绘制前清除",
-                "描画前にクリア",
-                "그리기 전 지우기",
             ),
             Self::QuadOverdrawPass => language.text(
                 "Quad overdraw: pass",
                 "四像素过度绘制：通道",
-                "クアッドオーバードロー：パス",
-                "쿼드 오버드로: 패스",
             ),
             Self::QuadOverdrawDraw => language.text(
                 "Quad overdraw: draw",
                 "四像素过度绘制：绘制",
-                "クアッドオーバードロー：描画",
-                "쿼드 오버드로: 그리기",
             ),
             Self::TriangleSizePass => language.text(
                 "Triangle size: pass",
                 "三角形尺寸：通道",
-                "三角形サイズ：パス",
-                "삼각형 크기: 패스",
             ),
             Self::TriangleSizeDraw => language.text(
                 "Triangle size: draw",
                 "三角形尺寸：绘制",
-                "三角形サイズ：描画",
-                "삼각형 크기: 그리기",
             ),
         }
     }

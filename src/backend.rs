@@ -1,7 +1,11 @@
-use crate::i18n::Language;
+use crate::{
+    i18n::Language,
+    viewer_settings::{AxisMapping, CameraControls, ProjectionGuess},
+};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -29,6 +33,20 @@ impl Default for EventColumns {
     }
 }
 
+/// A saved window layout. Upstream qrenderdoc stores one default layout plus
+/// six numbered slots; RenderDocX persists the same slots in `settings.json`.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(default)]
+pub struct WindowLayout {
+    /// Stable serialization name of the active capture tab (see `CaptureTab::name`).
+    pub tab: String,
+    pub timeline_shown: bool,
+    pub launch_config_shown: bool,
+    pub remote_browser_shown: bool,
+    pub frame_stats_raw: bool,
+    pub texture_auto_fit: bool,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Settings {
@@ -46,7 +64,17 @@ pub struct Settings {
     pub event_use_custom_action_names: bool,
     pub event_auto_format: bool,
     pub event_columns: EventColumns,
+    pub window_layouts: BTreeMap<String, WindowLayout>,
+    pub recent_captures: Vec<PathBuf>,
+    pub recent_capture_settings: Vec<PathBuf>,
+    pub axis_mapping: AxisMapping,
+    pub projection: ProjectionGuess,
+    pub camera: CameraControls,
+    pub always_replay_locally: bool,
 }
+
+/// Maximum number of entries kept in each recent-files list.
+pub const RECENT_LIMIT: usize = 10;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -65,11 +93,43 @@ impl Default for Settings {
             event_use_custom_action_names: true,
             event_auto_format: true,
             event_columns: EventColumns::default(),
+            window_layouts: BTreeMap::new(),
+            recent_captures: Vec::new(),
+            recent_capture_settings: Vec::new(),
+            axis_mapping: AxisMapping::default(),
+            projection: ProjectionGuess::default(),
+            camera: CameraControls::default(),
+            always_replay_locally: false,
         }
     }
 }
 
 impl Settings {
+    /// Slot 0 is the default layout; slots 1..=6 are the numbered fast slots.
+    pub fn layout_key(slot: usize) -> String {
+        if slot == 0 {
+            "default".to_owned()
+        } else {
+            slot.to_string()
+        }
+    }
+
+    pub fn record_capture(&mut self, path: &Path) {
+        record_recent(&mut self.recent_captures, path);
+    }
+
+    pub fn record_capture_settings(&mut self, path: &Path) {
+        record_recent(&mut self.recent_capture_settings, path);
+    }
+
+    pub fn clear_recent_captures(&mut self) {
+        self.recent_captures.clear();
+    }
+
+    pub fn clear_recent_capture_settings(&mut self) {
+        self.recent_capture_settings.clear();
+    }
+
     fn path() -> Option<PathBuf> {
         ProjectDirs::from("com", "neko233", "RenderDocX")
             .map(|p| p.config_dir().join("settings.json"))
@@ -80,6 +140,15 @@ impl Settings {
             .and_then(|p| fs::read(p).ok())
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default()
+    }
+
+    /// Parse a settings document edited by the in-app configuration editor.
+    pub fn from_json(text: &str) -> Result<Self, String> {
+        serde_json::from_str(text).map_err(|error| error.to_string())
+    }
+
+    pub fn to_json_string(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap_or_default()
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -93,6 +162,14 @@ impl Settings {
         let data = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
         fs::write(path, data).map_err(|e| e.to_string())
     }
+}
+
+/// Insert the most recently used path at the front, drop duplicates and cap
+/// the list length. Kept as a free function so it can be tested in isolation.
+fn record_recent(list: &mut Vec<PathBuf>, path: &Path) {
+    list.retain(|entry| entry.as_path() != path);
+    list.insert(0, path.to_path_buf());
+    list.truncate(RECENT_LIMIT);
 }
 
 pub(crate) fn find_tool(configured: &Option<PathBuf>, name: &str) -> Result<PathBuf, String> {
@@ -146,7 +223,9 @@ pub fn open_upstream(settings: &Settings) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::Settings;
+    use super::{Settings, WindowLayout};
+    use crate::viewer_settings::AxisDirection;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn older_settings_default_to_no_external_processors() {
@@ -191,5 +270,97 @@ mod tests {
                 && reloaded.event_columns.event_id
                 && reloaded.event_columns.duration
         );
+    }
+
+    #[test]
+    fn window_layouts_survive_settings_round_trip() {
+        let empty: Settings = serde_json::from_str("{}").unwrap();
+        assert!(empty.window_layouts.is_empty());
+        assert_eq!(Settings::layout_key(0), "default");
+        assert_eq!(Settings::layout_key(3), "3");
+
+        let mut settings = Settings::default();
+        settings.window_layouts.insert(
+            Settings::layout_key(2),
+            WindowLayout {
+                tab: "Textures".into(),
+                timeline_shown: true,
+                launch_config_shown: false,
+                remote_browser_shown: true,
+                frame_stats_raw: true,
+                texture_auto_fit: false,
+            },
+        );
+        let reloaded: Settings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(
+            reloaded.window_layouts.get("2"),
+            settings.window_layouts.get("2")
+        );
+    }
+
+    #[test]
+    fn recent_files_are_deduplicated_bounded_and_persisted() {
+        let empty: Settings = serde_json::from_str("{}").unwrap();
+        assert!(empty.recent_captures.is_empty());
+        assert!(empty.recent_capture_settings.is_empty());
+
+        let mut settings = Settings::default();
+        settings.record_capture(Path::new("a.rdc"));
+        settings.record_capture(Path::new("b.rdc"));
+        settings.record_capture(Path::new("a.rdc")); // move to front, no duplicate
+        assert_eq!(
+            settings.recent_captures,
+            vec![PathBuf::from("a.rdc"), PathBuf::from("b.rdc")]
+        );
+        for index in 0..super::RECENT_LIMIT + 3 {
+            settings.record_capture_settings(Path::new(&format!("{index}.cap")));
+        }
+        assert_eq!(settings.recent_capture_settings.len(), super::RECENT_LIMIT);
+        assert_eq!(
+            settings.recent_capture_settings[0],
+            PathBuf::from(format!("{}.cap", super::RECENT_LIMIT + 2))
+        );
+        let reloaded: Settings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(reloaded.recent_captures, settings.recent_captures);
+        assert_eq!(reloaded.recent_capture_settings, settings.recent_capture_settings);
+        settings.clear_recent_captures();
+        settings.clear_recent_capture_settings();
+        assert!(settings.recent_captures.is_empty());
+        assert!(settings.recent_capture_settings.is_empty());
+    }
+
+    #[test]
+    fn viewer_settings_round_trip_with_old_settings() {
+        let empty: Settings = serde_json::from_str("{}").unwrap();
+        assert!(empty.axis_mapping.validate().is_ok());
+        assert!(empty.camera.validate().is_ok());
+        let mut settings = Settings::default();
+        settings.axis_mapping.x = AxisDirection::Left;
+        settings.camera.near_plane = 0.5;
+        settings.projection.fov = 60.0;
+        let json = serde_json::to_string(&settings).unwrap();
+        let reloaded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(reloaded.axis_mapping, settings.axis_mapping);
+        assert_eq!(reloaded.camera, settings.camera);
+        assert_eq!(reloaded.projection, settings.projection);
+    }
+
+    #[test]
+    fn configuration_editor_round_trips_and_rejects_invalid_json() {
+        let settings = Settings::default();
+        let text = settings.to_json_string();
+        let parsed = Settings::from_json(&text).unwrap();
+        assert_eq!(parsed.language, settings.language);
+        assert_eq!(parsed.axis_mapping, settings.axis_mapping);
+        assert_eq!(parsed.projection, settings.projection);
+        assert_eq!(parsed.recent_captures, settings.recent_captures);
+        assert!(Settings::from_json("not json").is_err());
+        assert!(Settings::from_json("{\"language\": 42}").is_err());
+        // Unknown fields are tolerated, matching serde(default) on Settings.
+        assert!(Settings::from_json("{\"future_option\":true}").is_ok());
+        assert!(!Settings::from_json("{}").unwrap().always_replay_locally);
+        assert!(Settings::from_json("{\"always_replay_locally\":true}").unwrap().always_replay_locally);
     }
 }

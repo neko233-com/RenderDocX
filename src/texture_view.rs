@@ -1,5 +1,40 @@
 //! Coordinate mapping for RenderDoc's base-sized texture display.
 
+/// RenderDoc TextureSwizzle values in destination RGBA order. Identity is omitted.
+pub fn swizzle_label(swizzle: [u32; 4]) -> Option<String> {
+    if swizzle == [0, 1, 2, 3] {
+        return None;
+    }
+    Some(
+        swizzle
+            .into_iter()
+            .map(|value| match value {
+                0 => "R".to_owned(),
+                1 => "G".to_owned(),
+                2 => "B".to_owned(),
+                3 => "A".to_owned(),
+                4 => "0".to_owned(),
+                5 => "1".to_owned(),
+                _ => format!("?{value}"),
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+/// Read a complete swizzle from the versioned bridge; missing data is not identity.
+pub fn descriptor_swizzle(value: &serde_json::Value) -> Option<String> {
+    let items = value.get("swizzle")?.as_array()?;
+    if items.len() != 4 {
+        return None;
+    }
+    let mut components = [0; 4];
+    for (target, item) in components.iter_mut().zip(items) {
+        *target = u32::try_from(item.as_u64()?).ok()?;
+    }
+    swizzle_label(components)
+}
+
 /// RenderDoc uses a signed default range for SNorm source formats or casts.
 pub fn default_range(component_type: u32, type_cast: u32) -> [f32; 2] {
     if component_type == 3 || type_cast == 3 {
@@ -278,6 +313,26 @@ pub fn texel_at(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn descriptor_swizzle_preserves_constants_unknowns_and_missing_data() {
+        use super::{descriptor_swizzle, swizzle_label};
+        assert_eq!(swizzle_label([0, 1, 2, 3]), None);
+        assert_eq!(swizzle_label([2, 1, 0, 5]).as_deref(), Some("B G R 1"));
+        assert_eq!(swizzle_label([4, 5, 9, 0]).as_deref(), Some("0 1 ?9 R"));
+        assert_eq!(
+            descriptor_swizzle(&serde_json::json!({"swizzle":[2,1,0,5]})).as_deref(),
+            Some("B G R 1")
+        );
+        assert_eq!(descriptor_swizzle(&serde_json::json!({})), None);
+        assert_eq!(
+            descriptor_swizzle(&serde_json::json!({"swizzle":[0,1,2]})),
+            None
+        );
+        assert_eq!(
+            descriptor_swizzle(&serde_json::json!({"swizzle":[0,1,2,-1]})),
+            None
+        );
+    }
     use super::{display_extent, texel_at};
     #[test]
     fn fits_enabled_channels_with_integer_types_and_handles_constants() {

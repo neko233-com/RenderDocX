@@ -102,6 +102,14 @@ pub struct EventCallstackFrame {
     pub symbol: Option<String>,
 }
 
+/// Result of `ICaptureFile::Convert` used by the recompress action.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RecompressResult {
+    pub already_compressed: bool,
+    #[serde(default)]
+    pub size: u64,
+}
+
 /// A page of direct children in RenderDoc's structured capture data.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StructurePage {
@@ -370,6 +378,77 @@ pub struct DebugMessage {
     pub source: u32,
     pub message_id: u32,
     pub description: String,
+}
+
+pub const SHADER_MESSAGE_PAGE_LIMIT: u32 = 128;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ShaderMessage {
+    pub stage: u32,
+    pub disassembly_line: i32,
+    pub message: String,
+    pub location: Option<serde_json::Value>,
+}
+
+impl ShaderMessage {
+    fn valid_location(&self) -> bool {
+        let Some(value) = self.location.as_ref() else {
+            return !matches!(self.stage, 0 | 3..=7);
+        };
+        let number = |name: &str| {
+            value
+                .get(name)
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|v| u32::try_from(v).is_ok())
+        };
+        let triple = |name: &str| {
+            value
+                .get(name)
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|values| {
+                    values.len() == 3
+                        && values
+                            .iter()
+                            .all(|v| v.as_u64().is_some_and(|v| u32::try_from(v).is_ok()))
+                })
+        };
+        match self.stage {
+            0 => ["vertex", "instance", "view"].into_iter().all(number),
+            3 => ["primitive", "view"].into_iter().all(number),
+            4 => ["x", "y", "sample", "primitive", "view"]
+                .into_iter()
+                .all(number),
+            5 => triple("workgroup") && triple("thread"),
+            6 | 7 => triple("task_group") && triple("mesh_group") && triple("thread"),
+            _ => false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ShaderMessagePage {
+    pub event_id: u32,
+    pub offset: String,
+    pub total: String,
+    pub messages: Vec<ShaderMessage>,
+}
+
+impl ShaderMessagePage {
+    fn validate(&self, event: u32, offset: u64, limit: u32) -> Result<(), String> {
+        let total = self
+            .total
+            .parse::<u64>()
+            .map_err(|_| "Invalid shader message count")?;
+        if self.event_id != event
+            || self.offset != offset.to_string()
+            || offset > total
+            || self.messages.len() as u64 != (total - offset).min(u64::from(limit))
+            || !self.messages.iter().all(ShaderMessage::valid_location)
+        {
+            return Err("Invalid shader message page".into());
+        }
+        Ok(())
+    }
 }
 
 pub fn debug_message_source_name(source: u32) -> &'static str {
@@ -1535,6 +1614,7 @@ enum Reply {
     DebugMessages {
         messages: Vec<DebugMessage>,
     },
+    ShaderMessages(ShaderMessagePage),
     CounterFetch(CounterFetch),
     CounterPage(CounterPage),
     ResourceUsage(ResourceUsagePage),
@@ -1585,6 +1665,10 @@ enum Reply {
         matches: Vec<Option<StructuredNode>>,
     },
     Callstack(EventCallstack),
+    Recompress(RecompressResult),
+    Log {
+        log: String,
+    },
     Mesh(MeshInfo),
     MeshData {
         event_id: u32,
@@ -1927,6 +2011,14 @@ trait Transport: Send {
     fn debug_messages(&mut self) -> Result<Vec<DebugMessage>, String> {
         Err("Debug messages are not supported by this transport".into())
     }
+    fn shader_messages(
+        &mut self,
+        _event: u32,
+        _offset: u64,
+        _limit: u32,
+    ) -> Result<ShaderMessagePage, String> {
+        Err("Shader messages are not supported by this transport".into())
+    }
     fn counter_fetch(&mut self, _ids: &[u32]) -> Result<CounterFetch, String> {
         Err("GPU counters are not supported by this transport".into())
     }
@@ -2130,6 +2222,14 @@ trait Transport: Send {
     }
     fn callstack(&mut self, _event: u32, _resolve: bool) -> Result<EventCallstack, String> {
         Err("Event callstack inspection is not supported by this transport".into())
+    }
+
+    fn log(&mut self) -> Result<String, String> {
+        Err("RenderDoc log inspection is not supported by this transport".into())
+    }
+
+    fn recompress(&mut self, _destination: &Path) -> Result<RecompressResult, String> {
+        Err("Capture recompression is not supported by this transport".into())
     }
     fn structure(
         &mut self,
@@ -2375,6 +2475,34 @@ impl Transport for Process {
         Ok(path)
     }
 
+    fn recompress(&mut self, destination: &Path) -> Result<RecompressResult, String> {
+        if !destination.is_absolute() {
+            return Err("Invalid recompression destination".into());
+        }
+        let stamp = self
+            .capture_stamp
+            .clone()
+            .ok_or("Capture identity is unavailable")?;
+        if capture_stamp(&self.capture).as_ref() != Some(&stamp) {
+            return Err("Capture changed since it was opened".into());
+        }
+        let text = destination.to_str().ok_or("Invalid recompression path")?;
+        let encoded: String = text.as_bytes().iter().map(|byte| format!("{byte:02x}")).collect();
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(input, "recompress {encoded}")
+            .and_then(|_| input.flush())
+            .map_err(|error| error.to_string())?;
+        let reply = self.read()?;
+        if capture_stamp(&self.capture).as_ref() != Some(&stamp) {
+            return Err("Capture changed while recompressing".into());
+        }
+        match reply {
+            Reply::Recompress(result) => Ok(result),
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected recompress response".into()),
+        }
+    }
+
     fn annotation_read(&mut self, name: &str) -> Result<AnnotationSection, String> {
         if capture_stamp(&self.capture).as_ref() != self.capture_stamp.as_ref()
             || self.capture_stamp.is_none()
@@ -2500,6 +2628,25 @@ impl Transport for Process {
             Reply::DebugMessages { messages } => Ok(messages),
             Reply::Error { message } => Err(message),
             _ => Err("Unexpected debug messages response".into()),
+        }
+    }
+    fn shader_messages(
+        &mut self,
+        event: u32,
+        offset: u64,
+        limit: u32,
+    ) -> Result<ShaderMessagePage, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(input, "shader_messages {offset} {limit}")
+            .and_then(|_| input.flush())
+            .map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::ShaderMessages(page) => {
+                page.validate(event, offset, limit)?;
+                Ok(page)
+            }
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected shader message response".into()),
         }
     }
     fn counter_fetch(&mut self, ids: &[u32]) -> Result<CounterFetch, String> {
@@ -3163,6 +3310,16 @@ impl Transport for Process {
             Reply::RemoteCopy => Ok(()),
             Reply::Error { message } => Err(message),
             _ => Err("Unexpected remote copy response".into()),
+        }
+    }
+
+    fn log(&mut self) -> Result<String, String> {
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(input, "log").and_then(|_| input.flush()).map_err(|e| e.to_string())?;
+        match self.read()? {
+            Reply::Log { log } => Ok(log),
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected RenderDoc log response".into()),
         }
     }
 
@@ -4038,6 +4195,21 @@ impl Session {
             .map_err(|e| e.to_string())?
             .debug_messages()
     }
+    /// Page messages associated with the currently selected replay event.
+    pub fn shader_messages(
+        &self,
+        event: u32,
+        offset: u64,
+        limit: u32,
+    ) -> Result<ShaderMessagePage, String> {
+        if limit == 0 || limit > SHADER_MESSAGE_PAGE_LIMIT {
+            return Err("Invalid shader message page limit".into());
+        }
+        self.process
+            .lock()
+            .map_err(|e| e.to_string())?
+            .shader_messages(event, offset, limit)
+    }
     pub fn counter_fetch(&self, ids: &[u32]) -> Result<CounterFetch, String> {
         if ids.is_empty()
             || ids
@@ -4542,6 +4714,35 @@ impl Session {
         Ok(page)
     }
 
+    pub fn resolve_shader_vertex(
+        &self,
+        action: &Action,
+        pipeline: &Pipeline,
+        buffers: &[Buffer],
+        instance: u32,
+        reported: u32,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<Option<crate::vertex_input::ShaderVertexMatch>, String> {
+        let revision = self.revision.load(Ordering::SeqCst);
+        let mut process = self.process.lock().map_err(|error| error.to_string())?;
+        if self.revision.load(Ordering::SeqCst) != revision {
+            return Err("Replay selection changed".into());
+        }
+        let result = crate::vertex_input::resolve_shader_vertex(
+            action,
+            pipeline,
+            buffers,
+            instance,
+            reported,
+            |index, offset, length| process.read_buffer(index, offset, length),
+            cancelled,
+        )?;
+        if self.revision.load(Ordering::SeqCst) != revision {
+            return Err("Replay selection changed".into());
+        }
+        Ok(result)
+    }
+
     pub fn shader(&self, stage: u32, target: Option<u32>) -> Result<ShaderReport, String> {
         if stage as usize >= SHADER_STAGES.len() {
             return Err("Invalid shader stage".into());
@@ -4741,6 +4942,19 @@ impl Session {
             .lock()
             .map_err(|e| e.to_string())?
             .callstack(event, resolve)
+    }
+
+    /// Snapshot of the upstream RenderDoc core log (`RENDERDOC_GetLogFileContents`).
+    pub fn log(&self) -> Result<String, String> {
+        self.process.lock().map_err(|e| e.to_string())?.log()
+    }
+
+    /// Recompress an open capture to a new `.rdc` file via `ICaptureFile::Convert`.
+    pub fn recompress(&self, destination: &Path) -> Result<RecompressResult, String> {
+        self.process
+            .lock()
+            .map_err(|error| error.to_string())?
+            .recompress(destination)
     }
 
     pub fn structure(
@@ -5013,6 +5227,47 @@ pub mod test_support {
         Option<TimelineHistory>,
     );
     impl Transport for RecordingTransport {
+        fn shader_messages(
+            &mut self,
+            event: u32,
+            offset: u64,
+            limit: u32,
+        ) -> Result<ShaderMessagePage, String> {
+            const TOTAL: u64 = 130;
+            if offset > TOTAL {
+                return Err("Shader message offset is out of range".into());
+            }
+            let messages = (offset..(offset + u64::from(limit)).min(TOTAL))
+                .map(|index| ShaderMessage {
+                    stage: 5,
+                    disassembly_line: 3,
+                    message: format!("fixture message {index}"),
+                    location: Some(serde_json::json!({"workgroup":[1,2,3],"thread":[4,5,6]})),
+                })
+                .collect();
+            Ok(ShaderMessagePage {
+                event_id: event,
+                offset: offset.to_string(),
+                total: TOTAL.to_string(),
+                messages,
+            })
+        }
+        fn annotation_write(
+            &mut self,
+            section: &AnnotationSection,
+            document: &serde_json::Value,
+        ) -> Result<AnnotationSection, String> {
+            if section.name != "bookmarks" {
+                return Err("Annotation sections are not supported by this transport".into());
+            }
+            let bytes = serde_json::to_vec(document).map_err(|error| error.to_string())?;
+            Ok(AnnotationSection {
+                name: section.name.clone(),
+                exists: true,
+                version: "1".into(),
+                hex: bytes.iter().map(|byte| format!("{byte:02x}")).collect(),
+            })
+        }
         fn render_texture(
             &mut self,
             _index: u32,
@@ -5345,6 +5600,22 @@ pub mod test_support {
                 component_byte_width: 4,
                 num_indices: 3,
                 unproject: true,
+                dispatch_size: (selection.stage == 3).then_some([3, 1, 1]),
+                tasks: if selection.stage == 3 {
+                    vec![[1, 1, 1]; 3]
+                } else {
+                    vec![]
+                },
+                meshlets: if selection.stage == 4 {
+                    (0..3)
+                        .map(|_| MeshletInfo {
+                            indices: 1,
+                            vertices: 1,
+                        })
+                        .collect()
+                } else {
+                    vec![]
+                },
                 ..MeshInfo::default()
             })
         }
@@ -5615,7 +5886,7 @@ pub mod test_support {
                     String::new()
                 },
                 targets: vec!["native".into()],
-                disassembly: "fixture disassembly".into(),
+                disassembly: "fixture disassembly\nline two\nline three\nline four\n".into(),
                 inputs: vec![],
                 outputs: vec![],
                 constant_blocks: 1,
@@ -5708,6 +5979,64 @@ pub mod test_support {
                 ],
             })
         }
+
+        fn debug_vertex(
+            &mut self,
+            vertex: u32,
+            instance: u32,
+            index: u32,
+            view: u32,
+        ) -> Result<DebugTrace, String> {
+            let event_id = *self
+                .0
+                .lock()
+                .map_err(|e| e.to_string())?
+                .last()
+                .ok_or("No event")?;
+            let mut trace: DebugTrace = serde_json::from_value(serde_json::json!({"event_id":event_id,"stage":0,
+                "inputs":[],"constant_blocks":[],"read_only_resources":[],"read_write_resources":[],"samplers":[],
+                "instructions":[
+                    {"instruction":0,"disassembly_line":1,"file_index":-1,"line_start":0,"line_end":0,"column_start":0,"column_end":0,"source_variables":[]},
+                    {"instruction":1,"disassembly_line":3,"file_index":-1,"line_start":0,"line_end":0,"column_start":0,"column_end":0,"source_variables":[]},
+                    {"instruction":2,"disassembly_line":4,"file_index":-1,"line_start":0,"line_end":0,"column_start":0,"column_end":0,"source_variables":[]}
+                ]})).map_err(|e| e.to_string())?;
+            trace.inputs.push(DebugVariable {
+                name: format!("vertex={vertex},instance={instance},index={index},view={view}"),
+                rows: 1,
+                columns: 1,
+                variable_type: 4,
+                flags: 0,
+                value_hex: "00000000".into(),
+                members: vec![],
+            });
+            Ok(trace)
+        }
+
+        fn debug_next(&mut self) -> Result<DebugStates, String> {
+            let event_id = *self
+                .0
+                .lock()
+                .map_err(|e| e.to_string())?
+                .last()
+                .ok_or("No event")?;
+            Ok(DebugStates {
+                event_id,
+                finished: true,
+                states: (0..3)
+                    .map(|step| DebugState {
+                        step,
+                        next_instruction: step,
+                        flags: 0,
+                        callstack: vec![],
+                        changes: vec![],
+                    })
+                    .collect(),
+            })
+        }
+
+        fn debug_stop(&mut self) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     pub fn recording_remote_session() -> (
@@ -5742,6 +6071,50 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn log_snapshot_and_symbol_resolution_reach_the_replay_session() {
+        use super::*;
+        struct Fixture;
+        impl Transport for Fixture {
+            fn select(&mut self, _event: u32) -> Result<Pipeline, String> {
+                Err("unused".into())
+            }
+            fn log(&mut self) -> Result<String, String> {
+                Ok("RDOC 7: [01:02:03] core.cpp(1) - Comment - fixture log".into())
+            }
+            fn recompress(&mut self, _destination: &Path) -> Result<RecompressResult, String> {
+                Ok(RecompressResult {
+                    already_compressed: false,
+                    size: 42,
+                })
+            }
+            fn callstack(&mut self, event: u32, resolve: bool) -> Result<EventCallstack, String> {
+                Ok(EventCallstack {
+                    event_id: event,
+                    available: true,
+                    resolved: resolve,
+                    frames: vec![EventCallstackFrame {
+                        address: "4660".into(),
+                        symbol: resolve.then(|| "fixture::draw".into()),
+                    }],
+                })
+            }
+        }
+        let session = Session {
+            process: Arc::new(Mutex::new(Box::new(Fixture))),
+            revision: Arc::new(AtomicU64::new(0)),
+            remote_url: None,
+        };
+        assert!(session.log().unwrap().contains("fixture log"));
+        let recompressed = session.recompress(Path::new("C:\\capture-compressed.rdc")).unwrap();
+        assert!(!recompressed.already_compressed);
+        assert_eq!(recompressed.size, 42);
+        let stack = session.callstack(3, true).unwrap();
+        assert!(stack.resolved);
+        assert_eq!(stack.frames[0].symbol.as_deref(), Some("fixture::draw"));
+        assert!(!session.callstack(3, false).unwrap().resolved);
+    }
+
     #[test]
     fn raw_texture_search_crosses_pages_and_detects_revision_changes() {
         use super::*;
@@ -6365,6 +6738,25 @@ mod tests {
             debug_message_category_name(messages[0].category),
             "Performance"
         );
+    }
+
+    #[test]
+    fn shader_message_reply_preserves_stage_locations_and_rejects_bad_shapes() {
+        let json = "RENDERDOCX/1 {\"type\":\"shader_messages\",\"event_id\":42,\"offset\":\"0\",\"total\":\"3\",\"messages\":[{\"stage\":5,\"disassembly_line\":-1,\"message\":\"计算\",\"location\":{\"workgroup\":[1,2,3],\"thread\":[4,5,6]}},{\"stage\":4,\"disassembly_line\":5,\"message\":\"pixel\",\"location\":{\"x\":1,\"y\":2,\"sample\":4294967295,\"primitive\":3,\"view\":0}},{\"stage\":1,\"disassembly_line\":-1,\"message\":\"hull\",\"location\":null}]}\n";
+        let Reply::ShaderMessages(mut page) = read_reply(&mut Cursor::new(json)).unwrap() else {
+            panic!("expected shader messages")
+        };
+        assert!(page.messages.iter().all(ShaderMessage::valid_location));
+        assert!(page.validate(42, 0, 3).is_ok());
+        assert!(page.validate(41, 0, 3).is_err());
+        assert!(page.validate(42, 1, 3).is_err());
+        assert!(page.validate(42, 0, 2).is_err());
+        assert_eq!(
+            page.messages[0].location.as_ref().unwrap()["thread"],
+            serde_json::json!([4, 5, 6])
+        );
+        page.messages[0].location = Some(serde_json::json!({"workgroup":[1,2],"thread":[4,5,6]}));
+        assert!(!page.messages[0].valid_location());
     }
 
     #[test]

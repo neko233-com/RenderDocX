@@ -65,6 +65,24 @@ fn include_capture_start(request: &serde_json::Map<String, Value>) -> Option<boo
         .map_or(Some(false), Value::as_bool)
 }
 
+fn shader_message_filter(
+    request: &serde_json::Map<String, Value>,
+) -> Option<renderdocx::shader_messages::Filter> {
+    let stage_mask = match request.get("stage_mask") {
+        None => u16::MAX,
+        Some(value) => u16::try_from(value.as_u64()?).ok()?,
+    };
+    let query = match request.get("query") {
+        None => String::new(),
+        Some(value) => value.as_str()?.to_owned(),
+    };
+    Some(renderdocx::shader_messages::Filter {
+        stage_mask,
+        query,
+        language: renderdocx::i18n::Language::English,
+    })
+}
+
 #[derive(Clone, Copy)]
 struct EventNameOptions {
     enabled: bool,
@@ -170,8 +188,10 @@ impl AgentDebugTimeline {
     fn response(&self, reason: Option<StopReason>) -> Value {
         let state = self.navigator.current(&self.states);
         let location = state.and_then(|state| self.trace.instruction_info(state.next_instruction));
+        let mutable = self.navigator.variables(&self.states);
+        let source_variables = renderdocx::source_variables::resolve(&self.trace, state, &mutable);
         json!({"event_id":self.trace.event_id,"stage":self.trace.stage,"position":self.navigator.position,
-            "total":self.states.len(),"state":state,"mutable_variables":self.navigator.variables(&self.states),"location":location,"breakpoints":self.navigator.breakpoints,"reason":reason})
+            "total":self.states.len(),"state":state,"mutable_variables":mutable,"source_variables":source_variables,"location":location,"breakpoints":self.navigator.breakpoints,"reason":reason})
     }
 }
 
@@ -265,7 +285,7 @@ fn usage() -> Value {
         {"name":"select","arguments":["capture.rdc","event_id"],"description":"Replay a capture to an event."},
         {"name":"serve","arguments":[],"description":"Serve sequential JSONL requests using a persistent replay session."},
         {"name":"capabilities","arguments":[],"description":"Describe the commands currently implemented."}
-    ],"serve_commands":["capabilities","open","snapshot","timeline","timeline_usage","timeline_history","select","pipeline","shader","shader_bindings","shader_binding_read","shader_constants","shader_export","shader_apply","shader_revert","debug_vertex","debug_pixel","debug_compute","debug_collect","debug_state","debug_breakpoint","debug_navigate","debug_next","debug_stop","vertex_input","mesh","mesh_read","mesh_draw","mesh_draw_export","structure","structure_buffer","callstack","read_buffer","decode_buffer","decode_buffer_layout","buffer_formats_list","buffer_format_get","buffer_format_save","buffer_format_delete","export_buffer","export_buffer_csv","find_buffer","resource_usage","resource_rename","annotation_read","annotation_write","dependencies","dependencies_save","descriptors","debug_messages","clear_debug_messages","counter_fetch","counter_page","pick_pixel","pixel_history","texture_statistics","export_texture","export_texture_raw","read_texture_raw","find_texture_raw","close","gpu_list","remote_list","remote_download","target_list","target_launch","target_connect","target_connect_pid","target_copy","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"texture_export_formats":["png","dds","jpg","bmp","tga","hdr","exr"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"mesh_draw_page_limit":renderdocx::mesh_draw::PAGE_LIMIT,"shader_binding_page_limit":renderdocx::replay::SHADER_BINDING_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"counter_page_limit":renderdocx::replay::COUNTER_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]});
+    ],"serve_commands":["capabilities","open","snapshot","timeline","timeline_usage","timeline_history","select","pipeline","shader","shader_bindings","shader_binding_read","shader_constants","shader_export","shader_apply","shader_revert","debug_vertex","debug_pixel","debug_compute","debug_collect","debug_state","debug_breakpoint","debug_navigate","debug_message_jump","debug_next","debug_stop","shader_vertex_resolve","shader_geometry_resolve","shader_workgroup_resolve","vertex_input","mesh","mesh_read","mesh_draw","mesh_draw_export","structure","structure_buffer","callstack","read_buffer","decode_buffer","decode_buffer_layout","buffer_formats_list","buffer_format_get","buffer_format_save","buffer_format_delete","export_buffer","export_buffer_csv","find_buffer","resource_usage","resource_rename","annotation_read","annotation_write","dependencies","dependencies_save","descriptors","debug_messages","shader_messages","shader_messages_export","clear_debug_messages","counter_fetch","counter_page","pick_pixel","pixel_history","texture_statistics","export_texture","export_texture_raw","read_texture_raw","find_texture_raw","close","gpu_list","remote_list","remote_download","target_list","target_launch","target_connect","target_connect_pid","target_copy","target_events","target_trigger","target_queue","target_cycle","target_close","quit"],"texture_export_formats":["png","dds","jpg","bmp","tga","hdr","exr"],"shader_stages":SHADER_STAGES,"mesh_stages":["vs_out","gs_out","task_out","mesh_out"],"buffer_page_limit":BUFFER_PAGE_LIMIT,"structure_page_limit":STRUCTURE_PAGE_LIMIT,"vertex_input_page_limit":renderdocx::vertex_input::INPUT_PAGE_LIMIT,"mesh_draw_page_limit":renderdocx::mesh_draw::PAGE_LIMIT,"shader_binding_page_limit":renderdocx::replay::SHADER_BINDING_PAGE_LIMIT,"resource_usage_page_limit":renderdocx::replay::RESOURCE_USAGE_PAGE_LIMIT,"counter_page_limit":renderdocx::replay::COUNTER_PAGE_LIMIT,"pixel_history_page_limit":renderdocx::replay::PIXEL_HISTORY_PAGE_LIMIT,"capture_options_default":CaptureOptions::default(),"environment_operations":["set","append","prepend"],"environment_separators":["platform","semi_colon","colon","no_sep"],"global_options":["--bridge PATH"],"limitations":["Additional RenderDoc GUI and agent features are not yet implemented."]});
     capabilities["serve_commands"]
         .as_array_mut()
         .expect("capabilities commands")
@@ -1568,6 +1588,121 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     }
                 }
             },
+            "shader_geometry_resolve" => {
+                let primitive = request
+                    .get("primitive")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+                    .filter(|value| *value != u32::MAX);
+                let view = match request.get("view") {
+                    None => Some(0),
+                    Some(value) => value
+                        .as_u64()
+                        .and_then(|value| u32::try_from(value).ok())
+                        .filter(|value| *value != u32::MAX),
+                };
+                match (&opened, selected_event, &pipeline, primitive, view) {
+                    (None, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some(_), None, _, _, _) => Err(("no_event", "Select a draw first".into())),
+                    (Some((_, snapshot)), Some(event), Some(pipeline), Some(primitive), Some(view)) => {
+                        let action = snapshot.actions.iter().find(|action| action.event_id == event && action.flags & 2 != 0);
+                        if action.is_none() || !pipeline.available || pipeline.event_id != event {
+                            Err(("no_draw", "Select a draw first".into()))
+                        } else if !pipeline.shaders.iter().any(|shader| shader.stage == "geometry" && shader.resource.bound) {
+                            Err(("no_geometry_shader", "No geometry shader is bound".into()))
+                        } else if pipeline.multiview_count.is_some_and(|count| view >= count) {
+                            Err(("invalid_arguments", "Geometry view is out of range".into()))
+                        } else if let Some(row) = renderdocx::shader_messages::primitive_vertex_offset(pipeline.topology, primitive) {
+                            Ok(json!({"event_id":event, "stage":"gs_out", "row":row, "instance":0, "instance_known":false, "view":view, "mapping":"upstream_input_topology_approximation"}))
+                        } else { Err(("shader_geometry_resolve_failed", "Unsupported topology or primitive offset overflow".into())) }
+                    }
+                    _ => Err(("invalid_arguments", "shader_geometry_resolve requires an unsigned primitive and optional view below 4294967295".into())),
+                }
+            }
+            "shader_workgroup_resolve" => {
+                let stage = request.get("stage").and_then(Value::as_str);
+                let group = request
+                    .get("group")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value::<[u32; 3]>(value).ok());
+                let task_group = request
+                    .get("task_group")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value::<[u32; 3]>(value).ok());
+                match (&opened, selected_event, &pipeline, stage, group) {
+                    (None, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some(_), None, _, _, _) => Err(("no_event", "Select a mesh dispatch first".into())),
+                    (Some((session, snapshot)), Some(event), Some(pipeline), Some(stage @ ("task" | "mesh")), Some(group)) => {
+                        if stage == "mesh" && task_group.is_none() {
+                            Err(("invalid_arguments", "Mesh messages require the complete task_group array".into()))
+                        } else if let Some(action) = snapshot.actions.iter().find(|action| action.event_id == event) {
+                            mesh_selection = None;
+                            let selection = MeshSelection { stage: if stage == "task" { 3 } else { 4 }, instance: 0, view: 0 };
+                            session.mesh(event, selection).and_then(|info| {
+                                if info.event_id != event || info.stage != selection.stage || info.instance != 0 || info.view != 0 {
+                                    return Err("Mesh response belongs to another selection".into());
+                                }
+                                if stage == "task" {
+                                    let row = renderdocx::shader_messages::task_group_row(snapshot.api, &info, group)?;
+                                    Ok(json!({"event_id": event, "stage": stage, "task_row": row}))
+                                } else {
+                                    let meshlet = renderdocx::shader_messages::direct_meshlet(snapshot.api, action, pipeline, &info, group, task_group.unwrap())?;
+                                    Ok(json!({"event_id": event, "stage": stage, "meshlet": meshlet}))
+                                }
+                            }).map_err(|error| ("shader_workgroup_resolve_failed", error))
+                        } else { Err(("no_dispatch", "Select a mesh dispatch first".into())) }
+                    }
+                    _ => Err(("invalid_arguments", "shader_workgroup_resolve requires stage task or mesh and a three-element group".into())),
+                }
+            }
+            "shader_vertex_resolve" => {
+                let reported = request
+                    .get("reported_vertex")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok());
+                let instance = match request.get("instance") {
+                    None => Some(0),
+                    Some(value) => value.as_u64().and_then(|value| u32::try_from(value).ok()),
+                };
+                match (&opened, selected_event, &pipeline, reported, instance) {
+                    (None, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some(_), None, _, _, _) => {
+                        Err(("no_event", "Select a draw action first".into()))
+                    }
+                    (
+                        Some((session, snapshot)),
+                        Some(event),
+                        Some(pipeline),
+                        Some(reported),
+                        Some(instance),
+                    ) => {
+                        if let Some(action) = snapshot
+                            .actions
+                            .iter()
+                            .find(|action| action.event_id == event)
+                        {
+                            session
+                                .resolve_shader_vertex(
+                                    action,
+                                    pipeline,
+                                    &snapshot.buffers,
+                                    instance,
+                                    reported,
+                                    || false,
+                                )
+                                .map(|resolved| json!({"event_id":event, "match":resolved}))
+                                .map_err(|error| ("shader_vertex_resolve_failed", error))
+                        } else {
+                            Err(("no_draw", "Select a draw action first".into()))
+                        }
+                    }
+                    _ => Err((
+                        "invalid_arguments",
+                        "shader_vertex_resolve requires an unsigned reported_vertex and instance"
+                            .into(),
+                    )),
+                }
+            }
             "vertex_input" => {
                 let number = |name: &str, default| match request.get(name) {
                     None => Some(default),
@@ -2208,6 +2343,27 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     )),
                 }
             }
+            "debug_message_jump" => {
+                let line = request
+                    .get("disassembly_line")
+                    .and_then(Value::as_i64)
+                    .and_then(|value| i32::try_from(value).ok())
+                    .filter(|value| *value >= 0);
+                match (&opened, &mut debug_timeline, line) {
+                    (_, None, _) => Err(("no_debug_timeline", "Collect a shader debug trace first".into())),
+                    (Some((session, _)), Some(timeline), Some(line)) => {
+                        session.shader(timeline.trace.stage, None).and_then(|shader| {
+                            if shader.event_id != timeline.trace.event_id {
+                                return Err("Shader response belongs to a different event".into());
+                            }
+                            let jump = timeline.navigator.run_to_message_line(&timeline.trace, &timeline.states, &shader.disassembly, line)
+                                .expect("validated nonnegative message line");
+                            Ok(json!({"jump": jump, "timeline": timeline.response(Some(jump.reason))}))
+                        }).map_err(|error| ("replay_debug_failed", error))
+                    }
+                    _ => Err(("invalid_arguments", "debug_message_jump requires a nonnegative signed 32-bit disassembly_line".into())),
+                }
+            }
             "debug_navigate" => {
                 let direction = match request.get("direction").and_then(Value::as_str) {
                     Some("forward") => Some(true),
@@ -2766,6 +2922,56 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         }
                     }
                     _ => Err(("invalid_arguments", "debug_messages requires a valid decimal-string offset and page limit 1–128".into())),
+                }
+            }
+            "shader_messages" => {
+                let offset = match request.get("offset") {
+                    None => Some(0),
+                    Some(value) => value.as_str().and_then(|v| v.parse::<u64>().ok()),
+                };
+                let limit = match request.get("limit") {
+                    None => Some(renderdocx::replay::SHADER_MESSAGE_PAGE_LIMIT),
+                    Some(value) => value.as_u64().and_then(|v| u32::try_from(v).ok()),
+                };
+                let filter = shader_message_filter(&request);
+                match (&opened, selected_event, offset, limit, filter) {
+                    (None, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some(_), None, _, _, _) => {
+                        Err(("no_event", "Select a replay event first".into()))
+                    }
+                    (Some((session, _)), Some(event), Some(offset), Some(limit), Some(filter))
+                        if (1..=renderdocx::replay::SHADER_MESSAGE_PAGE_LIMIT).contains(&limit) =>
+                    {
+                        renderdocx::shader_messages::filtered_page(event, offset, limit, &filter, |offset, limit| session.shader_messages(event, offset, limit))
+                            .map(|page| json!(page))
+                            .map_err(|error| ("shader_messages_failed", error))
+                    }
+                    _ => Err((
+                        "invalid_arguments",
+                        "shader_messages requires a decimal-string offset, page limit 1–128, optional 16-bit stage_mask and text query"
+                            .into(),
+                    )),
+                }
+            }
+            "shader_messages_export" => {
+                let filter = shader_message_filter(&request);
+                let path = request
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty());
+                let csv = match request.get("format") {
+                    None => Some(false),
+                    Some(value) if value.as_str() == Some("text") => Some(false),
+                    Some(value) if value.as_str() == Some("csv") => Some(true),
+                    _ => None,
+                };
+                match (&opened, selected_event, filter, path, csv) {
+                    (None, _, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some(_), None, _, _, _) => Err(("no_event", "Select a replay event first".into())),
+                    (Some((session, _)), Some(event), Some(filter), Some(path), Some(csv)) =>
+                        renderdocx::shader_messages::export_report(event, &filter, csv, PathBuf::from(path).as_path(), |offset, limit| session.shader_messages(event, offset, limit))
+                            .map(|count| json!({"path":path, "count":count.to_string(), "event_id":event})).map_err(|error| ("shader_messages_export_failed", error)),
+                    _ => Err(("invalid_arguments", "shader_messages_export requires path, format text or csv, optional 16-bit stage_mask and text query".into())),
                 }
             }
             "clear_debug_messages" => match &mut opened {

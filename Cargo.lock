@@ -5966,6 +5966,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "smol",
  "stacker",
  "sys-locale",
  "tempfile",

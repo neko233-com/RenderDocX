@@ -34,6 +34,136 @@ pub struct InputValue {
     pub unavailable: Option<&'static str>,
 }
 
+/// A shader message reports a zero-based draw row for non-indexed draws, but
+/// an effective vertex index for indexed Vulkan draws. Repeated indices are
+/// represented explicitly so callers can disclose the ambiguity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ShaderVertexMatch {
+    pub row: u32,
+    pub vertex_index: u32,
+    pub match_count: u32,
+}
+
+pub fn resolve_shader_vertex<F>(
+    action: &Action,
+    pipeline: &Pipeline,
+    buffers: &[Buffer],
+    instance: u32,
+    reported: u32,
+    mut read: F,
+    cancelled: impl Fn() -> bool,
+) -> Result<Option<ShaderVertexMatch>, String>
+where
+    F: FnMut(u32, u64, u32) -> Result<Vec<u8>, String>,
+{
+    if action.flags & DRAW == 0 || pipeline.event_id != action.event_id || !pipeline.available {
+        return Err("Select a draw action first".into());
+    }
+    if instance >= action.instances.max(1) {
+        return Err("Invalid vertex instance".into());
+    }
+    if cancelled() {
+        return Err("Vertex lookup cancelled".into());
+    }
+    if action.flags & INDEXED == 0 {
+        let offset = action.vertex_offset.ok_or("Bridge lacks draw offsets")?;
+        return Ok((reported < action.indices).then(|| ShaderVertexMatch {
+            row: reported,
+            vertex_index: offset.wrapping_add(reported),
+            match_count: 1,
+        }));
+    }
+    let base = action.base_vertex.ok_or("Bridge lacks draw offsets")?;
+    let index_offset = action.index_offset.ok_or("Bridge lacks draw offsets")?;
+    let ib = pipeline
+        .index_buffer
+        .as_ref()
+        .ok_or("Index buffer unavailable")?;
+    let stride = ib.byte_stride;
+    if !matches!(stride, 1 | 2 | 4) {
+        return Err("Unsupported index stride".into());
+    }
+    let restart_enabled = pipeline
+        .restart_enabled
+        .ok_or("Bridge lacks primitive restart metadata")?;
+    let mask = match stride {
+        1 => 0xff,
+        2 => 0xffff,
+        _ => u32::MAX,
+    };
+    let restart = if restart_enabled {
+        Some(
+            pipeline
+                .restart_index
+                .ok_or("Bridge lacks primitive restart metadata")?
+                & mask,
+        )
+    } else {
+        None
+    };
+    let mut cache = HashMap::new();
+    let mut first = None;
+    let mut count = 0u32;
+    let mut row = 0u32;
+    // Read bounded chunks while retaining at most the blocks for one chunk.
+    let chunk_rows = 4096 / stride;
+    while row < action.indices {
+        if cancelled() {
+            return Err("Vertex lookup cancelled".into());
+        }
+        let count_rows = (action.indices - row).min(chunk_rows);
+        let relative = (u64::from(index_offset) + u64::from(row))
+            .checked_mul(u64::from(stride))
+            .ok_or("Index offset overflow")?;
+        cache.clear();
+        let bytes = fetch(
+            ib,
+            relative,
+            count_rows * stride,
+            buffers,
+            &mut cache,
+            &mut read,
+        )?
+        .ok_or("Index buffer range unavailable")?;
+        for (position, bytes) in bytes.chunks_exact(stride as usize).enumerate() {
+            let mut raw = [0u8; 4];
+            raw[..bytes.len()].copy_from_slice(bytes);
+            let raw = u32::from_le_bytes(raw);
+            if restart == Some(raw) {
+                continue;
+            }
+            let effective = if base < 0 {
+                let magnitude = base.unsigned_abs();
+                if raw < magnitude {
+                    // The replay input viewer clamps these to zero, while the
+                    // shader's signed VertexIndex may be negative.
+                    if raw.wrapping_sub(magnitude) == reported {
+                        return Err(
+                            "Negative vertex index cannot be represented by the input viewer"
+                                .into(),
+                        );
+                    }
+                    continue;
+                }
+                raw - magnitude
+            } else {
+                raw.wrapping_add(base as u32)
+            };
+            if effective == reported {
+                let position = row + position as u32;
+                first.get_or_insert(position);
+                count += 1;
+            }
+        }
+        row += count_rows;
+    }
+    Ok(first.map(|row| ShaderVertexMatch {
+        row,
+        vertex_index: reported,
+        match_count: count,
+    }))
+}
+
 fn decode(input: &VertexInput, bytes: &[u8]) -> Option<Vec<String>> {
     let kind = input.component_type?;
     let width = input.component_byte_width? as usize;
@@ -415,6 +545,100 @@ where
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn shader_vertex_lookup_handles_offsets_duplicates_restart_and_cancellation() {
+        let mut action: Action = serde_json::from_value(json!({"event_id":7,"action_id":1,"depth":0,"parent":-1,"flags":65538,"indices":6,"instances":2,"base_vertex":2,"index_offset":1,"vertex_offset":0,"instance_offset":0,"name":"draw"})).unwrap();
+        let pipeline: Pipeline = serde_json::from_value(json!({"event_id":7,"available":true,"topology":5,"shaders":[],"outputs":[],"restart_enabled":true,"restart_index":65535,"index_buffer":{"bound":true,"resource_index":0,"name":"ib","byte_offset":"4","byte_size":"60","byte_stride":2}})).unwrap();
+        let buffers: Vec<Buffer> = serde_json::from_value(
+            json!([{"name":"ib","resource_index":0,"length":"64","creation_flags":0}]),
+        )
+        .unwrap();
+        let mut data = vec![0u8; 64];
+        for (i, value) in [99u16, 3, 7, 3, 65535, 1, 3].into_iter().enumerate() {
+            data[4 + i * 2..6 + i * 2].copy_from_slice(&value.to_le_bytes());
+        }
+        let read = |_: u32, offset: u64, length: u32| {
+            Ok(data[offset as usize..offset as usize + length as usize].to_vec())
+        };
+        assert_eq!(
+            resolve_shader_vertex(&action, &pipeline, &buffers, 1, 5, read, || false).unwrap(),
+            Some(ShaderVertexMatch {
+                row: 0,
+                vertex_index: 5,
+                match_count: 3
+            })
+        );
+        assert!(resolve_shader_vertex(&action, &pipeline, &buffers, 2, 5, read, || false).is_err());
+        assert!(resolve_shader_vertex(&action, &pipeline, &buffers, 0, 5, read, || true).is_err());
+        action.base_vertex = Some(-2);
+        assert_eq!(
+            resolve_shader_vertex(&action, &pipeline, &buffers, 0, 1, read, || false)
+                .unwrap()
+                .unwrap()
+                .match_count,
+            3
+        );
+        assert_eq!(
+            resolve_shader_vertex(&action, &pipeline, &buffers, 0, 0, read, || false).unwrap(),
+            None
+        );
+        assert!(
+            resolve_shader_vertex(&action, &pipeline, &buffers, 0, u32::MAX, read, || false)
+                .is_err()
+        );
+        action.flags &= !INDEXED;
+        action.vertex_offset = Some(10);
+        assert_eq!(
+            resolve_shader_vertex(&action, &pipeline, &buffers, 0, 2, read, || false).unwrap(),
+            Some(ShaderVertexMatch {
+                row: 2,
+                vertex_index: 12,
+                match_count: 1
+            })
+        );
+        assert_eq!(
+            resolve_shader_vertex(&action, &pipeline, &buffers, 0, 6, read, || false).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn shader_vertex_lookup_scans_across_chunks() {
+        let action: Action = serde_json::from_value(json!({"event_id":7,"action_id":1,"depth":0,"parent":-1,"flags":65538,"indices":5000,"instances":1,"base_vertex":0,"index_offset":0,"vertex_offset":0,"instance_offset":0,"name":"draw"})).unwrap();
+        let pipeline: Pipeline = serde_json::from_value(json!({"event_id":7,"available":true,"topology":5,"shaders":[],"outputs":[],"restart_enabled":false,"index_buffer":{"bound":true,"resource_index":0,"name":"ib","byte_offset":"0","byte_size":"5000","byte_stride":1}})).unwrap();
+        let buffers: Vec<Buffer> = serde_json::from_value(
+            json!([{"name":"ib","resource_index":0,"length":"5000","creation_flags":0}]),
+        )
+        .unwrap();
+        let mut data = vec![0u8; 5000];
+        data[4095] = 250;
+        data[4096] = 250;
+        let reads = std::cell::Cell::new(0);
+        let result = resolve_shader_vertex(
+            &action,
+            &pipeline,
+            &buffers,
+            0,
+            250,
+            |_, offset, length| {
+                reads.set(reads.get() + 1);
+                assert!(length <= 4096);
+                Ok(data[offset as usize..offset as usize + length as usize].to_vec())
+            },
+            || false,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Some(ShaderVertexMatch {
+                row: 4095,
+                vertex_index: 250,
+                match_count: 2
+            })
+        );
+        assert_eq!(reads.get(), 2);
+    }
 
     #[test]
     fn indexed_inputs_follow_offsets_instance_rate_and_restart() {

@@ -231,25 +231,8 @@ fn format_inline(
 }
 
 fn format_gpu_address(value: u64, context: &ResourceContext<'_>) -> Result<String, String> {
-    for buffer in context.buffers {
-        let Some(address) = buffer.gpu_address.as_deref() else {
-            // A missing earlier base could be the upstream first match.
-            return Ok(format!("0x{value:x}"));
-        };
-        let base = address
-            .parse::<u64>()
-            .map_err(|_| "Invalid buffer GPU address")?;
-        if base == 0 || value < base {
-            continue;
-        }
-        let length = buffer
-            .length
-            .parse::<u64>()
-            .map_err(|_| "Invalid buffer length")?;
-        let offset = value - base;
-        if offset >= length {
-            continue;
-        }
+    if let Some((buffer_index, offset)) = crate::gpu_address::resolve(context.buffers, value)? {
+        let buffer = &context.buffers[buffer_index];
         let Some(index) = buffer.resource_index else {
             return Ok(format!("0x{value:x}"));
         };

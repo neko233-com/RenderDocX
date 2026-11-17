@@ -19,6 +19,31 @@ fn texture_center_reports_capability_and_requires_capture() {
             .as_array()
             .unwrap()
             .iter()
+            .any(|command| command == "shader_geometry_resolve")
+    );
+    assert!(
+        capabilities["data"]["serve_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|command| command == "shader_workgroup_resolve")
+    );
+    assert!(
+        capabilities["data"]["serve_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|command| command == "debug_message_jump")
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"debug_message_jump","disassembly_line":1}"#)["error"]["code"],
+        "no_debug_timeline"
+    );
+    assert!(
+        capabilities["data"]["serve_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
             .any(|command| command == "texture_center")
     );
     let result = agent.send(r#"{"command":"texture_center","index":0,"x":0,"y":0}"#);
@@ -399,6 +424,9 @@ fn real_vulkan_mesh_shader_debug_trace() {
     let selected =
         agent.send(&serde_json::json!({"command":"select","event_id":event}).to_string());
     assert_eq!(selected["ok"], true, "{selected}");
+    let group = agent.send(r#"{"command":"shader_workgroup_resolve","stage":"mesh","group":[1,0,0],"task_group":[4294967295,4294967295,4294967295]}"#);
+    assert_eq!(group["ok"], true, "{group}");
+    assert_eq!(group["data"]["meshlet"], 1);
     let mesh = agent.send(r#"{"command":"mesh","stage":"mesh_out","instance":0,"view":0}"#);
     assert_eq!(mesh["ok"], true, "{mesh}");
     let draw = agent.send(r#"{"command":"mesh_draw","offset":0,"count":12}"#);
@@ -493,6 +521,20 @@ fn real_vulkan_mesh_shader_debug_trace() {
     assert_eq!(
         agent.send(&serde_json::json!({"command":"select","event_id":task_event}).to_string())["ok"],
         true
+    );
+    let task_group =
+        agent.send(r#"{"command":"shader_workgroup_resolve","stage":"task","group":[0,0,0]}"#);
+    assert_eq!(task_group["ok"], true, "{task_group}");
+    assert_eq!(task_group["data"]["task_row"], 0);
+    let unknown_parent = agent.send(r#"{"command":"shader_workgroup_resolve","stage":"mesh","group":[0,0,0],"task_group":[0,0,0]}"#);
+    assert_eq!(
+        unknown_parent["error"]["code"],
+        "shader_workgroup_resolve_failed"
+    );
+    let false_direct = agent.send(r#"{"command":"shader_workgroup_resolve","stage":"mesh","group":[0,0,0],"task_group":[4294967295,4294967295,4294967295]}"#);
+    assert_eq!(
+        false_direct["error"]["code"],
+        "shader_workgroup_resolve_failed"
     );
     let task_mesh = agent.send(r#"{"command":"mesh","stage":"task_out","instance":0,"view":0}"#);
     assert_eq!(task_mesh["ok"], true, "{task_mesh}");
@@ -2133,6 +2175,9 @@ fn agent_jsonl_session_has_correlated_errors_and_clean_shutdown() {
     assert_eq!(reply["error"]["code"], "no_capture");
     for command in [
         "debug_vertex",
+        "shader_vertex_resolve",
+        "shader_geometry_resolve",
+        "shader_workgroup_resolve",
         "debug_pixel",
         "debug_compute",
         "debug_mesh",
@@ -2141,6 +2186,8 @@ fn agent_jsonl_session_has_correlated_errors_and_clean_shutdown() {
         "debug_next",
         "debug_stop",
         "debug_messages",
+        "shader_messages",
+        "shader_messages_export",
         "clear_debug_messages",
         "descriptors",
         "annotation_read",
@@ -2616,6 +2663,702 @@ fn real_d3d11_nested_markers_resolve_and_replay_effective_events() {
         reopened["data"]["effective_event_id"],
         last_draw + 1,
         "{reopened}"
+    );
+    agent.quit();
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires a VK_RenderDocX_Mesh_Printf capture and matching RenderDoc replay bridge"]
+fn real_vulkan_task_message_sanitizes_older_core() {
+    let bridge = std::env::var("RENDERDOCX_TEST_BRIDGE").expect("set RENDERDOCX_TEST_BRIDGE");
+    let capture = std::env::var("RENDERDOCX_TEST_MESH_PRINTF_CAPTURE")
+        .expect("set RENDERDOCX_TEST_MESH_PRINTF_CAPTURE");
+    let mut agent = Agent::new(Some(&bridge));
+    let opened = agent.send(&serde_json::json!({"command":"open","path":capture}).to_string());
+    assert_eq!(opened["ok"], true, "{opened}");
+    let event = opened["data"]["capture"]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|action| action["flags"].as_u64().is_some_and(|flags| flags & 8 != 0))
+        .nth(1)
+        .unwrap()["event_id"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(
+        agent.send(&serde_json::json!({"command":"select","event_id":event}).to_string())["ok"],
+        true
+    );
+    let page = agent.send(r#"{"command":"shader_messages","offset":"0","limit":128}"#);
+    assert_eq!(page["ok"], true, "{page}");
+    let messages = page["data"]["messages"].as_array().unwrap();
+    let task = messages
+        .iter()
+        .find(|message| message["stage"] == 6)
+        .unwrap();
+    assert_eq!(
+        task["location"]["mesh_group"],
+        serde_json::json!([u32::MAX, u32::MAX, u32::MAX])
+    );
+    assert!(
+        messages
+            .iter()
+            .filter(|message| message["stage"] == 7)
+            .all(|message| message["location"]["task_group_reliable"] == false)
+    );
+    let denied = agent.send(r#"{"command":"debug_mesh","group":[0,0,0],"thread":[0,0,0]}"#);
+    assert_eq!(denied["error"]["code"], "replay_debug_failed", "{denied}");
+    assert!(
+        denied["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("parent task")
+    );
+    agent.quit();
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires a VK_RenderDocX_Mesh_Printf capture and matching patched RenderDoc replay core"]
+fn real_vulkan_mesh_printf_core_survives_and_initializes_locations() {
+    let bridge = std::env::var("RENDERDOCX_TEST_BRIDGE").expect("set RENDERDOCX_TEST_BRIDGE");
+    let capture = std::env::var("RENDERDOCX_TEST_MESH_PRINTF_CAPTURE")
+        .expect("set RENDERDOCX_TEST_MESH_PRINTF_CAPTURE");
+    let mut agent = Agent::new(Some(&bridge));
+    let opened = agent.send(&serde_json::json!({"command":"open","path":capture}).to_string());
+    assert_eq!(opened["ok"], true, "{opened}");
+    let actions: Vec<_> = opened["data"]["capture"]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|action| action["flags"].as_u64().is_some_and(|flags| flags & 8 != 0))
+        .collect();
+    assert!(actions.len() >= 2);
+    for (action, direct) in [(actions[0], true), (actions[1], false)] {
+        let event = action["event_id"].as_u64().unwrap();
+        let selected =
+            agent.send(&serde_json::json!({"command":"select","event_id":event}).to_string());
+        assert_eq!(selected["ok"], true, "{selected}");
+        let page = agent.send(r#"{"command":"shader_messages","offset":"0","limit":128}"#);
+        assert_eq!(page["ok"], true, "{page}");
+        let messages = page["data"]["messages"].as_array().unwrap();
+        if direct {
+            assert_eq!(messages.len(), 2, "{page}");
+            assert!(messages.iter().all(|message| message["stage"] == 7
+                && message["location"]["task_group"]
+                    == serde_json::json!([u32::MAX, u32::MAX, u32::MAX])));
+        } else {
+            let task = messages
+                .iter()
+                .find(|message| message["stage"] == 6)
+                .unwrap();
+            assert_eq!(
+                task["location"]["mesh_group"],
+                serde_json::json!([u32::MAX, u32::MAX, u32::MAX])
+            );
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| message["stage"] == 7)
+                    .count(),
+                4
+            );
+        }
+    }
+    agent.quit();
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires a VK_RenderDocX_Mesh_Printf capture and matching patched RenderDoc replay core"]
+fn real_vulkan_task_and_mesh_shader_messages() {
+    let bridge = std::env::var("RENDERDOCX_TEST_BRIDGE").expect("set RENDERDOCX_TEST_BRIDGE");
+    let capture = std::env::var("RENDERDOCX_TEST_MESH_PRINTF_CAPTURE")
+        .expect("set RENDERDOCX_TEST_MESH_PRINTF_CAPTURE");
+    let mut agent = Agent::new(Some(&bridge));
+    let opened = agent.send(&serde_json::json!({"command":"open","path":capture}).to_string());
+    assert_eq!(opened["ok"], true, "{opened}");
+    let actions: Vec<_> = opened["data"]["capture"]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|action| action["flags"].as_u64().is_some_and(|flags| flags & 8 != 0))
+        .collect();
+    assert!(actions.len() >= 2);
+    let direct_event = actions[0]["event_id"].as_u64().unwrap();
+    let task_event = actions[1]["event_id"].as_u64().unwrap();
+    assert_eq!(
+        agent.send(&serde_json::json!({"command":"select","event_id":task_event}).to_string())["ok"],
+        true
+    );
+    let page = agent.send(r#"{"command":"shader_messages","offset":"0","limit":128}"#);
+    assert_eq!(page["ok"], true, "{page}");
+    let messages = page["data"]["messages"].as_array().unwrap();
+    let tasks: Vec<_> = messages
+        .iter()
+        .filter(|message| message["stage"] == 6)
+        .collect();
+    let children: Vec<_> = messages
+        .iter()
+        .filter(|message| message["stage"] == 7)
+        .collect();
+    assert_eq!(tasks.len(), 1, "{page}");
+    assert_eq!(children.len(), 4, "{page}");
+    assert_eq!(tasks[0]["message"], "rdx-task:0");
+    assert_eq!(
+        tasks[0]["location"]["task_group"],
+        serde_json::json!([0, 0, 0])
+    );
+    assert_eq!(
+        tasks[0]["location"]["mesh_group"],
+        serde_json::json!([u32::MAX, u32::MAX, u32::MAX])
+    );
+    assert_eq!(tasks[0]["location"]["thread"], serde_json::json!([0, 0, 0]));
+    let child_groups: std::collections::BTreeSet<_> = children
+        .iter()
+        .map(|message| message["location"]["mesh_group"][0].as_u64().unwrap())
+        .collect();
+    assert_eq!(child_groups, std::collections::BTreeSet::from([0, 1, 2, 3]));
+    assert!(
+        children
+            .iter()
+            .all(|message| message["location"]["task_group"] == serde_json::json!([0, 0, 0]))
+    );
+    assert!(
+        children
+            .iter()
+            .all(|message| message["location"]["task_group_reliable"] == false)
+    );
+    let resolved =
+        agent.send(r#"{"command":"shader_workgroup_resolve","stage":"task","group":[0,0,0]}"#);
+    assert_eq!(resolved["ok"], true, "{resolved}");
+    assert_eq!(resolved["data"]["task_row"], 0);
+    let denied = agent.send(r#"{"command":"debug_mesh","group":[0,0,0],"thread":[0,0,0]}"#);
+    assert_eq!(denied["error"]["code"], "replay_debug_failed", "{denied}");
+    assert!(
+        denied["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("parent task")
+    );
+    let denied = agent.send(r#"{"command":"shader_workgroup_resolve","stage":"mesh","group":[0,0,0],"task_group":[0,0,0]}"#);
+    assert_eq!(
+        denied["error"]["code"], "shader_workgroup_resolve_failed",
+        "{denied}"
+    );
+
+    let selected =
+        agent.send(&serde_json::json!({"command":"select","event_id":direct_event}).to_string());
+    assert_eq!(selected["ok"], true, "{selected}");
+    let page = agent.send(r#"{"command":"shader_messages","offset":"0","limit":128}"#);
+    assert_eq!(page["ok"], true, "{page}");
+    let messages = page["data"]["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2, "{page}");
+    let message = messages
+        .iter()
+        .find(|message| message["location"]["mesh_group"][0] == 1)
+        .unwrap();
+    assert_eq!(message["stage"], 7);
+    assert_eq!(message["message"], "rdx-mesh:1");
+    assert_eq!(
+        message["location"]["task_group"],
+        serde_json::json!([u32::MAX, u32::MAX, u32::MAX])
+    );
+    assert_eq!(message["location"]["task_group_reliable"], true);
+    let resolved = agent.send(r#"{"command":"shader_workgroup_resolve","stage":"mesh","group":[1,0,0],"task_group":[4294967295,4294967295,4294967295]}"#);
+    assert_eq!(resolved["ok"], true, "{resolved}");
+    assert_eq!(resolved["data"]["meshlet"], 1);
+    let debug = agent.send(r#"{"command":"debug_mesh","group":[1,0,0],"thread":[0,0,0]}"#);
+    assert_eq!(debug["ok"], true, "{debug}");
+    assert_eq!(agent.send(r#"{"command":"debug_collect"}"#)["ok"], true);
+    let line = message["disassembly_line"].as_i64().unwrap();
+    let jump = agent.send(
+        &serde_json::json!({"command":"debug_message_jump","disassembly_line":line}).to_string(),
+    );
+    assert_eq!(jump["ok"], true, "{jump}");
+    assert_eq!(jump["data"]["jump"]["reason"], "breakpoint", "{jump}");
+    assert_eq!(
+        jump["data"]["timeline"]["location"]["disassembly_line"],
+        line
+    );
+    agent.quit();
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires a VK_RenderDocX_Geometry_Printf capture and matching RenderDoc replay bridge"]
+fn real_vulkan_geometry_shader_messages_show_approximate_output() {
+    let bridge = std::env::var("RENDERDOCX_TEST_BRIDGE").expect("set RENDERDOCX_TEST_BRIDGE");
+    let capture = std::env::var("RENDERDOCX_TEST_GEOMETRY_PRINTF_CAPTURE")
+        .expect("set RENDERDOCX_TEST_GEOMETRY_PRINTF_CAPTURE");
+    let mut agent = Agent::new(Some(&bridge));
+    let opened = agent.send(&serde_json::json!({"command":"open","path":capture}).to_string());
+    assert_eq!(opened["ok"], true, "{opened}");
+    let event = opened["data"]["capture"]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|action| action["flags"].as_u64().is_some_and(|flags| flags & 2 != 0))
+        .unwrap()["event_id"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(
+        agent.send(&serde_json::json!({"command":"select","event_id":event}).to_string())["ok"],
+        true
+    );
+    let page = agent.send(r#"{"command":"shader_messages","offset":"0","limit":128}"#);
+    assert_eq!(page["ok"], true, "{page}");
+    let messages = page["data"]["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2);
+    let message = messages
+        .iter()
+        .find(|message| message["location"]["primitive"] == 1)
+        .unwrap();
+    assert_eq!(message["stage"], 3);
+    assert_eq!(message["message"], "rdx-geometry:1");
+    assert_eq!(message["location"]["view"], 0);
+    let resolved = agent.send(r#"{"command":"shader_geometry_resolve","primitive":1,"view":0}"#);
+    assert_eq!(resolved["ok"], true, "{resolved}");
+    assert_eq!(resolved["data"]["row"], 3);
+    assert_eq!(resolved["data"]["instance"], 0);
+    assert_eq!(resolved["data"]["instance_known"], false);
+    assert_eq!(
+        resolved["data"]["mapping"],
+        "upstream_input_topology_approximation"
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"shader_geometry_resolve","primitive":4294967295}"#)["error"]["code"],
+        "invalid_arguments"
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"shader_geometry_resolve","primitive":1,"view":1}"#)["error"]["code"],
+        "invalid_arguments"
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"shader_geometry_resolve","primitive":1431655766}"#)["error"]["code"],
+        "shader_geometry_resolve_failed"
+    );
+    let mesh = agent.send(r#"{"command":"mesh","stage":"gs_out","instance":0,"view":0}"#);
+    assert_eq!(mesh["ok"], true, "{mesh}");
+    let output = agent.send(r#"{"command":"mesh_draw","offset":3,"count":4}"#);
+    assert_eq!(output["ok"], true, "{output}");
+    let rows = output["data"]["page"]["rows"].as_array().unwrap();
+    assert_eq!(rows[0]["row"], 3);
+    assert_eq!(
+        rows[0]["position"],
+        serde_json::json!([-0.375, -0.5, 0.0, 1.0])
+    );
+    assert_eq!(rows[3]["row"], 6);
+    assert_eq!(rows[3]["position"], serde_json::json!([0.0, 0.5, 0.0, 1.0]));
+    agent.quit();
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires a VK_RenderDocX_Vertex_Printf capture and matching RenderDoc replay bridge"]
+fn real_vulkan_vertex_shader_messages_resolve_and_debug() {
+    let bridge = std::env::var("RENDERDOCX_TEST_BRIDGE").expect("set RENDERDOCX_TEST_BRIDGE");
+    let capture = std::env::var("RENDERDOCX_TEST_VERTEX_PRINTF_CAPTURE")
+        .expect("set RENDERDOCX_TEST_VERTEX_PRINTF_CAPTURE");
+    let mut agent = Agent::new(Some(&bridge));
+    let opened = agent.send(&serde_json::json!({"command":"open","path":capture}).to_string());
+    assert_eq!(opened["ok"], true, "{opened}");
+    let actions = opened["data"]["capture"]["actions"].as_array().unwrap();
+    for indexed in [true, false] {
+        let action = actions
+            .iter()
+            .find(|action| {
+                let flags = action["flags"].as_u64().unwrap();
+                flags & 2 != 0 && (flags & 0x10000 != 0) == indexed
+            })
+            .unwrap();
+        let event = action["event_id"].as_u64().unwrap();
+        let first_instance = if indexed { 7 } else { 5 };
+        assert_eq!(action["instance_offset"], first_instance);
+        if indexed {
+            assert_eq!(action["index_offset"], 1);
+            assert_eq!(action["base_vertex"], 1);
+        } else {
+            assert_eq!(action["vertex_offset"], 1);
+        }
+        assert_eq!(
+            agent.send(&serde_json::json!({"command":"select","event_id":event}).to_string())["ok"],
+            true
+        );
+        let inputs = agent.send(r#"{"command":"vertex_input","offset":0,"limit":64}"#);
+        assert_eq!(inputs["ok"], true, "{inputs}");
+        let rows = inputs["data"]["page"]["rows"].as_array().unwrap();
+        let page = agent.send(r#"{"command":"shader_messages","offset":"0","limit":128}"#);
+        assert_eq!(page["ok"], true, "{page}");
+        let messages = page["data"]["messages"].as_array().unwrap();
+        assert!(!messages.is_empty());
+        let mut vertices = std::collections::BTreeSet::new();
+        for message in messages {
+            assert_eq!(message["stage"], 0);
+            let reported = message["location"]["vertex"].as_u64().unwrap();
+            assert_eq!(message["location"]["instance"], 0);
+            assert_eq!(message["location"]["view"], 0);
+            let effective = if indexed { reported } else { reported + 1 };
+            vertices.insert(effective);
+            assert_eq!(
+                message["message"],
+                format!("rdx-vertex:{effective}:{first_instance}")
+            );
+            let matches: Vec<_> = rows
+                .iter()
+                .filter(|row| row["vertex_index"].as_u64() == Some(effective))
+                .collect();
+            assert_eq!(matches.len(), if indexed { 2 } else { 1 });
+            let resolved = agent.send(&serde_json::json!({"command":"shader_vertex_resolve","reported_vertex":reported,"instance":0}).to_string());
+            assert_eq!(resolved["ok"], true, "{resolved}");
+            assert_eq!(resolved["data"]["match"]["row"], matches[0]["row"]);
+            assert_eq!(resolved["data"]["match"]["vertex_index"], effective);
+            assert_eq!(resolved["data"]["match"]["match_count"], matches.len());
+        }
+        assert_eq!(vertices, std::collections::BTreeSet::from([1, 2, 3]));
+        let first = &messages[0];
+        let reported = first["location"]["vertex"].as_u64().unwrap();
+        let resolved = agent.send(&serde_json::json!({"command":"shader_vertex_resolve","reported_vertex":reported,"instance":0}).to_string());
+        let found = &resolved["data"]["match"];
+        let debug = agent.send(&serde_json::json!({"command":"debug_vertex","vertex":found["row"],"instance":0,"index":found["vertex_index"],"view":0}).to_string());
+        assert_eq!(debug["ok"], true, "{debug}");
+        let trace = &debug["data"]["trace"];
+        let mapped_input = |name: &str| {
+            let mapping = trace["source_variables"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["name"] == name)
+                .unwrap();
+            let raw_name = mapping["variables"][0]["name"].as_str().unwrap();
+            trace["inputs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|input| input["name"] == raw_name)
+                .unwrap()["value_hex"]
+                .as_str()
+                .unwrap()
+        };
+        let row = found["row"].as_u64().unwrap() as usize;
+        let expected_position = rows[row]["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|attribute| attribute["name"] == "Position")
+            .unwrap()["hex"]
+            .as_str()
+            .unwrap();
+        assert!(
+            mapped_input("Position").starts_with(expected_position),
+            "debug input differs from selected vertex row"
+        );
+        assert!(mapped_input("gl_VertexIndex").starts_with(&format!(
+            "{:02x}000000",
+            found["vertex_index"].as_u64().unwrap()
+        )));
+        assert!(
+            mapped_input("gl_InstanceIndex").starts_with(&format!("{first_instance:02x}000000"))
+        );
+        assert_eq!(agent.send(r#"{"command":"debug_collect"}"#)["ok"], true);
+        let line = first["disassembly_line"].as_i64().unwrap();
+        let jump = agent.send(
+            &serde_json::json!({"command":"debug_message_jump","disassembly_line":line})
+                .to_string(),
+        );
+        assert_eq!(jump["ok"], true, "{jump}");
+        assert_eq!(jump["data"]["jump"]["reason"], "breakpoint", "{jump}");
+        assert_eq!(
+            jump["data"]["timeline"]["location"]["disassembly_line"],
+            line
+        );
+    }
+    agent.quit();
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires an upstream VK_Shader_Printf capture and matching RenderDoc replay bridge"]
+fn real_vulkan_shader_messages_and_debug_handoff() {
+    let bridge = std::env::var("RENDERDOCX_TEST_BRIDGE").expect("set RENDERDOCX_TEST_BRIDGE");
+    let capture = std::env::var("RENDERDOCX_TEST_VULKAN_PRINTF_CAPTURE")
+        .expect("set RENDERDOCX_TEST_VULKAN_PRINTF_CAPTURE");
+    let mut agent = Agent::new(Some(&bridge));
+    let opened = agent.send(&serde_json::json!({"command":"open","path":capture}).to_string());
+    assert_eq!(opened["ok"], true, "{opened}");
+    let actions = opened["data"]["capture"]["actions"].as_array().unwrap();
+    let dispatch = actions
+        .iter()
+        .find(|action| action["flags"].as_u64().is_some_and(|flags| flags & 4 != 0))
+        .unwrap()["event_id"]
+        .as_u64()
+        .unwrap();
+    let draw = actions
+        .iter()
+        .find(|action| action["flags"].as_u64().is_some_and(|flags| flags & 2 != 0))
+        .unwrap()["event_id"]
+        .as_u64()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    for (event, stage, expected) in [(dispatch, 5, 5usize), (draw, 4, 8)] {
+        assert_eq!(
+            agent.send(&serde_json::json!({"command":"select","event_id":event}).to_string())["ok"],
+            true
+        );
+        let page = agent.send(r#"{"command":"shader_messages","offset":"0","limit":128}"#);
+        assert_eq!(page["ok"], true, "{page}");
+        assert_eq!(page["data"]["event_id"], event);
+        let messages = page["data"]["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), expected, "{page}");
+        assert!(messages.iter().all(|message| message["stage"] == stage));
+        let first = &messages[0];
+        let location = &first["location"];
+        let command = if stage == 5 {
+            assert_eq!(location["workgroup"], serde_json::json!([1, 0, 0]));
+            let thread = location["thread"][0].as_u64().unwrap();
+            assert!((36..=40).contains(&thread));
+            assert_eq!(first["message"], format!("compute:{}, 0, 0", thread + 64));
+            serde_json::json!({"command":"debug_compute","group":location["workgroup"],"thread":location["thread"]})
+        } else {
+            let x = location["x"].as_u64().unwrap();
+            let y = location["y"].as_u64().unwrap();
+            assert!((200..=201).contains(&x) && (150..=151).contains(&y));
+            assert_eq!(location["sample"], u32::MAX);
+            assert!(messages.iter().any(|m| {
+                m["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Unrecognised % formatter")
+            }));
+            serde_json::json!({"command":"debug_pixel","x":x,"y":y,"primitive":location["primitive"],"view":location["view"]})
+        };
+        let query = if stage == 5 { "compute:" } else { "pixel:" };
+        let filtered = agent.send(&serde_json::json!({"command":"shader_messages","stage_mask":1u32 << stage,"query":query,"offset":"0","limit":2}).to_string());
+        assert_eq!(filtered["ok"], true, "{filtered}");
+        assert_eq!(
+            filtered["data"]["total"],
+            if stage == 5 { "5" } else { "4" }
+        );
+        assert_eq!(filtered["data"]["messages"].as_array().unwrap().len(), 2);
+        let export_path = dir.path().join(format!("stage-{stage}.csv"));
+        let export = agent.send(&serde_json::json!({"command":"shader_messages_export","path":export_path,"format":"csv","stage_mask":1u32 << stage,"query":query}).to_string());
+        assert_eq!(export["ok"], true, "{export}");
+        assert_eq!(export["data"]["count"], if stage == 5 { "5" } else { "4" });
+        assert!(
+            std::fs::read_to_string(export_path)
+                .unwrap()
+                .contains(query)
+        );
+        let debug = agent.send(&command.to_string());
+        assert_eq!(debug["ok"], true, "{debug}");
+        assert_eq!(agent.send(r#"{"command":"debug_collect"}"#)["ok"], true);
+        let line = first["disassembly_line"].as_i64().unwrap();
+        assert!(line >= 0);
+        let jump = agent.send(
+            &serde_json::json!({"command":"debug_message_jump","disassembly_line":line})
+                .to_string(),
+        );
+        assert_eq!(jump["ok"], true, "{jump}");
+        assert_eq!(jump["data"]["jump"]["reason"], "breakpoint", "{jump}");
+        assert_eq!(
+            jump["data"]["timeline"]["location"]["disassembly_line"],
+            line
+        );
+    }
+    agent.quit();
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires the D3D11 fixture and matching RenderDoc replay bridge"]
+fn real_d3d11_source_variable_values_follow_debug_navigation() {
+    use std::{os::windows::process::CommandExt, path::PathBuf};
+    let bridge = PathBuf::from(std::env::var_os("RENDERDOCX_TEST_BRIDGE").unwrap());
+    let fixture = PathBuf::from(std::env::var_os("RENDERDOCX_TEST_FIXTURE").unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(fixture)
+        .arg(bridge.parent().unwrap().join("renderdoc.dll"))
+        .arg(dir.path().join("frame"))
+        .creation_flags(0x08000000)
+        .output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let capture = stdout.lines().find_map(|line| line.strip_prefix("RENDERDOCX_CAPTURE=")).unwrap();
+    let mut agent = Agent::new(bridge.to_str());
+    let opened = agent.send(&serde_json::json!({"command":"open", "path":capture}).to_string());
+    assert_eq!(opened["ok"], true, "{opened}");
+    let event = opened["data"]["capture"]["actions"].as_array().unwrap().iter()
+        .find(|action| action["name"].as_str().is_some_and(|name| name.contains("Dispatch")))
+        .unwrap()["event_id"].as_u64().unwrap();
+    assert_eq!(agent.send(&serde_json::json!({"command":"select","event_id":event}).to_string())["ok"], true);
+    assert_eq!(agent.send(r#"{"command":"debug_compute","group":[1,0,0],"thread":[1,1,0]}"#)["ok"], true);
+    let initial = agent.send(r#"{"command":"debug_collect"}"#);
+    assert_eq!(initial["ok"], true, "{initial}");
+    let find = |response: &Value, name: &str| -> Value {
+        response["data"]["source_variables"].as_array().unwrap().iter()
+            .find(|source| source["mapping"]["name"] == name).cloned()
+            .unwrap_or_else(|| panic!("missing {name}: {response}"))
+    };
+    let group = find(&initial, "group");
+    assert_eq!(group["components"].as_array().unwrap().iter().map(|c| c["value"].as_str().unwrap()).collect::<Vec<_>>(), ["1", "0", "0"]);
+    assert_eq!(agent.send(r#"{"command":"debug_breakpoint","breakpoint":{"kind":"source","file_index":0,"line":7},"enabled":true}"#)["ok"], true);
+    let run = agent.send(r#"{"command":"debug_navigate","direction":"forward","mode":"run"}"#);
+    assert_eq!(run["data"]["reason"], "breakpoint", "{run}");
+    let value = find(&run, "value");
+    assert_eq!(value["components"][0]["value"], "153", "{value}");
+    assert_eq!(agent.send(r#"{"command":"debug_breakpoint","breakpoint":{"kind":"source","file_index":0,"line":6},"enabled":true}"#)["ok"], true);
+    let back = agent.send(r#"{"command":"debug_navigate","direction":"backward","mode":"run"}"#);
+    assert_eq!(back["data"]["location"]["line_start"], 6, "{back}");
+    assert_eq!(find(&back, "group")["components"], group["components"]);
+    agent.quit();
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires the D3D11 fixture and matching RenderDoc replay bridge"]
+fn real_d3d11_shader_messages_page_is_empty() {
+    use std::{os::windows::process::CommandExt, path::PathBuf};
+    let bridge = PathBuf::from(
+        std::env::var_os("RENDERDOCX_TEST_BRIDGE").expect("set RENDERDOCX_TEST_BRIDGE"),
+    );
+    let fixture = PathBuf::from(
+        std::env::var_os("RENDERDOCX_TEST_FIXTURE").expect("set RENDERDOCX_TEST_FIXTURE"),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(fixture)
+        .arg(bridge.parent().unwrap().join("renderdoc.dll"))
+        .arg(dir.path().join("frame"))
+        .creation_flags(0x08000000)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let capture = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("RENDERDOCX_CAPTURE="))
+        .unwrap();
+    let mut agent = Agent::new(bridge.to_str());
+    let opened = agent.send(&serde_json::json!({"command":"open", "path":capture}).to_string());
+    assert_eq!(opened["ok"], true, "{opened}");
+    assert_eq!(
+        agent.send(r#"{"command":"shader_messages"}"#)["error"]["code"],
+        "no_event"
+    );
+    let event = opened["data"]["capture"]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|action| {
+            action["flags"]
+                .as_u64()
+                .is_some_and(|flags| flags & 0x10002 == 0x10002)
+        })
+        .unwrap()["event_id"]
+        .as_u64()
+        .unwrap();
+    let selected =
+        agent.send(&serde_json::json!({"command":"select", "event_id":event}).to_string());
+    assert_eq!(selected["ok"], true, "{selected}");
+    let inputs = agent.send(r#"{"command":"vertex_input","offset":0,"limit":64}"#);
+    assert_eq!(inputs["ok"], true, "{inputs}");
+    let rows = inputs["data"]["page"]["rows"].as_array().unwrap();
+    assert_eq!(
+        rows.len() as u64,
+        inputs["data"]["page"]["total"].as_u64().unwrap()
+    );
+    let target = rows[1]["vertex_index"].as_u64().unwrap();
+    let matches: Vec<_> = rows
+        .iter()
+        .filter(|row| row["vertex_index"].as_u64() == Some(target) && row["restart"] == false)
+        .collect();
+    let resolved = agent.send(&serde_json::json!({"command":"shader_vertex_resolve","reported_vertex":target,"instance":0}).to_string());
+    assert_eq!(resolved["ok"], true, "{resolved}");
+    assert_eq!(resolved["data"]["match"]["row"], matches[0]["row"]);
+    assert_eq!(resolved["data"]["match"]["vertex_index"], target);
+    assert_eq!(resolved["data"]["match"]["match_count"], matches.len());
+    let page = agent.send(r#"{"command":"shader_messages","offset":"0","limit":1}"#);
+    assert_eq!(page["ok"], true, "{page}");
+    assert_eq!(page["data"]["event_id"], event);
+    assert_eq!(page["data"]["total"], "0");
+    assert_eq!(page["data"]["messages"], serde_json::json!([]));
+    let filtered = agent.send(
+        r#"{"command":"shader_messages","stage_mask":32,"query":"missing","offset":"0","limit":1}"#,
+    );
+    assert_eq!(filtered["ok"], true, "{filtered}");
+    assert_eq!(filtered["data"]["total"], "0");
+    let export = dir.path().join("shader-messages.csv");
+    let command = serde_json::json!({"command":"shader_messages_export","format":"csv","path":export,"stage_mask":32,"query":"missing"}).to_string();
+    let exported = agent.send(&command);
+    assert_eq!(exported["ok"], true, "{exported}");
+    assert_eq!(exported["data"]["count"], "0");
+    let contents = std::fs::read(&export).unwrap();
+    assert!(!contents.is_empty());
+    assert_eq!(
+        agent.send(&command)["error"]["code"],
+        "shader_messages_export_failed"
+    );
+    assert_eq!(std::fs::read(&export).unwrap(), contents);
+    assert_eq!(
+        agent.send(r#"{"command":"shader_messages","stage_mask":65536}"#)["error"]["code"],
+        "invalid_arguments"
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"shader_messages","limit":0}"#)["error"]["code"],
+        "invalid_arguments"
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"shader_messages","offset":"1"}"#)["error"]["code"],
+        "shader_messages_failed"
+    );
+    let shader = agent.send(r#"{"command":"shader","stage":"vertex"}"#);
+    assert_eq!(shader["ok"], true, "{shader}");
+    let disassembly = shader["data"]["shader"]["disassembly"].as_str().unwrap();
+    let start = serde_json::json!({"command":"debug_vertex","vertex":matches[0]["row"],"instance":0,"index":target}).to_string();
+    let started = agent.send(&start);
+    assert_eq!(started["ok"], true, "{started}");
+    let trace: renderdocx::replay::DebugTrace =
+        serde_json::from_value(started["data"]["trace"].clone()).unwrap();
+    let mut states = Vec::new();
+    loop {
+        let batch = agent.send(r#"{"command":"debug_next"}"#);
+        assert_eq!(batch["ok"], true, "{batch}");
+        let parsed: renderdocx::replay::DebugStates =
+            serde_json::from_value(batch["data"]["batch"].clone()).unwrap();
+        states.extend(parsed.states);
+        if parsed.finished {
+            break;
+        }
+    }
+    let line_count = disassembly.bytes().filter(|&byte| byte == b'\n').count() + 1;
+    let target_line = states
+        .iter()
+        .skip(1)
+        .filter_map(|state| trace.instruction_info(state.next_instruction))
+        .map(|info| info.disassembly_line)
+        .find(|&line| line > 0 && (line as usize) < line_count)
+        .expect("mapped instruction after initial state");
+    assert_eq!(agent.send(r#"{"command":"debug_stop"}"#)["ok"], true);
+    assert_eq!(agent.send(&start)["ok"], true);
+    assert_eq!(agent.send(r#"{"command":"debug_collect"}"#)["ok"], true);
+    let jump = agent.send(
+        &serde_json::json!({"command":"debug_message_jump","disassembly_line":target_line})
+            .to_string(),
+    );
+    assert_eq!(jump["ok"], true, "{jump}");
+    assert_eq!(jump["data"]["jump"]["breakpoint_line"], target_line);
+    assert_eq!(jump["data"]["jump"]["reason"], "breakpoint");
+    assert_eq!(
+        jump["data"]["timeline"]["location"]["disassembly_line"],
+        target_line
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"debug_message_jump","disassembly_line":-1}"#)["error"]["code"],
+        "invalid_arguments"
     );
     agent.quit();
 }
@@ -4519,6 +5262,24 @@ fn real_d3d11_capture_is_inspected_and_selected() {
             ["ok"],
         true
     );
+    let batch = agent.send(r#"{"command":"descriptors","offset":"0","limit":128}"#);
+    assert_eq!(batch["ok"], true, "{batch}");
+    let entries = batch["data"]["page"]["entries"].as_array().unwrap();
+    assert!(
+        entries.len() >= 2,
+        "compute fixture must exercise batched descriptor access: {batch}"
+    );
+    for (offset, expected) in entries.iter().enumerate() {
+        let single = agent.send(
+            &serde_json::json!({"command":"descriptors","offset":offset.to_string(),"limit":1})
+                .to_string(),
+        );
+        assert_eq!(single["ok"], true, "{single}");
+        assert_eq!(
+            &single["data"]["page"]["entries"][0], expected,
+            "descriptor {offset}"
+        );
+    }
     let shader = agent.send(r#"{"command":"shader","stage":"compute"}"#);
     assert_eq!(shader["ok"], true, "{shader}");
     assert_eq!(

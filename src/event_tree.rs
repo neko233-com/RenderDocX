@@ -127,6 +127,10 @@ impl EventTree {
         self.rows.get(index).copied()
     }
 
+    pub fn parent_row(&self, index: usize) -> Option<usize> {
+        self.parents.get(index).copied().flatten()
+    }
+
     pub fn display_name(&self, row: usize) -> Option<&str> {
         self.names.get(row).map(String::as_str)
     }

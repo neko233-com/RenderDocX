@@ -13,7 +13,9 @@ use gpui_kit::{
 };
 use renderdocx::{
     annotations,
-    backend::{self, Settings},
+    backend::{self, Settings, WindowLayout},
+    capture_save,
+    capture_settings::CaptureSettings,
     debug_navigation::{DebugNavigator, SourceStep},
     event_tree::{EventRow, EventTarget, EventTree},
     i18n::Language,
@@ -98,6 +100,101 @@ fn resource_name<'a>(
         .unwrap_or(&resource.name)
 }
 
+fn descriptor_type_label(language: Language, value: Option<u64>) -> String {
+    match value {
+        Some(0) => language
+            .text("Unknown", "未知")
+            .to_owned(),
+        Some(1) => language
+            .text(
+                "Constant buffer",
+                "常量缓冲区",
+            )
+            .to_owned(),
+        Some(2) => language
+            .text("Sampler", "采样器")
+            .to_owned(),
+        Some(3) => language
+            .text(
+                "Image sampler",
+                "图像采样器",
+            )
+            .to_owned(),
+        Some(4) => language
+            .text("Image", "图像")
+            .to_owned(),
+        Some(5) => language
+            .text("Buffer", "缓冲区")
+            .to_owned(),
+        Some(6) => language
+            .text(
+                "Typed buffer",
+                "类型化缓冲区",
+            )
+            .to_owned(),
+        Some(7) => language
+            .text(
+                "Read/write image",
+                "读写图像",
+            )
+            .to_owned(),
+        Some(8) => language
+            .text(
+                "Read/write typed buffer",
+                "读写类型化缓冲区",
+            )
+            .to_owned(),
+        Some(9) => language
+            .text(
+                "Read/write buffer",
+                "读写缓冲区",
+            )
+            .to_owned(),
+        Some(10) => language
+            .text(
+                "Acceleration structure",
+                "加速结构",
+            )
+            .to_owned(),
+        Some(value) => format!(
+            "{} ({value})",
+            language.text("Unknown", "未知")
+        ),
+        None => language
+            .text("Unavailable", "不可用")
+            .to_owned(),
+    }
+}
+
+fn descriptor_stage_label(value: Option<u64>) -> String {
+    const STAGES: [&str; 14] = [
+        "Vertex",
+        "Hull / Tessellation control",
+        "Domain / Tessellation evaluation",
+        "Geometry",
+        "Pixel / Fragment",
+        "Compute",
+        "Task / Amplification",
+        "Mesh",
+        "RayGen",
+        "Intersection",
+        "AnyHit",
+        "ClosestHit",
+        "Miss",
+        "Callable",
+    ];
+    value
+        .and_then(|value| {
+            usize::try_from(value)
+                .ok()
+                .and_then(|index| STAGES.get(index))
+                .copied()
+        })
+        .map(str::to_owned)
+        .or_else(|| value.map(|value| format!("#{value}")))
+        .unwrap_or_else(|| "—".into())
+}
+
 #[derive(Clone, Copy)]
 enum ShaderDebugContext {
     Vertex {
@@ -111,6 +208,20 @@ enum ShaderDebugContext {
     Mesh(ComputeDebugSelection),
 }
 
+struct ShaderVertexResolution {
+    event: u32,
+    reported: u32,
+    instance: u32,
+    view: u32,
+    result: renderdocx::vertex_input::ShaderVertexMatch,
+}
+
+#[derive(Clone, Copy)]
+enum ShaderVertexPurpose {
+    Navigate,
+    Debug { disassembly_line: i32 },
+}
+
 struct ShaderDebugView {
     context: ShaderDebugContext,
     trace: DebugTrace,
@@ -118,6 +229,7 @@ struct ShaderDebugView {
     navigator: DebugNavigator,
     disassembly: String,
     source_files: Vec<ShaderSourceFile>,
+    message_jump: Option<renderdocx::debug_navigation::MessageJump>,
 }
 
 struct ShaderEditor {
@@ -225,6 +337,7 @@ fn collect_shader_debug(
             navigator: DebugNavigator::default(),
             disassembly: shader.disassembly,
             source_files: shader.source_files,
+            message_jump: None,
         })
     })();
     let stopped = session.debug_stop();
@@ -352,6 +465,8 @@ struct MeshView {
     filter: renderdocx::mesh_draw::MeshFilter,
     task_sizes: Vec<[u32; 3]>,
     offset: u64,
+    highlighted_row: Option<u32>,
+    geometry_message_handoff: bool,
 }
 
 impl Default for MeshView {
@@ -369,6 +484,8 @@ impl Default for MeshView {
             filter: renderdocx::mesh_draw::MeshFilter::All,
             task_sizes: Vec::new(),
             offset: 0,
+            highlighted_row: None,
+            geometry_message_handoff: false,
         }
     }
 }
@@ -416,6 +533,40 @@ fn mesh_positions(info: &MeshInfo, bytes: &[u8], offset: u64) -> Option<Vec<(u64
         .into_iter()
         .map(|position| Some((position.row.parse().ok()?, position.values)))
         .collect()
+}
+
+#[cfg(test)]
+mod descriptor_label_tests {
+    use super::{CAPTURE_TABS, CaptureTab, Language, descriptor_stage_label, descriptor_type_label};
+
+    #[test]
+    fn capture_tab_layout_names_round_trip() {
+        for tab in CAPTURE_TABS {
+            assert_eq!(CaptureTab::from_name(tab.name()), Some(tab));
+        }
+        assert_eq!(CaptureTab::from_name("NotATab"), None);
+    }
+
+    #[test]
+    fn known_and_future_descriptor_types_are_distinguishable() {
+        assert_eq!(
+            descriptor_type_label(Language::English, Some(1)),
+            "Constant buffer"
+        );
+        assert_eq!(descriptor_type_label(Language::Chinese, Some(4)), "图像");
+        assert_eq!(
+            descriptor_type_label(Language::English, Some(99)),
+            "Unknown (99)"
+        );
+        assert_eq!(
+            descriptor_type_label(Language::English, None),
+            "Unavailable"
+        );
+        assert_eq!(descriptor_stage_label(Some(4)), "Pixel / Fragment");
+        assert_eq!(descriptor_stage_label(Some(13)), "Callable");
+        assert_eq!(descriptor_stage_label(Some(77)), "#77");
+        assert_eq!(descriptor_stage_label(None), "—");
+    }
 }
 
 #[cfg(test)]
@@ -549,7 +700,20 @@ fn structured_value(node: &StructuredNode) -> String {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InfoDialog {
+    About,
+    Tips,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ViewerDialog {
+    Axis,
+    Projection,
+    Camera,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CaptureTab {
     Events,
     ApiCalls,
@@ -561,10 +725,56 @@ enum CaptureTab {
     VertexInput,
     Resources,
     Messages,
+    ShaderMessages,
     Statistics,
     Counters,
     Descriptors,
     Annotations,
+}
+
+const CAPTURE_TABS: [CaptureTab; 15] = [
+    CaptureTab::Events,
+    CaptureTab::ApiCalls,
+    CaptureTab::Parameters,
+    CaptureTab::Textures,
+    CaptureTab::Buffers,
+    CaptureTab::Shaders,
+    CaptureTab::Mesh,
+    CaptureTab::VertexInput,
+    CaptureTab::Resources,
+    CaptureTab::Messages,
+    CaptureTab::ShaderMessages,
+    CaptureTab::Statistics,
+    CaptureTab::Counters,
+    CaptureTab::Descriptors,
+    CaptureTab::Annotations,
+];
+
+impl CaptureTab {
+    fn name(self) -> &'static str {
+        const NAMES: [&str; 15] = [
+            "Events",
+            "ApiCalls",
+            "Parameters",
+            "Textures",
+            "Buffers",
+            "Shaders",
+            "Mesh",
+            "VertexInput",
+            "Resources",
+            "Messages",
+            "ShaderMessages",
+            "Statistics",
+            "Counters",
+            "Descriptors",
+            "Annotations",
+        ];
+        NAMES[self as usize]
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        CAPTURE_TABS.into_iter().find(|tab| tab.name() == name)
+    }
 }
 
 #[derive(Clone)]
@@ -611,6 +821,9 @@ struct Workspace {
     snapshot: Option<Snapshot>,
     event_tree: EventTree,
     event_scroll: UniformListScrollHandle,
+    event_focus: gpui::FocusHandle,
+    requested_event: Option<u32>,
+    queued_event_key: Option<u32>,
     event_search: Entity<InputState>,
     event_annotation_key: Entity<InputState>,
     _event_annotation_subscription: gpui::Subscription,
@@ -641,12 +854,25 @@ struct Workspace {
     message_query: String,
     message_visible: Vec<usize>,
     message_severity: Option<u32>,
+    message_sort: renderdocx::debug_message_view::SortKey,
+    message_sort_descending: bool,
     hidden_message_sources: std::collections::BTreeSet<u32>,
+    hidden_message_severities: std::collections::BTreeSet<u32>,
     hidden_message_categories: std::collections::BTreeSet<u32>,
     hidden_message_types: std::collections::BTreeSet<(u32, u32, u32)>,
     show_hidden_messages: bool,
     message_poll_pending: bool,
     message_generation: u64,
+    shader_message_page: Option<renderdocx::replay::ShaderMessagePage>,
+    selected_shader_message: Option<usize>,
+    pending_shader_messages_event: Option<u32>,
+    shader_vertex_resolution: Option<ShaderVertexResolution>,
+    shader_vertex_lookup_pending: bool,
+    shader_vertex_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    shader_message_search: Entity<InputState>,
+    _shader_message_search_subscription: gpui::Subscription,
+    shader_message_draft_mask: u16,
+    shader_message_filter: renderdocx::shader_messages::Filter,
     selected: Option<usize>,
     pipeline: Option<Pipeline>,
     tab: CaptureTab,
@@ -697,6 +923,8 @@ struct Workspace {
     stats_min: Entity<InputState>,
     stats_max: Entity<InputState>,
     statistics: Option<TextureStatistics>,
+    frame_stats_category: usize,
+    frame_stats_raw: bool,
     selected_buffer: Option<usize>,
     buffer_offset: u64,
     buffer_format: Option<renderdocx::buffer_format::ScalarFormat>,
@@ -741,6 +969,7 @@ struct Workspace {
     counter_page: Option<CounterPage>,
     descriptor_store: Option<usize>,
     descriptor_page: Option<DescriptorPage>,
+    descriptor_show_raw: bool,
     annotations: AnnotationView,
     bookmark_text: Entity<InputState>,
     usage_page: Option<ResourceUsagePage>,
@@ -775,12 +1004,44 @@ struct Workspace {
     launch_delay: Entity<InputState>,
     launch_memory: Entity<InputState>,
     launch_working_directory: Option<PathBuf>,
+    launch_executable: Option<PathBuf>,
     capture_options: CaptureOptions,
     launch_env_name: Entity<InputState>,
     launch_env_value: Entity<InputState>,
     launch_environment: Vec<EnvironmentModification>,
     launch_env_operation: EnvOperation,
     launch_env_separator: EnvSeparator,
+    /// Input values from a `.cap` import opened without a window handle; applied
+    /// on the next render frame via `cx.defer`.
+    pending_launch_inputs: Option<(String, String, String)>,
+    info_dialog: Option<InfoDialog>,
+    log_messages: Vec<renderdocx::log_view::LogMessage>,
+    log_filter: Entity<InputState>,
+    show_log: bool,
+    log_pending: bool,
+    replay_loop: Option<renderdocx::replay_loop::ReplayLoop>,
+    replay_loop_generation: u64,
+    replay_loop_delay: Entity<InputState>,
+    viewer_dialog: Option<ViewerDialog>,
+    proj_fov: Entity<InputState>,
+    proj_aspect: Entity<InputState>,
+    proj_near: Entity<InputState>,
+    proj_far: Entity<InputState>,
+    camera_near: Entity<InputState>,
+    camera_far: Entity<InputState>,
+    config_editor: Entity<TextareaState>,
+    show_config_editor: bool,
+    show_find_replace: bool,
+    find_options: renderdocx::find_replace::FindOptions,
+    find_cursor: usize,
+    shader_find: Entity<InputState>,
+    shader_replace: Entity<InputState>,
+    thumbnail_history: Vec<renderdocx::thumbnail_strip::ThumbnailEntry>,
+    suggest_remote: Option<renderdocx::suggest_remote::SuggestRemote>,
+    python_input: Entity<InputState>,
+    python_script: Entity<TextareaState>,
+    python_output: Vec<String>,
+    python_pending: bool,
 }
 
 impl Workspace {
@@ -906,8 +1167,6 @@ impl Workspace {
                 self.t(
                     "Attachment subresource is unavailable.",
                     "附件子资源不可用。",
-                    "アタッチメントのサブリソースを利用できません。",
-                    "첨부 하위 리소스를 사용할 수 없습니다.",
                 )
                 .to_owned(),
             );
@@ -924,6 +1183,15 @@ impl Workspace {
         }
         self.selected_texture = Some(index);
         self.texture_selection = selection;
+        renderdocx::thumbnail_strip::record(
+            &mut self.thumbnail_history,
+            renderdocx::thumbnail_strip::ThumbnailEntry {
+                texture: index,
+                mip: selection.mip,
+                slice: selection.slice,
+                sample: selection.sample.unwrap_or(0),
+            },
+        );
         let [black, white] = selection.display_range.unwrap_or([0.0, 1.0]);
         self.texture_black_point.update(cx, |input, cx| {
             input.set_value(black.to_string(), window, cx)
@@ -1013,8 +1281,6 @@ impl Workspace {
             self.t(
                 "Apply or discard the shader draft first.",
                 "请先应用或放弃着色器草稿。",
-                "シェーダーの下書きを適用または破棄してください。",
-                "먼저 셰이더 초안을 적용하거나 취소하세요.",
             )
             .to_owned(),
         );
@@ -1028,8 +1294,6 @@ impl Workspace {
                 self.t(
                     "Wait for the current operation to finish before closing.",
                     "请等待当前操作完成后再关闭。",
-                    "現在の処理が完了してから閉じてください。",
-                    "현재 작업이 끝난 후 창을 닫아 주세요.",
                 )
                 .to_owned(),
             );
@@ -1044,8 +1308,6 @@ impl Workspace {
                 self.t(
                     "Save or discard the comment draft before closing.",
                     "关闭前请先保存或放弃注释草稿。",
-                    "閉じる前にコメントを保存または破棄してください。",
-                    "닫기 전에 댓글 초안을 저장하거나 취소하세요.",
                 )
                 .to_owned(),
             );
@@ -1078,8 +1340,6 @@ impl Workspace {
             self.t(
                 "Loading annotations…",
                 "正在加载注释与书签…",
-                "注釈とブックマークを読み込み中…",
-                "주석과 북마크를 불러오는 중…",
             )
             .to_owned(),
         );
@@ -1112,8 +1372,6 @@ impl Workspace {
                             this.t(
                                 "Could not load annotations",
                                 "无法加载注释与书签",
-                                "注釈を読み込めません",
-                                "주석을 불러올 수 없습니다"
                             )
                         ))
                     }
@@ -1137,8 +1395,6 @@ impl Workspace {
             self.t(
                 "Inspecting capture dependencies…",
                 "正在检查捕获依赖…",
-                "キャプチャの依存関係を確認中…",
-                "캡처 종속성을 확인하는 중…",
             )
             .to_owned(),
         );
@@ -1164,8 +1420,6 @@ impl Workspace {
                             this.t(
                                 "Could not inspect dependencies",
                                 "无法检查依赖",
-                                "依存関係を確認できません",
-                                "종속성을 확인할 수 없습니다"
                             )
                         ))
                     }
@@ -1185,8 +1439,6 @@ impl Workspace {
                 self.t(
                     "Save or discard drafts before exporting a capture copy.",
                     "导出捕获副本前请先保存或放弃草稿。",
-                    "コピーの出力前に下書きを保存または破棄してください。",
-                    "복사본을 내보내기 전에 초안을 저장하거나 취소하세요.",
                 )
                 .to_owned(),
             );
@@ -1202,8 +1454,6 @@ impl Workspace {
             self.t(
                 "Exporting capture copy…",
                 "正在导出捕获副本…",
-                "キャプチャのコピーを出力中…",
-                "캡처 복사본을 내보내는 중…",
             )
             .to_owned(),
         );
@@ -1225,8 +1475,6 @@ impl Workspace {
                             this.t(
                                 "Capture copy saved",
                                 "捕获副本已保存",
-                                "キャプチャのコピーを保存しました",
-                                "캡처 복사본을 저장했습니다"
                             ),
                             path.display()
                         ));
@@ -1238,8 +1486,6 @@ impl Workspace {
                             this.t(
                                 "Could not export capture copy",
                                 "无法导出捕获副本",
-                                "キャプチャのコピーを出力できません",
-                                "캡처 복사본을 내보낼 수 없습니다"
                             )
                         ))
                     }
@@ -1284,8 +1530,6 @@ impl Workspace {
             self.t(
                 "Saving annotations…",
                 "正在保存注释与书签…",
-                "注釈を保存中…",
-                "주석 저장 중…",
             )
             .to_owned(),
         );
@@ -1319,8 +1563,6 @@ impl Workspace {
                             this.t(
                                 "Could not save annotations",
                                 "无法保存注释与书签",
-                                "注釈を保存できません",
-                                "주석을 저장할 수 없습니다"
                             )
                         ))
                     }
@@ -1343,30 +1585,22 @@ impl Workspace {
             1 => self.t(
                 "Redundant API use",
                 "冗余 API 调用",
-                "冗長な API 使用",
-                "중복 API 사용",
             ),
             2 => self.t(
                 "Incorrect API use",
                 "错误的 API 调用",
-                "不正な API 使用",
-                "잘못된 API 사용",
             ),
             3 => self.t(
                 "General performance",
                 "通用性能",
-                "一般的な性能",
-                "일반 성능",
             ),
-            4 => self.t("GCN performance", "GCN 性能", "GCN 性能", "GCN 성능"),
-            5 => self.t("Runtime warning", "运行时警告", "実行時警告", "런타임 경고"),
+            4 => self.t("GCN performance", "GCN 性能"),
+            5 => self.t("Runtime warning", "运行时警告"),
             6 => self.t(
                 "Unsupported configuration",
                 "不支持的配置",
-                "未対応の構成",
-                "지원하지 않는 구성",
             ),
-            _ => self.t("Unknown", "未知", "不明", "알 수 없음"),
+            _ => self.t("Unknown", "未知"),
         }
     }
 
@@ -1375,29 +1609,25 @@ impl Workspace {
             0 => self.t(
                 "Application defined",
                 "应用自定义",
-                "アプリ定義",
-                "애플리케이션 정의",
             ),
-            1 => self.t("Miscellaneous", "其他", "その他", "기타"),
-            2 => self.t("Initialization", "初始化", "初期化", "초기화"),
-            3 => self.t("Cleanup", "清理", "クリーンアップ", "정리"),
-            4 => self.t("Compilation", "编译", "コンパイル", "컴파일"),
-            5 => self.t("State creation", "状态创建", "状態の作成", "상태 생성"),
-            6 => self.t("State setting", "状态设置", "状態の設定", "상태 설정"),
-            7 => self.t("State getting", "状态查询", "状態の取得", "상태 조회"),
+            1 => self.t("Miscellaneous", "其他"),
+            2 => self.t("Initialization", "初始化"),
+            3 => self.t("Cleanup", "清理"),
+            4 => self.t("Compilation", "编译"),
+            5 => self.t("State creation", "状态创建"),
+            6 => self.t("State setting", "状态设置"),
+            7 => self.t("State getting", "状态查询"),
             8 => self.t(
                 "Resource manipulation",
                 "资源操作",
-                "リソース操作",
-                "리소스 조작",
             ),
-            9 => self.t("Execution", "执行", "実行", "실행"),
-            10 => self.t("Shaders", "着色器", "シェーダー", "셰이더"),
-            11 => self.t("Deprecated", "已弃用", "非推奨", "지원 중단"),
-            12 => self.t("Undefined", "未定义", "未定義", "정의되지 않음"),
-            13 => self.t("Portability", "可移植性", "移植性", "이식성"),
-            14 => self.t("Performance", "性能", "性能", "성능"),
-            _ => self.t("Unknown", "未知", "不明", "알 수 없음"),
+            9 => self.t("Execution", "执行"),
+            10 => self.t("Shaders", "着色器"),
+            11 => self.t("Deprecated", "已弃用"),
+            12 => self.t("Undefined", "未定义"),
+            13 => self.t("Portability", "可移植性"),
+            14 => self.t("Performance", "性能"),
+            _ => self.t("Unknown", "未知"),
         }
     }
 
@@ -1412,6 +1642,148 @@ impl Workspace {
                 cx.notify();
             }
         })
+    }
+
+    fn watch_shader_message_search(
+        input: &Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Subscription {
+        cx.subscribe(input, |_, _, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+    }
+
+    fn render_message(&self, text: &str) -> renderdocx::rich_message::Rendered {
+        let Some(snapshot) = &self.snapshot else {
+            return renderdocx::rich_message::render(
+                text,
+                |_| None,
+                |_| false,
+                |_| None,
+                |_, _| None,
+            );
+        };
+        let renames = self.annotations.renames.as_ref().map(|(_, doc)| doc);
+        renderdocx::rich_message::render(
+            text,
+            |id| {
+                snapshot
+                    .resources
+                    .iter()
+                    .enumerate()
+                    .find(|(_, resource)| {
+                        resource
+                            .rename_key
+                            .as_deref()
+                            .and_then(|key| key.strip_prefix("ResourceId::"))
+                            .and_then(|key| key.parse::<u64>().ok())
+                            == Some(id)
+                    })
+                    .map(|(index, resource)| (index, resource_name(resource, renames).to_owned()))
+            },
+            |event| {
+                snapshot.actions.iter().any(|action| {
+                    action.event_id == event
+                        || action.api_events.iter().any(|api| api.event_id == event)
+                })
+            },
+            |address| self.resolve_gpu_address(address),
+            |event, count| {
+                snapshot
+                    .actions
+                    .iter()
+                    .any(|action| {
+                        action.event_id == event
+                            || action.api_events.iter().any(|api| api.event_id == event)
+                    })
+                    .then(|| {
+                        format!(
+                            "{count} {}",
+                            self.t("messages", "条消息")
+                        )
+                    })
+            },
+        )
+    }
+
+    fn resolve_gpu_address(&self, address: u64) -> Option<(usize, u64, String)> {
+        let snapshot = self.snapshot.as_ref()?;
+        let (index, offset) =
+            renderdocx::gpu_address::resolve(&snapshot.buffers, address).ok()??;
+        let buffer = snapshot.buffers.get(index)?;
+        let name = buffer
+            .resource_index
+            .and_then(|index| snapshot.resources.get(index))
+            .map(|resource| {
+                resource_name(
+                    resource,
+                    self.annotations.renames.as_ref().map(|(_, doc)| doc),
+                )
+            })
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&buffer.name);
+        let name = if name.is_empty() {
+            format!(
+                "{} #{index}",
+                self.t("Buffer", "缓冲区")
+            )
+        } else {
+            name.to_owned()
+        };
+        Some((index, offset, name))
+    }
+
+    fn open_gpu_address(
+        &mut self,
+        index: usize,
+        offset: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            self.status = Some(
+                self.t(
+                    "Wait for the current operation.",
+                    "请等待当前操作完成。",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        if self.selected.is_none() {
+            self.status = Some(
+                self.t(
+                    "Select an event before reading a buffer.",
+                    "请先选择事件再读取缓冲区。",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        if self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.buffers.get(index))
+            .and_then(|buffer| buffer.length.parse::<u64>().ok())
+            .is_none_or(|length| offset >= length)
+        {
+            return;
+        }
+        self.buffer_binding_range = None;
+        self.buffer_layout = None;
+        self.buffer_format = None;
+        self.buffer_layout_origin = offset;
+        self.buffer_search_last = None;
+        self.buffer_seek.update(cx, |input, cx| {
+            input.set_value(offset.to_string(), window, cx)
+        });
+        self.tab = CaptureTab::Buffers;
+        self.refresh_buffer_formats(cx);
+        self.read_buffer(index, offset, cx);
     }
 
     fn refresh_messages(&mut self) {
@@ -1443,13 +1815,13 @@ impl Workspace {
                                 .message_category_label(message.category)
                                 .to_lowercase()
                                 .contains(query);
-                        let hidden = self.hidden_message_sources.contains(&message.source)
-                            || self.hidden_message_categories.contains(&message.category)
-                            || self.hidden_message_types.contains(&(
-                                message.source,
-                                message.category,
-                                message.message_id,
-                            ));
+                        let hidden = renderdocx::debug_message_view::is_hidden(
+                            message,
+                            &self.hidden_message_sources,
+                            &self.hidden_message_severities,
+                            &self.hidden_message_categories,
+                            &self.hidden_message_types,
+                        );
                         (matched
                             && self
                                 .message_severity
@@ -1460,6 +1832,862 @@ impl Workspace {
                     .collect()
             })
             .unwrap_or_default();
+        if let Some(snapshot) = &self.snapshot {
+            renderdocx::debug_message_view::sort_indices(
+                &mut self.message_visible,
+                &snapshot.debug_messages,
+                self.message_sort,
+                self.message_sort_descending,
+            );
+        }
+    }
+
+    fn read_shader_messages(&mut self, offset: u64, cx: &mut Context<Self>) {
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            self.status = Some(
+                self.t(
+                    "Wait for the current operation.",
+                    "请等待当前操作完成。",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let (Some(session), Some(event)) = (
+            self.session.clone(),
+            self.pipeline.as_ref().map(|pipeline| pipeline.event_id),
+        ) else {
+            self.status = Some(
+                self.t(
+                    "Select an event first.",
+                    "请先选择事件。",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let open_revision = self.open_revision;
+        let selection_revision = self.selection_revision;
+        let mut filter = self.shader_message_filter.clone();
+        filter.language = self.settings.language.resolved();
+        self.resource_pending = true;
+        self.status = Some(
+            self.t(
+                "Loading shader messages…",
+                "正在加载着色器消息…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            renderdocx::shader_messages::filtered_page(
+                event,
+                offset,
+                renderdocx::replay::SHADER_MESSAGE_PAGE_LIMIT,
+                &filter,
+                |offset, limit| session.shader_messages(event, offset, limit),
+            )
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != open_revision
+                    || this.selection_revision != selection_revision
+                {
+                    return;
+                }
+                this.resource_pending = false;
+                match result {
+                    Ok(page) => {
+                        this.shader_message_page = Some(page);
+                        this.selected_shader_message = None;
+                        this.pending_shader_messages_event = None;
+                        this.shader_vertex_resolution = None;
+                        this.shader_vertex_lookup_pending = false;
+                        this.status = None;
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Shader messages failed",
+                                "加载着色器消息失败",
+                            )
+                        ));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn apply_shader_message_filter(&mut self, cx: &mut Context<Self>) {
+        if self.replay_pending || self.resource_pending || self.export_pending {
+            self.status = Some(
+                self.t(
+                    "Wait for the current operation.",
+                    "请等待当前操作完成。",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        self.shader_message_filter = renderdocx::shader_messages::Filter {
+            stage_mask: self.shader_message_draft_mask,
+            query: self
+                .shader_message_search
+                .read(cx)
+                .value()
+                .trim()
+                .to_owned(),
+            language: self.settings.language.resolved(),
+        };
+        self.shader_message_page = None;
+        self.selected_shader_message = None;
+        self.shader_vertex_resolution = None;
+        self.read_shader_messages(0, cx);
+    }
+
+    fn shader_message_filter_dirty(&self, cx: &Context<Self>) -> bool {
+        self.shader_message_draft_mask != self.shader_message_filter.stage_mask
+            || self.shader_message_search.read(cx).value().trim()
+                != self.shader_message_filter.query
+    }
+
+    fn export_shader_messages_to(
+        &mut self,
+        destination: PathBuf,
+        csv: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.replay_pending || self.resource_pending || self.export_pending {
+            return;
+        }
+        if self.shader_message_filter_dirty(cx) {
+            self.status = Some(
+                self.t(
+                    "Apply the shader message filter first.",
+                    "请先应用着色器消息筛选。",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let (Some(session), Some(event)) = (
+            self.session.clone(),
+            self.pipeline.as_ref().map(|pipeline| pipeline.event_id),
+        ) else {
+            return;
+        };
+        let mut filter = self.shader_message_filter.clone();
+        filter.language = self.settings.language.resolved();
+        let label = destination.display().to_string();
+        let open_revision = self.open_revision;
+        let selection_revision = self.selection_revision;
+        self.export_pending = true;
+        self.status = Some(
+            self.t(
+                "Exporting shader messages…",
+                "正在导出着色器消息…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            renderdocx::shader_messages::export_report(
+                event,
+                &filter,
+                csv,
+                &destination,
+                |offset, limit| session.shader_messages(event, offset, limit),
+            )
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != open_revision
+                    || this.selection_revision != selection_revision
+                {
+                    return;
+                }
+                this.export_pending = false;
+                this.status = Some(match result {
+                    Ok(count) => format!(
+                        "{}: {label} ({count})",
+                        this.t(
+                            "Shader messages exported",
+                            "着色器消息已导出",
+                        )
+                    ),
+                    Err(error) => format!(
+                        "{}: {error}",
+                        this.t(
+                            "Shader message export failed",
+                            "着色器消息导出失败",
+                        )
+                    ),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn choose_shader_message_export(&mut self, csv: bool, cx: &mut Context<Self>) {
+        if self.replay_pending || self.resource_pending || self.export_pending {
+            return;
+        }
+        if self.shader_message_filter_dirty(cx) {
+            self.status = Some(
+                self.t(
+                    "Apply the shader message filter first.",
+                    "请先应用着色器消息筛选。",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        if self.pipeline.is_none() {
+            return;
+        }
+        let (filename, extension) = if csv {
+            ("shader-messages.csv", "csv")
+        } else {
+            ("shader-messages.txt", "txt")
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name(filename)
+            .add_filter(if csv { "CSV" } else { "Text" }, &[extension])
+            .save_file()
+        else {
+            return;
+        };
+        self.export_shader_messages_to(path, csv, cx);
+    }
+
+    fn resolve_shader_message_vertex(
+        &mut self,
+        reported: u32,
+        instance: u32,
+        view: u32,
+        purpose: ShaderVertexPurpose,
+        cx: &mut Context<Self>,
+    ) {
+        use std::sync::atomic::Ordering;
+        if self.replay_pending || self.resource_pending || self.export_pending {
+            return;
+        }
+        let (Some(snapshot), Some(pipeline), Some(session)) = (
+            self.snapshot.as_ref(),
+            self.pipeline.clone(),
+            self.session.clone(),
+        ) else {
+            return;
+        };
+        let Some(action) = self
+            .selected
+            .and_then(|index| snapshot.actions.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        if self
+            .shader_message_page
+            .as_ref()
+            .is_none_or(|page| page.event_id != pipeline.event_id)
+            || action.event_id != pipeline.event_id
+        {
+            self.status = Some(self.t("Shader messages are stale; reload them for this event.", "着色器消息已过期，请为当前事件重新加载。").to_owned());
+            cx.notify();
+            return;
+        }
+        if let (ShaderVertexPurpose::Debug { disassembly_line }, Some(cached)) =
+            (purpose, self.shader_vertex_resolution.as_ref())
+        {
+            if cached.event == pipeline.event_id
+                && cached.reported == reported
+                && cached.instance == instance
+                && cached.view == view
+            {
+                let result = cached.result.clone();
+                self.start_shader_debug_at(
+                    ShaderDebugContext::Vertex {
+                        vertex: result.row,
+                        instance,
+                        index: result.vertex_index,
+                        view,
+                    },
+                    Some(disassembly_line),
+                    cx,
+                );
+                return;
+            }
+        }
+        let buffers = snapshot.buffers.clone();
+        let event = pipeline.event_id;
+        let open_revision = self.open_revision;
+        let selection_revision = self.selection_revision;
+        let cancel = self.shader_vertex_cancel.clone();
+        cancel.store(false, Ordering::SeqCst);
+        self.shader_vertex_lookup_pending = true;
+        self.resource_pending = true;
+        self.status = Some(
+            self.t(
+                "Resolving shader vertex…",
+                "正在定位着色器顶点…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            let cancelled = || cancel.load(Ordering::SeqCst);
+            let resolved = session
+                .resolve_shader_vertex(&action, &pipeline, &buffers, instance, reported, cancelled)?
+                .ok_or_else(|| "No matching vertex invocation".to_owned())?;
+            if cancelled() {
+                return Err("Vertex lookup cancelled".to_owned());
+            }
+            if matches!(purpose, ShaderVertexPurpose::Debug { .. }) {
+                return Ok((resolved, None, None));
+            }
+            let input = session.vertex_input_page(
+                &action,
+                &pipeline,
+                &buffers,
+                instance,
+                resolved.row,
+                INPUT_PAGE_LIMIT,
+            );
+            if cancelled() {
+                return Err("Vertex lookup cancelled".to_owned());
+            }
+            let selection = MeshSelection {
+                stage: 1,
+                instance,
+                view,
+            };
+            let output = (|| {
+                let info = session.mesh(event, selection)?;
+                let page = renderdocx::mesh_draw::filtered_page(
+                    &info,
+                    &[],
+                    renderdocx::mesh_draw::MeshFilter::All,
+                    resolved.row,
+                    renderdocx::mesh_draw::PAGE_LIMIT,
+                    |kind, offset, length| {
+                        session.mesh_read(event, selection, kind, offset, length)
+                    },
+                )?;
+                if !page.rows.iter().any(|row| row.row == resolved.row) {
+                    return Err("Matching row is unavailable in VS output".to_owned());
+                }
+                Ok::<_, String>((info, page))
+            })();
+            if cancelled() {
+                return Err("Vertex lookup cancelled".to_owned());
+            }
+            Ok((resolved, Some(input), Some(output)))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != open_revision
+                    || this.selection_revision != selection_revision
+                {
+                    return;
+                }
+                this.resource_pending = false;
+                this.shader_vertex_lookup_pending = false;
+                if this.shader_vertex_cancel.load(Ordering::SeqCst) {
+                    this.status = Some(
+                        this.t(
+                            "Vertex lookup cancelled.",
+                            "顶点定位已取消。",
+                        )
+                        .to_owned(),
+                    );
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok((resolved, input, output)) => {
+                        this.shader_vertex_resolution = Some(ShaderVertexResolution {
+                            event,
+                            reported,
+                            instance,
+                            view,
+                            result: resolved.clone(),
+                        });
+                        if let ShaderVertexPurpose::Debug { disassembly_line } = purpose {
+                            this.start_shader_debug_at(
+                                ShaderDebugContext::Vertex {
+                                    vertex: resolved.row,
+                                    instance,
+                                    index: resolved.vertex_index,
+                                    view,
+                                },
+                                Some(disassembly_line),
+                                cx,
+                            );
+                            return;
+                        }
+                        let mut problems = Vec::new();
+                        this.debug_vertex_selection = None;
+                        match input.expect("navigation includes input") {
+                            Ok(page)
+                                if page.rows.first().is_some_and(|row| {
+                                    row.row == resolved.row
+                                        && row.vertex_index == Some(resolved.vertex_index)
+                                }) =>
+                            {
+                                this.debug_vertex_selection =
+                                    Some((resolved.row, instance, resolved.vertex_index));
+                                this.input_page = Some(page);
+                            }
+                            Ok(_) => {
+                                this.input_page = None;
+                                problems.push(
+                                    this.t(
+                                        "VS input row does not match the shader index.",
+                                        "VS 输入行与着色器索引不匹配。",
+                                    )
+                                    .to_owned(),
+                                );
+                            }
+                            Err(error) => {
+                                this.input_page = None;
+                                problems.push(format!(
+                                    "{}: {error}",
+                                    this.t(
+                                        "VS input unavailable",
+                                        "VS 输入不可用",
+                                    )
+                                ));
+                            }
+                        }
+                        match output.expect("navigation includes output") {
+                            Ok((info, page)) => {
+                                this.mesh = MeshView {
+                                    selection: MeshSelection {
+                                        stage: 1,
+                                        instance,
+                                        view,
+                                    },
+                                    kind: MeshBufferKind::Draw,
+                                    info: Some(info),
+                                    bytes: None,
+                                    draw: Some(page),
+                                    filter: renderdocx::mesh_draw::MeshFilter::All,
+                                    task_sizes: Vec::new(),
+                                    offset: u64::from(resolved.row),
+                                    highlighted_row: Some(resolved.row),
+                                    geometry_message_handoff: false,
+                                };
+                                this.tab = CaptureTab::Mesh;
+                            }
+                            Err(error) => {
+                                this.mesh = MeshView::default();
+                                problems.push(format!(
+                                    "{}: {error}",
+                                    this.t(
+                                        "VS output unavailable",
+                                        "VS 输出不可用",
+                                    )
+                                ));
+                                if this.input_page.is_some() {
+                                    this.tab = CaptureTab::VertexInput;
+                                }
+                            }
+                        }
+                        this.status = if !problems.is_empty() {
+                            Some(problems.join(" · "))
+                        } else if resolved.match_count > 1 {
+                            Some(format!(
+                                "{}: {} · {}: {}",
+                                this.t(
+                                    "Matching draw rows",
+                                    "匹配的绘制行数",
+                                ),
+                                resolved.match_count,
+                                this.t("First row", "首行"),
+                                resolved.row
+                            ))
+                        } else {
+                            None
+                        };
+                    }
+                    Err(error) => {
+                        this.shader_vertex_resolution = None;
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Could not resolve the shader vertex",
+                                "无法定位着色器顶点",
+                            )
+                        ));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn navigate_shader_message(
+        &mut self,
+        message: &renderdocx::replay::ShaderMessage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.replay_pending || self.resource_pending || self.export_pending {
+            self.status = Some(
+                self.t(
+                    "Wait for the current operation.",
+                    "请等待当前操作完成。",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let Some(pipeline) = self.pipeline.as_ref() else {
+            return;
+        };
+        if self
+            .shader_message_page
+            .as_ref()
+            .is_none_or(|page| page.event_id != pipeline.event_id)
+        {
+            self.status = Some(self.t("Shader messages are stale; reload them for this event.", "着色器消息已过期，请为当前事件重新加载。").to_owned());
+            cx.notify();
+            return;
+        }
+        let Some(target) = renderdocx::shader_messages::navigation(message, pipeline.topology)
+        else {
+            self.status = Some(
+                self.t(
+                    "The invocation location is unavailable for this topology or stage.",
+                    "此拓扑或阶段的调用位置不可用。",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        match target {
+            renderdocx::shader_messages::Navigation::Vertex {
+                reported,
+                instance,
+                view,
+            } => {
+                self.vertex_instance.update(cx, |input, cx| {
+                    input.set_value(instance.to_string(), window, cx)
+                });
+                self.vertex_view.update(cx, |input, cx| {
+                    input.set_value(view.to_string(), window, cx)
+                });
+                self.resolve_shader_message_vertex(
+                    reported,
+                    instance,
+                    view,
+                    ShaderVertexPurpose::Navigate,
+                    cx,
+                );
+            }
+            renderdocx::shader_messages::Navigation::Mesh {
+                stage,
+                row,
+                instance,
+                view,
+            } => {
+                self.vertex_instance.update(cx, |input, cx| {
+                    input.set_value(instance.to_string(), window, cx)
+                });
+                self.vertex_view.update(cx, |input, cx| {
+                    input.set_value(view.to_string(), window, cx)
+                });
+                self.tab = CaptureTab::Mesh;
+                self.read_mesh_inner(
+                    MeshSelection {
+                        stage,
+                        instance,
+                        view,
+                    },
+                    MeshBufferKind::Draw,
+                    u64::from(row),
+                    Some(row),
+                    cx,
+                );
+            }
+            renderdocx::shader_messages::Navigation::TaskGroup { .. }
+            | renderdocx::shader_messages::Navigation::MeshGroup { .. } => {
+                self.navigate_shader_mesh_group(target, cx);
+            }
+            renderdocx::shader_messages::Navigation::Pixel {
+                x,
+                y,
+                sample,
+                primitive,
+                view,
+            } => {
+                let output = self.snapshot.as_ref().and_then(|snapshot| {
+                    renderdocx::shader_messages::pixel_output(snapshot, pipeline, view, sample)
+                });
+                let Some(output) = output else {
+                    self.status = Some(
+                        self.t(
+                            "The current output texture is unavailable.",
+                            "当前输出纹理不可用。",
+                        )
+                        .to_owned(),
+                    );
+                    cx.notify();
+                    return;
+                };
+                if !self.switch_texture(
+                    output.texture,
+                    Some((output.mip, output.slice, output.type_cast)),
+                    window,
+                    cx,
+                ) {
+                    return;
+                }
+                self.texture_selection.sample = output.sample;
+                self.pixel_x
+                    .update(cx, |input, cx| input.set_value(x.to_string(), window, cx));
+                self.pixel_y
+                    .update(cx, |input, cx| input.set_value(y.to_string(), window, cx));
+                self.pixel_debug_primitive.update(cx, |input, cx| {
+                    input.set_value(
+                        primitive.map(|value| value.to_string()).unwrap_or_default(),
+                        window,
+                        cx,
+                    )
+                });
+                self.pixel_debug_view.update(cx, |input, cx| {
+                    input.set_value(view.to_string(), window, cx)
+                });
+                self.tab = CaptureTab::Textures;
+                self.center_texture_pixel(window, cx);
+            }
+        }
+    }
+
+    fn navigate_shader_mesh_group(
+        &mut self,
+        target: renderdocx::shader_messages::Navigation,
+        cx: &mut Context<Self>,
+    ) {
+        use renderdocx::shader_messages::Navigation;
+        let (Some(snapshot), Some(pipeline), Some(session)) =
+            (&self.snapshot, &self.pipeline, self.session.clone())
+        else {
+            return;
+        };
+        let Some(action) = self
+            .selected
+            .and_then(|index| snapshot.actions.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        let event = pipeline.event_id;
+        if action.event_id != event {
+            return;
+        }
+        let pipeline = pipeline.clone();
+        let api = snapshot.api;
+        let revision = self.open_revision;
+        let selection_revision = self.selection_revision;
+        self.resource_pending = true;
+        self.status = Some(
+            self.t(
+                "Locating shader workgroup…",
+                "正在定位着色器工作组…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            let selection = MeshSelection {
+                stage: if matches!(target, Navigation::TaskGroup { .. }) {
+                    3
+                } else {
+                    4
+                },
+                instance: 0,
+                view: 0,
+            };
+            let info = session.mesh(event, selection)?;
+            if info.event_id != event
+                || info.stage != selection.stage
+                || info.instance != 0
+                || info.view != 0
+            {
+                return Err("Mesh response belongs to another selection".to_owned());
+            }
+            match target {
+                Navigation::TaskGroup { group } => {
+                    let row = renderdocx::shader_messages::task_group_row(api, &info, group)?;
+                    if !info.vertex_bound
+                        || info.vertex_stride == 0
+                        || info.vertex_stride > renderdocx::replay::BUFFER_PAGE_LIMIT
+                    {
+                        return Err("Task payload buffer is unavailable".into());
+                    }
+                    let offset = u64::from(row) * u64::from(info.vertex_stride);
+                    let count = (info.num_indices - row)
+                        .min(renderdocx::task_payload::PAGE_LIMIT)
+                        .min(renderdocx::replay::BUFFER_PAGE_LIMIT / info.vertex_stride);
+                    let bytes = session.mesh_read(
+                        event,
+                        selection,
+                        "vertex",
+                        offset,
+                        count * info.vertex_stride,
+                    )?;
+                    if bytes.len() != (count * info.vertex_stride) as usize {
+                        return Err("Incomplete task payload buffer".into());
+                    }
+                    Ok(MeshView {
+                        selection,
+                        kind: MeshBufferKind::Vertex,
+                        info: Some(info),
+                        bytes: Some(bytes),
+                        draw: None,
+                        filter: renderdocx::mesh_draw::MeshFilter::All,
+                        task_sizes: Vec::new(),
+                        offset,
+                        highlighted_row: Some(row),
+                        geometry_message_handoff: false,
+                    })
+                }
+                Navigation::MeshGroup { group, task_group } => {
+                    let meshlet = renderdocx::shader_messages::direct_meshlet(
+                        api, &action, &pipeline, &info, group, task_group,
+                    )?;
+                    let filter = renderdocx::mesh_draw::MeshFilter::Meshlet(meshlet);
+                    let page = renderdocx::mesh_draw::filtered_page(
+                        &info,
+                        &[],
+                        filter,
+                        0,
+                        renderdocx::mesh_draw::PAGE_LIMIT,
+                        |kind, offset, length| {
+                            session.mesh_read(event, selection, kind, offset, length)
+                        },
+                    )?;
+                    let highlighted_row = page.rows.first().map(|row| row.row);
+                    Ok(MeshView {
+                        selection,
+                        kind: MeshBufferKind::Draw,
+                        info: Some(info),
+                        bytes: None,
+                        draw: Some(page),
+                        filter,
+                        task_sizes: Vec::new(),
+                        offset: 0,
+                        highlighted_row,
+                        geometry_message_handoff: false,
+                    })
+                }
+                _ => Err("Invalid shader workgroup".into()),
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision || this.selection_revision != selection_revision { return; }
+                this.resource_pending = false;
+                match result {
+                    Ok(mesh) => { this.mesh = mesh; this.tab = CaptureTab::Mesh; this.status = Some(this.t("Showing the workgroup output; the message thread is not a mesh row.", "正在显示工作组输出；消息中的线程不对应网格行。").to_owned()); }
+                    Err(error) => { this.status = Some(format!("{}: {error}", this.t("Could not locate shader workgroup", "无法定位着色器工作组"))); }
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    fn debug_shader_message(
+        &mut self,
+        message: &renderdocx::replay::ShaderMessage,
+        cx: &mut Context<Self>,
+    ) {
+        if message.stage == 0 {
+            if let Some(renderdocx::shader_messages::Navigation::Vertex {
+                reported,
+                instance,
+                view,
+            }) = renderdocx::shader_messages::navigation(
+                message,
+                self.pipeline
+                    .as_ref()
+                    .map_or(0, |pipeline| pipeline.topology),
+            ) {
+                self.resolve_shader_message_vertex(
+                    reported,
+                    instance,
+                    view,
+                    ShaderVertexPurpose::Debug {
+                        disassembly_line: message.disassembly_line,
+                    },
+                    cx,
+                );
+            } else {
+                self.status = Some(
+                    self.t(
+                        "Vertex invocation coordinates are unavailable.",
+                        "顶点调用坐标不可用。",
+                    )
+                    .to_owned(),
+                );
+                cx.notify();
+            }
+            return;
+        }
+        use renderdocx::shader_messages::DebugInvocation;
+        let context = self
+            .pipeline
+            .as_ref()
+            .and_then(|pipeline| {
+                renderdocx::shader_messages::debug_invocation_for_pipeline(message, pipeline)
+            })
+            .map(|invocation| match invocation {
+                DebugInvocation::Pixel(selection) => ShaderDebugContext::Pixel(selection),
+                DebugInvocation::Compute(selection) => ShaderDebugContext::Compute(selection),
+                DebugInvocation::Mesh(selection) => ShaderDebugContext::Mesh(selection),
+            });
+        if let Some(context) = context {
+            self.start_shader_debug_at(context, Some(message.disassembly_line), cx);
+        }
+    }
+
+    fn shader_vertex_resolution_label(&self) -> Option<String> {
+        let resolved = self.shader_vertex_resolution.as_ref()?;
+        if self.pipeline.as_ref()?.event_id != resolved.event {
+            return None;
+        }
+        Some(format!(
+            "{}: {} · {}: {} · {}: {}",
+            self.t(
+                "Matching draw rows",
+                "匹配的绘制行数",
+            ),
+            resolved.result.match_count,
+            self.t("First row", "首行"),
+            resolved.result.row,
+            self.t(
+                "Vertex index",
+                "顶点索引",
+            ),
+            resolved.result.vertex_index
+        ))
     }
 
     fn poll_messages(&mut self, session: Session, revision: u64, cx: &mut Context<Self>) {
@@ -1503,8 +2731,6 @@ impl Workspace {
                                 == Some(this.t(
                                     "Wait for the message refresh.",
                                     "请等待消息刷新完成。",
-                                    "メッセージの更新をお待ちください。",
-                                    "메시지 새로 고침이 완료될 때까지 기다려 주세요.",
                                 ))
                             {
                                 this.status = None;
@@ -1525,8 +2751,6 @@ impl Workspace {
                                 this.t(
                                     "Debug message polling failed",
                                     "调试消息获取失败",
-                                    "デバッグメッセージの取得に失敗",
-                                    "디버그 메시지를 가져오지 못했습니다"
                                 )
                             ));
                             cx.notify();
@@ -1599,8 +2823,6 @@ impl Workspace {
                 self.t(
                     "Resource ID unavailable; update the replay bridge.",
                     "资源 ID 不可用，请更新回放桥。",
-                    "リソース ID を取得できません。リプレイブリッジを更新してください。",
-                    "리소스 ID를 사용할 수 없습니다. 재생 브리지를 업데이트하세요.",
                 )
                 .to_owned(),
             );
@@ -1612,8 +2834,6 @@ impl Workspace {
                 self.t(
                     "Resource names are unavailable; reopen the capture.",
                     "资源名称不可用，请重新打开捕获文件。",
-                    "リソース名を取得できません。キャプチャを開き直してください。",
-                    "리소스 이름을 사용할 수 없습니다. 캡처를 다시 여세요.",
                 )
                 .to_owned(),
             );
@@ -1656,8 +2876,6 @@ impl Workspace {
                         == Some(this.t(
                             "Searching event names…",
                             "正在搜索事件名称…",
-                            "イベント名を検索中…",
-                            "이벤트 이름을 검색하는 중…",
                         ))
                 {
                     this.status = None;
@@ -1724,8 +2942,6 @@ impl Workspace {
                     self.t(
                         "Could not find event path",
                         "找不到事件路径",
-                        "イベントパスが見つかりません",
-                        "이벤트 경로를 찾을 수 없습니다"
                     )
                 ));
                 cx.notify();
@@ -1817,8 +3033,6 @@ impl Workspace {
                             this.t(
                                 "Could not load event annotations",
                                 "无法加载事件注释",
-                                "イベント注釈を読み込めません",
-                                "이벤트 주석을 불러올 수 없습니다"
                             )
                         ))
                     }
@@ -1847,7 +3061,7 @@ impl Workspace {
         } else {
             Vec::new()
         };
-        if targets.is_empty() {
+        if targets.is_empty() && !needs_parameters {
             self.event_tree.set_filter(&expression);
         } else {
             self.event_tree.clear_filter_error();
@@ -1948,8 +3162,6 @@ impl Workspace {
                             this.t(
                                 "Could not evaluate structured event filter",
                                 "无法计算事件结构数据筛选",
-                                "イベント構造データのフィルターを評価できません",
-                                "이벤트 구조 데이터 필터를 평가할 수 없습니다"
                             )
                         ))
                     }
@@ -1979,8 +3191,6 @@ impl Workspace {
                 self.t(
                     "No visible API events to format.",
                     "没有可格式化的可见 API 事件。",
-                    "整形できる表示中の API イベントはありません。",
-                    "서식을 지정할 표시된 API 이벤트가 없습니다.",
                 )
                 .to_owned(),
             );
@@ -2000,8 +3210,6 @@ impl Workspace {
             self.t(
                 "Formatting visible API events…",
                 "正在格式化可见 API 事件…",
-                "表示中の API イベントを整形中…",
-                "표시된 API 이벤트의 서식을 지정하는 중…",
             )
             .to_owned(),
         );
@@ -2058,8 +3266,8 @@ impl Workspace {
                         this.event_tree.apply_formatted_names(&names);
                         let mut status = format!(
                             "{}: {done}, {}: {failed}",
-                            this.t("Formatted", "已格式化", "整形済み", "서식 지정 완료"),
-                            this.t("Failed", "失败", "失敗", "실패")
+                            this.t("Formatted", "已格式化"),
+                            this.t("Failed", "失败")
                         );
                         if let Some(error) = first_error {
                             status.push_str(&format!(" · {error}"));
@@ -2072,8 +3280,6 @@ impl Workspace {
                             this.t(
                                 "Could not format events",
                                 "无法格式化事件",
-                                "イベントを整形できません",
-                                "이벤트 서식 지정 실패"
                             )
                         ))
                     }
@@ -2129,9 +3335,12 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
+                // A worker from a previous capture must not clear the current worker's flag.
+                if this.open_revision != capture_revision {
+                    return;
+                }
                 this.event_name_worker = false;
-                if this.open_revision == capture_revision
-                    && this.settings.event_auto_format
+                if this.settings.event_auto_format
                     && this.event_filter_revision.load(Ordering::Relaxed) == filter_revision
                     && this.settings.language == language
                     && this.settings.event_show_all_parameters == show_all
@@ -2164,8 +3373,6 @@ impl Workspace {
                 self.t(
                     "Close the current target first.",
                     "请先关闭当前目标连接。",
-                    "現在のターゲット接続を先に閉じてください。",
-                    "현재 대상 연결을 먼저 닫아 주세요.",
                 )
                 .to_owned(),
             );
@@ -2182,8 +3389,6 @@ impl Workspace {
             self.t(
                 "Discovering targets…",
                 "正在查找目标…",
-                "ターゲットを検索中…",
-                "대상을 찾는 중…",
             )
             .to_owned(),
         );
@@ -2203,7 +3408,7 @@ impl Workspace {
                     Ok(targets) => {
                         this.status = Some(format!(
                             "{}: {}",
-                            this.t("Targets", "目标", "ターゲット", "대상"),
+                            this.t("Targets", "目标"),
                             targets.len()
                         ));
                         this.live_targets = targets;
@@ -2215,8 +3420,6 @@ impl Workspace {
                             this.t(
                                 "Discovery failed",
                                 "目标查找失败",
-                                "検索に失敗しました",
-                                "대상 검색 실패"
                             )
                         ));
                     }
@@ -2249,8 +3452,6 @@ impl Workspace {
             self.t(
                 "Connecting to target…",
                 "正在连接目标…",
-                "ターゲットに接続中…",
-                "대상에 연결 중…",
             )
             .to_owned(),
         );
@@ -2275,7 +3476,7 @@ impl Workspace {
                     Ok(session) => {
                         this.live_status = Some(format!(
                             "{}: {}",
-                            this.t("Connected", "已连接", "接続済み", "연결됨"),
+                            this.t("Connected", "已连接"),
                             session
                                 .connected
                                 .get("ident")
@@ -2293,8 +3494,6 @@ impl Workspace {
                             this.t(
                                 "Connection failed",
                                 "连接失败",
-                                "接続に失敗しました",
-                                "연결 실패"
                             )
                         ))
                     }
@@ -2323,8 +3522,6 @@ impl Workspace {
                         .child(self.t(
                             "Remote server address",
                             "远程服务器地址",
-                            "リモートサーバーアドレス",
-                            "원격 서버 주소",
                         ))
                         .child(
                             Input::new(&self.remote_target_url)
@@ -2332,8 +3529,6 @@ impl Workspace {
                                 .aria_label(self.t(
                                     "Remote server address",
                                     "远程服务器地址",
-                                    "リモートサーバーアドレス",
-                                    "원격 서버 주소",
                                 ))
                                 .w(px(260.)),
                         ),
@@ -2352,8 +3547,6 @@ impl Workspace {
                             .child(self.t(
                                 "Remote directory",
                                 "远程目录",
-                                "リモートディレクトリ",
-                                "원격 디렉터리",
                             ))
                             .child(
                                 Input::new(&self.remote_browser_path)
@@ -2361,15 +3554,13 @@ impl Workspace {
                                     .aria_label(self.t(
                                         "Remote directory",
                                         "远程目录",
-                                        "リモートディレクトリ",
-                                        "원격 디렉터리",
                                     ))
                                     .w(px(300.)),
                             ),
                     )
                     .child(button(
                         "remote-browser-home",
-                        self.t("Browse home", "浏览主目录", "ホームを参照", "홈 탐색"),
+                        self.t("Browse home", "浏览主目录"),
                         false,
                         |this, cx| this.browse_remote(None, cx),
                         cx,
@@ -2379,8 +3570,6 @@ impl Workspace {
                         self.t(
                             "Filesystem roots",
                             "文件系统根目录",
-                            "ファイルシステムルート",
-                            "파일 시스템 루트",
                         ),
                         false,
                         |this, cx| this.browse_remote(Some("/".to_owned()), cx),
@@ -2391,8 +3580,6 @@ impl Workspace {
                         self.t(
                             "Browse directory",
                             "浏览目录",
-                            "ディレクトリを参照",
-                            "디렉터리 탐색",
                         ),
                         false,
                         |this, cx| {
@@ -2423,8 +3610,6 @@ impl Workspace {
                         self.t(
                             "Remote directory",
                             "远程目录",
-                            "リモートディレクトリ",
-                            "원격 디렉터리"
                         ),
                         current
                     )))
@@ -2434,8 +3619,6 @@ impl Workspace {
                             self.t(
                                 "Parent directory",
                                 "上级目录",
-                                "親ディレクトリ",
-                                "상위 디렉터리",
                             ),
                             false,
                             move |this, cx| this.browse_remote(Some(parent.clone()), cx),
@@ -2464,7 +3647,7 @@ impl Workspace {
                                             .id(SharedString::from(format!("remote-dir-{path}")))
                                             .test_support()
                                             .cursor_pointer()
-                                            .child(self.t("Open", "打开", "開く", "열기"))
+                                            .child(self.t("Open", "打开"))
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.browse_remote(Some(open_path.clone()), cx)
                                             })),
@@ -2482,8 +3665,6 @@ impl Workspace {
                                             .child(self.t(
                                                 "Use as working directory",
                                                 "用作工作目录",
-                                                "作業ディレクトリに設定",
-                                                "작업 디렉터리로 사용",
                                             ))
                                             .on_click(cx.listener(move |this, _, window, cx| {
                                                 this.remote_working_directory.update(
@@ -2509,8 +3690,6 @@ impl Workspace {
                                             .child(self.t(
                                                 "Use as application",
                                                 "用作应用",
-                                                "アプリとして使用",
-                                                "앱으로 사용",
                                             ))
                                             .on_click(cx.listener(move |this, _, window, cx| {
                                                 this.remote_app_path.update(cx, |input, cx| {
@@ -2531,8 +3710,6 @@ impl Workspace {
                                             .child(self.t(
                                                 "Download and replay",
                                                 "下载并回放",
-                                                "ダウンロードして再生",
-                                                "다운로드 후 리플레이",
                                             ))
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.download_remote(
@@ -2560,8 +3737,6 @@ impl Workspace {
                 self.t(
                     "Enter a remote server URL.",
                     "请输入远程服务器地址。",
-                    "リモートサーバーの URL を入力してください。",
-                    "원격 서버 URL을 입력하세요.",
                 )
                 .to_owned(),
             );
@@ -2582,8 +3757,6 @@ impl Workspace {
             self.t(
                 "Discovering replay GPUs…",
                 "正在发现回放 GPU…",
-                "リプレイ GPU を検索中…",
-                "리플레이 GPU를 검색하는 중…",
             )
             .to_owned(),
         );
@@ -2622,8 +3795,6 @@ impl Workspace {
                             this.t(
                                 "GPU discovery failed",
                                 "GPU 发现失败",
-                                "GPU の検索に失敗しました",
-                                "GPU 검색 실패"
                             )
                         ));
                     }
@@ -2644,8 +3815,6 @@ impl Workspace {
                 self.t(
                     "Enter a remote server URL.",
                     "请输入远程服务器地址。",
-                    "リモートサーバーの URL を入力してください。",
-                    "원격 서버 URL을 입력하세요.",
                 )
                 .to_owned(),
             );
@@ -2665,8 +3834,6 @@ impl Workspace {
             self.t(
                 "Browsing remote files…",
                 "正在浏览远程文件…",
-                "リモートファイルを参照中…",
-                "원격 파일을 탐색하는 중…",
             )
             .to_owned(),
         );
@@ -2701,8 +3868,6 @@ impl Workspace {
                                 this.t(
                                     "Remote directory error",
                                     "远程目录错误",
-                                    "リモートディレクトリエラー",
-                                    "원격 디렉터리 오류"
                                 ),
                                 entry.name,
                                 entry.flags
@@ -2717,8 +3882,6 @@ impl Workspace {
                             this.t(
                                 "Remote browsing failed",
                                 "远程浏览失败",
-                                "リモート参照に失敗しました",
-                                "원격 탐색 실패"
                             )
                         ));
                     }
@@ -2746,8 +3909,6 @@ impl Workspace {
             self.t(
                 "Downloading remote capture…",
                 "正在下载远程捕获…",
-                "リモートキャプチャをダウンロード中…",
-                "원격 캡처를 다운로드하는 중…",
             )
             .to_owned(),
         );
@@ -2784,8 +3945,6 @@ impl Workspace {
                             this.t(
                                 "Remote download failed",
                                 "远程下载失败",
-                                "リモートダウンロードに失敗しました",
-                                "원격 다운로드 실패"
                             )
                         ));
                     }
@@ -2811,8 +3970,6 @@ impl Workspace {
                 self.t(
                     "Close the current target first.",
                     "请先关闭当前目标连接。",
-                    "現在のターゲット接続を先に閉じてください。",
-                    "현재 대상 연결을 먼저 닫아 주세요.",
                 )
                 .to_owned(),
             );
@@ -2826,8 +3983,6 @@ impl Workspace {
                 self.t(
                     "Debugger delay and memory limit must be unsigned integers.",
                     "调试器等待时间和内存限制必须是非负整数。",
-                    "デバッガー待機時間とメモリ制限は非負整数で入力してください。",
-                    "디버거 대기 시간과 메모리 제한은 음이 아닌 정수여야 합니다.",
                 )
                 .to_owned(),
             );
@@ -2863,8 +4018,6 @@ impl Workspace {
                 self.t(
                     "Invalid working directory or launch arguments.",
                     "工作目录或启动参数无效。",
-                    "作業ディレクトリまたは起動引数が無効です。",
-                    "작업 디렉터리 또는 실행 인수가 올바르지 않습니다.",
                 )
                 .to_owned(),
             );
@@ -2879,8 +4032,6 @@ impl Workspace {
             self.t(
                 "Starting capture target…",
                 "正在启动捕获目标…",
-                "キャプチャ対象を起動中…",
-                "캡처 대상을 시작하는 중…",
             )
             .to_owned(),
         );
@@ -2905,7 +4056,7 @@ impl Workspace {
                     Ok(session) => {
                         this.live_status = Some(format!(
                             "{} · {}",
-                            this.t("Connected", "已连接", "接続済み", "연결됨"),
+                            this.t("Connected", "已连接"),
                             session
                                 .capture_template
                                 .as_ref()
@@ -2922,8 +4073,6 @@ impl Workspace {
                             this.t(
                                 "Target launch failed",
                                 "目标启动失败",
-                                "ターゲットの起動に失敗しました",
-                                "대상 실행 실패"
                             )
                         ))
                     }
@@ -2967,7 +4116,7 @@ impl Workspace {
                                     if let Some(capture) = this.live_captures.iter_mut().find(|capture| capture.generation == generation && capture.capture_id == Some(id)) {
                                         capture.path = path;
                                         capture.local = true;
-                                        this.live_status = Some(this.t("Capture copied; select it to open.", "捕获已复制，选择后可打开。", "キャプチャをコピーしました。選択して開いてください。", "캡처를 복사했습니다. 선택하여 여세요.").to_owned());
+                                        this.live_status = Some(this.t("Capture copied; select it to open.", "捕获已复制，选择后可打开。").to_owned());
                                     }
                                 }
                             }
@@ -2982,11 +4131,11 @@ impl Workspace {
                                     .unwrap_or(false);
                                 this.live_status = Some(format!(
                                     "{}: {name} · {}",
-                                    this.t("API", "图形接口", "API", "API"),
+                                    this.t("API", "图形接口"),
                                     if supported {
-                                        this.t("supported", "支持捕获", "対応", "지원")
+                                        this.t("supported", "支持捕获")
                                     } else {
-                                        this.t("unsupported", "不支持捕获", "非対応", "지원 안 됨")
+                                        this.t("unsupported", "不支持捕获")
                                     }
                                 ));
                             }
@@ -3000,8 +4149,6 @@ impl Workspace {
                                             this.t(
                                                 "Capturing",
                                                 "正在捕获",
-                                                "キャプチャ中",
-                                                "캡처 중"
                                             ),
                                             value * 100.
                                         ));
@@ -3015,8 +4162,6 @@ impl Workspace {
                                     this.t(
                                         "Target error",
                                         "目标错误",
-                                        "ターゲットエラー",
-                                        "대상 오류"
                                     ),
                                     event
                                         .get("message")
@@ -3032,8 +4177,6 @@ impl Workspace {
                             this.t(
                                 "Target disconnected",
                                 "目标已断开",
-                                "ターゲット切断",
-                                "대상 연결 끊김",
                             )
                             .to_owned(),
                         );
@@ -3051,22 +4194,430 @@ impl Workspace {
         .detach();
     }
 
-    fn t(
-        &self,
-        en: &'static str,
-        zh: &'static str,
-        ja: &'static str,
-        ko: &'static str,
-    ) -> &'static str {
-        self.settings.language.text(en, zh, ja, ko)
+    fn t(&self, en: &'static str, zh: &'static str) -> &'static str {
+        self.settings.language.text(en, zh)
     }
 
     fn result(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
         self.status = Some(match result {
-            Ok(()) => self.t("Process started. Capture and replay results are reported by RenderDoc.", "进程已启动，捕获与回放结果由 RenderDoc 报告。", "プロセスを起動しました。キャプチャとリプレイの結果は RenderDoc に表示されます。", "프로세스를 시작했습니다. 캡처 및 재생 결과는 RenderDoc에서 확인하세요.").to_owned(),
-            Err(e) => format!("{}: {e}", self.t("Could not start", "启动失败", "起動できません", "시작할 수 없음")),
+            Ok(()) => self.t("Process started. Capture and replay results are reported by RenderDoc.", "进程已启动，捕获与回放结果由 RenderDoc 报告。").to_owned(),
+            Err(e) => format!("{}: {e}", self.t("Could not start", "启动失败")),
         });
         cx.notify();
+    }
+
+    /// Export launch settings to an upstream-compatible `.cap` file.
+    fn export_capture_settings(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Capture settings", &["cap"])
+            .save_file()
+        else {
+            return;
+        };
+        let invalid = self
+            .t(
+                "Debugger delay and memory limit must be unsigned integers.",
+                "调试器等待时间和内存限制必须是非负整数。",
+            )
+            .to_owned();
+        let Ok(delay) = self.launch_delay.read(cx).value().parse::<u32>() else {
+            self.status = Some(invalid);
+            cx.notify();
+            return;
+        };
+        let Ok(memory) = self.launch_memory.read(cx).value().parse::<u32>() else {
+            self.status = Some(invalid);
+            cx.notify();
+            return;
+        };
+        let mut options = self.capture_options.clone();
+        options.delay_for_debugger = delay;
+        options.soft_memory_limit = memory;
+        let settings = CaptureSettings {
+            executable: self
+                .launch_executable
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            working_directory: self
+                .launch_working_directory
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            command_line: self.launch_arguments.read(cx).value().to_string(),
+            environment: self.launch_environment.clone(),
+            options,
+            ..Default::default()
+        };
+        self.status = Some(match settings.save(&path) {
+            Ok(()) => format!(
+                "{} {}",
+                self.t("Exported capture settings to", "已将捕获设置导出到"),
+                path.display()
+            ),
+            Err(error) => format!(
+                "{}: {error}",
+                self.t("Could not export capture settings", "导出捕获设置失败")
+            ),
+        });
+        cx.notify();
+    }
+
+    fn import_capture_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Capture settings", &["cap"])
+            .pick_file()
+        else {
+            return;
+        };
+        self.import_capture_settings_from(&path, Some(window), cx);
+    }
+
+    fn import_capture_settings_from(
+        &mut self,
+        path: &std::path::Path,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        match CaptureSettings::load(path) {
+            Ok(settings) => {
+                let unsupported = settings.unsupported_fields();
+                let delay = settings.options.delay_for_debugger.to_string();
+                let memory = settings.options.soft_memory_limit.to_string();
+                let command_line = settings.command_line.clone();
+                self.capture_options = settings.options;
+                self.launch_environment = settings.environment;
+                self.launch_executable = if settings.executable.is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(&settings.executable))
+                };
+                self.launch_working_directory = if settings.working_directory.is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(&settings.working_directory))
+                };
+                if let Some(window) = window {
+                    self.launch_arguments.update(cx, |input, cx| {
+                        input.set_value(command_line, window, cx)
+                    });
+                    self.launch_delay.update(cx, |input, cx| {
+                        input.set_value(delay, window, cx)
+                    });
+                    self.launch_memory.update(cx, |input, cx| {
+                        input.set_value(memory, window, cx)
+                    });
+                } else {
+                    self.pending_launch_inputs = Some((command_line, delay, memory));
+                }
+                let imported = format!(
+                    "{} {}",
+                    self.t("Imported capture settings from", "已从以下位置导入捕获设置"),
+                    path.display()
+                );
+                self.status = Some(if unsupported.is_empty() {
+                    imported
+                } else {
+                    format!(
+                        "{imported} · {}: {}",
+                        self.t("Ignored unsupported fields", "已忽略不支持的字段"),
+                        unsupported.join(", ")
+                    )
+                });
+                self.show_launch_config = true;
+                self.settings.record_capture_settings(path);
+                self.save();
+            }
+            Err(error) => {
+                self.status = Some(format!(
+                    "{}: {error}",
+                    self.t("Could not import capture settings", "导入捕获设置失败")
+                ));
+            }
+        }
+        cx.notify();
+    }
+
+    fn save_layout(&mut self, slot: usize, cx: &mut Context<Self>) {
+        let layout = WindowLayout {
+            tab: self.tab.name().to_owned(),
+            timeline_shown: self.timeline.shown,
+            launch_config_shown: self.show_launch_config,
+            remote_browser_shown: self.show_remote_browser,
+            frame_stats_raw: self.frame_stats_raw,
+            texture_auto_fit: self.texture_auto_fit,
+        };
+        self.settings
+            .window_layouts
+            .insert(Settings::layout_key(slot), layout);
+        self.save();
+        self.status = Some(format!("{} {slot}", self.t("Saved window layout", "已保存窗口布局")));
+        cx.notify();
+    }
+
+    fn load_layout(&mut self, slot: usize, cx: &mut Context<Self>) {
+        let Some(layout) = self
+            .settings
+            .window_layouts
+            .get(&Settings::layout_key(slot))
+            .cloned()
+        else {
+            self.status = Some(format!(
+                "{} {slot}",
+                self.t("No saved window layout", "没有已保存的窗口布局")
+            ));
+            cx.notify();
+            return;
+        };
+        if let Some(tab) = CaptureTab::from_name(&layout.tab) {
+            self.tab = tab;
+        }
+        self.timeline.shown = layout.timeline_shown;
+        self.show_launch_config = layout.launch_config_shown;
+        self.show_remote_browser = layout.remote_browser_shown;
+        self.frame_stats_raw = layout.frame_stats_raw;
+        self.texture_auto_fit = layout.texture_auto_fit;
+        self.status = Some(format!("{} {slot}", self.t("Loaded window layout", "已加载窗口布局")));
+        cx.notify();
+    }
+
+    fn open_log(&mut self, cx: &mut Context<Self>) {
+        self.show_log = true;
+        if self.log_pending {
+            cx.notify();
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            self.log_messages.clear();
+            self.status = Some(
+                self.t("Open a capture first to read the RenderDoc log.", "请先打开捕获再读取 RenderDoc 日志。")
+                    .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let revision = self.open_revision;
+        self.log_pending = true;
+        let task = cx.background_executor().spawn(async move { session.log() });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.log_pending = false;
+                if this.open_revision != revision {
+                    return;
+                }
+                match result {
+                    Ok(text) => {
+                        this.log_messages = renderdocx::log_view::parse_log(&text);
+                        this.status = None;
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t("Could not load the RenderDoc log", "无法加载 RenderDoc 日志")
+                        ));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn log_panel(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        if !self.show_log {
+            return Vec::new();
+        }
+        use renderdocx::log_view::LogLevel;
+        let query = self.log_filter.read(cx).value().to_string().to_lowercase();
+        let rows: Vec<_> = self
+            .log_messages
+            .iter()
+            .filter(|message| {
+                query.is_empty()
+                    || message.message.to_lowercase().contains(&query)
+                    || message.location.to_lowercase().contains(&query)
+                    || message.source.to_lowercase().contains(&query)
+                    || message.level.as_str().to_lowercase().contains(&query)
+            })
+            .cloned()
+            .collect();
+        let label = self.t("RenderDoc log", "RenderDoc 日志");
+        let filter_label = self.t("Filter log", "过滤日志");
+        vec![div()
+            .id("log-panel")
+            .test_support()
+            .w_full()
+            .h(px(460.))
+            .bg(rgb(0x101722))
+            .rounded_lg()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_4()
+            .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().text_sm().text_color(rgb(0x82aaff)).child(label))
+                            .child(
+                                Input::new(&self.log_filter)
+                                    .id("log-filter")
+                                    .aria_label(filter_label)
+                                    .w(px(240.)),
+                            )
+                            .child(button(
+                                "log-refresh",
+                                self.t("Refresh", "刷新"),
+                                false,
+                                |this, cx| this.open_log(cx),
+                                cx,
+                            ))
+                            .child(button(
+                                "log-close",
+                                self.t("Close", "关闭"),
+                                false,
+                                |this, cx| {
+                                    this.show_log = false;
+                                    cx.notify();
+                                },
+                                cx,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .id("log-rows")
+                            .test_support()
+                            .flex_1()
+                            .overflow_y_scroll()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .children(rows.into_iter().take(500).enumerate().map(|(index, message)| {
+                                let color = match message.level {
+                                    LogLevel::Error | LogLevel::Fatal => 0xff6b6b,
+                                    LogLevel::Warning => 0xd4b77c,
+                                    _ => 0xc3cedd,
+                                };
+                                let source = match message.source.as_str() {
+                                    "ADRD" => self.t("Android", "Android"),
+                                    "QTRD" => self.t("UI", "界面"),
+                                    "RDOC" => self.t("Core", "核心"),
+                                    _ => message.source.as_str(),
+                                };
+                                div()
+                                    .id(("log-row", index))
+                                    .test_support()
+                                    .text_sm()
+                                    .text_color(rgb(color))
+                                    .child(format!(
+                                        "{} {} [{}] {} - {} - {}",
+                                        source,
+                                        message.pid,
+                                        message.timestamp,
+                                        message.location,
+                                        message.level.as_str(),
+                                        message.message
+                                    ))
+                            })),
+                    )
+            .into_any_element()]
+    }
+
+    fn info_overlay(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        let Some(dialog) = self.info_dialog else {
+            return Vec::new();
+        };
+        let mut body: Vec<gpui::AnyElement> = Vec::new();
+        match dialog {
+            InfoDialog::About => {
+                body.push(
+                    div()
+                        .child(format!("RenderDocX {}", env!("CARGO_PKG_VERSION")))
+                        .into_any_element(),
+                );
+                body.push(
+                    div()
+                        .text_sm()
+                        .child(self.t(
+                            "A native Rust + GPUI GUI for RenderDoc.",
+                            "基于 RenderDoc 的 Rust + GPUI 原生界面。",
+                        ))
+                        .into_any_element(),
+                );
+                body.push(
+                    div()
+                        .text_sm()
+                        .child(self.t(
+                            "Capture and replay behaviour follows upstream RenderDoc; some GUI features are still being migrated.",
+                            "捕获与回放行为遵循上游 RenderDoc；部分 GUI 功能仍在迁移中。",
+                        ))
+                        .into_any_element(),
+                );
+            }
+            InfoDialog::Tips => {
+                for tip in [
+                    self.t(
+                        "Open a capture with Open capture, or launch an application from the launch settings.",
+                        "使用“打开捕获文件”打开捕获，或在启动设置中启动应用。",
+                    ),
+                    self.t(
+                        "Save and load window layouts from the layout slots on the home screen.",
+                        "在首页的布局槽位保存与加载窗口布局。",
+                    ),
+                    self.t(
+                        "Capture settings (.cap) can be imported and exported from the launch panel.",
+                        "可以在启动面板导入与导出捕获设置（.cap）。",
+                    ),
+                    self.t(
+                        "Recent captures and settings are kept in the home screen list.",
+                        "最近的捕获与设置会保留在首页列表中。",
+                    ),
+                ] {
+                    body.push(div().text_sm().child(format!("• {tip}")).into_any_element());
+                }
+            }
+        }
+        vec![div()
+            .id("info-panel")
+            .test_support()
+            .absolute()
+            .size_full()
+            .bg(rgb(0x050a12))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .max_w(px(560.))
+                    .p_8()
+                    .rounded_lg()
+                    .bg(rgb(0x192332))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_xl()
+                            .child(match dialog {
+                                InfoDialog::About => self.t("About RenderDocX", "关于 RenderDocX"),
+                                InfoDialog::Tips => self.t("Tips", "提示"),
+                            })
+                    )
+                    .children(body)
+                    .child(button(
+                        "info-close",
+                        self.t("Close", "关闭"),
+                        true,
+                        |this, cx| {
+                            this.info_dialog = None;
+                            cx.notify();
+                        },
+                        cx,
+                    )),
+            )
+            .into_any_element()]
     }
 
     fn save(&mut self) {
@@ -3085,8 +4636,6 @@ impl Workspace {
                 self.t(
                     "Could not save settings",
                     "无法保存设置",
-                    "設定を保存できません",
-                    "설정을 저장할 수 없습니다"
                 )
             ));
         }
@@ -3120,8 +4669,6 @@ impl Workspace {
                     self.t(
                         "Could not import shader processor",
                         "无法导入着色器处理器",
-                        "シェーダープロセッサーを読み込めません",
-                        "셰이더 처리기를 가져올 수 없습니다"
                     )
                 ));
                 cx.notify();
@@ -3134,7 +4681,7 @@ impl Workspace {
             .iter()
             .any(|existing| existing.name == config.name)
         {
-            self.status = Some(self.t("A processor with this name already exists; remove it before importing another.", "已存在同名处理器；请先移除再导入。", "同名のプロセッサーが既にあります。削除してから読み込んでください。", "같은 이름의 처리기가 있습니다. 삭제한 후 가져오세요.").to_owned());
+            self.status = Some(self.t("A processor with this name already exists; remove it before importing another.", "已存在同名处理器；请先移除再导入。").to_owned());
             cx.notify();
             return;
         }
@@ -3145,8 +4692,6 @@ impl Workspace {
                     self.t(
                         "Shader processor imported.",
                         "着色器处理器已导入。",
-                        "シェーダープロセッサーを読み込みました。",
-                        "셰이더 처리기를 가져왔습니다.",
                     )
                     .to_owned(),
                 )
@@ -3158,8 +4703,6 @@ impl Workspace {
                     self.t(
                         "Could not save settings",
                         "无法保存设置",
-                        "設定を保存できません",
-                        "설정을 저장할 수 없습니다"
                     )
                 ));
             }
@@ -3187,8 +4730,6 @@ impl Workspace {
                 self.t(
                     "Could not save settings",
                     "无法保存设置",
-                    "設定を保存できません",
-                    "설정을 저장할 수 없습니다"
                 )
             ));
         } else {
@@ -3196,13 +4737,667 @@ impl Workspace {
                 self.t(
                     "Shader processor removed.",
                     "着色器处理器已移除。",
-                    "シェーダープロセッサーを削除しました。",
-                    "셰이더 처리기를 삭제했습니다.",
                 )
                 .to_owned(),
             );
         }
         cx.notify();
+    }
+
+    fn open_suggest_remote(&mut self, cx: &mut Context<Self>) {
+        use renderdocx::suggest_remote::SuggestRemote;
+        let remote = !self.remote_target_url.read(cx).value().trim().is_empty();
+        self.suggest_remote = Some(SuggestRemote::new(
+            "RenderDoc".into(),
+            "this machine".into(),
+            remote,
+            self.settings.always_replay_locally,
+        ));
+        cx.notify();
+    }
+
+    fn choose_suggest_remote(
+        &mut self,
+        choice: renderdocx::suggest_remote::SuggestRemoteChoice,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(dialog) = self.suggest_remote.as_mut() {
+            dialog.choose(choice);
+            if dialog.choice.is_some() {
+                self.settings.always_replay_locally = dialog.always_replay_locally;
+                self.save();
+                self.suggest_remote = None;
+            }
+        }
+        cx.notify();
+    }
+
+    fn selected_shader_source_contents(&self) -> Option<String> {
+        Some(
+            self.shader_data
+                .as_ref()?
+                .source_files
+                .get(self.shader_source?)?
+                .contents
+                .clone(),
+        )
+    }
+
+    fn shader_find_next(&mut self, cx: &mut Context<Self>) {
+        let needle = self.shader_find.read(cx).value().to_string();
+        let Some(contents) = self.selected_shader_source_contents() else {
+            self.status = Some(
+                self.t("Select a shader source file first.", "请先选择着色器源文件。")
+                    .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        match renderdocx::find_replace::find_next(&contents, &needle, self.find_options, self.find_cursor) {
+            Some((start, end)) => {
+                let line = contents[..start].bytes().filter(|byte| *byte == b'\n').count();
+                self.shader_source_page = line / SHADER_SOURCE_PAGE_LINES;
+                self.find_cursor = end;
+                self.status = Some(format!(
+                    "{} {}",
+                    self.t("Found at line", "找到行"),
+                    line + 1
+                ));
+            }
+            None => {
+                self.find_cursor = 0;
+                self.status = Some(
+                    self.t("No match found.", "未找到匹配。").to_owned(),
+                );
+            }
+        }
+        cx.notify();
+    }
+
+    fn shader_replace_all(&mut self, cx: &mut Context<Self>) {
+        let needle = self.shader_find.read(cx).value().to_string();
+        let replacement = self.shader_replace.read(cx).value().to_string();
+        let Some(index) = self.shader_source else {
+            self.status = Some(
+                self.t("Select a shader source file first.", "请先选择着色器源文件。")
+                    .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let contents = self.selected_shader_source_contents().unwrap_or_default();
+        let (updated, count) = renderdocx::find_replace::replace_all(
+            &contents,
+            &needle,
+            &replacement,
+            self.find_options,
+        );
+        if count == 0 {
+            self.status = Some(
+                self.t("No match found.", "未找到匹配。").to_owned(),
+            );
+        } else if let Some(file) = self
+            .shader_data
+            .as_mut()
+            .and_then(|report| report.source_files.get_mut(index))
+        {
+            file.contents = updated;
+            self.find_cursor = 0;
+            self.status = Some(format!(
+                "{} {count}",
+                self.t("Replaced occurrences:", "已替换：")
+            ));
+        }
+        cx.notify();
+    }
+
+    fn open_config_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.settings.to_json_string();
+        self.config_editor
+            .update(cx, |editor, cx| editor.set_value(text, window, cx));
+        self.show_config_editor = true;
+        cx.notify();
+    }
+
+    fn apply_config_editor(&mut self, cx: &mut Context<Self>) {
+        let text = self.config_editor.read(cx).value().to_string();
+        match Settings::from_json(&text) {
+            Ok(settings) => {
+                self.settings = settings;
+                self.save();
+                self.show_config_editor = false;
+                self.status = Some(
+                    self.t("Configuration saved.", "配置已保存。").to_owned(),
+                );
+            }
+            Err(error) => {
+                self.status = Some(format!(
+                    "{}: {error}",
+                    self.t("Invalid configuration JSON", "配置 JSON 无效")
+                ));
+            }
+        }
+        cx.notify();
+    }
+
+    fn axis_label(&self, direction: renderdocx::viewer_settings::AxisDirection) -> &'static str {
+        use renderdocx::viewer_settings::AxisDirection;
+        match direction {
+            AxisDirection::Right => self.t("Right", "右"),
+            AxisDirection::Left => self.t("Left", "左"),
+            AxisDirection::Up => self.t("Up", "上"),
+            AxisDirection::Down => self.t("Down", "下"),
+            AxisDirection::IntoScreen => self.t("Into screen", "进入屏幕"),
+            AxisDirection::OutOfScreen => self.t("Out of screen", "离开屏幕"),
+        }
+    }
+
+    fn viewer_panel(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        let Some(dialog) = self.viewer_dialog else {
+            return Vec::new();
+        };
+        let mut children: Vec<gpui::AnyElement> = Vec::new();
+        match dialog {
+            ViewerDialog::Axis => {
+                let mapping = self.settings.axis_mapping;
+                let title = self.t("Axis mapping", "轴映射");
+                children.push(div().text_sm().text_color(rgb(0x82aaff)).child(title).into_any_element());
+                for (index, label, direction) in [
+                    (0usize, self.t("X axis", "X 轴"), mapping.x),
+                    (1, self.t("Y axis", "Y 轴"), mapping.y),
+                    (2, self.t("Z axis", "Z 轴"), mapping.z),
+                ] {
+                    children.push(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(label)
+                            .child(
+                                Button::new(("viewer-axis", index))
+                                    .label(self.axis_label(direction))
+                                    .secondary()
+                                    .on_click(cx.listener(move |this, _, _, cx| this.cycle_axis(index, cx))),
+                            )
+                            .into_any_element(),
+                    );
+                }
+            }
+            ViewerDialog::Projection => {
+                children.push(div().text_sm().text_color(rgb(0x82aaff)).child(self.t("Projection guess", "投影推测")).into_any_element());
+                let projection = self.settings.projection;
+                children.push(Button::new("viewer-projection-kind")
+                    .label(if projection.orthographic { self.t("Orthographic", "正交") } else { self.t("Perspective", "透视") })
+                    .secondary()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.settings.projection.orthographic = !this.settings.projection.orthographic;
+                        cx.notify();
+                    })).into_any_element());
+                children.push(Button::new("viewer-infinite-far")
+                    .label(if projection.far_plane == f32::MAX { self.t("Infinite far plane", "无限远平面") } else { self.t("Finite far plane", "有限远平面") })
+                    .secondary()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.settings.projection.far_plane = if this.settings.projection.far_plane == f32::MAX { 0.0 } else { f32::MAX };
+                        cx.notify();
+                    })).into_any_element());
+                children.push(div().flex().flex_wrap().gap_2()
+                    .child(Input::new(&self.proj_fov).id("viewer-fov").aria_label(self.t("Field of view", "视场角")).w(px(80.)))
+                    .child(Input::new(&self.proj_aspect).id("viewer-aspect").aria_label(self.t("Aspect ratio", "宽高比")).w(px(100.)))
+                    .child(Input::new(&self.proj_near).id("viewer-near").aria_label(self.t("Near plane", "近平面")).w(px(80.)))
+                    .child(Input::new(&self.proj_far).id("viewer-far").aria_label(self.t("Far plane", "远平面")).w(px(100.)))
+                    .into_any_element());
+            }
+            ViewerDialog::Camera => {
+                children.push(div().text_sm().text_color(rgb(0x82aaff)).child(self.t("Camera controls", "相机控制")).into_any_element());
+                children.push(div().flex().flex_wrap().gap_2()
+                    .child(Input::new(&self.camera_near).id("viewer-camera-near").aria_label(self.t("Near plane", "近平面")).w(px(80.)))
+                    .child(Input::new(&self.camera_far).id("viewer-camera-far").aria_label(self.t("Far plane", "远平面")).w(px(100.)))
+                    .into_any_element());
+                let modifier = self.settings.camera.speed_modifier;
+                let label = match modifier {
+                    renderdocx::viewer_settings::SpeedModifier::Shift => self.t("Shift", "Shift"),
+                    renderdocx::viewer_settings::SpeedModifier::Alt => self.t("Alt", "Alt"),
+                    renderdocx::viewer_settings::SpeedModifier::Control => self.t("Ctrl", "Ctrl"),
+                    renderdocx::viewer_settings::SpeedModifier::None => self.t("None", "无"),
+                };
+                children.push(Button::new("viewer-speed-modifier")
+                    .label(format!("{}: {label}", self.t("Speed modifier", "加速键")))
+                    .secondary()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        use renderdocx::viewer_settings::SpeedModifier;
+                        let all = SpeedModifier::ALL;
+                        let current = all.iter().position(|value| *value == this.settings.camera.speed_modifier).unwrap_or(0);
+                        this.settings.camera.speed_modifier = all[(current + 1) % all.len()];
+                        this.save();
+                        cx.notify();
+                    })).into_any_element());
+            }
+        }
+        children.push(Button::new("viewer-apply").label(self.t("Apply", "应用")).primary()
+            .on_click(cx.listener(|this, _, window, cx| this.apply_viewer_dialog(window, cx))).into_any_element());
+        children.push(Button::new("viewer-cancel").label(self.t("Cancel", "取消")).secondary()
+            .on_click(cx.listener(|this, _, _, cx| { this.viewer_dialog = None; cx.notify(); })).into_any_element());
+        vec![div()
+            .id("viewer-panel")
+            .test_support()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_4()
+            .rounded_lg()
+            .bg(rgb(0x192332))
+            .children(children)
+            .into_any_element()]
+    }
+
+    fn cycle_axis(&mut self, axis: usize, cx: &mut Context<Self>) {
+        use renderdocx::viewer_settings::AxisDirection;
+        let mapping = &mut self.settings.axis_mapping;
+        let current = match axis {
+            0 => mapping.x,
+            1 => mapping.y,
+            _ => mapping.z,
+        };
+        let index = AxisDirection::ALL
+            .iter()
+            .position(|direction| *direction == current)
+            .unwrap_or(0);
+        let next = AxisDirection::ALL[(index + 1) % AxisDirection::ALL.len()];
+        match axis {
+            0 => mapping.x = next,
+            1 => mapping.y = next,
+            _ => mapping.z = next,
+        }
+        self.save();
+        cx.notify();
+    }
+
+    fn open_viewer_dialog(
+        &mut self,
+        dialog: ViewerDialog,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.viewer_dialog = Some(dialog);
+        match dialog {
+            ViewerDialog::Axis => {}
+            ViewerDialog::Projection => {
+                let projection = self.settings.projection;
+                self.proj_fov.update(cx, |input, cx| {
+                    input.set_value(projection.fov.to_string(), window, cx)
+                });
+                self.proj_aspect.update(cx, |input, cx| {
+                    input.set_value(if projection.aspect > 0.0 { projection.aspect.to_string() } else { String::new() }, window, cx)
+                });
+                self.proj_near.update(cx, |input, cx| {
+                    input.set_value(if projection.near_plane > 0.0 { projection.near_plane.to_string() } else { String::new() }, window, cx)
+                });
+                self.proj_far.update(cx, |input, cx| {
+                    input.set_value(if projection.far_plane == f32::MAX { String::new() } else if projection.far_plane > 0.0 { projection.far_plane.to_string() } else { String::new() }, window, cx)
+                });
+            }
+            ViewerDialog::Camera => {
+                let camera = self.settings.camera;
+                self.camera_near.update(cx, |input, cx| {
+                    input.set_value(camera.near_plane.to_string(), window, cx)
+                });
+                self.camera_far.update(cx, |input, cx| {
+                    input.set_value(camera.far_plane.to_string(), window, cx)
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    fn apply_viewer_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use renderdocx::viewer_settings::parse_projection;
+        let Some(dialog) = self.viewer_dialog else {
+            return;
+        };
+        match dialog {
+            ViewerDialog::Axis => match self.settings.axis_mapping.validate() {
+                Ok(()) => {
+                    self.viewer_dialog = None;
+                    self.status = Some(
+                        self.t("Axis mapping saved.", "轴映射已保存。").to_owned(),
+                    );
+                }
+                Err(error) => {
+                    self.status = Some(format!(
+                        "{}: {} / {} → {}",
+                        self.t("Degenerate axis mapping", "轴映射退化"),
+                        error.first as u8,
+                        error.second as u8,
+                        error.direction
+                    ))
+                }
+            },
+            ViewerDialog::Projection => {
+                let fov = self.proj_fov.read(cx).value().parse::<f32>().unwrap_or(90.0);
+                let aspect = self.proj_aspect.read(cx).value().to_string();
+                let near = self.proj_near.read(cx).value().to_string();
+                let far = self.proj_far.read(cx).value().to_string();
+                let orthographic = self.settings.projection.orthographic;
+                let infinite = self.proj_far.read(cx).value().trim().is_empty();
+                match parse_projection(orthographic, fov, &aspect, &near, &far, infinite) {
+                    Ok(projection) => {
+                        self.settings.projection = projection;
+                        self.viewer_dialog = None;
+                        self.save();
+                        self.status = Some(
+                            self.t("Projection settings saved.", "投影设置已保存。").to_owned(),
+                        );
+                    }
+                    Err(error) => {
+                        self.status = Some(format!("{error:?}"));
+                    }
+                }
+            }
+            ViewerDialog::Camera => {
+                let near = self.camera_near.read(cx).value().parse::<f32>();
+                let far = self.camera_far.read(cx).value().parse::<f32>();
+                match (near, far) {
+                    (Ok(near_plane), Ok(far_plane)) => {
+                        let camera = renderdocx::viewer_settings::CameraControls {
+                            near_plane,
+                            far_plane,
+                            ..self.settings.camera
+                        };
+                        match camera.validate() {
+                            Ok(()) => {
+                                self.settings.camera = camera;
+                                self.viewer_dialog = None;
+                                self.save();
+                                self.status = Some(
+                                    self.t("Camera settings saved.", "相机设置已保存。").to_owned(),
+                                );
+                            }
+                            Err(error) => self.status = Some(format!("{error:?}")),
+                        }
+                    }
+                    _ => {
+                        self.status = Some(
+                            self.t("Planes must be decimal numbers.", "近/远平面必须是小数。")
+                                .to_owned(),
+                        );
+                    }
+                }
+            }
+        }
+        let _ = window;
+        cx.notify();
+    }
+
+    fn toggle_replay_loop(&mut self, cx: &mut Context<Self>) {
+        if let Some(state) = self.replay_loop.as_mut() {
+            if state.playing {
+                state.stop();
+                self.replay_loop_generation += 1;
+                self.status = Some(
+                    self.t("Replay loop stopped.", "已停止重放循环。").to_owned(),
+                );
+                cx.notify();
+                return;
+            }
+        }
+        let Some(events) = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.actions.iter().map(|action| action.event_id).collect::<Vec<_>>())
+        else {
+            self.status = Some(
+                self.t("Open a capture first to loop its events.", "请先打开捕获再循环回放事件。")
+                    .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let interval = self
+            .replay_loop_delay
+            .read(cx)
+            .value()
+            .parse::<u64>()
+            .unwrap_or(150);
+        let mut state = renderdocx::replay_loop::ReplayLoop::new(events, interval);
+        state.playing = true;
+        self.replay_loop = Some(state);
+        self.replay_loop_generation += 1;
+        let generation = self.replay_loop_generation;
+        self.status = Some(
+            self.t("Replay loop started.", "已开始重放循环。").to_owned(),
+        );
+        cx.spawn(async move |this, cx| loop {
+            smol::Timer::after(std::time::Duration::from_millis(interval)).await;
+            let mut stop = false;
+            let _ = this.update(cx, |this, cx| {
+                if this.replay_loop_generation != generation
+                    || !this.replay_loop.as_ref().is_some_and(|state| state.playing)
+                {
+                    stop = true;
+                    return;
+                }
+                if this.replay_pending || this.snapshot.is_none() {
+                    return;
+                }
+                let Some(event) = this.replay_loop.as_mut().and_then(|state| state.advance())
+                else {
+                    stop = true;
+                    return;
+                };
+                let index = this
+                    .snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.actions.iter().position(|action| action.event_id == event));
+                this.select_replay_event(index, event, event, cx);
+            });
+            if stop {
+                break;
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn run_python(&mut self, code: String, cx: &mut Context<Self>) {
+        if code.trim().is_empty() || self.python_pending {
+            return;
+        }
+        self.python_pending = true;
+        self.python_output.push(format!(">>> {code}"));
+        cx.notify();
+        let task = cx
+            .background_executor()
+            .spawn(async move { renderdocx::python_shell::execute(&code) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.python_pending = false;
+                match result {
+                    Ok(output) => {
+                        this.python_output
+                            .extend(renderdocx::python_shell::format_output(&output));
+                    }
+                    Err(error) => this.python_output.push(format!("! {error}")),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn execute_python_input(&mut self, cx: &mut Context<Self>) {
+        let code = self.python_input.read(cx).value().to_string();
+        self.run_python(code, cx);
+    }
+
+    fn run_python_script(&mut self, cx: &mut Context<Self>) {
+        let code = self.python_script.read(cx).value().to_string();
+        self.run_python(code, cx);
+    }
+
+    fn save_capture_copy(&mut self, source: PathBuf, cx: &mut Context<Self>) {
+        let Some(destination) = rfd::FileDialog::new()
+            .add_filter("RenderDoc", &["rdc"])
+            .save_file()
+        else {
+            return;
+        };
+        self.status = Some(match capture_save::save_copy(&source, &destination) {
+            Ok(()) => {
+                self.settings.record_capture(&destination);
+                self.save();
+                format!(
+                    "{} {}",
+                    self.t("Saved a copy of the capture to", "已将捕获副本保存到"),
+                    destination.display()
+                )
+            }
+            Err(error) => format!(
+                "{}: {error}",
+                self.t("Could not save the capture", "保存捕获失败")
+            ),
+        });
+        cx.notify();
+    }
+
+    fn recompress_capture(&mut self, cx: &mut Context<Self>) {
+        if self.capture.is_none() || self.session.is_none() {
+            self.status = Some(
+                self.t("Open a capture first before recompressing it.", "请先打开捕获再重压缩。")
+                    .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        if self.replay_pending {
+            self.status = Some(
+                self.t("Wait for the current replay operation.", "请等待当前回放操作完成。")
+                    .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let Some(destination) = rfd::FileDialog::new()
+            .add_filter("RenderDoc", &["rdc"])
+            .save_file()
+        else {
+            return;
+        };
+        if Some(&destination) == self.capture.as_ref() {
+            self.status = Some(
+                self.t("Choose a different path for the compressed copy.", "请为压缩副本选择其他路径。")
+                    .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let revision = self.open_revision;
+        self.replay_pending = true;
+        self.status = Some(
+            self.t("Recompressing capture…", "正在重压缩捕获…").to_owned(),
+        );
+        cx.notify();
+        let destination_for_status = destination.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { session.recompress(&destination) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.replay_pending = false;
+                if this.open_revision != revision {
+                    return;
+                }
+                this.status = Some(match result {
+                    Ok(info) if info.already_compressed => this
+                        .t(
+                            "This capture is already compressed as much as possible.",
+                            "此捕获已无法进一步压缩。",
+                        )
+                        .to_owned(),
+                    Ok(info) => {
+                        this.settings.record_capture(&destination_for_status);
+                        this.save();
+                        format!(
+                            "{} {} ({} bytes)",
+                            this.t("Recompressed capture to", "已将捕获重压缩到"),
+                            destination_for_status.display(),
+                            info.size
+                        )
+                    }
+                    Err(error) => format!(
+                        "{}: {error}",
+                        this.t("Could not recompress the capture", "重压缩捕获失败")
+                    ),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn save_capture_as(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = self.capture.clone() else {
+            self.status = Some(
+                self.t("Open a capture first before saving it.", "请先打开捕获再另存。")
+                    .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let Some(destination) = rfd::FileDialog::new()
+            .add_filter("RenderDoc", &["rdc"])
+            .save_file()
+        else {
+            return;
+        };
+        self.status = Some(match capture_save::save_copy(&source, &destination) {
+            Ok(()) => {
+                self.settings.record_capture(&destination);
+                self.save();
+                format!(
+                    "{} {}",
+                    self.t("Saved a copy of the capture to", "已将捕获副本保存到"),
+                    destination.display()
+                )
+            }
+            Err(error) => format!(
+                "{}: {error}",
+                self.t("Could not save the capture", "保存捕获失败")
+            ),
+        });
+        cx.notify();
+    }
+
+    fn save_capture_inplace(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = self.capture.clone() else {
+            self.status = Some(
+                self.t("Open a capture first before saving it.", "请先打开捕获再保存。")
+                    .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let Some(destination) = rfd::FileDialog::new()
+            .add_filter("RenderDoc", &["rdc"])
+            .save_file()
+        else {
+            return;
+        };
+        if let Err(error) = capture_save::save_copy(&source, &destination) {
+            self.status = Some(format!(
+                "{}: {error}",
+                self.t("Could not save the capture", "保存捕获失败")
+            ));
+            cx.notify();
+            return;
+        }
+        self.settings.record_capture(&destination);
+        self.save();
+        self.open(destination, cx);
     }
 
     fn open(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -3218,8 +5413,6 @@ impl Workspace {
                 self.t(
                     "Save or discard the comment draft first.",
                     "请先保存或放弃注释草稿。",
-                    "コメントを保存または破棄してください。",
-                    "먼저 댓글을 저장하거나 취소하세요.",
                 )
                 .to_owned(),
             );
@@ -3232,8 +5425,6 @@ impl Workspace {
                 self.t(
                     "Wait for the current replay operation to finish.",
                     "请等待当前回放操作完成。",
-                    "現在のリプレイ処理が完了するまでお待ちください。",
-                    "현재 리플레이 작업이 끝날 때까지 기다려 주세요.",
                 )
                 .to_owned(),
             );
@@ -3244,11 +5435,15 @@ impl Workspace {
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("cap"))
         {
-            let result = backend::open_capture(&self.settings, &path);
-            self.result(result, cx);
+            self.import_capture_settings_from(&path, None, cx);
             return;
         }
+        self.settings.record_capture(&path);
+        self.save();
         self.open_revision += 1;
+        self.event_name_worker = false;
+        self.requested_event = None;
+        self.queued_event_key = None;
         self.event_filter_revision
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.event_annotation_revision
@@ -3265,8 +5460,6 @@ impl Workspace {
                 self.t(
                     "Capture file does not exist.",
                     "捕获文件不存在。",
-                    "キャプチャファイルが存在しません。",
-                    "캡처 파일이 없습니다.",
                 )
                 .to_owned(),
             );
@@ -3284,8 +5477,6 @@ impl Workspace {
             self.t(
                 "Opening capture for native replay…",
                 "正在打开捕获并初始化原生回放…",
-                "キャプチャを開いてリプレイを初期化中…",
-                "캡처를 열고 리플레이를 초기화하는 중…",
             )
             .to_owned(),
         );
@@ -3329,6 +5520,9 @@ impl Workspace {
                     Ok((session, snapshot, renames, edits, bookmarks, initial)) => {
                         // Invalidate work started against the old session while this open was pending.
                         this.open_revision += 1;
+                        this.event_name_worker = false;
+                        this.requested_event = None;
+                        this.queued_event_key = None;
                         this.capture = Some(capture);
                         this.event_path_editing = false;
                         this.event_tree.set_use_custom_action_names(
@@ -3338,6 +5532,8 @@ impl Workspace {
                         this.refresh_event_filters(cx);
                         this.timeline.reset(&snapshot.actions);
                         this.snapshot = Some(snapshot);
+                        this.frame_stats_category = renderdocx::frame_statistics::OVERVIEW;
+                        this.frame_stats_raw = false;
                         this.session = Some(session.clone());
                         this.event_filter_names_pending = false;
                         let expression = this.event_search.read(cx).value().to_string();
@@ -3346,6 +5542,12 @@ impl Workspace {
                         this.load_event_annotation_column(key, cx);
                         this.message_generation += 1;
                         this.message_poll_pending = false;
+                        this.show_hidden_messages = false;
+                        this.shader_message_page = None;
+                        this.selected_shader_message = None;
+                        this.pending_shader_messages_event = None;
+                        this.shader_vertex_resolution = None;
+                        this.shader_vertex_lookup_pending = false;
                         this.refresh_messages();
                         this.poll_messages(session, this.message_generation, cx);
                         this.selected = None;
@@ -3445,8 +5647,6 @@ impl Workspace {
                                         this.t(
                                             "Could not load capture metadata",
                                             "无法加载捕获元数据",
-                                            "キャプチャのメタデータを読み込めません",
-                                            "캡처 메타데이터를 불러올 수 없습니다"
                                         )
                                     )
                                 });
@@ -3456,8 +5656,6 @@ impl Workspace {
                                 this.t(
                                     "Replay failed",
                                     "回放失败",
-                                    "リプレイに失敗しました",
-                                    "리플레이 실패"
                                 )
                             );
                             this.status = Some(match this.status.take() {
@@ -3481,8 +5679,6 @@ impl Workspace {
                             this.t(
                                 "Could not open capture",
                                 "无法打开捕获文件",
-                                "キャプチャを開けません",
-                                "캡처를 열 수 없습니다"
                             )
                         ))
                     }
@@ -3522,9 +5718,191 @@ impl Workspace {
         self.select_replay_event(None, 0, 0, cx);
     }
 
+    fn toggle_event_bookmark(&mut self, cx: &mut Context<Self>) {
+        if self.replay_pending || self.resource_pending || self.export_pending {
+            return;
+        }
+        let Some(event) = self.selected_event_id().filter(|event| *event != 0) else {
+            self.status = Some(
+                self.t(
+                    "Select an event to bookmark.",
+                    "请先选择要添加书签的事件。",
+                )
+                .into(),
+            );
+            cx.notify();
+            return;
+        };
+        let Some((_, document)) = self.annotations.bookmarks.as_ref() else {
+            self.status = Some(
+                self.t(
+                    "Bookmarks are unavailable; reopen the capture.",
+                    "书签不可用，请重新打开捕获文件。",
+                )
+                .into(),
+            );
+            cx.notify();
+            return;
+        };
+        let present = annotations::bookmarks(document)
+            .is_ok_and(|items| items.iter().any(|(id, _)| *id == event));
+        match annotations::set_bookmark(document, event, if present { None } else { Some("") }) {
+            Ok(updated) => self.save_annotation("bookmarks", updated, cx),
+            Err(error) => {
+                self.status = Some(error);
+                cx.notify();
+            }
+        }
+    }
+
+    fn jump_to_bookmark(&mut self, event: u32, cx: &mut Context<Self>) {
+        if self.replay_pending
+            || self.resource_pending
+            || self.export_pending
+            || self.event_filter_pending.is_some()
+        {
+            return;
+        }
+        let target = self
+            .event_tree
+            .row_for_event(event)
+            .and_then(|row| self.event_tree.row(row).map(|target| (row, target)));
+        if let Some((row, target)) = target {
+            if let Some(position) = self.event_tree.reveal_filtered(row) {
+                self.event_scroll
+                    .scroll_to_item(position + 1, gpui::ScrollStrategy::Nearest);
+                self.tab = CaptureTab::Events;
+                match target {
+                    EventRow::Action(action) => self.select_event(action, None, cx),
+                    EventRow::Api { action, event } => self.select_event(action, Some(event), cx),
+                }
+                return;
+            }
+        }
+        self.status = Some(
+            self.t(
+                "Bookmark is hidden by the current event view.",
+                "书签在当前事件视图中不可见。",
+            )
+            .into(),
+        );
+        cx.notify();
+    }
+
+    fn jump_to_bookmark_index(&mut self, index: usize, cx: &mut Context<Self>) {
+        let event = self
+            .annotations
+            .bookmarks
+            .as_ref()
+            .and_then(|(_, document)| annotations::bookmarks(document).ok())
+            .and_then(|items| items.get(index).map(|(event, _)| *event));
+        if let Some(event) = event {
+            self.jump_to_bookmark(event, cx);
+        }
+    }
+
+    fn navigate_event_list(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        if !matches!(key, "up" | "down" | "left" | "right" | "home" | "end") {
+            return false;
+        }
+        if self.resource_pending
+            || self.export_pending
+            || (self.replay_pending && self.requested_event.is_none())
+        {
+            return true;
+        }
+        let current = self
+            .queued_event_key
+            .or_else(|| {
+                self.timeline.pending_scrub.and_then(|index| {
+                    self.snapshot
+                        .as_ref()?
+                        .actions
+                        .get(index)
+                        .map(|action| action.event_id)
+                })
+            })
+            .or(self.requested_event)
+            .or_else(|| self.selected_event_id())
+            .and_then(|event| {
+                self.event_tree
+                    .row_for_event(event)
+                    .and_then(|row| self.event_tree.visible.iter().position(|&item| item == row))
+                    .map(|position| position + 1)
+            })
+            .unwrap_or(0);
+        let count = self.event_tree.visible.len();
+        let position = match key {
+            "up" => current.saturating_sub(1),
+            "down" => (current + 1).min(count),
+            "home" => 0,
+            "end" => count,
+            "left" | "right" if current > 0 => {
+                let row = self.event_tree.visible[current - 1];
+                let collapsed = self.event_tree.is_collapsed(row);
+                if self.event_tree.has_children(row)
+                    && ((key == "left" && !collapsed) || (key == "right" && collapsed))
+                {
+                    self.event_tree.toggle(row);
+                    cx.notify();
+                    return true;
+                }
+                if key == "left" {
+                    self.event_tree
+                        .parent_row(row)
+                        .and_then(|parent| {
+                            self.event_tree
+                                .visible
+                                .iter()
+                                .position(|&item| item == parent)
+                        })
+                        .map_or(current, |position| position + 1)
+                } else if self.event_tree.has_children(row) {
+                    (current + 1).min(count)
+                } else {
+                    current
+                }
+            }
+            _ => current,
+        };
+        if position == current {
+            return true;
+        }
+        self.event_scroll
+            .scroll_to_item(position, gpui::ScrollStrategy::Nearest);
+        if self.replay_pending {
+            self.timeline.pending_scrub = None;
+            self.queued_event_key = if position == 0 {
+                Some(0)
+            } else {
+                self.event_tree
+                    .event_id(self.event_tree.visible[position - 1])
+            };
+            return true;
+        }
+        if position == 0 {
+            self.select_capture_start(cx);
+        } else if let Some(row) = self.event_tree.row(self.event_tree.visible[position - 1]) {
+            match row {
+                EventRow::Action(action) => self.select_event(action, None, cx),
+                EventRow::Api { action, event } => self.select_event(action, Some(event), cx),
+            }
+        }
+        true
+    }
+
     fn selected_event_id(&self) -> Option<u32> {
         self.selected_event_id
             .or_else(|| self.pipeline.as_ref().map(|pipeline| pipeline.event_id))
+    }
+
+    fn is_selected_action(&self, index: usize) -> bool {
+        self.selected == Some(index)
+            && self
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.actions.get(index))
+                .is_some_and(|action| self.selected_event_id() == Some(action.event_id))
     }
 
     fn select_replay_event(
@@ -3544,8 +5922,6 @@ impl Workspace {
                 self.t(
                     "Wait for the resource operation to finish.",
                     "请等待资源操作完成。",
-                    "リソース処理が完了するまでお待ちください。",
-                    "리소스 작업이 완료될 때까지 기다려 주세요.",
                 )
                 .to_owned(),
             );
@@ -3555,6 +5931,9 @@ impl Workspace {
         let Some(session) = self.session.clone() else {
             return;
         };
+        self.queued_event_key = None;
+        self.requested_event = Some(selected_event);
+        self.pending_shader_messages_event = None;
         let revision = session.next_revision();
         self.selection_revision = revision;
         self.replay_pending = true;
@@ -3576,14 +5955,15 @@ impl Workspace {
         self.input_page = None;
         self.debug_vertex_selection = None;
         self.debug_view = None;
+        self.shader_message_page = None;
+        self.selected_shader_message = None;
+        self.shader_vertex_resolution = None;
         self.descriptor_page = None;
         let open_revision = self.open_revision;
         self.status = Some(
             self.t(
                 "Replaying event…",
                 "正在回放事件…",
-                "イベントをリプレイ中…",
-                "이벤트를 리플레이하는 중…",
             )
             .to_owned(),
         );
@@ -3598,6 +5978,7 @@ impl Workspace {
                     return;
                 }
                 this.replay_pending = false;
+                this.requested_event = None;
                 match result {
                     Ok(Some(pipeline)) => {
                         this.selected = index;
@@ -3612,16 +5993,42 @@ impl Workspace {
                             this.t(
                                 "Replay failed",
                                 "回放失败",
-                                "リプレイに失敗しました",
-                                "리플레이 실패"
                             )
                         ))
                     }
                 }
                 if let Some(next) = this.timeline.pending_scrub.take() {
-                    if this.selected != Some(next) {
+                    if !this.is_selected_action(next) {
                         this.select_event(next, None, cx);
                         return;
+                    }
+                }
+                if let Some(target) = this.queued_event_key.take() {
+                    if this.selected_event_id() != Some(target) {
+                        if target == 0 {
+                            this.select_capture_start(cx);
+                            return;
+                        }
+                        if let Some(row) = this
+                            .event_tree
+                            .row_for_event(target)
+                            .filter(|row| this.event_tree.visible.contains(row))
+                            .and_then(|row| this.event_tree.row(row))
+                        {
+                            match row {
+                                EventRow::Action(action) => this.select_event(action, None, cx),
+                                EventRow::Api { action, event } => {
+                                    this.select_event(action, Some(event), cx)
+                                }
+                            }
+                            return;
+                        }
+                    }
+                }
+                if let Some(event) = this.pending_shader_messages_event.take() {
+                    if this.selected_event_id == Some(event) && this.pipeline.is_some() {
+                        this.tab = CaptureTab::ShaderMessages;
+                        this.read_shader_messages(0, cx);
                     }
                 }
                 cx.notify();
@@ -3649,8 +6056,6 @@ impl Workspace {
                     self.t(
                         "Could not load saved filters",
                         "无法加载已保存的筛选",
-                        "保存したフィルターを読み込めません",
-                        "저장된 필터를 불러올 수 없습니다"
                     )
                 ))
             }
@@ -3671,8 +6076,6 @@ impl Workspace {
                     self.t(
                         "Filter saved.",
                         "筛选已保存。",
-                        "フィルターを保存しました。",
-                        "필터를 저장했습니다.",
                     )
                     .to_owned(),
                 );
@@ -3683,8 +6086,6 @@ impl Workspace {
                     self.t(
                         "Could not save filter",
                         "无法保存筛选",
-                        "フィルターを保存できません",
-                        "필터를 저장할 수 없습니다"
                     )
                 ))
             }
@@ -3704,8 +6105,6 @@ impl Workspace {
                     self.t(
                         "Filter deleted.",
                         "筛选已删除。",
-                        "フィルターを削除しました。",
-                        "필터를 삭제했습니다.",
                     )
                     .to_owned(),
                 );
@@ -3716,8 +6115,6 @@ impl Workspace {
                     self.t(
                         "Could not delete filter",
                         "无法删除筛选",
-                        "フィルターを削除できません",
-                        "필터를 삭제할 수 없습니다"
                     )
                 ))
             }
@@ -3741,8 +6138,6 @@ impl Workspace {
                     self.t(
                         "Could not load filter",
                         "无法加载筛选",
-                        "フィルターを読み込めません",
-                        "필터를 불러올 수 없습니다"
                     )
                 ))
             }
@@ -3767,8 +6162,6 @@ impl Workspace {
                     self.t(
                         "Could not load saved formats",
                         "无法加载已保存的格式",
-                        "保存した形式を読み込めません",
-                        "저장된 형식을 불러올 수 없습니다"
                     )
                 ))
             }
@@ -3789,8 +6182,6 @@ impl Workspace {
                     self.t(
                         "Format saved.",
                         "格式已保存。",
-                        "形式を保存しました。",
-                        "형식을 저장했습니다.",
                     )
                     .to_owned(),
                 );
@@ -3801,8 +6192,6 @@ impl Workspace {
                     self.t(
                         "Could not save format",
                         "无法保存格式",
-                        "形式を保存できません",
-                        "형식을 저장할 수 없습니다"
                     )
                 ))
             }
@@ -3822,8 +6211,6 @@ impl Workspace {
                     self.t(
                         "Format deleted.",
                         "格式已删除。",
-                        "形式を削除しました。",
-                        "형식을 삭제했습니다.",
                     )
                     .to_owned(),
                 );
@@ -3834,8 +6221,6 @@ impl Workspace {
                     self.t(
                         "Could not delete format",
                         "无法删除格式",
-                        "形式を削除できません",
-                        "형식을 삭제할 수 없습니다"
                     )
                 ))
             }
@@ -3858,8 +6243,6 @@ impl Workspace {
                     self.t(
                         "Could not load format",
                         "无法加载格式",
-                        "形式を読み込めません",
-                        "형식을 불러올 수 없습니다"
                     )
                 ));
                 cx.notify();
@@ -3920,8 +6303,6 @@ impl Workspace {
                     self.t(
                         "A layout row exceeds the buffer page limit.",
                         "布局单行超过缓冲区分页上限。",
-                        "レイアウトの 1 行がバッファページ上限を超えています。",
-                        "레이아웃 한 행이 버퍼 페이지 한도를 초과합니다.",
                     )
                     .to_owned(),
                 );
@@ -3933,8 +6314,6 @@ impl Workspace {
                     self.t(
                         "Invalid or unsupported layout",
                         "布局无效或尚不支持",
-                        "レイアウトが無効または未対応です",
-                        "레이아웃이 잘못되었거나 지원되지 않습니다"
                     )
                 ));
                 cx.notify();
@@ -3968,8 +6347,6 @@ impl Workspace {
                 self.t(
                     "Enter a nonempty sequence of hexadecimal bytes.",
                     "请输入非空的十六进制字节序列。",
-                    "空でない 16 進バイト列を入力してください。",
-                    "비어 있지 않은 16진수 바이트를 입력하세요.",
                 )
                 .to_owned(),
             );
@@ -4004,8 +6381,6 @@ impl Workspace {
                 self.t(
                     "No further match in the current range.",
                     "当前范围内没有后续匹配。",
-                    "現在の範囲に次の一致はありません。",
-                    "현재 범위에 다음 일치 항목이 없습니다.",
                 )
                 .to_owned(),
             );
@@ -4022,8 +6397,6 @@ impl Workspace {
             self.t(
                 "Searching buffer…",
                 "正在搜索缓冲区…",
-                "バッファを検索中…",
-                "버퍼 검색 중…",
             )
             .to_owned(),
         );
@@ -4066,8 +6439,6 @@ impl Workspace {
                                 this.t(
                                     "Match is outside the active layout",
                                     "匹配位于当前布局范围之外",
-                                    "一致は現在のレイアウト範囲外です",
-                                    "일치 항목이 현재 레이아웃 범위 밖입니다"
                                 )
                             ));
                             cx.notify();
@@ -4078,8 +6449,6 @@ impl Workspace {
                             this.t(
                                 "No further match in the current range.",
                                 "当前范围内没有后续匹配。",
-                                "現在の範囲に次の一致はありません。",
-                                "현재 범위에 다음 일치 항목이 없습니다.",
                             )
                             .to_owned(),
                         );
@@ -4091,8 +6460,6 @@ impl Workspace {
                             this.t(
                                 "Buffer search failed",
                                 "缓冲区搜索失败",
-                                "バッファ検索に失敗しました",
-                                "버퍼 검색 실패"
                             )
                         ));
                         cx.notify();
@@ -4135,8 +6502,6 @@ impl Workspace {
                         self.t(
                             "Offset is outside the active layout.",
                             "偏移位于当前布局范围之外。",
-                            "オフセットが現在のレイアウト範囲外です。",
-                            "오프셋이 현재 레이아웃 범위 밖입니다.",
                         )
                         .to_owned(),
                     );
@@ -4144,7 +6509,7 @@ impl Workspace {
                 }
             }
             _ => {
-                self.status = Some(self.t("Enter a byte offset within the current range (decimal or 0x hexadecimal).", "请输入当前范围内的字节偏移（十进制或 0x 十六进制）。", "現在の範囲内のバイトオフセットを入力してください（10 進数または 0x 付き 16 進数）。", "현재 범위의 바이트 오프셋을 입력하세요 (10진수 또는 0x 16진수).").to_owned());
+                self.status = Some(self.t("Enter a byte offset within the current range (decimal or 0x hexadecimal).", "请输入当前范围内的字节偏移（十进制或 0x 十六进制）。").to_owned());
                 cx.notify();
             }
         }
@@ -4156,8 +6521,6 @@ impl Workspace {
                 self.t(
                     "Wait for the current operation.",
                     "请等待当前操作完成。",
-                    "現在の処理が完了するまでお待ちください。",
-                    "현재 작업이 끝날 때까지 기다려 주세요.",
                 )
                 .to_owned(),
             );
@@ -4177,8 +6540,6 @@ impl Workspace {
                 self.t(
                     "Select an event before reading a buffer.",
                     "请先选择事件再读取缓冲区。",
-                    "バッファを読む前にイベントを選択してください。",
-                    "버퍼를 읽기 전에 이벤트를 선택하세요.",
                 )
                 .to_owned(),
             );
@@ -4220,8 +6581,6 @@ impl Workspace {
                 self.t(
                     "The fixed prefix is outside the current buffer range.",
                     "固定前缀位于当前缓冲区范围之外。",
-                    "固定プレフィックスが現在のバッファ範囲外です。",
-                    "고정 접두부가 현재 버퍼 범위 밖입니다.",
                 )
                 .to_owned(),
             );
@@ -4234,8 +6593,6 @@ impl Workspace {
             self.t(
                 "Reading buffer…",
                 "正在读取缓冲区…",
-                "バッファを読み込み中…",
-                "버퍼를 읽는 중…",
             )
             .to_owned(),
         );
@@ -4271,8 +6628,6 @@ impl Workspace {
                             this.t(
                                 "Buffer read failed",
                                 "缓冲区读取失败",
-                                "バッファを読み込めません",
-                                "버퍼 읽기 실패"
                             )
                         ));
                     }
@@ -4317,8 +6672,6 @@ impl Workspace {
                 self.t(
                     "Wait for the current operation.",
                     "请等待当前操作完成。",
-                    "現在の処理が完了するまでお待ちください。",
-                    "현재 작업이 끝날 때까지 기다려 주세요.",
                 )
                 .to_owned(),
             );
@@ -4330,8 +6683,6 @@ impl Workspace {
                 self.t(
                     "Select an event before inspecting shaders.",
                     "请先选择事件再查看着色器。",
-                    "シェーダーを見る前にイベントを選択してください。",
-                    "셰이더를 확인하기 전에 이벤트를 선택하세요.",
                 )
                 .to_owned(),
             );
@@ -4358,8 +6709,6 @@ impl Workspace {
             self.t(
                 "Loading shader…",
                 "正在加载着色器…",
-                "シェーダーを読み込み中…",
-                "셰이더를 불러오는 중…",
             )
             .to_owned(),
         );
@@ -4386,8 +6735,6 @@ impl Workspace {
                             this.t(
                                 "Shader response belongs to another event.",
                                 "着色器结果属于其他事件。",
-                                "シェーダーの結果は別のイベントのものです。",
-                                "셰이더 결과가 다른 이벤트에 속합니다.",
                             )
                             .to_owned(),
                         );
@@ -4398,8 +6745,6 @@ impl Workspace {
                             this.t(
                                 "Shader inspection failed",
                                 "着色器查看失败",
-                                "シェーダーを表示できません",
-                                "셰이더 확인 실패"
                             )
                         ));
                     }
@@ -4496,8 +6841,6 @@ impl Workspace {
                     self.t(
                         "Invalid saved shader draft.",
                         "保存的着色器草稿无效。",
-                        "保存されたシェーダーの下書きが無効です。",
-                        "저장된 셰이더 초안이 올바르지 않습니다.",
                     )
                     .to_owned(),
                 );
@@ -4517,8 +6860,6 @@ impl Workspace {
                     self.t(
                         "Invalid saved shader draft.",
                         "保存的着色器草稿无效。",
-                        "保存されたシェーダーの下書きが無効です。",
-                        "저장된 셰이더 초안이 올바르지 않습니다.",
                     )
                     .to_owned(),
                 );
@@ -4541,8 +6882,6 @@ impl Workspace {
                     self.t(
                         "Invalid saved shader draft.",
                         "保存的着色器草稿无效。",
-                        "保存されたシェーダーの下書きが無効です。",
-                        "저장된 셰이더 초안이 올바르지 않습니다.",
                     )
                     .to_owned(),
                 );
@@ -4555,8 +6894,6 @@ impl Workspace {
                     self.t(
                         "Invalid saved shader draft.",
                         "保存的着色器草稿无效。",
-                        "保存されたシェーダーの下書きが無効です。",
-                        "저장된 셰이더 초안이 올바르지 않습니다.",
                     )
                     .to_owned(),
                 );
@@ -4572,8 +6909,6 @@ impl Workspace {
                     self.t(
                         "Invalid saved shader draft.",
                         "保存的着色器草稿无效。",
-                        "保存されたシェーダーの下書きが無効です。",
-                        "저장된 셰이더 초안이 올바르지 않습니다.",
                     )
                     .to_owned(),
                 );
@@ -4585,8 +6920,6 @@ impl Workspace {
                     self.t(
                         "Invalid saved shader draft.",
                         "保存的着色器草稿无效。",
-                        "保存されたシェーダーの下書きが無効です。",
-                        "저장된 셰이더 초안이 올바르지 않습니다.",
                     )
                     .to_owned(),
                 );
@@ -4599,8 +6932,6 @@ impl Workspace {
                     self.t(
                         "Invalid saved shader draft.",
                         "保存的着色器草稿无效。",
-                        "保存されたシェーダーの下書きが無効です。",
-                        "저장된 셰이더 초안이 올바르지 않습니다.",
                     )
                     .to_owned(),
                 );
@@ -4726,8 +7057,6 @@ impl Workspace {
                     self.t(
                         "Enter a valid shader encoding.",
                         "请输入有效的着色器编码。",
-                        "有効なシェーダーエンコーディングを入力してください。",
-                        "올바른 셰이더 인코딩을 입력하세요.",
                     )
                     .to_owned(),
                 );
@@ -4747,8 +7076,6 @@ impl Workspace {
                         self.t(
                             "Import a matching external processor configuration first.",
                             "请先导入匹配的外部处理器配置。",
-                            "一致する外部プロセッサーの設定を先に読み込んでください。",
-                            "일치하는 외부 처리기 설정을 먼저 가져오세요.",
                         )
                         .to_owned(),
                     );
@@ -4767,8 +7094,6 @@ impl Workspace {
                         self.t(
                             "Processor input or output encoding is incompatible.",
                             "处理器输入或输出编码不兼容。",
-                            "プロセッサーの入出力エンコーディングが互換ではありません。",
-                            "처리기의 입력 또는 출력 인코딩이 호환되지 않습니다.",
                         )
                         .to_owned(),
                     );
@@ -4799,8 +7124,6 @@ impl Workspace {
                             self.t(
                                 "Could not assemble shader source",
                                 "无法合并着色器源码",
-                                "シェーダーソースを結合できません",
-                                "셰이더 소스를 결합할 수 없습니다"
                             )
                         ));
                         cx.notify();
@@ -4853,8 +7176,6 @@ impl Workspace {
             self.t(
                 "Updating shader replacement…",
                 "正在更新着色器替换…",
-                "シェーダー置換を更新中…",
-                "셰이더 교체를 업데이트하는 중…",
             )
             .to_owned(),
         );
@@ -4906,6 +7227,9 @@ impl Workspace {
                     Ok((edit, replacement, processor_diagnostics)) => {
                         this.event_tree.clear_durations();
                         this.pipeline = Some(edit.pipeline);
+                        this.shader_message_page = None;
+                        this.selected_shader_message = None;
+                        this.shader_vertex_resolution = None;
                         this.shader_report_stale = true;
                         this.mesh = MeshView::default();
                         this.input_page = None;
@@ -4952,22 +7276,16 @@ impl Workspace {
                             this.t(
                                 "Shader replacement removed",
                                 "已还原着色器",
-                                "シェーダー置換を解除しました",
-                                "셰이더 교체를 되돌렸습니다",
                             )
                         } else if edit.applied {
                             this.t(
                                 "Shader replacement applied",
                                 "已应用着色器替换",
-                                "シェーダー置換を適用しました",
-                                "셰이더 교체를 적용했습니다",
                             )
                         } else {
                             this.t(
                                 "Shader compilation failed",
                                 "着色器编译失败",
-                                "シェーダーのコンパイルに失敗しました",
-                                "셰이더 컴파일 실패",
                             )
                         };
                         let diagnostics =
@@ -4988,8 +7306,6 @@ impl Workspace {
                             this.t(
                                 "Shader edit failed",
                                 "着色器编辑失败",
-                                "シェーダー編集に失敗しました",
-                                "셰이더 편집 실패"
                             )
                         ))
                     }
@@ -5018,8 +7334,6 @@ impl Workspace {
                 self.t(
                     "A stable shader resource ID is required to save a draft.",
                     "保存草稿需要稳定的着色器资源 ID。",
-                    "下書きの保存には安定したシェーダーリソース ID が必要です。",
-                    "초안을 저장하려면 안정적인 셰이더 리소스 ID가 필요합니다.",
                 )
                 .to_owned(),
             );
@@ -5031,8 +7345,6 @@ impl Workspace {
                 self.t(
                     "Enter a valid shader encoding.",
                     "请输入有效的着色器编码。",
-                    "有効なシェーダーエンコーディングを入力してください。",
-                    "올바른 셰이더 인코딩을 입력하세요.",
                 )
                 .to_owned(),
             );
@@ -5060,8 +7372,6 @@ impl Workspace {
             self.t(
                 "Saving shader draft…",
                 "正在保存着色器草稿…",
-                "シェーダーの下書きを保存中…",
-                "셰이더 초안 저장 중…",
             )
             .to_owned(),
         );
@@ -5095,9 +7405,9 @@ impl Workspace {
                             editor.files = files.clone(); editor.baseline_files = files;
                             editor.baseline = source; editor.baseline_entry = entry; editor.baseline_encoding = encoding.to_string(); editor.command_line = command_line.clone(); editor.baseline_command_line = command_line; editor.baseline_tool = tool;
                         }
-                        this.status = Some(this.t("Shader draft saved to capture; it was not applied.", "着色器草稿已保存到捕获文件；尚未应用。", "シェーダーの下書きをキャプチャに保存しました。適用はされていません。", "셰이더 초안을 캡처에 저장했습니다. 적용되지는 않았습니다.").to_owned());
+                        this.status = Some(this.t("Shader draft saved to capture; it was not applied.", "着色器草稿已保存到捕获文件；尚未应用。").to_owned());
                     }
-                    Err(error) => this.status = Some(format!("{}: {error}", this.t("Could not save shader draft", "无法保存着色器草稿", "シェーダーの下書きを保存できません", "셰이더 초안을 저장할 수 없습니다"))),
+                    Err(error) => this.status = Some(format!("{}: {error}", this.t("Could not save shader draft", "无法保存着色器草稿"))),
                 }
                 cx.notify();
             });
@@ -5130,8 +7440,6 @@ impl Workspace {
             self.t(
                 "Loading descriptors…",
                 "正在加载描述符…",
-                "ディスクリプターを読み込み中…",
-                "디스크립터를 불러오는 중…",
             )
             .to_owned(),
         );
@@ -5159,8 +7467,6 @@ impl Workspace {
                             this.t(
                                 "Descriptor inspection failed",
                                 "描述符读取失败",
-                                "ディスクリプターの取得に失敗",
-                                "디스크립터 읽기 실패"
                             )
                         ));
                     }
@@ -5180,8 +7486,6 @@ impl Workspace {
                 self.t(
                     "Wait for the event filter to finish.",
                     "请等待事件筛选完成。",
-                    "イベントフィルターの完了をお待ちください。",
-                    "이벤트 필터가 끝날 때까지 기다려 주세요.",
                 )
                 .to_owned(),
             );
@@ -5221,8 +7525,6 @@ impl Workspace {
             self.t(
                 "Exporting events…",
                 "正在导出事件…",
-                "イベントを書き出し中…",
-                "이벤트 내보내는 중…",
             )
             .to_owned(),
         );
@@ -5250,8 +7552,6 @@ impl Workspace {
                         this.t(
                             "Events exported",
                             "事件已导出",
-                            "イベントを書き出しました",
-                            "이벤트를 내보냈습니다"
                         )
                     ),
                     Err(error) => format!(
@@ -5259,8 +7559,6 @@ impl Workspace {
                         this.t(
                             "Event export failed",
                             "事件导出失败",
-                            "イベントを書き出せません",
-                            "이벤트 내보내기 실패"
                         )
                     ),
                 });
@@ -5282,8 +7580,6 @@ impl Workspace {
                 self.t(
                     "GPU event duration is not available on this replay device.",
                     "当前回放设备不支持 GPU 事件耗时。",
-                    "このリプレイデバイスでは GPU イベント時間を取得できません。",
-                    "이 재생 장치에서는 GPU 이벤트 시간을 사용할 수 없습니다.",
                 )
                 .to_owned(),
             );
@@ -5305,8 +7601,6 @@ impl Workspace {
             self.t(
                 "Collecting GPU event durations…",
                 "正在采集 GPU 事件耗时…",
-                "GPU イベント時間を収集中…",
-                "GPU 이벤트 시간 수집 중…",
             )
             .to_owned(),
         );
@@ -5333,8 +7627,6 @@ impl Workspace {
                             this.t(
                                 "GPU event duration collection failed",
                                 "GPU 事件耗时采集失败",
-                                "GPU イベント時間の収集に失敗",
-                                "GPU 이벤트 시간 수집 실패"
                             )
                         ));
                     }
@@ -5382,8 +7674,6 @@ impl Workspace {
             self.t(
                 "Collecting GPU counters…",
                 "正在采集 GPU 计数器…",
-                "GPU カウンターを収集中…",
-                "GPU 카운터 수집 중…",
             )
             .to_owned(),
         );
@@ -5417,8 +7707,6 @@ impl Workspace {
                             this.t(
                                 "GPU counter collection failed",
                                 "GPU 计数器采集失败",
-                                "GPU カウンターの収集に失敗",
-                                "GPU 카운터 수집 실패"
                             )
                         ));
                     }
@@ -5435,8 +7723,6 @@ impl Workspace {
                 self.t(
                     "Wait for the current operation.",
                     "请等待当前操作完成。",
-                    "現在の処理が完了するまでお待ちください。",
-                    "현재 작업이 끝날 때까지 기다려 주세요.",
                 )
                 .to_owned(),
             );
@@ -5470,8 +7756,6 @@ impl Workspace {
             self.t(
                 "Loading resource usage…",
                 "正在加载资源使用记录…",
-                "リソース使用履歴を読み込み中…",
-                "리소스 사용 기록을 불러오는 중…",
             )
             .to_owned(),
         );
@@ -5506,8 +7790,6 @@ impl Workspace {
                                 this.t(
                                     "Could not load full resource usage",
                                     "无法加载完整资源使用记录",
-                                    "すべてのリソース使用履歴を読み込めません",
-                                    "전체 리소스 사용 기록을 불러올 수 없습니다"
                                 )
                             )),
                             None => None,
@@ -5519,8 +7801,6 @@ impl Workspace {
                             this.t(
                                 "Could not load resource usage",
                                 "无法加载资源使用记录",
-                                "リソース使用履歴を取得できません",
-                                "리소스 사용 기록을 불러올 수 없습니다"
                             )
                         ));
                     }
@@ -5547,8 +7827,6 @@ impl Workspace {
                 self.t(
                     "No further action in this direction.",
                     "此方向没有更多动作。",
-                    "この方向にこれ以上のアクションはありません。",
-                    "이 방향에 더 이상의 동작이 없습니다.",
                 )
                 .to_owned(),
             );
@@ -5577,8 +7855,6 @@ impl Workspace {
                 self.t(
                     "Wait for the event filter to finish.",
                     "请等待事件筛选完成。",
-                    "イベントフィルターの完了をお待ちください。",
-                    "이벤트 필터가 끝날 때까지 기다려 주세요.",
                 )
                 .to_owned(),
             );
@@ -5624,8 +7900,6 @@ impl Workspace {
                 self.t(
                     "Searching event names…",
                     "正在搜索事件名称…",
-                    "イベント名を検索中…",
-                    "이벤트 이름을 검색하는 중…",
                 )
                 .to_owned(),
             );
@@ -5677,8 +7951,6 @@ impl Workspace {
                             == Some(this.t(
                                 "Searching event names…",
                                 "正在搜索事件名称…",
-                                "イベント名を検索中…",
-                                "이벤트 이름을 검색하는 중…",
                             ))
                         {
                             this.status = None;
@@ -5700,8 +7972,6 @@ impl Workspace {
                                 this.t(
                                     "Could not search event names",
                                     "无法搜索事件名称",
-                                    "イベント名を検索できません",
-                                    "이벤트 이름을 검색할 수 없습니다"
                                 )
                             ))
                         }
@@ -5717,15 +7987,13 @@ impl Workspace {
             &query,
             current,
             forward,
-            self.t("Capture Start", "捕获开始", "キャプチャ開始", "캡처 시작"),
+            self.t("Capture Start", "捕获开始"),
         ) else {
             if !query.is_empty() {
                 self.status = Some(
                     self.t(
                         "No matching visible event.",
                         "没有匹配的可见事件。",
-                        "一致する表示イベントがありません。",
-                        "일치하는 표시 이벤트가 없습니다.",
                     )
                     .to_owned(),
                 );
@@ -5754,14 +8022,40 @@ impl Workspace {
         self.select_event(action, api, cx);
     }
 
+    fn open_shader_messages_event(
+        &mut self,
+        event: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.replay_pending || self.resource_pending || self.export_pending {
+            self.status = Some(
+                self.t(
+                    "Wait for the current operation.",
+                    "请等待当前操作完成。",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        if self.selected_event_id() == Some(event) && self.pipeline.is_some() {
+            self.tab = CaptureTab::ShaderMessages;
+            self.read_shader_messages(0, cx);
+        } else {
+            self.jump_to_usage(event, window, cx);
+            if self.replay_pending && self.requested_event == Some(event) {
+                self.pending_shader_messages_event = Some(event);
+            }
+        }
+    }
+
     fn jump_to_usage(&mut self, event: u32, window: &mut Window, cx: &mut Context<Self>) {
         if self.replay_pending || self.export_pending || self.resource_pending {
             self.status = Some(
                 self.t(
                     "Wait for the current operation.",
                     "请等待当前操作完成。",
-                    "現在の処理が完了するまでお待ちください。",
-                    "현재 작업이 끝날 때까지 기다려 주세요.",
                 )
                 .to_owned(),
             );
@@ -5795,8 +8089,6 @@ impl Workspace {
                 self.t(
                     "This usage has no navigable event.",
                     "该使用记录没有可跳转的事件。",
-                    "この使用履歴には移動可能なイベントがありません。",
-                    "이 사용 기록에는 이동할 수 있는 이벤트가 없습니다.",
                 )
                 .to_owned(),
             );
@@ -5820,8 +8112,6 @@ impl Workspace {
                     self.t(
                         "Enter a nonnegative view index.",
                         "请输入非负视图序号。",
-                        "0 以上のビュー番号を入力してください。",
-                        "0 이상의 뷰 번호를 입력하세요.",
                     )
                     .to_owned(),
                 );
@@ -5849,8 +8139,6 @@ impl Workspace {
                     self.t(
                         "Enter a nonnegative instance index.",
                         "请输入非负实例序号。",
-                        "0 以上のインスタンス番号を入力してください。",
-                        "0 이상의 인스턴스 번호를 입력하세요.",
                     )
                     .to_owned(),
                 );
@@ -5872,8 +8160,6 @@ impl Workspace {
                 self.t(
                     "Enter nonnegative integer pixel coordinates.",
                     "请输入非负整数像素坐标。",
-                    "非負の整数ピクセル座標を入力してください。",
-                    "음이 아닌 정수 픽셀 좌표를 입력하세요.",
                 )
                 .to_owned(),
             );
@@ -5897,7 +8183,7 @@ impl Workspace {
     }
 
     fn invalid_pixel_debug_selector(&mut self, cx: &mut Context<Self>) {
-        self.status = Some(self.t("Leave primitive and view blank for automatic selection, or enter integers below 4294967295.", "图元和视图留空表示自动选择，或输入小于 4294967295 的整数。", "プリミティブとビューは空欄で自動選択、または 4294967295 未満の整数を入力してください。", "프리미티브와 뷰를 비워 자동 선택하거나 4294967295 미만의 정수를 입력하세요.").to_owned());
+        self.status = Some(self.t("Leave primitive and view blank for automatic selection, or enter integers below 4294967295.", "图元和视图留空表示自动选择，或输入小于 4294967295 的整数。").to_owned());
         cx.notify();
     }
 
@@ -5919,8 +8205,6 @@ impl Workspace {
                 self.t(
                     "Enter three comma-separated nonnegative integers for each coordinate.",
                     "每组坐标请输入三个以逗号分隔的非负整数。",
-                    "各座標にカンマ区切りの非負整数を3つ入力してください。",
-                    "각 좌표에 쉼표로 구분된 음이 아닌 정수 세 개를 입력하세요.",
                 )
                 .to_owned(),
             );
@@ -5937,6 +8221,15 @@ impl Workspace {
     }
 
     fn start_shader_debug(&mut self, context: ShaderDebugContext, cx: &mut Context<Self>) {
+        self.start_shader_debug_at(context, None, cx);
+    }
+
+    fn start_shader_debug_at(
+        &mut self,
+        context: ShaderDebugContext,
+        message_line: Option<i32>,
+        cx: &mut Context<Self>,
+    ) {
         if self.replay_pending || self.export_pending || self.resource_pending {
             return;
         }
@@ -5955,15 +8248,22 @@ impl Workspace {
             self.t(
                 "Collecting shader debug trace…",
                 "正在收集着色器调试轨迹…",
-                "シェーダーデバッグのトレースを収集中…",
-                "셰이더 디버그 추적을 수집하는 중…",
             )
             .to_owned(),
         );
         cx.notify();
-        let task = cx
-            .background_executor()
-            .spawn(async move { collect_shader_debug(&session, event, context) });
+        let task = cx.background_executor().spawn(async move {
+            let mut view = collect_shader_debug(&session, event, context)?;
+            if let Some(line) = message_line {
+                view.message_jump = view.navigator.run_to_message_line(
+                    &view.trace,
+                    &view.states,
+                    &view.disassembly,
+                    line,
+                );
+            }
+            Ok::<_, String>(view)
+        });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -5982,8 +8282,6 @@ impl Workspace {
                             this.t(
                                 "Shader debugging failed",
                                 "着色器调试失败",
-                                "シェーダーデバッグに失敗しました",
-                                "셰이더 디버깅 실패"
                             )
                         ))
                     }
@@ -5999,8 +8297,6 @@ impl Workspace {
                 self.t(
                     "Wait for the current operation.",
                     "请等待当前操作完成。",
-                    "現在の処理が完了するまでお待ちください。",
-                    "현재 작업이 끝날 때까지 기다려 주세요.",
                 )
                 .to_owned(),
             );
@@ -6019,8 +8315,6 @@ impl Workspace {
                 self.t(
                     "Select a draw action first.",
                     "请先选择绘制操作。",
-                    "先に描画アクションを選択してください。",
-                    "먼저 그리기 작업을 선택하세요.",
                 )
                 .to_owned(),
             );
@@ -6041,8 +8335,6 @@ impl Workspace {
             self.t(
                 "Loading vertex inputs…",
                 "正在加载顶点输入…",
-                "頂点入力を読み込み中…",
-                "정점 입력을 불러오는 중…",
             )
             .to_owned(),
         );
@@ -6077,8 +8369,6 @@ impl Workspace {
                             this.t(
                                 "Could not inspect vertex inputs",
                                 "无法查看顶点输入",
-                                "頂点入力を表示できません",
-                                "정점 입력을 확인할 수 없습니다"
                             )
                         ));
                     }
@@ -6096,13 +8386,22 @@ impl Workspace {
         offset: u64,
         cx: &mut Context<Self>,
     ) {
+        self.read_mesh_inner(selection, kind, offset, None, cx);
+    }
+
+    fn read_mesh_inner(
+        &mut self,
+        selection: MeshSelection,
+        kind: MeshBufferKind,
+        offset: u64,
+        highlighted_row: Option<u32>,
+        cx: &mut Context<Self>,
+    ) {
         if self.replay_pending || self.export_pending || self.resource_pending {
             self.status = Some(
                 self.t(
                     "Wait for the current operation.",
                     "请等待当前操作完成。",
-                    "現在の処理が完了するまでお待ちください。",
-                    "현재 작업이 끝날 때까지 기다려 주세요.",
                 )
                 .to_owned(),
             );
@@ -6114,8 +8413,6 @@ impl Workspace {
                 self.t(
                     "Select a draw or mesh event first.",
                     "请先选择绘制或网格事件。",
-                    "先に描画またはメッシュイベントを選択してください。",
-                    "먼저 그리기 또는 메시 이벤트를 선택하세요.",
                 )
                 .to_owned(),
             );
@@ -6145,8 +8442,6 @@ impl Workspace {
             self.t(
                 "Loading mesh output…",
                 "正在加载网格输出…",
-                "メッシュ出力を読み込み中…",
-                "메시 출력을 불러오는 중…",
             )
             .to_owned(),
         );
@@ -6208,6 +8503,12 @@ impl Workspace {
                 this.resource_pending = false;
                 match result {
                     Ok((info, bytes, draw, task_sizes)) => {
+                        let requested_highlight = highlighted_row.is_some();
+                        let highlighted_row = highlighted_row.filter(|target| {
+                            draw.as_ref()
+                                .is_some_and(|page| page.rows.iter().any(|row| row.row == *target))
+                        });
+                        let missing_row = requested_highlight && highlighted_row.is_none();
                         this.mesh = MeshView {
                             selection,
                             kind,
@@ -6217,8 +8518,17 @@ impl Workspace {
                             filter,
                             task_sizes,
                             offset,
+                            highlighted_row,
+                            geometry_message_handoff: selection.stage == 2
+                                && highlighted_row.is_some(),
                         };
-                        this.status = None;
+                        this.status = missing_row.then(|| {
+                            this.t(
+                                "The requested mesh row is unavailable.",
+                                "请求的网格行不可用。",
+                            )
+                            .to_owned()
+                        });
                     }
                     Err(error) => {
                         this.mesh = MeshView {
@@ -6231,8 +8541,6 @@ impl Workspace {
                             this.t(
                                 "Could not inspect mesh output",
                                 "无法查看网格输出",
-                                "メッシュ出力を表示できません",
-                                "메시 출력을 확인할 수 없습니다"
                             )
                         ));
                     }
@@ -6258,8 +8566,6 @@ impl Workspace {
                     self.t(
                         "Enter nonnegative instance and view indices.",
                         "请输入非负的实例和视图序号。",
-                        "0 以上のインスタンス番号とビュー番号を入力してください。",
-                        "0 이상의 인스턴스 및 뷰 번호를 입력하세요.",
                     )
                     .to_owned(),
                 );
@@ -6311,8 +8617,6 @@ impl Workspace {
                 self.t(
                     "Select an event first.",
                     "请先选择事件。",
-                    "最初にイベントを選択してください。",
-                    "먼저 이벤트를 선택하세요.",
                 )
                 .to_owned(),
             );
@@ -6329,8 +8633,6 @@ impl Workspace {
             self.t(
                 "Loading event call stack…",
                 "正在加载事件调用栈…",
-                "イベントの呼び出し履歴を読み込み中…",
-                "이벤트 호출 스택을 불러오는 중…",
             )
             .to_owned(),
         );
@@ -6356,8 +8658,6 @@ impl Workspace {
                             this.t(
                                 "Could not load call stack",
                                 "无法加载调用栈",
-                                "呼び出し履歴を読み込めません",
-                                "호출 스택을 불러올 수 없습니다"
                             )
                         ));
                     }
@@ -6374,8 +8674,6 @@ impl Workspace {
                 self.t(
                     "Wait for the current operation.",
                     "请等待当前操作完成。",
-                    "現在の処理が完了するまでお待ちください。",
-                    "현재 작업이 끝날 때까지 기다려 주세요.",
                 )
                 .to_owned(),
             );
@@ -6387,8 +8685,6 @@ impl Workspace {
                 self.t(
                     "Select an event before inspecting parameters.",
                     "请先选择事件再查看参数。",
-                    "パラメーターを見る前にイベントを選択してください。",
-                    "매개변수를 확인하기 전에 이벤트를 선택하세요.",
                 )
                 .to_owned(),
             );
@@ -6406,8 +8702,6 @@ impl Workspace {
             self.t(
                 "Loading event parameters…",
                 "正在加载事件参数…",
-                "イベントパラメーターを読み込み中…",
-                "이벤트 매개변수를 불러오는 중…",
             )
             .to_owned(),
         );
@@ -6441,8 +8735,6 @@ impl Workspace {
                             this.t(
                                 "Could not inspect event parameters",
                                 "无法查看事件参数",
-                                "イベントパラメーターを表示できません",
-                                "이벤트 매개변수를 확인할 수 없습니다"
                             )
                         ));
                     }
@@ -6475,8 +8767,6 @@ impl Workspace {
             self.t(
                 "Formatting event parameters…",
                 "正在格式化事件参数…",
-                "イベントパラメーターを整形中…",
-                "이벤트 매개변수를 서식 지정하는 중…",
             )
             .to_owned(),
         );
@@ -6509,8 +8799,6 @@ impl Workspace {
                             this.t(
                                 "Could not format event",
                                 "无法格式化事件",
-                                "イベントを整形できません",
-                                "이벤트 서식 지정 실패"
                             )
                         ))
                     }
@@ -6551,8 +8839,6 @@ impl Workspace {
         self.status = Some(self.t(
             "Loading bytes in an isolated worker; full capture export can use substantial memory…",
             "正在隔离进程中读取字节；完整捕获导出可能占用较多内存…",
-            "分離プロセスでバイトを読み込み中。完全なキャプチャーの出力には多くのメモリが必要な場合があります…",
-            "분리된 프로세스에서 바이트를 불러오는 중입니다. 전체 캡처 내보내기에 많은 메모리가 필요할 수 있습니다…",
         ).to_owned());
         cx.notify();
         let task = cx
@@ -6577,8 +8863,6 @@ impl Workspace {
                             this.t(
                                 "Could not read structured bytes",
                                 "无法读取结构化字节",
-                                "構造化バイトを読み込めません",
-                                "구조화된 바이트를 읽을 수 없습니다"
                             )
                         ));
                     }
@@ -6595,8 +8879,6 @@ impl Workspace {
                 self.t(
                     "Wait for the current operation.",
                     "请等待当前操作完成。",
-                    "現在の処理が完了するまでお待ちください。",
-                    "현재 작업이 끝날 때까지 기다려 주세요.",
                 )
                 .to_owned(),
             );
@@ -6785,8 +9067,6 @@ impl Workspace {
                 self.t(
                     "Select an event and texture before fitting the range.",
                     "请先选择事件和纹理，再自适应范围。",
-                    "範囲を調整する前にイベントとテクスチャを選択してください。",
-                    "범위를 맞추기 전에 이벤트와 텍스처를 선택하세요.",
                 )
                 .to_owned(),
             );
@@ -6816,8 +9096,6 @@ impl Workspace {
                 self.t(
                     "Enable a texture channel before fitting the range.",
                     "请至少启用一个纹理通道，再自适应范围。",
-                    "範囲を調整する前にチャンネルを有効にしてください。",
-                    "범위를 맞추기 전에 텍스처 채널을 활성화하세요.",
                 )
                 .to_owned(),
             );
@@ -6834,8 +9112,6 @@ impl Workspace {
             self.t(
                 "Fitting texture range…",
                 "正在自适应纹理范围…",
-                "テクスチャの範囲を調整中…",
-                "텍스처 범위를 맞추는 중…",
             )
             .to_owned(),
         );
@@ -6894,8 +9170,6 @@ impl Workspace {
                                 this.t(
                                     "Could not fit texture range",
                                     "无法自适应纹理范围",
-                                    "テクスチャ範囲を調整できません",
-                                    "텍스처 범위를 맞출 수 없습니다"
                                 )
                             ));
                             cx.notify();
@@ -6913,8 +9187,6 @@ impl Workspace {
                 self.t(
                     "Wait for the current operation.",
                     "请等待当前操作完成。",
-                    "現在の処理が完了するまでお待ちください。",
-                    "현재 작업이 끝날 때까지 기다려 주세요.",
                 )
                 .to_owned(),
             );
@@ -6941,8 +9213,6 @@ impl Workspace {
                 self.t(
                     "Enter finite black and white points with black below white.",
                     "请输入有限黑白点，且黑点小于白点。",
-                    "黒点と白点に有限値を入力し、黒点を白点より小さくしてください。",
-                    "유한한 흑점과 백점을 입력하고 흑점이 백점보다 작아야 합니다.",
                 )
                 .to_owned(),
             );
@@ -6962,8 +9232,6 @@ impl Workspace {
                 self.t(
                     "Wait for the current operation.",
                     "请等待当前操作完成。",
-                    "現在の処理が完了するまでお待ちください。",
-                    "현재 작업이 끝날 때까지 기다려 주세요.",
                 )
                 .to_owned(),
             );
@@ -7103,8 +9371,6 @@ impl Workspace {
                         self.t(
                             "Enter a finite, non-negative RGBM multiplier.",
                             "请输入有限且非负的 RGBM 乘数。",
-                            "有限の 0 以上の RGBM 乗数を入力してください。",
-                            "유한한 0 이상의 RGBM 배율을 입력하세요.",
                         )
                         .to_owned(),
                     );
@@ -7163,8 +9429,8 @@ impl Workspace {
                 self.refresh_custom_shaders();
                 self.texture_custom_diagnostics = format!(
                     "{}: {count}; {}: {}{}",
-                    self.t("Imported", "已导入", "読み込み済み", "가져옴"),
-                    self.t("Failed", "失败", "失敗", "실패"),
+                    self.t("Imported", "已导入"),
+                    self.t("Failed", "失败"),
                     errors.len(),
                     if errors.is_empty() {
                         String::new()
@@ -7199,8 +9465,6 @@ impl Workspace {
                 self.t(
                     "Invalid compile flags JSON",
                     "编译参数 JSON 无效",
-                    "コンパイルフラグの JSON が無効です",
-                    "컴파일 플래그 JSON이 올바르지 않습니다"
                 )
             )
         })
@@ -7245,8 +9509,6 @@ impl Workspace {
                     .t(
                         "Shader saved.",
                         "着色器已保存。",
-                        "シェーダーを保存しました。",
-                        "셰이더를 저장했습니다.",
                     )
                     .to_owned();
             }
@@ -7273,8 +9535,6 @@ impl Workspace {
                     .t(
                         "Shader deleted.",
                         "着色器已删除。",
-                        "シェーダーを削除しました。",
-                        "셰이더를 삭제했습니다.",
                     )
                     .to_owned();
             }
@@ -7389,8 +9649,6 @@ impl Workspace {
                 .t(
                     "Enter an encoding (1–9), entry point and shader source.",
                     "请输入编码（1–9）、入口点和着色器源码。",
-                    "エンコード（1–9）、エントリポイント、ソースを入力してください。",
-                    "인코딩 (1–9), 진입점 및 셰이더 소스를 입력하세요.",
                 )
                 .to_owned();
             cx.notify();
@@ -7503,8 +9761,6 @@ impl Workspace {
                 self.t(
                     "Compile a custom shader first.",
                     "请先编译自定义着色器。",
-                    "先にカスタムシェーダーをコンパイルしてください。",
-                    "먼저 사용자 셰이더를 컴파일하세요.",
                 )
                 .to_owned(),
             );
@@ -7548,8 +9804,6 @@ impl Workspace {
                         self.t(
                             "Enter a background color as #RRGGBB.",
                             "请输入 #RRGGBB 格式的背景色。",
-                            "背景色を #RRGGBB 形式で入力してください。",
-                            "배경색을 #RRGGBB 형식으로 입력하세요.",
                         )
                         .to_owned(),
                     );
@@ -7648,8 +9902,6 @@ impl Workspace {
                 self.t(
                     "Enter a valid grid width, JPEG quality (1–100), or color (#RRGGBB).",
                     "请输入有效的网格宽度、JPEG 质量（1–100）或颜色（#RRGGBB）。",
-                    "有効なグリッド幅、JPEG 品質（1–100）、色（#RRGGBB）を入力してください。",
-                    "올바른 격자 너비, JPEG 품질 (1–100) 또는 색상 (#RRGGBB)을 입력하세요.",
                 )
                 .to_owned(),
             );
@@ -7786,8 +10038,6 @@ impl Workspace {
                 self.t(
                     "Select an event and wait for replay before exporting.",
                     "请先选择事件并等待回放完成再导出。",
-                    "イベントを選択し、リプレイ完了後に書き出してください。",
-                    "이벤트를 선택하고 리플레이가 끝난 뒤 내보내세요.",
                 )
                 .to_owned(),
             );
@@ -7830,8 +10080,6 @@ impl Workspace {
             self.t(
                 "Exporting buffer…",
                 "正在导出缓冲区…",
-                "バッファを書き出し中…",
-                "버퍼를 내보내는 중…",
             )
             .to_owned(),
         );
@@ -7852,8 +10100,6 @@ impl Workspace {
                         this.t(
                             "Buffer exported",
                             "缓冲区已导出",
-                            "バッファを書き出しました",
-                            "버퍼를 내보냈습니다"
                         )
                     ),
                     Err(error) => format!(
@@ -7861,8 +10107,6 @@ impl Workspace {
                         this.t(
                             "Buffer export failed",
                             "缓冲区导出失败",
-                            "バッファを書き出せません",
-                            "버퍼 내보내기 실패"
                         )
                     ),
                 });
@@ -7910,8 +10154,6 @@ impl Workspace {
                 self.t(
                     "The layout starts outside the current range.",
                     "布局起点位于当前范围之外。",
-                    "レイアウトの開始位置が現在の範囲外です。",
-                    "레이아웃 시작 위치가 현재 범위 밖입니다.",
                 )
                 .to_owned(),
             );
@@ -7935,8 +10177,6 @@ impl Workspace {
             self.t(
                 "Exporting CSV…",
                 "正在导出 CSV…",
-                "CSV を書き出し中…",
-                "CSV를 내보내는 중…",
             )
             .to_owned(),
         );
@@ -7957,12 +10197,10 @@ impl Workspace {
                         this.t(
                             "CSV exported",
                             "CSV 已导出",
-                            "CSV を書き出しました",
-                            "CSV를 내보냈습니다"
                         ),
-                        this.t("rows", "行", "行", "행"),
+                        this.t("rows", "行"),
                         summary.rows,
-                        this.t("trailing bytes", "剩余字节", "残りのバイト", "남은 바이트"),
+                        this.t("trailing bytes", "剩余字节"),
                         summary.trailing_bytes
                     ),
                     Err(error) => format!(
@@ -7970,8 +10208,6 @@ impl Workspace {
                         this.t(
                             "CSV export failed",
                             "CSV 导出失败",
-                            "CSV を書き出せません",
-                            "CSV 내보내기 실패"
                         )
                     ),
                 });
@@ -7999,8 +10235,6 @@ impl Workspace {
                     self.t(
                         "Enter a valid raw byte offset (decimal or 0x).",
                         "请输入有效的原始字节偏移（十进制或 0x）。",
-                        "有効な生バイトオフセットを入力してください（10 進数または 0x）。",
-                        "유효한 원시 바이트 오프셋을 입력하세요 (10진수 또는 0x).",
                     )
                     .to_owned(),
                 );
@@ -8022,8 +10256,6 @@ impl Workspace {
                 self.t(
                     "Select an event and texture first.",
                     "请先选择事件和纹理。",
-                    "先にイベントとテクスチャを選択してください。",
-                    "먼저 이벤트와 텍스처를 선택하세요.",
                 )
                 .to_owned(),
             );
@@ -8043,8 +10275,6 @@ impl Workspace {
                 self.t(
                     "Select an individual sample for raw data.",
                     "查看原始数据需要选择单个采样。",
-                    "生データには個別のサンプルを選択してください。",
-                    "원시 데이터에는 개별 샘플을 선택하세요.",
                 )
                 .to_owned(),
             );
@@ -8061,8 +10291,6 @@ impl Workspace {
                 self.t(
                     "Invalid raw texture selection.",
                     "原始纹理选择无效。",
-                    "生テクスチャの選択が無効です。",
-                    "원시 텍스처 선택이 잘못되었습니다.",
                 )
                 .to_owned(),
             );
@@ -8076,8 +10304,6 @@ impl Workspace {
                 self.t(
                     "Enter a nonempty sequence of hexadecimal bytes.",
                     "请输入非空的十六进制字节序列。",
-                    "空でない 16 進バイト列を入力してください。",
-                    "비어 있지 않은 16진수 바이트를 입력하세요.",
                 )
                 .to_owned(),
             );
@@ -8110,8 +10336,6 @@ impl Workspace {
             self.t(
                 "Searching raw texture…",
                 "正在搜索原始纹理…",
-                "生テクスチャを検索中…",
-                "원시 텍스처를 검색하는 중…",
             )
             .to_owned(),
         );
@@ -8152,8 +10376,6 @@ impl Workspace {
                             this.t(
                                 "No further match in the raw texture.",
                                 "原始纹理中没有后续匹配。",
-                                "生テクスチャに次の一致はありません。",
-                                "원시 텍스처에 다음 일치 항목이 없습니다.",
                             )
                             .to_owned(),
                         );
@@ -8165,8 +10387,6 @@ impl Workspace {
                             this.t(
                                 "Raw texture search failed",
                                 "原始纹理搜索失败",
-                                "生テクスチャの検索に失敗しました",
-                                "원시 텍스처 검색 실패"
                             )
                         ));
                         cx.notify();
@@ -8190,8 +10410,6 @@ impl Workspace {
                 self.t(
                     "Select an event and texture first.",
                     "请先选择事件和纹理。",
-                    "先にイベントとテクスチャを選択してください。",
-                    "먼저 이벤트와 텍스처를 선택하세요.",
                 )
                 .to_owned(),
             );
@@ -8211,8 +10429,6 @@ impl Workspace {
                 self.t(
                     "Select an individual sample for raw data.",
                     "查看原始数据需要选择单个采样。",
-                    "生データには個別のサンプルを選択してください。",
-                    "원시 데이터에는 개별 샘플을 선택하세요.",
                 )
                 .to_owned(),
             );
@@ -8225,7 +10441,7 @@ impl Workspace {
             sample: self.texture_selection.sample.unwrap_or(0),
         };
         if selection.validate(&texture).is_err() {
-            self.status = Some(self.t("Raw selection is invalid; for 3D textures use slice 0 for the whole mip volume.", "原始数据选择无效；3D 纹理选择切片 0 以读取整个 mip 体积。", "生データの選択が無効です。3D ではスライス 0 を選んで mip 全体を取得します。", "원시 데이터 선택이 잘못되었습니다. 3D에서는 슬라이스 0으로 전체 mip을 읽습니다.").to_owned());
+            self.status = Some(self.t("Raw selection is invalid; for 3D textures use slice 0 for the whole mip volume.", "原始数据选择无效；3D 纹理选择切片 0 以读取整个 mip 体积。").to_owned());
             cx.notify();
             return;
         }
@@ -8240,8 +10456,6 @@ impl Workspace {
             self.t(
                 "Reading raw texture…",
                 "正在读取原始纹理…",
-                "生テクスチャを読み込み中…",
-                "원시 텍스처를 읽는 중…",
             )
             .to_owned(),
         );
@@ -8273,8 +10487,6 @@ impl Workspace {
                             this.t(
                                 "Could not read raw texture",
                                 "无法读取原始纹理",
-                                "生テクスチャを読み込めません",
-                                "원시 텍스처를 읽을 수 없습니다"
                             )
                         ))
                     }
@@ -8295,8 +10507,6 @@ impl Workspace {
                 self.t(
                     "Select an event and wait for replay before exporting.",
                     "请先选择事件并等待回放完成再导出。",
-                    "イベントを選択し、リプレイ完了後に書き出してください。",
-                    "이벤트를 선택하고 재생이 끝난 뒤 내보내세요.",
                 )
                 .to_owned(),
             );
@@ -8318,8 +10528,6 @@ impl Workspace {
                 self.t(
                     "Select an individual sample for raw export.",
                     "原始数据导出需要选择单个采样。",
-                    "生データの書き出しには個別のサンプルを選択してください。",
-                    "원시 데이터를 내보내려면 개별 샘플을 선택하세요.",
                 )
                 .to_owned(),
             );
@@ -8337,15 +10545,11 @@ impl Workspace {
                     self.t(
                         "For a 3D texture, select slice 0 to export the entire mip volume.",
                         "3D 纹理请选择切片 0，导出整个 mip 体积。",
-                        "3D テクスチャではスライス 0 を選択し、mip 全体を書き出します。",
-                        "3D 텍스처는 슬라이스 0을 선택하여 전체 mip 볼륨을 내보내세요.",
                     )
                 } else {
                     self.t(
                         "Raw texture selection is out of range.",
                         "原始纹理子资源选择超出范围。",
-                        "生テクスチャの選択範囲が無効です。",
-                        "원시 텍스처 선택 범위가 올바르지 않습니다.",
                     )
                 }
                 .to_owned(),
@@ -8370,8 +10574,6 @@ impl Workspace {
             self.t(
                 "Exporting raw texture…",
                 "正在导出原始纹理…",
-                "生テクスチャを書き出し中…",
-                "원시 텍스처를 내보내는 중…",
             )
             .to_owned(),
         );
@@ -8392,8 +10594,6 @@ impl Workspace {
                         this.t(
                             "Raw texture exported",
                             "原始纹理已导出",
-                            "生テクスチャを書き出しました",
-                            "원시 텍스처를 내보냈습니다"
                         )
                     ),
                     Err(error) => format!(
@@ -8401,8 +10601,6 @@ impl Workspace {
                         this.t(
                             "Raw texture export failed",
                             "原始纹理导出失败",
-                            "生テクスチャを書き出せません",
-                            "원시 텍스처 내보내기 실패"
                         )
                     ),
                 });
@@ -8422,8 +10620,6 @@ impl Workspace {
                 self.t(
                     "Select an event and wait for replay to finish before exporting.",
                     "请先选择事件并等待回放完成，再导出纹理。",
-                    "イベントを選択し、リプレイ完了後に書き出してください。",
-                    "이벤트를 선택하고 리플레이가 끝난 뒤 내보내세요.",
                 )
                 .to_owned(),
             );
@@ -8449,8 +10645,6 @@ impl Workspace {
                 self.t(
                     "Texture selection is out of range.",
                     "纹理子资源选择超出范围。",
-                    "テクスチャの選択範囲が無効です。",
-                    "텍스처 선택 범위가 올바르지 않습니다.",
                 )
                 .to_owned(),
             );
@@ -8472,8 +10666,6 @@ impl Workspace {
                 self.t(
                     "Choose a supported texture file extension.",
                     "请选择受支持的纹理文件扩展名。",
-                    "対応するテクスチャの拡張子を選択してください。",
-                    "지원되는 텍스처 파일 확장자를 선택하세요.",
                 )
                 .to_owned(),
             );
@@ -8487,8 +10679,6 @@ impl Workspace {
             self.t(
                 "Exporting texture…",
                 "正在导出纹理…",
-                "テクスチャを書き出し中…",
-                "텍스처를 내보내는 중…",
             )
             .to_owned(),
         );
@@ -8509,8 +10699,6 @@ impl Workspace {
                         this.t(
                             "Texture exported",
                             "纹理已导出",
-                            "テクスチャを書き出しました",
-                            "텍스처를 내보냈습니다",
                         )
                     ),
                     Err(error) => format!(
@@ -8518,8 +10706,6 @@ impl Workspace {
                         this.t(
                             "Texture export failed",
                             "纹理导出失败",
-                            "テクスチャを書き出せません",
-                            "텍스처 내보내기 실패"
                         )
                     ),
                 });
@@ -8562,15 +10748,11 @@ impl Workspace {
                 self.t(
                     "Exporting mesh attributes…",
                     "正在导出网格属性…",
-                    "メッシュ属性を書き出し中…",
-                    "메시 속성을 내보내는 중…",
                 )
             } else {
                 self.t(
                     "Exporting mesh positions…",
                     "正在导出网格位置…",
-                    "メッシュ位置を書き出し中…",
-                    "메시 위치를 내보내는 중…",
                 )
             }
             .to_owned(),
@@ -8613,15 +10795,11 @@ impl Workspace {
                             this.t(
                                 "Mesh attributes exported",
                                 "网格属性已导出",
-                                "メッシュ属性を書き出しました",
-                                "메시 속성을 내보냈습니다",
                             )
                         } else {
                             this.t(
                                 "Mesh positions exported",
                                 "网格位置已导出",
-                                "メッシュ位置を書き出しました",
-                                "메시 위치를 내보냈습니다",
                             )
                         }
                     ),
@@ -8630,8 +10808,6 @@ impl Workspace {
                         this.t(
                             "Mesh export failed",
                             "网格导出失败",
-                            "メッシュを書き出せません",
-                            "메시 내보내기 실패"
                         )
                     ),
                 });
@@ -8664,8 +10840,6 @@ impl Workspace {
             self.t(
                 "Loading shader bindings…",
                 "正在加载着色器绑定…",
-                "シェーダーバインドを読み込み中…",
-                "셰이더 바인딩을 불러오는 중…",
             )
             .to_owned(),
         );
@@ -8698,8 +10872,6 @@ impl Workspace {
                             this.t(
                                 "Shader bindings unavailable",
                                 "着色器绑定不可用",
-                                "シェーダーバインドを利用できません",
-                                "셰이더 바인딩을 사용할 수 없습니다"
                             )
                         ))
                     }
@@ -8740,8 +10912,6 @@ impl Workspace {
             self.t(
                 "Loading constant values…",
                 "正在加载常量值…",
-                "定数値を読み込み中…",
-                "상수 값을 불러오는 중…",
             )
             .to_owned(),
         );
@@ -8768,8 +10938,6 @@ impl Workspace {
                             this.t(
                                 "Constant values unavailable",
                                 "常量值不可用",
-                                "定数値を利用できません",
-                                "상수 값을 사용할 수 없습니다"
                             )
                         ))
                     }
@@ -8813,8 +10981,6 @@ impl Workspace {
             self.t(
                 "Exporting shader text…",
                 "正在导出着色器文本…",
-                "シェーダーテキストを書き出し中…",
-                "셰이더 텍스트를 내보내는 중…",
             )
             .to_owned(),
         );
@@ -8835,8 +11001,6 @@ impl Workspace {
                         this.t(
                             "Shader text exported",
                             "着色器文本已导出",
-                            "シェーダーテキストを書き出しました",
-                            "셰이더 텍스트를 내보냈습니다"
                         )
                     ),
                     Err(error) => format!(
@@ -8844,8 +11008,6 @@ impl Workspace {
                         this.t(
                             "Shader text export failed",
                             "着色器文本导出失败",
-                            "シェーダーテキストを書き出せません",
-                            "셰이더 텍스트 내보내기 실패"
                         )
                     ),
                 });
@@ -8861,8 +11023,6 @@ impl Workspace {
                 self.t(
                     "Wait for the current operation.",
                     "请等待当前操作完成。",
-                    "現在の処理が完了するまでお待ちください。",
-                    "현재 작업이 끝날 때까지 기다려 주세요.",
                 )
                 .to_owned(),
             );
@@ -8874,8 +11034,6 @@ impl Workspace {
                 self.t(
                     "Select an event before inspecting pixel history.",
                     "请先选择事件再查看像素历史。",
-                    "ピクセル履歴を見る前にイベントを選択してください。",
-                    "픽셀 기록을 확인하기 전에 이벤트를 선택하세요.",
                 )
                 .to_owned(),
             );
@@ -8897,8 +11055,6 @@ impl Workspace {
                 self.t(
                     "Enter nonnegative integer pixel coordinates.",
                     "请输入非负整数像素坐标。",
-                    "非負の整数ピクセル座標を入力してください。",
-                    "음이 아닌 정수 픽셀 좌표를 입력하세요.",
                 )
                 .to_owned(),
             );
@@ -8932,8 +11088,6 @@ impl Workspace {
             self.t(
                 "Replaying pixel history; this may take time…",
                 "正在回放像素历史，可能需要一些时间…",
-                "ピクセル履歴をリプレイ中です。時間がかかる場合があります…",
-                "픽셀 기록을 리플레이하는 중입니다. 시간이 걸릴 수 있습니다…",
             )
             .to_owned(),
         );
@@ -8988,8 +11142,6 @@ impl Workspace {
                             this.t(
                                 "Could not inspect pixel history",
                                 "无法查看像素历史",
-                                "ピクセル履歴を表示できません",
-                                "픽셀 기록을 확인할 수 없습니다"
                             )
                         ));
                     }
@@ -9006,8 +11158,6 @@ impl Workspace {
                 self.t(
                     "Wait for the current operation.",
                     "请等待当前操作完成。",
-                    "現在の処理が完了するまでお待ちください。",
-                    "현재 작업이 끝날 때까지 기다려 주세요.",
                 )
                 .to_owned(),
             );
@@ -9019,8 +11169,6 @@ impl Workspace {
                 self.t(
                     "Select an event before analyzing a texture.",
                     "请先选择事件再分析纹理。",
-                    "テクスチャを解析する前にイベントを選択してください。",
-                    "텍스처를 분석하기 전에 이벤트를 선택하세요.",
                 )
                 .to_owned(),
             );
@@ -9035,8 +11183,6 @@ impl Workspace {
                 self.t(
                     "Enter a finite histogram range.",
                     "请输入有限的直方图范围。",
-                    "有限のヒストグラム範囲を入力してください。",
-                    "유한한 히스토그램 범위를 입력하세요.",
                 )
                 .to_owned(),
             );
@@ -9079,8 +11225,6 @@ impl Workspace {
                 self.t(
                     "Invalid histogram range or channel.",
                     "直方图范围或通道无效。",
-                    "ヒストグラムの範囲またはチャンネルが無効です。",
-                    "히스토그램 범위 또는 채널이 올바르지 않습니다.",
                 )
                 .to_owned(),
             );
@@ -9095,8 +11239,6 @@ impl Workspace {
             self.t(
                 "Analyzing texture…",
                 "正在分析纹理…",
-                "テクスチャを解析中…",
-                "텍스처 분석 중…",
             )
             .to_owned(),
         );
@@ -9127,8 +11269,6 @@ impl Workspace {
                             this.t(
                                 "Could not analyze texture",
                                 "无法分析纹理",
-                                "テクスチャを解析できません",
-                                "텍스처를 분석할 수 없습니다"
                             )
                         ));
                     }
@@ -9150,8 +11290,6 @@ impl Workspace {
                 self.t(
                     "Wait for the current operation.",
                     "请等待当前操作完成。",
-                    "現在の処理が完了するまでお待ちください。",
-                    "현재 작업이 끝날 때까지 기다려 주세요.",
                 )
                 .to_owned(),
             );
@@ -9163,8 +11301,6 @@ impl Workspace {
                 self.t(
                     "Select an event before picking a pixel.",
                     "请先选择事件再读取像素。",
-                    "ピクセルを取得する前にイベントを選択してください。",
-                    "픽셀을 읽기 전에 이벤트를 선택하세요.",
                 )
                 .to_owned(),
             );
@@ -9182,8 +11318,6 @@ impl Workspace {
                 self.t(
                     "Enter nonnegative integer pixel coordinates.",
                     "请输入非负整数像素坐标。",
-                    "非負の整数ピクセル座標を入力してください。",
-                    "음이 아닌 정수 픽셀 좌표를 입력하세요.",
                 )
                 .to_owned(),
             );
@@ -9237,8 +11371,6 @@ impl Workspace {
             self.t(
                 "Picking pixel…",
                 "正在读取像素…",
-                "ピクセルを取得中…",
-                "픽셀을 읽는 중…",
             )
             .to_owned(),
         );
@@ -9291,8 +11423,6 @@ impl Workspace {
                             this.t(
                                 "Could not pick pixel",
                                 "无法读取像素",
-                                "ピクセルを取得できません",
-                                "픽셀을 읽을 수 없습니다"
                             )
                         ));
                     }
@@ -9428,8 +11558,6 @@ impl Workspace {
                 self.t(
                     "Enter finite UV coordinates from 0 inclusive to 1 exclusive.",
                     "请输入大于等于 0 且小于 1 的有限 UV 坐标。",
-                    "0以上1未満の有限なUV座標を入力してください。",
-                    "0 이상 1 미만의 유한한 UV 좌표를 입력하세요.",
                 )
                 .to_owned(),
             );
@@ -9446,8 +11574,6 @@ impl Workspace {
                 self.t(
                     "Select an event before centering a pixel.",
                     "请先选择事件再居中像素。",
-                    "ピクセルを中央に移動する前にイベントを選択してください。",
-                    "픽셀을 중앙에 놓기 전에 이벤트를 선택하세요.",
                 )
                 .to_owned(),
             );
@@ -9466,8 +11592,6 @@ impl Workspace {
                 self.t(
                     "Enter valid pixel coordinates.",
                     "请输入有效的像素坐标。",
-                    "有効なピクセル座標を入力してください。",
-                    "올바른 픽셀 좌표를 입력하세요.",
                 )
                 .to_owned(),
             );
@@ -9492,8 +11616,6 @@ impl Workspace {
                 self.t(
                     "Pixel coordinates are outside the selected mip.",
                     "像素坐标超出所选 mip。",
-                    "ピクセル座標が選択した mip の範囲外です。",
-                    "픽셀 좌표가 선택한 mip 범위를 벗어났습니다.",
                 )
                 .to_owned(),
             );
@@ -9509,8 +11631,6 @@ impl Workspace {
                 self.t(
                     "Texture preview geometry is unavailable.",
                     "纹理预览尺寸不可用。",
-                    "テクスチャプレビューの寸法を取得できません。",
-                    "텍스처 미리보기 크기를 사용할 수 없습니다.",
                 )
                 .to_owned(),
             );
@@ -9586,8 +11706,6 @@ impl Workspace {
                 self.t(
                     "Pixel context is unavailable for this texture renderer.",
                     "当前纹理渲染器不支持像素上下文。",
-                    "このレンダラーではピクセルコンテキストを利用できません。",
-                    "이 렌더러에서는 픽셀 컨텍스트를 사용할 수 없습니다.",
                 )
                 .to_owned(),
             );
@@ -9647,8 +11765,6 @@ impl Workspace {
             self.t(
                 "Rendering pixel context…",
                 "正在渲染像素上下文…",
-                "ピクセルコンテキストを描画中…",
-                "픽셀 컨텍스트를 렌더링하는 중…",
             )
             .to_owned(),
         );
@@ -9717,8 +11833,6 @@ impl Workspace {
                                 this.t(
                                     "Pixel context failed",
                                     "像素上下文失败",
-                                    "ピクセルコンテキストの描画に失敗しました",
-                                    "픽셀 컨텍스트 렌더링 실패"
                                 )
                             ))
                         }
@@ -9740,8 +11854,6 @@ impl Workspace {
                 self.t(
                     "Select an event and wait for replay to finish before previewing.",
                     "请先选择事件并等待回放完成，再预览纹理。",
-                    "イベントを選択し、リプレイ完了後にプレビューしてください。",
-                    "이벤트를 선택하고 리플레이가 끝난 뒤 미리 보세요.",
                 )
                 .to_owned(),
             );
@@ -9768,8 +11880,6 @@ impl Workspace {
                 self.t(
                     "Texture selection is out of range.",
                     "纹理子资源选择超出范围。",
-                    "テクスチャの選択範囲が無効です。",
-                    "텍스처 선택 범위가 올바르지 않습니다.",
                 )
                 .to_owned(),
             );
@@ -9797,8 +11907,6 @@ impl Workspace {
             self.t(
                 "Loading texture preview…",
                 "正在加载纹理预览…",
-                "テクスチャのプレビューを読み込み中…",
-                "텍스처 미리 보기를 불러오는 중…",
             )
             .to_owned(),
         );
@@ -9844,8 +11952,6 @@ impl Workspace {
                             this.t(
                                 "Texture preview failed",
                                 "纹理预览失败",
-                                "テクスチャをプレビューできません",
-                                "텍스처 미리 보기 실패"
                             )
                         ))
                     }
@@ -9860,7 +11966,7 @@ impl Workspace {
         let debug = self.debug_view.as_ref()?;
         let previous = button(
             "vertex-debug-previous",
-            self.t("Previous step", "上一步", "前のステップ", "이전 단계"),
+            self.t("Previous step", "上一步"),
             false,
             |this, cx| {
                 if let Some(debug) = &mut this.debug_view {
@@ -9872,7 +11978,7 @@ impl Workspace {
         );
         let next = button(
             "vertex-debug-next",
-            self.t("Next step", "下一步", "次のステップ", "다음 단계"),
+            self.t("Next step", "下一步"),
             false,
             |this, cx| {
                 if let Some(debug) = &mut this.debug_view {
@@ -9887,8 +11993,6 @@ impl Workspace {
             self.t(
                 "Previous source",
                 "上一源码位置",
-                "前のソース位置",
-                "이전 소스 위치",
             ),
             false,
             |this, cx| {
@@ -9906,8 +12010,6 @@ impl Workspace {
             self.t(
                 "Next source",
                 "下一源码位置",
-                "次のソース位置",
-                "다음 소스 위치",
             ),
             false,
             |this, cx| {
@@ -9922,7 +12024,7 @@ impl Workspace {
         );
         let run_back = button(
             "shader-run-back",
-            self.t("Run backward", "向后运行", "逆方向に実行", "뒤로 실행"),
+            self.t("Run backward", "向后运行"),
             false,
             |this, cx| {
                 if let Some(debug) = &mut this.debug_view {
@@ -9934,7 +12036,7 @@ impl Workspace {
         );
         let run_next = button(
             "shader-run-next",
-            self.t("Run forward", "向前运行", "順方向に実行", "앞으로 실행"),
+            self.t("Run forward", "向前运行"),
             false,
             |this, cx| {
                 if let Some(debug) = &mut this.debug_view {
@@ -9958,27 +12060,27 @@ impl Workspace {
                 view,
             } => format!(
                 "{} {vertex} · {} {instance} · {} {index} · {} {view}",
-                self.t("Vertex", "顶点", "頂点", "정점"),
-                self.t("Instance", "实例", "インスタンス", "인스턴스"),
-                self.t("Index", "索引", "インデックス", "인덱스"),
-                self.t("View", "视图", "ビュー", "뷰")
+                self.t("Vertex", "顶点"),
+                self.t("Instance", "实例"),
+                self.t("Index", "索引"),
+                self.t("View", "视图")
             ),
             ShaderDebugContext::Pixel(selection) => format!(
                 "{} ({}, {}) · {} {} · {} {} · {} {}",
-                self.t("Pixel", "像素", "ピクセル", "픽셀"),
+                self.t("Pixel", "像素"),
                 selection.x,
                 selection.y,
-                self.t("Sample", "采样", "サンプル", "샘플"),
+                self.t("Sample", "采样"),
                 selection
                     .sample
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "—".into()),
-                self.t("Primitive", "图元", "プリミティブ", "프리미티브"),
+                self.t("Primitive", "图元"),
                 selection
                     .primitive
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "—".into()),
-                self.t("View", "视图", "ビュー", "뷰"),
+                self.t("View", "视图"),
                 selection
                     .view
                     .map(|v| v.to_string())
@@ -9986,16 +12088,16 @@ impl Workspace {
             ),
             ShaderDebugContext::Compute(selection) => format!(
                 "{} {:?} · {} {:?}",
-                self.t("Group", "工作组", "ワークグループ", "워크그룹"),
+                self.t("Group", "工作组"),
                 selection.group,
-                self.t("Thread", "组内线程", "グループ内スレッド", "그룹 내 스레드"),
+                self.t("Thread", "组内线程"),
                 selection.thread
             ),
             ShaderDebugContext::Mesh(selection) => format!(
                 "{} {:?} · {} {:?}",
-                self.t("Mesh group", "网格工作组", "メッシュグループ", "메시 그룹"),
+                self.t("Mesh group", "网格工作组"),
                 selection.group,
-                self.t("Thread", "组内线程", "グループ内スレッド", "그룹 내 스레드"),
+                self.t("Thread", "组内线程"),
                 selection.thread
             ),
         };
@@ -10006,12 +12108,10 @@ impl Workspace {
             .child(div().text_sm().text_color(rgb(0x82aaff)).child(self.t(
                 "SHADER DEBUG TRACE",
                 "着色器调试轨迹",
-                "シェーダーデバッグトレース",
-                "셰이더 디버그 추적",
             )))
             .child(format!(
                 "{context} · {} {}",
-                self.t("Event", "事件", "イベント", "이벤트"),
+                self.t("Event", "事件"),
                 debug.trace.event_id
             ))
             .child(
@@ -10032,15 +12132,13 @@ impl Workspace {
                                 self.t(
                                     "Step over backward",
                                     "向后跳过",
-                                    "逆方向にステップオーバー",
-                                    "뒤로 건너뛰기",
                                 ),
                                 false,
                                 SourceStep::Over,
                             ),
                             (
                                 "shader-over-forward",
-                                self.t("Step over", "单步跳过", "ステップオーバー", "건너뛰기"),
+                                self.t("Step over", "单步跳过"),
                                 true,
                                 SourceStep::Over,
                             ),
@@ -10049,15 +12147,13 @@ impl Workspace {
                                 self.t(
                                     "Step out backward",
                                     "向后跳出",
-                                    "逆方向にステップアウト",
-                                    "뒤로 나가기",
                                 ),
                                 false,
                                 SourceStep::Out,
                             ),
                             (
                                 "shader-out-forward",
-                                self.t("Step out", "单步跳出", "ステップアウト", "나가기"),
+                                self.t("Step out", "单步跳出"),
                                 true,
                                 SourceStep::Out,
                             ),
@@ -10090,8 +12186,6 @@ impl Workspace {
                                 self.t(
                                     "Previous sample/load",
                                     "向后运行到采样/加载",
-                                    "前のサンプル/ロード",
-                                    "이전 샘플/로드",
                                 ),
                                 false,
                                 1,
@@ -10101,8 +12195,6 @@ impl Workspace {
                                 self.t(
                                     "Next sample/load",
                                     "向前运行到采样/加载",
-                                    "次のサンプル/ロード",
-                                    "다음 샘플/로드",
                                 ),
                                 true,
                                 1,
@@ -10112,8 +12204,6 @@ impl Workspace {
                                 self.t(
                                     "Previous NaN/Inf",
                                     "向后运行到 NaN/Inf",
-                                    "前の NaN/Inf",
-                                    "이전 NaN/Inf",
                                 ),
                                 false,
                                 2,
@@ -10123,8 +12213,6 @@ impl Workspace {
                                 self.t(
                                     "Next NaN/Inf",
                                     "向前运行到 NaN/Inf",
-                                    "次の NaN/Inf",
-                                    "다음 NaN/Inf",
                                 ),
                                 true,
                                 2,
@@ -10159,26 +12247,18 @@ impl Workspace {
                     (false, false) => self.t(
                         "Set instruction breakpoint",
                         "设置指令断点",
-                        "命令にブレークポイント",
-                        "명령 중단점 설정",
                     ),
                     (false, true) => self.t(
                         "Remove instruction breakpoint",
                         "移除指令断点",
-                        "命令のブレークポイントを削除",
-                        "명령 중단점 제거",
                     ),
                     (true, false) => self.t(
                         "Set source breakpoint",
                         "设置源码断点",
-                        "ソースにブレークポイント",
-                        "소스 중단점 설정",
                     ),
                     (true, true) => self.t(
                         "Remove source breakpoint",
                         "移除源码断点",
-                        "ソースのブレークポイントを削除",
-                        "소스 중단점 제거",
                     ),
                 };
                 view = view.child(button(
@@ -10207,41 +12287,103 @@ impl Workspace {
                 ));
             }
         }
+        if let Some(jump) = debug.message_jump {
+            use renderdocx::debug_navigation::StopReason;
+            let breakpoint = jump.breakpoint_line.map_or_else(
+                || {
+                    self.t(
+                        "no mapped breakpoint",
+                        "无可映射断点",
+                    )
+                    .to_owned()
+                },
+                |line| {
+                    format!(
+                        "{} {line}",
+                        self.t(
+                            "breakpoint line",
+                            "断点行",
+                        )
+                    )
+                },
+            );
+            let reason = match jump.reason {
+                StopReason::Breakpoint => self.t(
+                    "breakpoint reached",
+                    "已到达断点",
+                ),
+                StopReason::Event => self.t(
+                    "stopped at debug event",
+                    "在调试事件处停止",
+                ),
+                _ => self.t(
+                    "reached trace boundary",
+                    "已到达轨迹边界",
+                ),
+            };
+            view = view.child(div().id("shader-message-jump-result").test_support().child(
+                format!(
+                    "{} {} · {breakpoint} · {reason}",
+                    self.t("Message line", "消息行"),
+                    jump.requested_line
+                ),
+            ));
+        }
         if let Some(state) = debug.states.get(debug.navigator.position) {
+            let mutable = debug.navigator.variables(&debug.states);
+            let source_values = renderdocx::source_variables::resolve(&debug.trace, Some(state), &mutable);
             view = view
                 .child(div().id("vertex-debug-step").test_support().child(format!(
                     "{} {} / {} · {} {} · {} {}",
-                    self.t("Step", "步骤", "ステップ", "단계"),
+                    self.t("Step", "步骤"),
                     state.step,
                     debug.states.len(),
-                    self.t("Next instruction", "下一条指令", "次の命令", "다음 명령"),
+                    self.t("Next instruction", "下一条指令"),
                     state.next_instruction,
-                    self.t("Flags", "标志", "フラグ", "플래그"),
+                    self.t("Flags", "标志"),
                     state.flags
                 )))
                 .child(format!(
                     "{}: {}",
-                    self.t("Call stack", "调用栈", "呼び出し履歴", "호출 스택"),
+                    self.t("Call stack", "调用栈"),
                     state.callstack.join(" → ")
                 ))
                 .child(self.t(
                     "Mutable variables",
                     "可变变量",
-                    "可変変数",
-                    "변경 가능한 변수",
                 ))
                 .children(
-                    debug
-                        .navigator
-                        .variables(&debug.states)
-                        .iter()
-                        .map(|variable| {
+                    mutable.iter().map(|variable| {
                             div()
                                 .text_sm()
                                 .child(shader_debug::display_variable(variable))
                         }),
                 )
-                .child(self.t("Variable changes", "变量变化", "変数の変化", "변수 변경"))
+                .when(!source_values.is_empty(), |view| {
+                    view.child(self.t("Source variable values", "源码变量值"))
+                        .children(source_values.iter().enumerate().map(|(index, source)| {
+                            let values = if source.mapping.undefined {
+                                self.t("undefined", "未定义").to_owned()
+                            } else if source.components.is_empty() {
+                                self.t("no components", "无分量").to_owned()
+                            } else {
+                                source.components.iter().map(|component| {
+                                    use renderdocx::source_variables::ComponentStatus;
+                                    match component.status {
+                                        ComponentStatus::Value => component.value.as_deref().unwrap_or("?").to_owned(),
+                                        ComponentStatus::Undefined => self.t("undefined", "未定义").to_owned(),
+                                        ComponentStatus::MissingReference => self.t("missing reference", "缺少引用").to_owned(),
+                                        ComponentStatus::MissingVariable => self.t("unavailable variable", "变量不可用").to_owned(),
+                                        ComponentStatus::Composite => self.t("composite", "复合变量").to_owned(),
+                                        ComponentStatus::UnsupportedType => self.t("unsupported type", "类型暂不支持").to_owned(),
+                                        ComponentStatus::InvalidData => self.t("invalid data", "数据无效").to_owned(),
+                                    }
+                                }).collect::<Vec<_>>().join(", ")
+                            };
+                            div().id(("shader-source-value", index)).test_support().text_sm().child(format!("{}: {values}", source.mapping.name))
+                        }))
+                })
+                .child(self.t("Variable changes", "变量变化"))
                 .children(state.changes.iter().map(|change| {
                     div().text_sm().child(format!(
                         "{} → {}",
@@ -10262,8 +12404,6 @@ impl Workspace {
                                 self.t(
                                     "Disassembly line",
                                     "反汇编行",
-                                    "逆アセンブル行",
-                                    "역어셈블리 행"
                                 ),
                                 info.disassembly_line
                             )),
@@ -10312,8 +12452,6 @@ impl Workspace {
                         .child(self.t(
                             "Source variable mappings",
                             "源码变量映射",
-                            "ソース変数の対応",
-                            "소스 변수 매핑",
                         ))
                         .children(info.source_variables.iter().map(|variable| {
                             div()
@@ -10326,8 +12464,6 @@ impl Workspace {
             view = view.child(self.t(
                 "No debug states were returned.",
                 "未返回调试状态。",
-                "デバッグ状態が返されませんでした。",
-                "디버그 상태가 반환되지 않았습니다.",
             ));
         }
         if !debug.trace.source_variables.is_empty() {
@@ -10335,8 +12471,6 @@ impl Workspace {
                 .child(self.t(
                     "Trace-wide source mappings",
                     "全轨迹源码变量映射",
-                    "トレース全体のソース変数対応",
-                    "전체 추적 소스 변수 매핑",
                 ))
                 .children(debug.trace.source_variables.iter().map(|variable| {
                     div()
@@ -10346,19 +12480,17 @@ impl Workspace {
         }
         let groups = [
             (
-                self.t("Inputs", "输入", "入力", "입력"),
+                self.t("Inputs", "输入"),
                 &debug.trace.inputs,
             ),
             (
-                self.t("Constant blocks", "常量块", "定数ブロック", "상수 블록"),
+                self.t("Constant blocks", "常量块"),
                 &debug.trace.constant_blocks,
             ),
             (
                 self.t(
                     "Read-only resources",
                     "只读资源",
-                    "読み取り専用リソース",
-                    "읽기 전용 리소스",
                 ),
                 &debug.trace.read_only_resources,
             ),
@@ -10366,13 +12498,11 @@ impl Workspace {
                 self.t(
                     "Read-write resources",
                     "读写资源",
-                    "読み書きリソース",
-                    "읽기/쓰기 리소스",
                 ),
                 &debug.trace.read_write_resources,
             ),
             (
-                self.t("Samplers", "采样器", "サンプラー", "샘플러"),
+                self.t("Samplers", "采样器"),
                 &debug.trace.samplers,
             ),
         ];
@@ -10397,8 +12527,6 @@ impl Workspace {
             .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
                 "Unsupported value types are shown as native-endian bytes.",
                 "未解码的类型显示原生字节序的原始字节。",
-                "未対応の型はネイティブエンディアンの生バイトで表示します。",
-                "지원하지 않는 유형은 네이티브 엔디언 원시 바이트로 표시합니다.",
             )))
             .child(
                 div()
@@ -10419,8 +12547,6 @@ impl Workspace {
                 self.t(
                     "Select a resource first.",
                     "请先选择资源。",
-                    "最初にリソースを選択してください。",
-                    "먼저 리소스를 선택하세요.",
                 )
                 .to_owned(),
             );
@@ -10436,8 +12562,6 @@ impl Workspace {
             self.t(
                 "Loading complete resource usage…",
                 "正在加载完整资源使用记录…",
-                "すべてのリソース使用履歴を読み込み中…",
-                "전체 리소스 사용 기록을 불러오는 중…",
             )
             .to_owned(),
         );
@@ -10467,8 +12591,6 @@ impl Workspace {
                             this.t(
                                 "Could not load full resource usage",
                                 "无法加载完整资源使用记录",
-                                "すべてのリソース使用履歴を読み込めません",
-                                "전체 리소스 사용 기록을 불러올 수 없습니다"
                             )
                         ))
                     }
@@ -10507,8 +12629,9 @@ impl Workspace {
         }
         self.tab = CaptureTab::Events;
         if self.replay_pending {
+            self.queued_event_key = None;
             self.timeline.pending_scrub = Some(index);
-        } else if self.selected != Some(index) {
+        } else if !self.is_selected_action(index) {
             self.select_event(index, None, cx);
         }
         cx.notify();
@@ -10926,22 +13049,22 @@ impl Workspace {
             }));
         div().flex().flex_col().gap_2()
             .child(div().flex().flex_wrap().gap_2()
-                .child(button("timeline-previous", self.t("Previous range", "上一范围", "前の範囲", "이전 범위"), false, |this, cx| { this.timeline.pan(false); cx.notify(); }, cx))
-                .child(button("timeline-next", self.t("Next range", "下一范围", "次の範囲", "다음 범위"), false, |this, cx| { this.timeline.pan(true); cx.notify(); }, cx))
-                .child(button("timeline-zoom-in", self.t("Zoom in", "放大", "拡大", "확대"), false, |this, cx| { this.timeline.zoom(true, this.pipeline.as_ref().map(|p| p.event_id)); cx.notify(); }, cx))
-                .child(button("timeline-zoom-out", self.t("Zoom out", "缩小", "縮小", "축소"), false, |this, cx| { this.timeline.zoom(false, this.pipeline.as_ref().map(|p| p.event_id)); cx.notify(); }, cx))
-                .child(button("timeline-load-usage", self.t("Highlight all resource usage", "高亮全部资源使用", "すべてのリソース使用を強調", "전체 리소스 사용 강조"), false, |this, cx| this.load_timeline_usage(cx), cx)))
-            .child(format!("{}: {start}–{end} / {}", self.t("Event IDs", "事件 ID", "イベント ID", "이벤트 ID"), self.timeline.model.max_event))
-            .child(self.t("Drag the axis or graph background to select actions; Alt-drag pans, scroll zooms. Green: passed · orange-red: failed pixel history · light green: bookmarks.", "拖动坐标轴或图表背景选择操作；Alt 拖动平移，滚轮缩放。绿：像素通过 · 橙红：像素失败 · 浅绿：书签。", "軸またはグラフの背景をドラッグして選択、Alt ドラッグで移動、スクロールで拡大縮小。緑：ピクセル成功・橙赤：失敗・薄緑：ブックマーク。", "축 또는 그래프 배경 드래그로 선택, Alt 드래그로 이동, 스크롤로 확대/축소. 초록: 픽셀 통과 · 주황 빨강: 실패 · 연두: 북마크."))
-            .child(self.t("Click the highlight band to jump to the nearest history or usage event.", "点击高亮区域可跳转到最近的像素历史或资源使用事件。", "強調表示領域をクリックすると最も近い履歴または使用イベントへ移動します。", "강조 영역을 클릭하면 가장 가까운 기록 또는 사용 이벤트로 이동합니다."))
+                .child(button("timeline-previous", self.t("Previous range", "上一范围"), false, |this, cx| { this.timeline.pan(false); cx.notify(); }, cx))
+                .child(button("timeline-next", self.t("Next range", "下一范围"), false, |this, cx| { this.timeline.pan(true); cx.notify(); }, cx))
+                .child(button("timeline-zoom-in", self.t("Zoom in", "放大"), false, |this, cx| { this.timeline.zoom(true, this.pipeline.as_ref().map(|p| p.event_id)); cx.notify(); }, cx))
+                .child(button("timeline-zoom-out", self.t("Zoom out", "缩小"), false, |this, cx| { this.timeline.zoom(false, this.pipeline.as_ref().map(|p| p.event_id)); cx.notify(); }, cx))
+                .child(button("timeline-load-usage", self.t("Highlight all resource usage", "高亮全部资源使用"), false, |this, cx| this.load_timeline_usage(cx), cx)))
+            .child(format!("{}: {start}–{end} / {}", self.t("Event IDs", "事件 ID"), self.timeline.model.max_event))
+            .child(self.t("Drag the axis or graph background to select actions; Alt-drag pans, scroll zooms. Green: passed · orange-red: failed pixel history · light green: bookmarks.", "拖动坐标轴或图表背景选择操作；Alt 拖动平移，滚轮缩放。绿：像素通过 · 橙红：像素失败 · 浅绿：书签。"))
+            .child(self.t("Click the highlight band to jump to the nearest history or usage event.", "点击高亮区域可跳转到最近的像素历史或资源使用事件。"))
             .child(div().flex().flex_wrap().gap_2()
-                .child(format!("{}:", self.t("Resource usage", "资源使用", "リソース使用", "리소스 사용")))
-                .child(div().text_color(rgb(0xe69f00)).child(self.t("Read", "读取", "読み取り", "읽기")))
-                .child(div().text_color(rgb(0x56b4e9)).child(self.t("Write", "写入", "書き込み", "쓰기")))
-                .child(div().text_color(rgb(0xf0e442)).child(self.t("Read/write", "读写", "読み書き", "읽기/쓰기")))
-                .child(div().bg(rgb(0xdddddd)).text_color(rgb(0x000000)).child(self.t("Clear/discard", "清除/丢弃", "クリア/破棄", "지우기/폐기")))
-                .child(div().text_color(rgb(0xcc79a7)).child(self.t("Barrier", "屏障", "バリア", "배리어"))))
-            .child(format!("{}: {} · {}: {}", self.t("Resource usage", "资源使用", "リソース使用", "리소스 사용"), if full_usage.is_some() { self.t("complete", "完整", "全件", "전체") } else { self.t("loaded page", "已加载页", "読込済みページ", "불러온 페이지") }, self.t("Pixel history", "像素历史", "ピクセル履歴", "픽셀 기록"), if self.timeline.history.is_some() { self.t("complete", "完整", "全件", "전체") } else { self.t("loaded page", "已加载页", "読込済みページ", "불러온 페이지") }))
+                .child(format!("{}:", self.t("Resource usage", "资源使用")))
+                .child(div().text_color(rgb(0xe69f00)).child(self.t("Read", "读取")))
+                .child(div().text_color(rgb(0x56b4e9)).child(self.t("Write", "写入")))
+                .child(div().text_color(rgb(0xf0e442)).child(self.t("Read/write", "读写")))
+                .child(div().bg(rgb(0xdddddd)).text_color(rgb(0x000000)).child(self.t("Clear/discard", "清除/丢弃")))
+                .child(div().text_color(rgb(0xcc79a7)).child(self.t("Barrier", "屏障"))))
+            .child(format!("{}: {} · {}: {}", self.t("Resource usage", "资源使用"), if full_usage.is_some() { self.t("complete", "完整") } else { self.t("loaded page", "已加载页") }, self.t("Pixel history", "像素历史"), if self.timeline.history.is_some() { self.t("complete", "完整") } else { self.t("loaded page", "已加载页") }))
             .child(div().id("timeline-scroll").test_support().max_h(px(180.)).overflow_scroll().child(graph))
             .child(div().id("timeline-axis-scroll").test_support().overflow_x_scroll().child(axis))
             .into_any_element()
@@ -10950,14 +13073,14 @@ impl Workspace {
     #[inline(never)]
     fn texture_raw_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         div().flex().flex_col().gap_2()
-                    .child(self.t("Raw export uses native bytes without channel extraction or type casts; 3D exports contain the whole mip volume.", "原始导出保留原生字节，不应用通道提取或类型转换；3D 导出包含整个 mip 体积。", "生データはチャンネル抽出や型変換を行わず、3D では mip 全体を書き出します。", "원시 내보내기는 채널 추출이나 형식 변환 없이 3D mip 전체를 포함합니다."))
+                    .child(self.t("Raw export uses native bytes without channel extraction or type casts; 3D exports contain the whole mip volume.", "原始导出保留原生字节，不应用通道提取或类型转换；3D 导出包含整个 mip 体积。"))
                     .child(div().flex().flex_wrap().gap_2()
-                        .child(button("texture-raw-read", self.t("Read raw bytes", "读取原始字节", "生バイトを取得", "원시 바이트 읽기"), false, |this, cx| this.read_texture_raw_page(0, cx), cx))
-                        .child(Input::new(&self.texture_raw_seek).id("texture-raw-seek-input").aria_label(self.t("Raw byte offset", "原始字节偏移", "生バイトオフセット", "원시 바이트 오프셋")).w(px(120.)))
-                        .child(button("texture-raw-seek", self.t("Go", "跳转", "移動", "이동"), false, |this, cx| this.seek_texture_raw(cx), cx)))
+                        .child(button("texture-raw-read", self.t("Read raw bytes", "读取原始字节"), false, |this, cx| this.read_texture_raw_page(0, cx), cx))
+                        .child(Input::new(&self.texture_raw_seek).id("texture-raw-seek-input").aria_label(self.t("Raw byte offset", "原始字节偏移")).w(px(120.)))
+                        .child(button("texture-raw-seek", self.t("Go", "跳转"), false, |this, cx| this.seek_texture_raw(cx), cx)))
                     .child(div().flex().flex_wrap().gap_2()
-                        .child(Input::new(&self.texture_raw_search).id("texture-raw-search-input").aria_label(self.t("Hex bytes", "十六进制字节", "16 進バイト", "16진수 바이트")).w(px(150.)))
-                        .child(button("texture-raw-search", self.t("Find next", "查找下一个", "次を検索", "다음 찾기"), false, |this, cx| this.find_texture_raw(cx), cx)))
+                        .child(Input::new(&self.texture_raw_search).id("texture-raw-search-input").aria_label(self.t("Hex bytes", "十六进制字节")).w(px(150.)))
+                        .child(button("texture-raw-search", self.t("Find next", "查找下一个"), false, |this, cx| this.find_texture_raw(cx), cx)))
                     .when_some(self.texture_raw_page.clone(), |view, page| {
                         let offset = page.offset.parse::<u64>().unwrap_or(0);
                         let total = page.total.parse::<u64>().unwrap_or(0);
@@ -10967,11 +13090,11 @@ impl Workspace {
                             let spaced = content.as_bytes().chunks(2).filter_map(|pair| std::str::from_utf8(pair).ok()).collect::<Vec<_>>().join(" ");
                             format!("{:016x}  {spaced}", offset + (index as u64 * 16))
                         }).collect::<Vec<_>>();
-                        view.when_some(self.texture_raw_last.as_ref().filter(|hit| hit.offset == offset && hit.index == page.index as usize && hit.event == page.event_id && hit.selection_revision == self.selection_revision), |view, hit| view.child(format!("{}: {}", self.t("Match at byte", "匹配字节偏移", "一致したバイト位置", "일치 바이트 위치"), hit.offset)))
-                            .child(format!("{}: {} / {}", self.t("Raw byte offset", "原始字节偏移", "生バイトオフセット", "원시 바이트 오프셋"), page.offset, page.total))
+                        view.when_some(self.texture_raw_last.as_ref().filter(|hit| hit.offset == offset && hit.index == page.index as usize && hit.event == page.event_id && hit.selection_revision == self.selection_revision), |view, hit| view.child(format!("{}: {}", self.t("Match at byte", "匹配字节偏移"), hit.offset)))
+                            .child(format!("{}: {} / {}", self.t("Raw byte offset", "原始字节偏移"), page.offset, page.total))
                             .child(div().flex().gap_2()
-                                .child(button("texture-raw-prev", self.t("Previous", "上一页", "前へ", "이전"), false, move |this, cx| this.read_texture_raw_page(offset.saturating_sub(256), cx), cx))
-                                .child(button("texture-raw-next", self.t("Next", "下一页", "次へ", "다음"), false, move |this, cx| { if next < total { this.read_texture_raw_page(next, cx); } }, cx)))
+                                .child(button("texture-raw-prev", self.t("Previous", "上一页"), false, move |this, cx| this.read_texture_raw_page(offset.saturating_sub(256), cx), cx))
+                                .child(button("texture-raw-next", self.t("Next", "下一页"), false, move |this, cx| { if next < total { this.read_texture_raw_page(next, cx); } }, cx)))
                             .children(lines.into_iter().enumerate().map(|(index, line)| div().id(("texture-raw-line", index)).test_support().text_sm().child(line)))
                     })
             .into_any_element()
@@ -10979,16 +13102,16 @@ impl Workspace {
 
     fn texture_range_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div().flex().flex_col().gap_2()
-            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(format!("{}: {:?}", self.t("Preview/export black and white points", "预览与导出黑白点", "プレビュー・書き出しの黒点と白点", "미리보기·내보내기 흑점과 백점"), self.texture_selection.display_range.unwrap_or([0.0, 1.0]))))
+            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(format!("{}: {:?}", self.t("Preview/export black and white points", "预览与导出黑白点"), self.texture_selection.display_range.unwrap_or([0.0, 1.0]))))
             .child(div().flex().flex_wrap().gap_2()
-                .child(Input::new(&self.texture_black_point).id("texture-black-point").aria_label(self.t("Black point", "黑点", "黒点", "흑점")).w(px(90.)))
-                .child(Input::new(&self.texture_white_point).id("texture-white-point").aria_label(self.t("White point", "白点", "白点", "백점")).w(px(90.)))
-                .child(button("texture-apply-range", self.t("Apply range", "应用范围", "範囲を適用", "범위 적용"), false, |this, cx| this.apply_texture_range(cx), cx))
-                .child(Button::new("texture-reset-range").label(self.t("Reset range", "重置范围", "範囲をリセット", "범위 초기화")).secondary().on_click(cx.listener(|this, _, window, cx| this.reset_texture_range(window, cx))))
-                .child(Button::new("texture-fit-range").label(self.t("Fit range", "自适应范围", "範囲を自動調整", "범위 자동 맞춤")).secondary().on_click(cx.listener(|this, _, window, cx| { this.disable_auto_texture_fit(); this.fit_texture_range(window, false, cx); })))
-                .child(button("texture-auto-fit", self.t("Continuous auto-fit", "持续自动拟合", "継続的に自動調整", "계속 자동 맞춤"), self.texture_auto_fit, |this, cx| { if this.texture_auto_fit { this.disable_auto_texture_fit(); } else { this.texture_auto_fit = true; this.texture_auto_fit_generation = this.texture_auto_fit_generation.wrapping_add(1); this.texture_auto_fit_last = None; } cx.notify(); }, cx))
-                .child(button("texture-reset-range-on-switch", self.t("Reset range on texture change", "切换纹理时重置范围", "テクスチャ変更時に範囲をリセット", "텍스처 변경 시 범위 초기화"), self.settings.texture_reset_range, |this, cx| { this.settings.texture_reset_range = !this.settings.texture_reset_range; this.save(); cx.notify(); }, cx)))
-            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t("Preview uses native texture display. Export applies the range only when RenderDoc converts the data.", "预览使用原生纹理显示；导出仅在 RenderDoc 转换数据时应用范围。", "プレビューはネイティブ表示を使用し、書き出しでは変換時のみ範囲が適用されます。", "미리보기는 기본 텍스처 표시를 사용하며 내보내기는 데이터 변환 시에만 범위를 적용합니다.")))
+                .child(Input::new(&self.texture_black_point).id("texture-black-point").aria_label(self.t("Black point", "黑点")).w(px(90.)))
+                .child(Input::new(&self.texture_white_point).id("texture-white-point").aria_label(self.t("White point", "白点")).w(px(90.)))
+                .child(button("texture-apply-range", self.t("Apply range", "应用范围"), false, |this, cx| this.apply_texture_range(cx), cx))
+                .child(Button::new("texture-reset-range").label(self.t("Reset range", "重置范围")).secondary().on_click(cx.listener(|this, _, window, cx| this.reset_texture_range(window, cx))))
+                .child(Button::new("texture-fit-range").label(self.t("Fit range", "自适应范围")).secondary().on_click(cx.listener(|this, _, window, cx| { this.disable_auto_texture_fit(); this.fit_texture_range(window, false, cx); })))
+                .child(button("texture-auto-fit", self.t("Continuous auto-fit", "持续自动拟合"), self.texture_auto_fit, |this, cx| { if this.texture_auto_fit { this.disable_auto_texture_fit(); } else { this.texture_auto_fit = true; this.texture_auto_fit_generation = this.texture_auto_fit_generation.wrapping_add(1); this.texture_auto_fit_last = None; } cx.notify(); }, cx))
+                .child(button("texture-reset-range-on-switch", self.t("Reset range on texture change", "切换纹理时重置范围"), self.settings.texture_reset_range, |this, cx| { this.settings.texture_reset_range = !this.settings.texture_reset_range; this.save(); cx.notify(); }, cx)))
+            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t("Preview uses native texture display. Export applies the range only when RenderDoc converts the data.", "预览使用原生纹理显示；导出仅在 RenderDoc 转换数据时应用范围。")))
     }
 
     fn texture_export_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -11001,8 +13124,6 @@ impl Workspace {
             .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
                 "Export mapping",
                 "导出映射",
-                "書き出しマッピング",
-                "내보내기 매핑",
             )))
             .child(
                 div()
@@ -11011,7 +13132,7 @@ impl Workspace {
                     .gap_2()
                     .child(button(
                         "export-all-mips",
-                        self.t("All mips", "全部 mip", "全 mip", "모든 mip"),
+                        self.t("All mips", "全部 mip"),
                         opts.all_mips,
                         |this, cx| this.update_export_options(0, cx),
                         cx,
@@ -11021,8 +13142,6 @@ impl Workspace {
                         self.t(
                             "Samples as slices",
                             "采样展开为切片",
-                            "サンプルをスライスへ",
-                            "샘플을 슬라이스로",
                         ),
                         opts.samples_as_array,
                         |this, cx| this.update_export_options(1, cx),
@@ -11033,8 +13152,6 @@ impl Workspace {
                         self.t(
                             "Selected slice",
                             "当前切片",
-                            "選択スライス",
-                            "선택 슬라이스",
                         ),
                         opts.slices == SliceLayout::Selected,
                         |this, cx| this.update_export_options(2, cx),
@@ -11042,7 +13159,7 @@ impl Workspace {
                     ))
                     .child(button(
                         "export-slice-all",
-                        self.t("All slices", "全部切片", "全スライス", "모든 슬라이스"),
+                        self.t("All slices", "全部切片"),
                         opts.slices == SliceLayout::All,
                         |this, cx| this.update_export_options(3, cx),
                         cx,
@@ -11050,7 +13167,7 @@ impl Workspace {
                     .child(
                         Input::new(&self.texture_export_grid)
                             .id("export-grid-width")
-                            .aria_label(self.t("Grid width", "网格宽度", "グリッド幅", "격자 너비"))
+                            .aria_label(self.t("Grid width", "网格宽度"))
                             .w(px(65.)),
                     )
                     .child(button(
@@ -11058,8 +13175,6 @@ impl Workspace {
                         self.t(
                             "Slice grid",
                             "切片网格",
-                            "スライスグリッド",
-                            "슬라이스 격자",
                         ),
                         opts.slices == SliceLayout::Grid,
                         |this, cx| this.update_export_options(4, cx),
@@ -11067,7 +13182,7 @@ impl Workspace {
                     ))
                     .child(button(
                         "export-slice-cube",
-                        self.t("Cubemap cross", "立方体十字图", "キューブ十字", "큐브 십자"),
+                        self.t("Cubemap cross", "立方体十字图"),
                         opts.slices == SliceLayout::Cubemap,
                         |this, cx| this.update_export_options(5, cx),
                         cx,
@@ -11080,14 +13195,14 @@ impl Workspace {
                     .gap_2()
                     .child(button(
                         "export-alpha-preserve",
-                        self.t("Preserve alpha", "保留 Alpha", "Alpha を保持", "알파 유지"),
+                        self.t("Preserve alpha", "保留 Alpha"),
                         opts.alpha == AlphaMapping::Preserve,
                         |this, cx| this.update_export_options(6, cx),
                         cx,
                     ))
                     .child(button(
                         "export-alpha-discard",
-                        self.t("Discard alpha", "丢弃 Alpha", "Alpha を破棄", "알파 버리기"),
+                        self.t("Discard alpha", "丢弃 Alpha"),
                         opts.alpha == AlphaMapping::Discard,
                         |this, cx| this.update_export_options(7, cx),
                         cx,
@@ -11097,8 +13212,6 @@ impl Workspace {
                         self.t(
                             "Blend checkerboard",
                             "混合棋盘格",
-                            "市松に合成",
-                            "체커보드 합성",
                         ),
                         opts.alpha == AlphaMapping::BlendToCheckerboard,
                         |this, cx| this.update_export_options(8, cx),
@@ -11110,14 +13223,12 @@ impl Workspace {
                             .aria_label(self.t(
                                 "Alpha blend color",
                                 "Alpha 混合颜色",
-                                "Alpha 合成色",
-                                "알파 합성 색상",
                             ))
                             .w(px(100.)),
                     )
                     .child(button(
                         "export-alpha-color-apply",
-                        self.t("Blend color", "混合颜色", "色に合成", "색상 합성"),
+                        self.t("Blend color", "混合颜色"),
                         opts.alpha == AlphaMapping::BlendToColor,
                         |this, cx| this.update_export_options(9, cx),
                         cx,
@@ -11128,8 +13239,6 @@ impl Workspace {
                             .aria_label(self.t(
                                 "JPEG quality",
                                 "JPEG 质量",
-                                "JPEG 品質",
-                                "JPEG 품질",
                             ))
                             .w(px(60.)),
                     )
@@ -11138,8 +13247,6 @@ impl Workspace {
                         self.t(
                             "Apply JPEG quality",
                             "应用 JPEG 质量",
-                            "JPEG 品質を適用",
-                            "JPEG 품질 적용",
                         ),
                         false,
                         |this, cx| this.update_export_options(10, cx),
@@ -11149,8 +13256,6 @@ impl Workspace {
             .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
                 "RenderDoc may adapt mapping to the texture and output format.",
                 "RenderDoc 可能根据纹理和输出格式调整映射。",
-                "RenderDoc はテクスチャと形式に応じてマッピングを調整する場合があります。",
-                "RenderDoc은 텍스처와 출력 형식에 맞게 매핑을 조정할 수 있습니다.",
             )))
             .into_any_element()
     }
@@ -11162,7 +13267,7 @@ impl Workspace {
             .gap_2()
             .child(button(
                 "texture-background-checker",
-                self.t("Checkerboard", "棋盘格", "市松模様", "체커보드"),
+                self.t("Checkerboard", "棋盘格"),
                 self.texture_selection.preview_background.is_none(),
                 |this, cx| this.change_preview_background(true, cx),
                 cx,
@@ -11173,8 +13278,6 @@ impl Workspace {
                     .aria_label(self.t(
                         "Preview background #RRGGBB",
                         "预览背景色 #RRGGBB",
-                        "プレビュー背景色 #RRGGBB",
-                        "미리보기 배경색 #RRGGBB",
                     ))
                     .w(px(110.)),
             )
@@ -11183,8 +13286,6 @@ impl Workspace {
                 self.t(
                     "Apply background",
                     "应用背景色",
-                    "背景色を適用",
-                    "배경색 적용",
                 ),
                 self.texture_selection.preview_background.is_some(),
                 |this, cx| this.change_preview_background(false, cx),
@@ -11205,8 +13306,6 @@ impl Workspace {
                     self.t(
                         "Depth / stencil",
                         "深度 / 模板",
-                        "深度 / ステンシル",
-                        "깊이 / 스텐실",
                     )
                 } else {
                     "RGBA"
@@ -11224,8 +13323,6 @@ impl Workspace {
                         .aria_label(self.t(
                             "RGBM multiplier",
                             "RGBM 乘数",
-                            "RGBM 乗数",
-                            "RGBM 배율",
                         ))
                         .w(px(90.)),
                 )
@@ -11238,7 +13335,7 @@ impl Workspace {
                 ))
                 .child(button(
                     "texture-mode-yuv",
-                    self.t("YUVA decode", "YUVA 解码", "YUVA デコード", "YUVA 디코딩"),
+                    self.t("YUVA decode", "YUVA 解码"),
                     self.texture_selection.preview_decode_yuv,
                     |this, cx| this.change_preview_mode(2, cx),
                     cx,
@@ -11249,8 +13346,6 @@ impl Workspace {
                 self.t(
                     "Custom shader",
                     "自定义着色器",
-                    "カスタムシェーダー",
-                    "사용자 셰이더",
                 ),
                 self.texture_selection.preview_custom_shader,
                 |this, cx| this.use_custom_shader(cx),
@@ -11261,8 +13356,6 @@ impl Workspace {
                 self.t(
                     "Edit custom shader",
                     "编辑自定义着色器",
-                    "カスタムシェーダー編集",
-                    "사용자 셰이더 편집",
                 ),
                 self.texture_custom_open,
                 |this, cx| this.custom_shader_info(cx),
@@ -11282,19 +13375,17 @@ impl Workspace {
                     self.t(
                         "Supported encodings",
                         "支持的编码",
-                        "対応エンコード",
-                        "지원 인코딩"
                     ),
                     self.texture_custom_encodings
                 ))
                 .child(div().text_sm().text_color(rgb(0x9eacc0)).child("1 DXBC · 2 GLSL · 3 SPIR-V · 4 SPIR-V ASM · 5 HLSL · 6 DXIL · 7 OpenGL SPIR-V · 8 OpenGL SPIR-V ASM · 9 Slang"))
-                .child(div().text_sm().child(self.t("Binary encodings use hexadecimal bytes.", "二进制编码使用十六进制字节。", "バイナリ形式は16進数で入力します。", "바이너리 인코딩은 16진수로 입력합니다.")))
+                .child(div().text_sm().child(self.t("Binary encodings use hexadecimal bytes.", "二进制编码使用十六进制字节。")))
                 .child(div().flex().flex_wrap().gap_2()
-                    .child(Input::new(&self.texture_custom_name).id("texture-custom-name").aria_label(self.t("Shader name", "着色器名称", "シェーダー名", "셰이더 이름")).w(px(160.)))
-                    .child(button("texture-custom-import", self.t("Import shader folder", "导入着色器目录", "シェーダーフォルダーを読み込む", "셰이더 폴더 가져오기"), false, |this, cx| { if let Some(path) = rfd::FileDialog::new().pick_folder() { this.import_custom_shader_directory(&path, cx); } }, cx))
-                    .child(button("texture-custom-save", self.t("Save new", "新建保存", "新規保存", "새로 저장"), false, |this, cx| this.save_custom_shader(false, cx), cx))
-                    .child(button("texture-custom-replace", self.t("Replace saved", "覆盖已保存", "保存内容を上書き", "저장 항목 덮어쓰기"), false, |this, cx| this.save_custom_shader(true, cx), cx))
-                    .child(button("texture-custom-delete", if self.pending_custom_delete.as_deref() == Some(self.texture_custom_name.read(cx).value().trim()) { self.t("Confirm delete", "确认删除", "削除を確認", "삭제 확인") } else { self.t("Delete", "删除", "削除", "삭제") }, false, |this, cx| this.delete_custom_shader(cx), cx)))
+                    .child(Input::new(&self.texture_custom_name).id("texture-custom-name").aria_label(self.t("Shader name", "着色器名称")).w(px(160.)))
+                    .child(button("texture-custom-import", self.t("Import shader folder", "导入着色器目录"), false, |this, cx| { if let Some(path) = rfd::FileDialog::new().pick_folder() { this.import_custom_shader_directory(&path, cx); } }, cx))
+                    .child(button("texture-custom-save", self.t("Save new", "新建保存"), false, |this, cx| this.save_custom_shader(false, cx), cx))
+                    .child(button("texture-custom-replace", self.t("Replace saved", "覆盖已保存"), false, |this, cx| this.save_custom_shader(true, cx), cx))
+                    .child(button("texture-custom-delete", if self.pending_custom_delete.as_deref() == Some(self.texture_custom_name.read(cx).value().trim()) { self.t("Confirm delete", "确认删除") } else { self.t("Delete", "删除") }, false, |this, cx| this.delete_custom_shader(cx), cx)))
                 .children(self.saved_custom_shaders.iter().enumerate().map(|(index, shader)| {
                     let name = shader.name.clone();
                     Button::new(("texture-saved-shader", index)).label(name.clone()).secondary().on_click(cx.listener(move |this, _, window, cx| this.load_custom_shader(&name, window, cx)))
@@ -11310,8 +13401,6 @@ impl Workspace {
                                 .aria_label(self.t(
                                     "Entry point",
                                     "入口点",
-                                    "エントリポイント",
-                                    "진입점",
                                 ))
                                 .w(px(100.)),
                         )
@@ -11321,8 +13410,6 @@ impl Workspace {
                                 .aria_label(self.t(
                                     "Shader encoding",
                                     "着色器编码",
-                                    "シェーダーエンコード",
-                                    "셰이더 인코딩",
                                 ))
                                 .w(px(70.)),
                         )
@@ -11331,8 +13418,6 @@ impl Workspace {
                             self.t(
                                 "Compile custom shader",
                                 "编译自定义着色器",
-                                "カスタムシェーダーをコンパイル",
-                                "사용자 셰이더 컴파일",
                             ),
                             false,
                             |this, cx| this.custom_shader_apply(false, cx),
@@ -11343,17 +13428,15 @@ impl Workspace {
                             self.t(
                                 "Clear custom shader",
                                 "清除自定义着色器",
-                                "カスタムシェーダーを解除",
-                                "사용자 셰이더 지우기",
                             ),
                             false,
                             |this, cx| this.custom_shader_apply(true, cx),
                             cx,
                         )),
                 )
-                .child(button("texture-custom-prefix", if self.custom_shader_prefix_enabled(cx) { self.t("Prefix: on", "前缀：开", "プレフィックス：オン", "접두사: 켜짐") } else { self.t("Prefix: off", "前缀：关", "プレフィックス：オフ", "접두사: 꺼짐") }, self.custom_shader_prefix_enabled(cx), |this, cx| { this.texture_custom_prefix = Some(!this.custom_shader_prefix_enabled(cx)); cx.notify(); }, cx))
-                .child(div().text_sm().child(self.t("Compile flags (JSON array of name and value)", "编译参数（包含 name 和 value 的 JSON 数组）", "コンパイルフラグ（name と value の JSON 配列）", "컴파일 플래그 (name과 value의 JSON 배열)")))
-                .child(div().id("texture-custom-flags").test_support().w_full().child(Textarea::new(&self.texture_custom_flags).aria_label(self.t("Compile flags JSON", "编译参数 JSON", "コンパイルフラグ JSON", "컴파일 플래그 JSON"))))
+                .child(button("texture-custom-prefix", if self.custom_shader_prefix_enabled(cx) { self.t("Prefix: on", "前缀：开") } else { self.t("Prefix: off", "前缀：关") }, self.custom_shader_prefix_enabled(cx), |this, cx| { this.texture_custom_prefix = Some(!this.custom_shader_prefix_enabled(cx)); cx.notify(); }, cx))
+                .child(div().text_sm().child(self.t("Compile flags (JSON array of name and value)", "编译参数（包含 name 和 value 的 JSON 数组）")))
+                .child(div().id("texture-custom-flags").test_support().w_full().child(Textarea::new(&self.texture_custom_flags).aria_label(self.t("Compile flags JSON", "编译参数 JSON"))))
                 .child(
                     div()
                         .id("texture-custom-source")
@@ -11363,8 +13446,6 @@ impl Workspace {
                             Textarea::new(&self.texture_custom_source).aria_label(self.t(
                                 "Custom shader source",
                                 "自定义着色器源码",
-                                "カスタムシェーダーのソース",
-                                "사용자 셰이더 소스",
                             )),
                         ),
                 )
@@ -11415,8 +13496,6 @@ impl Workspace {
                         self.t(
                             "Per-texture settings",
                             "按纹理保存设置",
-                            "テクスチャごとに設定を保存",
-                            "텍스처별 설정 저장",
                         ),
                         self.settings.texture_per_resource_settings,
                         |this, cx| {
@@ -11432,8 +13511,6 @@ impl Workspace {
                         self.t(
                             "Per-texture Y flip",
                             "按纹理保存 Y 翻转",
-                            "Y反転をテクスチャごとに保存",
-                            "텍스처별 Y 뒤집기 저장",
                         ),
                         self.settings.texture_per_resource_settings
                             && self.settings.texture_per_resource_flip_y,
@@ -11451,8 +13528,6 @@ impl Workspace {
             .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
                 "Preview channels and display",
                 "预览通道与显示",
-                "プレビューのチャンネルと表示",
-                "미리보기 채널 및 표시",
             )))
             .child(
                 div()
@@ -11465,7 +13540,7 @@ impl Workspace {
                             |row| {
                                 row.child(button(
                                     "texture-preview-depth",
-                                    self.t("Depth", "深度", "深度", "깊이"),
+                                    self.t("Depth", "深度"),
                                     channels[0],
                                     |this, cx| this.change_preview_channel(0, cx),
                                     cx,
@@ -11474,7 +13549,7 @@ impl Workspace {
                         )
                         .child(button(
                             "texture-preview-stencil",
-                            self.t("Stencil", "模板", "ステンシル", "스텐실"),
+                            self.t("Stencil", "模板"),
                             channels[1],
                             |this, cx| this.change_preview_channel(1, cx),
                             cx,
@@ -11517,7 +13592,7 @@ impl Workspace {
                     })
                     .child(button(
                         "texture-preview-flip",
-                        self.t("Flip Y", "垂直翻转", "上下反転", "상하 반전"),
+                        self.t("Flip Y", "垂直翻转"),
                         self.texture_selection.preview_flip_y,
                         |this, cx| this.change_preview_flip(cx),
                         cx,
@@ -11528,8 +13603,6 @@ impl Workspace {
                             self.t(
                                 "Linear as gamma",
                                 "线性转 Gamma",
-                                "リニアをガンマ表示",
-                                "선형을 감마로 표시",
                             ),
                             forced_gamma.unwrap_or(
                                 self.texture_selection
@@ -11545,8 +13618,6 @@ impl Workspace {
             .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
                 "Channel combinations, flip and gamma affect the preview only.",
                 "通道组合、翻转和 Gamma 仅影响预览。",
-                "チャンネルの組み合わせ、反転、ガンマはプレビューのみに影響します。",
-                "채널 조합, 반전 및 감마는 미리보기에만 적용됩니다.",
             )))
             .child(self.texture_preview_modes(cx))
             .child(self.texture_custom_shader_panel(cx))
@@ -11554,8 +13625,6 @@ impl Workspace {
             .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
                 "Preview zoom and pan (output pixels)",
                 "预览缩放与平移（输出像素）",
-                "プレビューの拡大と移動（出力ピクセル）",
-                "미리보기 확대 및 이동 (출력 픽셀)",
             )))
             .child(
                 div()
@@ -11564,7 +13633,7 @@ impl Workspace {
                     .gap_2()
                     .child(button(
                         "texture-view-fit",
-                        self.t("Fit", "适应", "全体表示", "맞춤"),
+                        self.t("Fit", "适应"),
                         self.texture_selection.preview_scale.is_none(),
                         |this, cx| this.change_preview_transform(None, [0.0, 0.0], cx),
                         cx,
@@ -11626,8 +13695,6 @@ impl Workspace {
             .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
                 "Debug overlay (may replay the capture)",
                 "调试叠加层（可能重新回放捕获）",
-                "デバッグオーバーレイ（再リプレイする場合があります）",
-                "디버그 오버레이 (캡처를 다시 재생할 수 있음)",
             )))
             .child(
                 div().flex().flex_wrap().gap_2().children(
@@ -11860,7 +13927,7 @@ impl Workspace {
                         format!(
                             "{}: {index} · {}",
                             row_label,
-                            self.t("Restart", "重启", "リスタート", "재시작")
+                            self.t("Restart", "重启")
                         )
                     } else if let Some(position) = &row.position {
                         format!("{}: {index} → {position:?}{attributes}", row_label)
@@ -11872,28 +13939,20 @@ impl Workspace {
                                 Some("index_out_of_bounds") => self.t(
                                     "Index out of bounds",
                                     "索引越界",
-                                    "インデックスが範囲外",
-                                    "인덱스 범위 초과"
                                 ),
                                 Some("vertex_out_of_bounds") => self.t(
                                     "Vertex out of bounds",
                                     "顶点越界",
-                                    "頂点が範囲外",
-                                    "정점 범위 초과"
                                 ),
                                 Some("vertex_buffer_unavailable") => self.t(
                                     "Vertex buffer unavailable",
                                     "顶点缓冲区不可用",
-                                    "頂点バッファーを利用できません",
-                                    "정점 버퍼를 사용할 수 없음"
                                 ),
                                 Some("unsupported_format") => self.t(
                                     "Unsupported format",
                                     "格式暂不支持",
-                                    "未対応の形式",
-                                    "지원하지 않는 형식"
                                 ),
-                                _ => self.t("Unavailable", "不可用", "利用不可", "사용 불가"),
+                                _ => self.t("Unavailable", "不可用"),
                             }
                         )
                     }
@@ -11938,8 +13997,6 @@ impl Workspace {
                                             self.t(
                                                 "Some fields could not be decoded",
                                                 "部分字段无法解码",
-                                                "一部のフィールドを解釈できません",
-                                                "일부 필드를 해석할 수 없습니다"
                                             )
                                         )
                                     } else {
@@ -11952,8 +14009,6 @@ impl Workspace {
                                 self.t(
                                     "Task payload could not be decoded",
                                     "无法解码任务载荷",
-                                    "タスクペイロードを解釈できません",
-                                    "태스크 페이로드를 해석할 수 없습니다",
                                 )
                                 .to_owned(),
                             ],
@@ -11972,7 +14027,7 @@ impl Workspace {
                                     "{}: {} ({})",
                                     index.row,
                                     index.raw,
-                                    self.t("Restart", "重启", "リスタート", "재시작")
+                                    self.t("Restart", "重启")
                                 ),
                             })
                             .collect()
@@ -12007,17 +14062,24 @@ impl Workspace {
                 .map_or(0, |items| items.len()),
             CaptureTab::Descriptors => snapshot.descriptor_stores.len() + 1,
             CaptureTab::Counters => snapshot.counters.len(),
-            CaptureTab::Statistics => snapshot
-                .frame_statistics
-                .as_ref()
-                .map(|value| {
-                    serde_json::to_string_pretty(value)
-                        .unwrap_or_default()
-                        .lines()
-                        .count()
-                })
-                .unwrap_or(0),
+            CaptureTab::Statistics => {
+                if snapshot
+                    .frame_statistics
+                    .as_ref()
+                    .and_then(|value| value.get("recorded"))
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                {
+                    1 + renderdocx::frame_statistics::CATEGORIES.len()
+                } else {
+                    1
+                }
+            }
             CaptureTab::Messages => self.message_visible.len(),
+            CaptureTab::ShaderMessages => self
+                .shader_message_page
+                .as_ref()
+                .map_or(0, |page| page.messages.len()),
             CaptureTab::Resources => self.resource_visible.len(),
             CaptureTab::VertexInput => self.input_page.as_ref().map_or(0, |page| page.rows.len()),
             CaptureTab::Mesh => mesh_lines.len(),
@@ -12078,54 +14140,46 @@ impl Workspace {
             "{}  ·  {} {}  ·  {} {}  ·  {} {}",
             api,
             snapshot.resource_count,
-            self.t("resources", "资源", "リソース", "리소스"),
+            self.t("resources", "资源"),
             snapshot.texture_count,
-            self.t("textures", "纹理", "テクスチャ", "텍스처"),
+            self.t("textures", "纹理"),
             snapshot.buffer_count,
-            self.t("buffers", "缓冲区", "バッファ", "버퍼")
+            self.t("buffers", "缓冲区")
         );
         let frame = format!(
             "{} {}{}",
-            self.t("Frame", "帧", "フレーム", "프레임"),
+            self.t("Frame", "帧"),
             snapshot.frame,
             if snapshot.degraded {
                 self.t(
                     " · degraded replay",
                     " · 降级回放",
-                    " · 機能制限あり",
-                    " · 제한된 리플레이",
                 )
             } else {
                 ""
             }
         );
-        let back = self.t("Workspace", "工作台", "ワークスペース", "작업 공간");
+        let back = self.t("Workspace", "工作台");
         let open = self.t(
             "Open capture",
             "打开捕获文件",
-            "キャプチャを開く",
-            "캡처 열기",
         );
         let upstream = self.t(
             "Open in RenderDoc",
             "在 RenderDoc 中打开",
-            "RenderDoc で開く",
-            "RenderDoc에서 열기",
         );
-        let events = self.t("EVENTS", "事件", "イベント", "이벤트");
-        let api_calls = self.t("API calls", "API 调用", "API 呼び出し", "API 호출");
-        let parameters_label = self.t("Parameters", "参数", "パラメーター", "매개변수");
-        let parent_label = self.t("Parent", "上一级", "親", "상위");
-        let previous_label = self.t("Previous", "上一页", "前へ", "이전");
-        let next_label = self.t("Next", "下一页", "次へ", "다음");
+        let events = self.t("EVENTS", "事件");
+        let api_calls = self.t("API calls", "API 调用");
+        let parameters_label = self.t("Parameters", "参数");
+        let parent_label = self.t("Parent", "上一级");
+        let previous_label = self.t("Previous", "上一页");
+        let next_label = self.t("Next", "下一页");
         let load_structure_bytes = self.t(
             "Load bytes (full capture export)",
             "读取字节（完整导出捕获）",
-            "バイトを読み込む（キャプチャー全体を出力）",
-            "바이트 읽기 (전체 캡처 내보내기)",
         );
-        let previous_bytes = self.t("Previous bytes", "上一段字节", "前のバイト", "이전 바이트");
-        let next_bytes = self.t("Next bytes", "下一段字节", "次のバイト", "다음 바이트");
+        let previous_bytes = self.t("Previous bytes", "上一段字节");
+        let next_bytes = self.t("Next bytes", "下一段字节");
         let is_structured_buffer = self
             .structure
             .page
@@ -12134,165 +14188,129 @@ impl Workspace {
         let selected_event_label = self.t(
             "Selected event",
             "当前事件",
-            "選択イベント",
-            "선택한 이벤트",
         );
         let event_filter_label = self.t(
             "Filter event names",
             "筛选事件名称",
-            "イベント名で絞り込み",
-            "이벤트 이름 필터",
         );
         let show_api_events = if self.event_tree.show_api() {
             self.t(
                 "Hide API events",
                 "隐藏 API 事件",
-                "API イベントを隠す",
-                "API 이벤트 숨기기",
             )
         } else {
             self.t(
                 "Show API events",
                 "显示 API 事件",
-                "API イベントを表示",
-                "API 이벤트 표시",
             )
         };
-        let textures_label = self.t("Textures", "纹理", "テクスチャ", "텍스처");
-        let next_mip = self.t("Next mip", "切换 mip", "mip 切替", "mip 전환");
-        let next_slice = self.t("Next slice", "切换层", "スライス切替", "슬라이스 전환");
-        let next_sample = self.t("Next sample", "切换采样", "サンプル切替", "샘플 전환");
-        let next_channel = self.t("Next channel", "切换通道", "チャンネル切替", "채널 전환");
-        let slice_label = self.t("Slice", "层", "スライス", "슬라이스");
-        let channel_label = self.t("Channel", "通道", "チャンネル", "채널");
-        let resolve_label = self.t("Resolve", "解析", "解決", "리졸브");
-        let all_label = self.t("All", "全部", "すべて", "전체");
-        let buffers_label = self.t("Buffers", "缓冲区", "バッファ", "버퍼");
-        let shaders_tab_label = self.t("Shaders", "着色器", "シェーダー", "셰이더");
+        let textures_label = self.t("Textures", "纹理");
+        let next_mip = self.t("Next mip", "切换 mip");
+        let next_slice = self.t("Next slice", "切换层");
+        let next_sample = self.t("Next sample", "切换采样");
+        let next_channel = self.t("Next channel", "切换通道");
+        let slice_label = self.t("Slice", "层");
+        let channel_label = self.t("Channel", "通道");
+        let resolve_label = self.t("Resolve", "解析");
+        let all_label = self.t("All", "全部");
+        let buffers_label = self.t("Buffers", "缓冲区");
+        let shaders_tab_label = self.t("Shaders", "着色器");
         let shader_details = self.t(
             "SHADER DETAILS",
             "着色器详情",
-            "シェーダー詳細",
-            "셰이더 상세",
         );
         let shader_empty = self.t(
             "Select an event and a bound shader stage.",
             "选择事件及已绑定的着色器阶段。",
-            "イベントとバインドされたシェーダーステージを選択してください。",
-            "이벤트와 바인딩된 셰이더 단계를 선택하세요.",
         );
-        let next_target = self.t("Next target", "切换目标", "ターゲット切替", "대상 전환");
-        let entry_label = self.t("Entry point", "入口点", "エントリポイント", "진입점");
-        let disasm_label = self.t("Disassembly", "反汇编", "逆アセンブル", "역어셈블리");
-        let shader_inputs_label = self.t("Inputs", "输入", "入力", "입력");
-        let shader_outputs_label = self.t("Outputs", "输出", "出力", "출력");
-        let constants_label = self.t("Constant blocks", "常量块", "定数ブロック", "상수 블록");
-        let target_label = self.t("Target", "目标", "ターゲット", "대상");
-        let default_label = self.t("Default", "默认", "既定", "기본값");
-        let bound_label = self.t("bound", "已绑定", "バインド済み", "바인딩됨");
-        let unbound_label = self.t("unbound", "未绑定", "未バインド", "바인딩 안 됨");
-        let buffer_label = self.t("Buffer", "缓冲区", "バッファ", "버퍼");
+        let next_target = self.t("Next target", "切换目标");
+        let entry_label = self.t("Entry point", "入口点");
+        let disasm_label = self.t("Disassembly", "反汇编");
+        let shader_inputs_label = self.t("Inputs", "输入");
+        let shader_outputs_label = self.t("Outputs", "输出");
+        let constants_label = self.t("Constant blocks", "常量块");
+        let target_label = self.t("Target", "目标");
+        let default_label = self.t("Default", "默认");
+        let bound_label = self.t("bound", "已绑定");
+        let unbound_label = self.t("unbound", "未绑定");
+        let buffer_label = self.t("Buffer", "缓冲区");
         let buffer_details = self.t(
             "BUFFER DETAILS",
             "缓冲区详情",
-            "バッファの詳細",
-            "버퍼 상세",
         );
-        let previous = self.t("Previous", "上一页", "前へ", "이전");
-        let next = self.t("Next", "下一页", "次へ", "다음");
-        let read = self.t("Read", "读取", "読み込み", "읽기");
+        let previous = self.t("Previous", "上一页");
+        let next = self.t("Next", "下一页");
+        let read = self.t("Read", "读取");
         let buffer_empty = self.t(
             "Select a buffer to inspect its bytes.",
             "选择缓冲区查看字节。",
-            "バッファを選択してバイトを表示します。",
-            "버퍼를 선택해 바이트를 확인하세요.",
         );
-        let texture_label = self.t("Texture", "纹理", "テクスチャ", "텍스처");
-        let array_label = self.t("Array", "数组", "配列", "배열");
-        let samples_label = self.t("Samples", "采样", "サンプル", "샘플");
-        let bytes_label = self.t("Bytes", "字节", "バイト", "바이트");
-        let format_label = self.t("Format", "格式", "形式", "형식");
-        let component_label = self.t("Component", "分量", "成分", "구성 요소");
+        let texture_label = self.t("Texture", "纹理");
+        let array_label = self.t("Array", "数组");
+        let samples_label = self.t("Samples", "采样");
+        let bytes_label = self.t("Bytes", "字节");
+        let format_label = self.t("Format", "格式");
+        let component_label = self.t("Component", "分量");
         let texture_details = self.t(
             "TEXTURE DETAILS",
             "纹理详情",
-            "テクスチャの詳細",
-            "텍스처 상세",
         );
-        let export_label = self.t("Export PNG", "导出 PNG", "PNG を書き出す", "PNG 내보내기");
-        let preview_label = self.t("Preview", "预览", "プレビュー", "미리 보기");
+        let export_label = self.t("Export PNG", "导出 PNG");
+        let preview_label = self.t("Preview", "预览");
         let preview_note = self.t(
             "Click 2D/3D or D3D 1D previews to pick a pixel; scroll to zoom and drag to pan.",
             "点击 2D/3D 或 D3D 1D 预览读取像素；滚轮缩放，拖动平移。",
-            "2D/3D または D3D 1D プレビューをクリックして取得。スクロールで拡大縮小、ドラッグで移動。",
-            "2D/3D 또는 D3D 1D 미리보기를 클릭해 픽셀을 읽고, 스크롤로 확대하고 드래그해 이동합니다.",
         );
         let export_note = self.t(
             "Existing files are never replaced.",
             "不会覆盖已有文件。",
-            "既存のファイルは上書きしません。",
-            "기존 파일을 덮어쓰지 않습니다.",
         );
         let texture_empty = self.t(
             "Select a texture to inspect its metadata.",
             "选择纹理查看元数据。",
-            "テクスチャを選択して情報を表示します。",
-            "텍스처를 선택해 정보를 확인하세요.",
         );
-        let details = self.t("ACTION DETAILS", "操作详情", "アクション詳細", "작업 상세");
+        let details = self.t("ACTION DETAILS", "操作详情");
         let empty = self.t(
             "Select an action to replay its event.",
             "选择操作以回放对应事件。",
-            "アクションを選択してイベントをリプレイします。",
-            "작업을 선택하여 이벤트를 리플레이합니다.",
         );
-        let event_label = self.t("Event", "事件", "イベント", "이벤트");
-        let action_label = self.t("Action", "操作", "アクション", "작업");
-        let flags_label = self.t("Flags", "标志", "フラグ", "플래그");
+        let event_label = self.t("Event", "事件");
+        let action_label = self.t("Action", "操作");
+        let flags_label = self.t("Flags", "标志");
         let indices_label = self.t(
             "Indices / vertices",
             "索引 / 顶点",
-            "インデックス / 頂点",
-            "인덱스 / 정점",
         );
-        let instances_label = self.t("Instances", "实例", "インスタンス", "인스턴스");
-        let pipeline_label = self.t("PIPELINE", "管线", "パイプライン", "파이프라인");
-        let topology_label = self.t("Topology", "拓扑", "トポロジー", "토폴로지");
+        let instances_label = self.t("Instances", "实例");
+        let pipeline_label = self.t("PIPELINE", "管线");
+        let topology_label = self.t("Topology", "拓扑");
         let shaders_label = self.t(
             "Bound shaders",
             "已绑定着色器",
-            "バインド済みシェーダー",
-            "바인딩된 셰이더",
         );
         let outputs_label = self.t(
             "Bound outputs",
             "已绑定输出",
-            "バインド済み出力",
-            "바인딩된 출력",
         );
         let pipeline_unavailable = self.t(
             "Pipeline state unavailable",
             "管线状态不可用",
-            "パイプライン状態を取得できません",
-            "파이프라인 상태를 사용할 수 없습니다",
         );
         let vertex_buffers_label =
-            self.t("Vertex buffers", "顶点缓冲区", "頂点バッファ", "정점 버퍼");
+            self.t("Vertex buffers", "顶点缓冲区");
         let index_buffer_label = self.t(
             "Index buffer",
             "索引缓冲区",
-            "インデックスバッファ",
-            "인덱스 버퍼",
         );
-        let inputs_label = self.t("Vertex inputs", "顶点输入", "頂点入力", "정점 입력");
-        let viewport_label = self.t("Viewports", "视口", "ビューポート", "뷰포트");
-        let scissor_label = self.t("Scissors", "裁剪矩形", "シザー矩形", "시저 사각형");
-        let unavailable = self.t("Unavailable", "不可用", "利用不可", "사용할 수 없음");
-        let offset_label = self.t("offset", "偏移", "オフセット", "오프셋");
-        let stride_label = self.t("stride", "步长", "ストライド", "스트라이드");
-        let enabled_label = self.t("enabled", "启用", "有効", "활성");
-        let disabled_label = self.t("disabled", "禁用", "無効", "비활성");
-        let depth_label = self.t("depth", "深度", "深度", "깊이");
+        let inputs_label = self.t("Vertex inputs", "顶点输入");
+        let viewport_label = self.t("Viewports", "视口");
+        let scissor_label = self.t("Scissors", "裁剪矩形");
+        let unavailable = self.t("Unavailable", "不可用");
+        let offset_label = self.t("offset", "偏移");
+        let stride_label = self.t("stride", "步长");
+        let enabled_label = self.t("enabled", "启用");
+        let disabled_label = self.t("disabled", "禁用");
+        let depth_label = self.t("depth", "深度");
         let pipeline = self.pipeline.clone();
         let selected_event = self.selected_event_id();
         let status = self.status.clone();
@@ -12321,8 +14339,8 @@ impl Workspace {
                                     .overflow_hidden()
                                     .cursor_pointer()
                                     .child(format!("E{event} · {text}"))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.jump_to_usage(event, window, cx)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.jump_to_bookmark(event, cx)
                                     })),
                             )
                         })
@@ -12357,8 +14375,6 @@ impl Workspace {
                                 this.t(
                                     "Current event accesses",
                                     "当前事件的描述符访问",
-                                    "現在のイベントのアクセス",
-                                    "현재 이벤트 접근",
                                 )
                                 .to_owned()
                             };
@@ -12434,21 +14450,89 @@ impl Workspace {
             .flex_1()
             .into_any_element()
         } else if self.tab == CaptureTab::Statistics {
-            let lines: std::sync::Arc<Vec<String>> = std::sync::Arc::new(
-                snapshot
-                    .frame_statistics
-                    .as_ref()
-                    .and_then(|value| serde_json::to_string_pretty(value).ok())
-                    .map(|value| value.lines().map(str::to_owned).collect())
-                    .unwrap_or_default(),
-            );
             uniform_list(
                 "capture-statistics",
                 count,
-                cx.processor(move |_, range: std::ops::Range<usize>, _, _| {
+                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                     range
-                        .filter_map(|i| lines.get(i))
-                        .map(|line| div().h(px(24.)).px_3().child(line.clone()))
+                        .map(|row| {
+                            let index = if row == 0 {
+                                renderdocx::frame_statistics::OVERVIEW
+                            } else {
+                                row - 1
+                            };
+                            let label = renderdocx::frame_statistics::category_label(
+                                index,
+                                this.settings.language,
+                            );
+                            div()
+                                .id(("frame-stats-category", index))
+                                .test_support()
+                                .h(px(32.))
+                                .px_3()
+                                .cursor_pointer()
+                                .bg(rgb(if this.frame_stats_category == index {
+                                    0x304c7c
+                                } else {
+                                    0x192332
+                                }))
+                                .child(label)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.frame_stats_category = index;
+                                    this.frame_stats_raw = false;
+                                    cx.notify();
+                                }))
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .flex_1()
+            .into_any_element()
+        } else if self.tab == CaptureTab::ShaderMessages {
+            uniform_list(
+                "capture-shader-messages",
+                count,
+                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                    range
+                        .filter_map(|index| {
+                            let message = this.shader_message_page.as_ref()?.messages.get(index)?;
+                            let label = format!(
+                                "{} · {} · {}",
+                                renderdocx::shader_messages::stage_name(
+                                    message.stage,
+                                    this.settings.language
+                                ),
+                                renderdocx::shader_messages::location(
+                                    message,
+                                    this.settings.language
+                                ),
+                                message.message
+                            );
+                            Some(
+                                div()
+                                    .id(("shader-message", index))
+                                    .test_support()
+                                    .h(px(32.))
+                                    .px_3()
+                                    .overflow_hidden()
+                                    .cursor_pointer()
+                                    .bg(rgb(if this.selected_shader_message == Some(index) {
+                                        0x304c7c
+                                    } else {
+                                        0x192332
+                                    }))
+                                    .child(label)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if !this.shader_vertex_lookup_pending {
+                                            if this.selected_shader_message != Some(index) {
+                                                this.shader_vertex_resolution = None;
+                                            }
+                                            this.selected_shader_message = Some(index);
+                                            cx.notify();
+                                        }
+                                    })),
+                            )
+                        })
                         .collect::<Vec<_>>()
                 }),
             )
@@ -12466,13 +14550,17 @@ impl Workspace {
                             let message = this.snapshot.as_ref()?.debug_messages.get(index)?;
                             let event = message.event_id;
                             let severity = match message.severity {
-                                0 => this.t("High", "高", "高", "높음"),
-                                1 => this.t("Medium", "中", "中", "중간"),
-                                2 => this.t("Low", "低", "低", "낮음"),
-                                3 => this.t("Info", "信息", "情報", "정보"),
-                                _ => this.t("Unknown", "未知", "不明", "알 수 없음"),
+                                0 => this.t("High", "高"),
+                                1 => this.t("Medium", "中"),
+                                2 => this.t("Low", "低"),
+                                3 => this.t("Info", "信息"),
+                                _ => this.t("Unknown", "未知"),
                             };
-                            let text = format!("{severity} · E{event} · {}", message.description);
+                            let hidden = renderdocx::debug_message_view::is_hidden(message,
+                                &this.hidden_message_sources, &this.hidden_message_severities,
+                                &this.hidden_message_categories, &this.hidden_message_types);
+                            let marker = if hidden { this.t("[hidden] ", "[已隐藏] ") } else { "" };
+                            let text = format!("{marker}{severity} · E{event} · {}", message.description);
                             Some(
                                 div()
                                     .id(("debug-message", index))
@@ -12481,14 +14569,18 @@ impl Workspace {
                                     .px_3()
                                     .overflow_hidden()
                                     .cursor_pointer()
+                                    .text_color(rgb(if hidden { 0x98a1af } else { 0xe2e8f0 }))
                                     .child(text)
                                     .bg(rgb(if this.selected_message == Some(index) {
                                         0x304c7c
                                     } else {
                                         0x192332
                                     }))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                    .on_click(cx.listener(move |this, click: &gpui::ClickEvent, window, cx| {
                                         this.selected_message = Some(index);
+                                        if event != 0 && matches!(click, gpui::ClickEvent::Mouse(mouse) if mouse.up.click_count == 2) {
+                                            this.jump_to_usage(event, window, cx);
+                                        }
                                         cx.notify();
                                     })),
                             )
@@ -12627,15 +14719,48 @@ impl Workspace {
             uniform_list(
                 "capture-mesh",
                 count,
-                cx.processor(move |_, range: std::ops::Range<usize>, _, _| {
+                cx.processor(move |this, range: std::ops::Range<usize>, _, _| {
                     range
                         .filter_map(|index| {
                             lines.get(index).map(|line| {
+                                let highlighted = this.mesh.highlighted_row.is_some_and(|target| {
+                                    this.mesh
+                                        .draw
+                                        .as_ref()
+                                        .and_then(|page| page.rows.get(index))
+                                        .is_some_and(|row| row.row == target)
+                                        || (this.mesh.selection.stage == 3
+                                            && this.mesh.kind == MeshBufferKind::Vertex
+                                            && this.mesh.info.as_ref().is_some_and(|info| {
+                                                info.vertex_stride > 0
+                                                    && this.mesh.offset
+                                                        / u64::from(info.vertex_stride)
+                                                        + index as u64
+                                                        == u64::from(target)
+                                            }))
+                                });
                                 div()
                                     .id(("mesh-row", index))
                                     .test_support()
                                     .h(px(32.))
                                     .px_3()
+                                    .bg(rgb(if highlighted { 0x304c7c } else { 0x192332 }))
+                                    .when(highlighted, |row| {
+                                        row.aria_label(format!(
+                                            "{}: {line}",
+                                            if this.mesh.geometry_message_handoff {
+                                                this.t(
+                                                    "Approximate output row",
+                                                    "近似输出行",
+                                                )
+                                            } else {
+                                                this.t(
+                                                    "Selected invocation row",
+                                                    "已选调用行",
+                                                )
+                                            }
+                                        ))
+                                    })
                                     .child(line.clone())
                             })
                         })
@@ -12697,15 +14822,11 @@ impl Workspace {
                 self.t(
                     "Select an action to view its API calls.",
                     "选择操作以查看其 API 调用。",
-                    "アクションを選択して API 呼び出しを表示します。",
-                    "작업을 선택하여 API 호출을 확인하세요.",
                 )
             } else {
                 self.t(
                     "No API calls are available for this action.",
                     "此操作没有可用的 API 调用。",
-                    "このアクションに利用可能な API 呼び出しはありません。",
-                    "이 작업에 사용 가능한 API 호출이 없습니다.",
                 )
             };
             div()
@@ -12734,8 +14855,6 @@ impl Workspace {
                                 this.t(
                                     "Unnamed API event",
                                     "未命名 API 事件",
-                                    "名前のない API イベント",
-                                    "이름 없는 API 이벤트",
                                 )
                                 .to_owned()
                             } else {
@@ -12928,222 +15047,294 @@ impl Workspace {
             .flex_1()
             .into_any_element()
         } else {
-            uniform_list(
-                "capture-actions",
-                count,
-                cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
-                    this.format_viewport_events(
-                        range.start.saturating_sub(1)..range.end.saturating_sub(1),
-                        cx,
-                    );
-                    range
-                        .filter_map(|row| {
-                            if row == 0 {
-                                let selected =
-                                    this.selected.is_none() && this.selected_event_id() == Some(0);
-                                return Some(
-                                    div()
-                                        .id("capture-start")
-                                        .test_support()
-                                        .h(px(32.))
-                                        .px_3()
-                                        .flex()
-                                        .items_center()
-                                        .cursor_pointer()
-                                        .bg(rgb(if selected { 0x304c7c } else { 0x192332 }))
-                                        .hover(|row| row.bg(rgb(0x263950)))
-                                        .child(div().w(px(22.)).flex_none())
-                                        .child(
+            div()
+                .id("event-list")
+                .test_support()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .track_focus(&self.event_focus)
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        window.focus(&this.event_focus, cx);
+                    }),
+                )
+                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                    let modifiers = event.keystroke.modifiers;
+                    let key = event.keystroke.key.as_str();
+                    let control_only = modifiers.control
+                        && !modifiers.alt
+                        && !modifiers.shift
+                        && !modifiers.platform
+                        && !modifiers.function;
+                    let handled = if control_only && (key == "left" || key == "right") {
+                        this.step_event(key == "right", cx);
+                        true
+                    } else if control_only && key.len() == 1 && key.as_bytes()[0].is_ascii_digit() {
+                        let digit = key.as_bytes()[0] - b'0';
+                        this.jump_to_bookmark_index(
+                            if digit == 0 {
+                                9
+                            } else {
+                                usize::from(digit - 1)
+                            },
+                            cx,
+                        );
+                        true
+                    } else {
+                        !modifiers.modified() && this.navigate_event_list(key, cx)
+                    };
+                    if handled {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                }))
+                .child(
+                    uniform_list(
+                        "capture-actions",
+                        count,
+                        cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                            this.format_viewport_events(
+                                range.start.saturating_sub(1)..range.end.saturating_sub(1),
+                                cx,
+                            );
+                            range
+                                .filter_map(|row| {
+                                    if row == 0 {
+                                        let selected = this.selected.is_none()
+                                            && this.selected_event_id() == Some(0);
+                                        return Some(
                                             div()
-                                                .flex_1()
+                                                .id("capture-start")
+                                                .test_support()
+                                                .h(px(32.))
+                                                .px_3()
                                                 .flex()
                                                 .items_center()
-                                                .gap_3()
-                                                .when(this.settings.event_columns.event_id, |row| {
-                                                    row.child(
-                                                        div()
-                                                            .id("event-eid-0")
-                                                            .test_support()
-                                                            .w(px(108.))
-                                                            .flex_none()
-                                                            .child("0"),
-                                                    )
-                                                })
-                                                .when(this.settings.event_columns.action, |row| {
-                                                    row.child(
-                                                        div().w(px(76.)).flex_none().child("0"),
-                                                    )
-                                                })
-                                                .child(div().flex_1().min_w_0().when(
-                                                    this.settings.event_columns.name,
-                                                    |row| {
-                                                        row.child(this.t(
-                                                            "Capture Start",
-                                                            "捕获开始",
-                                                            "キャプチャ開始",
-                                                            "캡처 시작",
+                                                .cursor_pointer()
+                                                .bg(rgb(if selected { 0x304c7c } else { 0x192332 }))
+                                                .hover(|row| row.bg(rgb(0x263950)))
+                                                .child(div().w(px(22.)).flex_none())
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap_3()
+                                                        .when(
+                                                            this.settings.event_columns.event_id,
+                                                            |row| {
+                                                                row.child(
+                                                                    div()
+                                                                        .id("event-eid-0")
+                                                                        .test_support()
+                                                                        .w(px(108.))
+                                                                        .flex_none()
+                                                                        .child("0"),
+                                                                )
+                                                            },
+                                                        )
+                                                        .when(
+                                                            this.settings.event_columns.action,
+                                                            |row| {
+                                                                row.child(
+                                                                    div()
+                                                                        .w(px(76.))
+                                                                        .flex_none()
+                                                                        .child("0"),
+                                                                )
+                                                            },
+                                                        )
+                                                        .child(div().flex_1().min_w_0().when(
+                                                            this.settings.event_columns.name,
+                                                            |row| {
+                                                                row.child(this.t(
+                                                                    "Capture Start",
+                                                                    "捕获开始",
+                                                                ))
+                                                            },
                                                         ))
-                                                    },
-                                                ))
-                                                .when(
-                                                    this.settings.event_columns.annotation
-                                                        && !this
-                                                            .event_annotation_key
-                                                            .read(cx)
-                                                            .value()
-                                                            .is_empty(),
-                                                    |row| row.child(div().w(px(112.)).flex_none()),
+                                                        .when(
+                                                            this.settings.event_columns.annotation
+                                                                && !this
+                                                                    .event_annotation_key
+                                                                    .read(cx)
+                                                                    .value()
+                                                                    .is_empty(),
+                                                            |row| {
+                                                                row.child(
+                                                                    div().w(px(112.)).flex_none(),
+                                                                )
+                                                            },
+                                                        )
+                                                        .when(
+                                                            this.settings.event_columns.duration
+                                                                && this.event_tree.has_durations(),
+                                                            |row| {
+                                                                row.child(
+                                                                    div().w(px(80.)).flex_none(),
+                                                                )
+                                                            },
+                                                        ),
                                                 )
-                                                .when(
-                                                    this.settings.event_columns.duration
-                                                        && this.event_tree.has_durations(),
-                                                    |row| row.child(div().w(px(80.)).flex_none()),
-                                                ),
-                                        )
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.select_capture_start(cx)
-                                        }))
-                                        .into_any_element(),
-                                );
-                            }
-                            let node = *this.event_tree.visible.get(row - 1)?;
-                            let (index, api_index) = match this.event_tree.row(node)? {
-                                EventRow::Action(index) => (index, None),
-                                EventRow::Api { action, event } => (action, Some(event)),
-                            };
-                            let action = this.snapshot.as_ref()?.actions.get(index)?;
-                            let (event, name, id): (u32, String, gpui::ElementId) = match api_index
-                            {
-                                Some(api_index) => {
-                                    let api = action.api_events.get(api_index)?;
-                                    let display_name =
-                                        this.event_tree.display_name(node).unwrap_or(&api.name);
-                                    let name = if display_name.is_empty() {
-                                        this.t(
-                                            "Unnamed API event",
-                                            "未命名 API 事件",
-                                            "名前のない API イベント",
-                                            "이름 없는 API 이벤트",
-                                        )
-                                        .to_owned()
-                                    } else {
-                                        display_name.to_owned()
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.select_capture_start(cx)
+                                                }))
+                                                .into_any_element(),
+                                        );
+                                    }
+                                    let node = *this.event_tree.visible.get(row - 1)?;
+                                    let (index, api_index) = match this.event_tree.row(node)? {
+                                        EventRow::Action(index) => (index, None),
+                                        EventRow::Api { action, event } => (action, Some(event)),
                                     };
-                                    (
-                                        api.event_id,
-                                        name,
-                                        SharedString::from(format!(
-                                            "event-api-{index}-{api_index}"
-                                        ))
-                                        .into(),
-                                    )
-                                }
-                                None => (
-                                    action.event_id,
-                                    this.event_tree
-                                        .display_name(node)
-                                        .unwrap_or(&action.name)
-                                        .to_owned(),
-                                    index.into(),
-                                ),
-                            };
-                            let selected = this.selected == Some(index)
-                                && this.selected_event_id() == Some(event);
-                            let indent = action.depth as f32 * 14.0;
-                            Some(
-                                div()
-                                    .h(px(32.))
-                                    .pl_3()
-                                    .pr_3()
-                                    .flex()
-                                    .items_center()
-                                    .bg(rgb(if selected { 0x304c7c } else { 0x192332 }))
-                                    .hover(|row| row.bg(rgb(0x263950)))
-                                    .child(if this.event_tree.has_children(node) {
+                                    let action = this.snapshot.as_ref()?.actions.get(index)?;
+                                    let (event, name, id): (u32, String, gpui::ElementId) =
+                                        match api_index {
+                                            Some(api_index) => {
+                                                let api = action.api_events.get(api_index)?;
+                                                let display_name = this
+                                                    .event_tree
+                                                    .display_name(node)
+                                                    .unwrap_or(&api.name);
+                                                let name = if display_name.is_empty() {
+                                                    this.t(
+                                                        "Unnamed API event",
+                                                        "未命名 API 事件",
+                                                    )
+                                                    .to_owned()
+                                                } else {
+                                                    display_name.to_owned()
+                                                };
+                                                (
+                                                    api.event_id,
+                                                    name,
+                                                    SharedString::from(format!(
+                                                        "event-api-{index}-{api_index}"
+                                                    ))
+                                                    .into(),
+                                                )
+                                            }
+                                            None => (
+                                                action.event_id,
+                                                this.event_tree
+                                                    .display_name(node)
+                                                    .unwrap_or(&action.name)
+                                                    .to_owned(),
+                                                index.into(),
+                                            ),
+                                        };
+                                    let selected = this.selected == Some(index)
+                                        && this.selected_event_id() == Some(event);
+                                    let indent = action.depth as f32 * 14.0;
+                                    Some(
                                         div()
-                                            .id(SharedString::from(format!("event-toggle-{index}")))
-                                            .test_support()
-                                            .w(px(22.))
-                                            .flex_none()
-                                            .cursor_pointer()
-                                            .child(if this.event_tree.is_collapsed(node) {
-                                                "▸"
-                                            } else {
-                                                "▾"
-                                            })
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.event_tree.toggle(node);
-                                                cx.notify();
-                                            }))
-                                            .into_any_element()
-                                    } else {
-                                        div().w(px(22.)).flex_none().into_any_element()
-                                    })
-                                    .child(
-                                        div()
-                                            .id(id)
-                                            .test_support()
-                                            .flex_1()
+                                            .h(px(32.))
+                                            .pl_3()
+                                            .pr_3()
                                             .flex()
                                             .items_center()
-                                            .gap_3()
-                                            .cursor_pointer()
-                                            .when(this.settings.event_columns.event_id, |row| {
-                                                row.child(
-                                                    div()
-                                                        .id(SharedString::from(format!(
-                                                            "event-eid-{event}"
-                                                        )))
-                                                        .test_support()
-                                                        .w(px(108.))
-                                                        .flex_none()
-                                                        .text_color(rgb(0x91a7c0))
-                                                        .child(
-                                                            this.event_tree
-                                                                .event_label(node)
-                                                                .unwrap_or_else(|| {
-                                                                    event.to_string()
-                                                                }),
-                                                        ),
-                                                )
-                                            })
-                                            .when(this.settings.event_columns.action, |row| {
-                                                row.child(
-                                                    div()
-                                                        .id(SharedString::from(format!(
-                                                            "event-action-{event}"
-                                                        )))
-                                                        .test_support()
-                                                        .w(px(76.))
-                                                        .flex_none()
-                                                        .text_color(rgb(0x91a7c0))
-                                                        .child(
-                                                            this.event_tree
-                                                                .action_label(node)
-                                                                .unwrap_or_default(),
-                                                        ),
-                                                )
+                                            .bg(rgb(if selected { 0x304c7c } else { 0x192332 }))
+                                            .hover(|row| row.bg(rgb(0x263950)))
+                                            .child(if this.event_tree.has_children(node) {
+                                                div()
+                                                    .id(SharedString::from(format!(
+                                                        "event-toggle-{index}"
+                                                    )))
+                                                    .test_support()
+                                                    .w(px(22.))
+                                                    .flex_none()
+                                                    .cursor_pointer()
+                                                    .child(if this.event_tree.is_collapsed(node) {
+                                                        "▸"
+                                                    } else {
+                                                        "▾"
+                                                    })
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        this.event_tree.toggle(node);
+                                                        cx.notify();
+                                                    }))
+                                                    .into_any_element()
+                                            } else {
+                                                div().w(px(22.)).flex_none().into_any_element()
                                             })
                                             .child(
                                                 div()
+                                                    .id(id)
+                                                    .test_support()
                                                     .flex_1()
-                                                    .min_w_0()
-                                                    .overflow_hidden()
-                                                    .pl(px(indent))
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_3()
+                                                    .cursor_pointer()
                                                     .when(
-                                                        this.settings.event_columns.name,
-                                                        |row| row.child(name),
-                                                    ),
-                                            )
-                                            .when(
-                                                this.settings.event_columns.annotation
-                                                    && !this
-                                                        .event_annotation_key
-                                                        .read(cx)
-                                                        .value()
-                                                        .is_empty(),
-                                                |row| {
-                                                    row.child(
+                                                        this.settings.event_columns.event_id,
+                                                        |row| {
+                                                            row.child(
+                                                                div()
+                                                                    .id(SharedString::from(
+                                                                        format!(
+                                                                            "event-eid-{event}"
+                                                                        ),
+                                                                    ))
+                                                                    .test_support()
+                                                                    .w(px(108.))
+                                                                    .flex_none()
+                                                                    .text_color(rgb(0x91a7c0))
+                                                                    .child(
+                                                                        this.event_tree
+                                                                            .event_label(node)
+                                                                            .unwrap_or_else(|| {
+                                                                                event.to_string()
+                                                                            }),
+                                                                    ),
+                                                            )
+                                                        },
+                                                    )
+                                                    .when(
+                                                        this.settings.event_columns.action,
+                                                        |row| {
+                                                            row.child(
+                                                                div()
+                                                                    .id(SharedString::from(
+                                                                        format!(
+                                                                            "event-action-{event}"
+                                                                        ),
+                                                                    ))
+                                                                    .test_support()
+                                                                    .w(px(76.))
+                                                                    .flex_none()
+                                                                    .text_color(rgb(0x91a7c0))
+                                                                    .child(
+                                                                        this.event_tree
+                                                                            .action_label(node)
+                                                                            .unwrap_or_default(),
+                                                                    ),
+                                                            )
+                                                        },
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .overflow_hidden()
+                                                            .pl(px(indent))
+                                                            .when(
+                                                                this.settings.event_columns.name,
+                                                                |row| row.child(name),
+                                                            ),
+                                                    )
+                                                    .when(
+                                                        this.settings.event_columns.annotation
+                                                            && !this
+                                                                .event_annotation_key
+                                                                .read(cx)
+                                                                .value()
+                                                                .is_empty(),
+                                                        |row| {
+                                                            row.child(
                                                         div()
                                                             .id(SharedString::from(format!(
                                                                 "event-annotation-{event}"
@@ -13161,66 +15352,70 @@ impl Workspace {
                                                                     .unwrap_or_default(),
                                                             ),
                                                     )
-                                                },
-                                            )
-                                            .when(
-                                                this.settings.event_columns.duration
-                                                    && this.event_tree.has_durations(),
-                                                |row| {
-                                                    row.child(
-                                                        div()
-                                                            .w(px(80.))
-                                                            .flex_none()
-                                                            .text_sm()
-                                                            .text_color(rgb(0x9eacc0))
-                                                            .child(
-                                                                this.event_tree
-                                                                    .duration(event)
-                                                                    .map(|seconds| {
-                                                                        format!(
-                                                                            "{:.3} ms",
-                                                                            seconds * 1000.0
-                                                                        )
-                                                                    })
-                                                                    .unwrap_or_else(|| "—".into()),
-                                                            ),
+                                                        },
                                                     )
-                                                },
+                                                    .when(
+                                                        this.settings.event_columns.duration
+                                                            && this.event_tree.has_durations(),
+                                                        |row| {
+                                                            row.child(
+                                                                div()
+                                                                    .w(px(80.))
+                                                                    .flex_none()
+                                                                    .text_sm()
+                                                                    .text_color(rgb(0x9eacc0))
+                                                                    .child(
+                                                                        this.event_tree
+                                                                            .duration(event)
+                                                                            .map(|seconds| {
+                                                                                format!(
+                                                                                    "{:.3} ms",
+                                                                                    seconds
+                                                                                        * 1000.0
+                                                                                )
+                                                                            })
+                                                                            .unwrap_or_else(|| {
+                                                                                "—".into()
+                                                                            }),
+                                                                    ),
+                                                            )
+                                                        },
+                                                    )
+                                                    .on_click(cx.listener(
+                                                        move |this, _, _, cx| {
+                                                            this.select_event(index, api_index, cx)
+                                                        },
+                                                    )),
                                             )
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.select_event(index, api_index, cx)
-                                            })),
+                                            .into_any_element(),
                                     )
-                                    .into_any_element(),
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                }),
-            )
-            .track_scroll(&self.event_scroll)
-            .flex_1()
-            .into_any_element()
+                                })
+                                .collect::<Vec<_>>()
+                        }),
+                    )
+                    .track_scroll(&self.event_scroll)
+                    .flex_1(),
+                )
+                .into_any_element()
         };
 
         let detail_view = if self.tab == CaptureTab::Annotations {
             let mut detail = div().p_3().flex().flex_col().gap_2().child(self.t(
                 "Comments and bookmarks",
                 "注释与书签",
-                "コメントとブックマーク",
-                "댓글과 북마크",
             ));
-            detail = detail.child(self.t("Capture dependencies", "捕获依赖", "キャプチャの依存関係", "캡처 종속성"))
-                .child(self.t("Exports create a new copy. Embedding replaces existing embedded files; missing external files are skipped.", "导出会创建新副本。嵌入会替换已有嵌入文件，找不到的外部文件会被跳过。", "出力時に新しいコピーを作成します。埋め込みは既存ファイルを置き換え、見つからない外部ファイルを省略します。", "내보내기는 새 복사본을 만듭니다. 포함 시 기존 파일이 교체되며 없는 외부 파일은 건너뜁니다."))
-                .when(self.session.as_ref().and_then(Session::remote_server_url).is_some(), |view| view.child(self.t("Remote export changes this session's temporary capture; reopen the original to restore it.", "远程导出会更改本会话的临时捕获；重新打开原文件可恢复。", "リモート出力はこのセッションの一時キャプチャを変更します。元のファイルを開き直すと復元できます。", "원격 내보내기는 현재 세션의 임시 캡처를 변경합니다. 원본을 다시 열면 복원됩니다.")))
-                .child(button("dependencies-inspect", self.t("Inspect dependencies", "检查依赖", "依存関係を確認", "종속성 확인"), false, |this, cx| this.inspect_dependencies(cx), cx))
-                .child(button("dependencies-embed", self.t("Save copy with dependencies", "保存含依赖的副本", "依存関係を含むコピーを保存", "종속성이 포함된 복사본 저장"), false, |this, cx| {
+            detail = detail.child(self.t("Capture dependencies", "捕获依赖"))
+                .child(self.t("Exports create a new copy. Embedding replaces existing embedded files; missing external files are skipped.", "导出会创建新副本。嵌入会替换已有嵌入文件，找不到的外部文件会被跳过。"))
+                .when(self.session.as_ref().and_then(Session::remote_server_url).is_some(), |view| view.child(self.t("Remote export changes this session's temporary capture; reopen the original to restore it.", "远程导出会更改本会话的临时捕获；重新打开原文件可恢复。")))
+                .child(button("dependencies-inspect", self.t("Inspect dependencies", "检查依赖"), false, |this, cx| this.inspect_dependencies(cx), cx))
+                .child(button("dependencies-embed", self.t("Save copy with dependencies", "保存含依赖的副本"), false, |this, cx| {
                     if let Some(root) = rfd::FileDialog::new().pick_folder() { this.export_dependencies("embed", root, cx); }
                 }, cx))
-                .child(button("dependencies-remove", self.t("Save copy without embedded dependencies", "保存移除嵌入依赖的副本", "埋め込み依存関係のないコピーを保存", "포함된 종속성을 제거한 복사본 저장"), false, |this, cx| {
+                .child(button("dependencies-remove", self.t("Save copy without embedded dependencies", "保存移除嵌入依赖的副本"), false, |this, cx| {
                     if let Some(root) = rfd::FileDialog::new().pick_folder() { this.export_dependencies("remove", root, cx); }
                 }, cx))
                 .when_some(self.annotations.dependencies.as_ref(), |view, info| {
-                    view.child(format!("{}: {} · {}: {}", self.t("Embedded", "已嵌入", "埋め込み済み", "포함됨"), info.embedded, self.t("Pending", "待嵌入", "保留中", "대기 중"), info.pending))
+                    view.child(format!("{}: {} · {}: {}", self.t("Embedded", "已嵌入"), info.embedded, self.t("Pending", "待嵌入"), info.pending))
                         .children(info.nicknames.iter().cloned().map(|name| div().text_sm().child(name)))
                 })
                 .when_some(self.annotations.dependencies_copy.as_ref(), |view, path| view.child(path.display().to_string()));
@@ -13228,15 +15423,13 @@ impl Workspace {
                 let label = self.t(
                     "Capture comments",
                     "捕获注释",
-                    "キャプチャコメント",
-                    "캡처 댓글",
                 );
                 detail = detail
                     .child(label)
                     .child(Textarea::new(editor).aria_label(label))
                     .child(button(
                         "annotation-save-notes",
-                        self.t("Save comments", "保存注释", "コメントを保存", "댓글 저장"),
+                        self.t("Save comments", "保存注释"),
                         false,
                         |this, cx| {
                             let doc = this.annotations.notes.as_ref().map(|(_, doc)| doc.clone());
@@ -13259,7 +15452,7 @@ impl Workspace {
                     ))
                     .child(button(
                         "annotation-discard-notes",
-                        self.t("Discard draft", "放弃草稿", "下書きを破棄", "초안 취소"),
+                        self.t("Discard draft", "放弃草稿"),
                         false,
                         |this, cx| {
                             this.annotations.editor = None;
@@ -13272,8 +15465,6 @@ impl Workspace {
             let label = self.t(
                 "Bookmark text",
                 "书签文字",
-                "ブックマークのテキスト",
-                "북마크 텍스트",
             );
             detail = detail
                 .child(label)
@@ -13288,8 +15479,6 @@ impl Workspace {
                     self.t(
                         "Save bookmark for current event",
                         "为当前事件保存书签",
-                        "現在のイベントにブックマークを保存",
-                        "현재 이벤트에 북마크 저장",
                     ),
                     false,
                     |this, cx| {
@@ -13317,8 +15506,6 @@ impl Workspace {
                     self.t(
                         "Remove current bookmark",
                         "移除当前事件书签",
-                        "現在のブックマークを削除",
-                        "현재 북마크 제거",
                     ),
                     false,
                     |this, cx| {
@@ -13346,8 +15533,6 @@ impl Workspace {
             let mut detail = div().p_3().flex().flex_col().gap_2().child(self.t(
                 "Descriptor inspector",
                 "描述符检查器",
-                "ディスクリプター検査",
-                "디스크립터 검사",
             ));
             if let Some(page) = page {
                 let offset = page.offset.parse::<u64>().unwrap_or(0);
@@ -13361,7 +15546,7 @@ impl Workspace {
                             .gap_2()
                             .child(button(
                                 "descriptor-prev",
-                                self.t("Previous", "上一页", "前へ", "이전"),
+                                self.t("Previous", "上一页"),
                                 false,
                                 |this, cx| {
                                     if let Some(page) = &this.descriptor_page {
@@ -13382,7 +15567,7 @@ impl Workspace {
                             ))
                             .child(button(
                                 "descriptor-next",
-                                self.t("Next", "下一页", "次へ", "다음"),
+                                self.t("Next", "下一页"),
                                 false,
                                 |this, cx| {
                                     if let Some(page) = &this.descriptor_page {
@@ -13402,16 +15587,251 @@ impl Workspace {
                                     }
                                 },
                                 cx,
+                            ))
+                            .child(button(
+                                "descriptor-toggle-raw",
+                                if self.descriptor_show_raw {
+                                    self.t(
+                                        "Hide raw data",
+                                        "隐藏原始数据",
+                                    )
+                                } else {
+                                    self.t(
+                                        "Show raw data",
+                                        "显示原始数据",
+                                    )
+                                },
+                                self.descriptor_show_raw,
+                                |this, cx| {
+                                    this.descriptor_show_raw = !this.descriptor_show_raw;
+                                    cx.notify();
+                                },
+                                cx,
                             )),
                     );
                 for (index, entry) in page.entries.iter().enumerate() {
-                    let text = serde_json::to_string_pretty(entry).unwrap_or_default();
-                    detail = detail.child(div().text_sm().child(text));
+                    let descriptor = entry.get("descriptor").filter(|value| value.is_object());
+                    let access = entry.get("access").filter(|value| value.is_object());
+                    let location = entry.get("location").filter(|value| value.is_object());
+                    let kind = descriptor
+                        .and_then(|value| value.get("type"))
+                        .and_then(|value| value.as_u64())
+                        .or_else(|| {
+                            access
+                                .and_then(|value| value.get("type"))
+                                .and_then(|value| value.as_u64())
+                        });
+                    let ordinal = offset.saturating_add(index as u64);
+                    let name = location
+                        .and_then(|value| value.get("name"))
+                        .and_then(|value| value.as_str())
+                        .filter(|value| !value.is_empty());
+                    let mut heading = format!(
+                        "{} {ordinal} · {}",
+                        self.t("Descriptor", "描述符"),
+                        descriptor_type_label(self.settings.language, kind)
+                    );
+                    if let Some(name) = name {
+                        heading.push_str(&format!(" · {name}"));
+                    }
+                    detail = detail.child(
+                        div()
+                            .id(("descriptor-heading", index))
+                            .test_support()
+                            .aria_label(heading.clone())
+                            .text_sm()
+                            .text_color(rgb(0x82aaff))
+                            .child(heading),
+                    );
+                    if let Some(access) = access {
+                        let field = |key: &str| {
+                            access
+                                .get(key)
+                                .filter(|value| !value.is_null())
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "—".into())
+                        };
+                        let unused = access
+                            .get("statically_unused")
+                            .and_then(|value| value.as_bool())
+                            .unwrap_or(false);
+                        detail = detail.child(format!(
+                            "{}: {} · {}: {}[{}]{}",
+                            self.t("Stage", "阶段"),
+                            descriptor_stage_label(
+                                access.get("stage").and_then(|value| value.as_u64())
+                            ),
+                            self.t("Binding", "绑定"),
+                            field("binding"),
+                            field("array_element"),
+                            if unused {
+                                self.t(
+                                    " · statically unused",
+                                    " · 静态未使用",
+                                )
+                            } else {
+                                ""
+                            }
+                        ));
+                    }
+                    if let Some(descriptor) = descriptor {
+                        let field = |key: &str| {
+                            descriptor
+                                .get(key)
+                                .filter(|value| !value.is_null())
+                                .map(|value| {
+                                    value
+                                        .as_str()
+                                        .map(str::to_owned)
+                                        .unwrap_or_else(|| value.to_string())
+                                })
+                                .unwrap_or_else(|| "—".into())
+                        };
+                        let resource = descriptor
+                            .get("resource")
+                            .and_then(|value| value.as_u64())
+                            .and_then(|value| usize::try_from(value).ok());
+                        let resource_name = resource
+                            .and_then(|index| {
+                                snapshot.resources.get(index).map(|resource| {
+                                    self.resource_display_name(Some(index), &resource.name)
+                                })
+                            })
+                            .unwrap_or_else(|| {
+                                match descriptor
+                                    .get("resource_present")
+                                    .and_then(|value| value.as_bool())
+                                {
+                                    Some(false) => self.t(
+                                        "No resource",
+                                        "无资源",
+                                    ),
+                                    _ => self.t(
+                                        "Unavailable",
+                                        "不可用",
+                                    ),
+                                }
+                            });
+                        detail = detail
+                            .child(format!(
+                                "{}: {} · {}: {}",
+                                self.t("Resource", "资源"),
+                                resource_name,
+                                self.t("Format", "格式"),
+                                field("format")
+                            ))
+                            .child(format!(
+                                "{}: {} + {} · mip {} + {} · {} {} + {}",
+                                self.t("Byte range", "字节范围"),
+                                field("byte_offset"),
+                                field("byte_size"),
+                                field("first_mip"),
+                                field("num_mips"),
+                                self.t("slice", "切片"),
+                                field("first_slice"),
+                                field("num_slices")
+                            ));
+                    } else {
+                        detail = detail.child(self.t(
+                            "Descriptor data unavailable",
+                            "描述符数据不可用",
+                        ));
+                    }
+                    if let Some(descriptor) =
+                        entry.get("descriptor").filter(|value| value.is_object())
+                    {
+                        if let Some(swizzle) =
+                            renderdocx::texture_view::descriptor_swizzle(descriptor)
+                        {
+                            let label = format!(
+                                "{}: {swizzle}",
+                                self.t("Swizzle", "通道映射")
+                            );
+                            detail = detail.child(
+                                div()
+                                    .id(("descriptor-swizzle", index))
+                                    .test_support()
+                                    .aria_label(label.clone())
+                                    .text_sm()
+                                    .child(label),
+                            );
+                        }
+                        if let Ok(range) =
+                            renderdocx::buffer_binding::resolve(descriptor, &snapshot.buffers)
+                        {
+                            detail = detail.child(
+                                div()
+                                    .id(("descriptor-buffer", index))
+                                    .test_support()
+                                    .cursor_pointer()
+                                    .text_color(rgb(0x91cfff))
+                                    .child(self.t(
+                                        "Open bound buffer range",
+                                        "打开绑定的缓冲区范围",
+                                    ))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.open_bound_buffer(range, cx)
+                                    })),
+                            );
+                        }
+                        let number = |key: &str| {
+                            descriptor
+                                .get(key)
+                                .and_then(|v| v.as_u64())
+                                .and_then(|v| u32::try_from(v).ok())
+                        };
+                        let texture = descriptor
+                            .get("resource")
+                            .and_then(|v| v.as_u64())
+                            .and_then(|v| usize::try_from(v).ok())
+                            .and_then(|resource| {
+                                snapshot
+                                    .textures
+                                    .iter()
+                                    .position(|texture| texture.resource_index == Some(resource))
+                            });
+                        if let (Some(texture), Some(mip), Some(slice)) =
+                            (texture, number("first_mip"), number("first_slice"))
+                        {
+                            let cast = number("format_component_type").unwrap_or(0);
+                            detail = detail.child(
+                                div()
+                                    .id(("descriptor-texture", index))
+                                    .test_support()
+                                    .cursor_pointer()
+                                    .text_color(rgb(0x91cfff))
+                                    .child(self.t(
+                                        "Open texture view",
+                                        "打开纹理视图",
+                                    ))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.open_attachment_texture(
+                                            texture, mip, slice, cast, window, cx,
+                                        )
+                                    })),
+                            );
+                        }
+                    }
+                    if let Some(lines) = entry.get("sampler").and_then(|sampler| {
+                        renderdocx::sampler_view::lines(sampler, self.settings.language)
+                    }) {
+                        for (line_index, line) in lines.into_iter().enumerate() {
+                            detail = detail.child(
+                                div()
+                                    .id(("descriptor-sampler", index * 16 + line_index))
+                                    .test_support()
+                                    .aria_label(line.clone())
+                                    .text_sm()
+                                    .child(line),
+                            );
+                        }
+                    }
                     if let Some(resource) = entry
                         .get("descriptor")
                         .and_then(|d| d.get("resource"))
                         .and_then(|v| v.as_u64())
                         .and_then(|v| usize::try_from(v).ok())
+                        .filter(|index| snapshot.resources.get(*index).is_some())
                     {
                         detail = detail.child(
                             div()
@@ -13422,8 +15842,6 @@ impl Workspace {
                                 .child(self.t(
                                     "Inspect resource",
                                     "检查资源",
-                                    "リソースを検査",
-                                    "리소스 검사",
                                 ))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.tab = CaptureTab::Resources;
@@ -13432,13 +15850,21 @@ impl Workspace {
                                 })),
                         );
                     }
+                    if self.descriptor_show_raw {
+                        let text = serde_json::to_string_pretty(entry).unwrap_or_default();
+                        detail = detail.child(
+                            div()
+                                .id(("descriptor-raw", index))
+                                .test_support()
+                                .text_sm()
+                                .child(text),
+                        );
+                    }
                 }
             } else {
                 detail = detail.child(self.t(
                     "Select an event and a descriptor list.",
                     "选择事件和描述符列表。",
-                    "イベントとディスクリプターを選択してください。",
-                    "이벤트와 디스크립터 목록을 선택하세요.",
                 ));
             }
             detail
@@ -13455,17 +15881,15 @@ impl Workspace {
                 .child(self.t(
                     "GPU performance counters",
                     "GPU 性能计数器",
-                    "GPU パフォーマンスカウンター",
-                    "GPU 성능 카운터",
                 ))
                 .child(format!(
                     "{}: {}",
-                    self.t("Selected", "已选择", "選択済み", "선택됨"),
+                    self.t("Selected", "已选择"),
                     self.selected_counters.len()
                 ))
                 .child(button(
                     "counter-fetch",
-                    self.t("Collect", "采集", "収集", "수집"),
+                    self.t("Collect", "采集"),
                     false,
                     |this, cx| this.read_counters(0, false, cx),
                     cx,
@@ -13487,7 +15911,7 @@ impl Workspace {
                         .gap_2()
                         .child(button(
                             "counter-prev",
-                            self.t("Previous", "上一页", "前へ", "이전"),
+                            self.t("Previous", "上一页"),
                             false,
                             |this, cx| {
                                 if let Some(page) = &this.counter_page {
@@ -13507,7 +15931,7 @@ impl Workspace {
                         ))
                         .child(button(
                             "counter-next",
-                            self.t("Next", "下一页", "次へ", "다음"),
+                            self.t("Next", "下一页"),
                             false,
                             |this, cx| {
                                 if let Some(page) = &this.counter_page {
@@ -13536,7 +15960,7 @@ impl Workspace {
                             1 => "s",
                             2 => "%",
                             4 => "B",
-                            5 => self.t("cycles", "周期", "サイクル", "사이클"),
+                            5 => self.t("cycles", "周期"),
                             6 => "Hz",
                             7 => "V",
                             8 => "°C",
@@ -13565,15 +15989,380 @@ impl Workspace {
                 detail = detail.child(self.t(
                     "Select counters and collect their values.",
                     "选择计数器后开始采集。",
-                    "カウンターを選んで収集します。",
-                    "카운터를 선택한 후 수집하세요.",
                 ));
             }
             detail
         } else if self.tab == CaptureTab::Statistics {
-            div().p_3().flex().flex_col().gap_2()
-                .child(self.t("Frame statistics", "帧统计", "フレーム統計", "프레임 통계"))
-                .child(self.t("Values come from RenderDoc's recorded frame statistics. If recorded is false, the capture has no statistics.", "数据来自 RenderDoc 记录的帧统计；recorded 为 false 表示捕获文件没有统计数据。", "RenderDoc が記録した統計です。recorded が false の場合は利用できません。", "RenderDoc에서 기록한 통계입니다. recorded가 false이면 통계를 사용할 수 없습니다."))
+            let mut detail = div().p_3().flex().flex_col().gap_2().child(self.t(
+                "Frame statistics",
+                "帧统计",
+            ));
+            detail = detail.child(button(
+                "frame-stats-export",
+                self.t(
+                    "Export report",
+                    "导出报告",
+                ),
+                false,
+                |this, cx| {
+                    let Some(snapshot) = this.snapshot.as_ref() else {
+                        return;
+                    };
+                    let report =
+                        renderdocx::frame_statistics::text_report(snapshot, this.settings.language);
+                    let Some(path) = rfd::FileDialog::new()
+                        .set_file_name("frame-statistics.txt")
+                        .add_filter("Text", &["txt"])
+                        .save_file()
+                    else {
+                        return;
+                    };
+                    let overwrites_capture = this.capture.as_ref().is_some_and(|capture| {
+                        path == *capture
+                            || match (std::fs::canonicalize(&path), std::fs::canonicalize(capture))
+                            {
+                                (Ok(a), Ok(b)) => a == b,
+                                _ => false,
+                            }
+                    });
+                    this.status = Some(if overwrites_capture {
+                        this.t(
+                            "Cannot overwrite the capture file.",
+                            "不能覆盖捕获文件。",
+                        )
+                        .to_owned()
+                    } else {
+                        match std::fs::write(&path, report.as_bytes()) {
+                            Ok(()) => format!(
+                                "{}: {}",
+                                this.t(
+                                    "Report exported",
+                                    "报告已导出",
+                                ),
+                                path.display()
+                            ),
+                            Err(error) => format!(
+                                "{}: {error}",
+                                this.t(
+                                    "Report export failed",
+                                    "报告导出失败",
+                                )
+                            ),
+                        }
+                    });
+                    cx.notify();
+                },
+                cx,
+            ));
+            if self.frame_stats_category == renderdocx::frame_statistics::OVERVIEW {
+                detail = detail.child(renderdocx::frame_statistics::category_label(
+                    renderdocx::frame_statistics::OVERVIEW,
+                    self.settings.language,
+                ));
+                for row in renderdocx::frame_statistics::overview(snapshot, self.settings.language)
+                {
+                    if let renderdocx::frame_statistics::Row::Metric { name, value } = row {
+                        detail = detail.child(div().child(format!("{name}: {value}")));
+                    }
+                }
+            } else if let Some(stats) = snapshot.frame_statistics.as_ref() {
+                detail = detail.child(button(
+                    "frame-stats-toggle-raw",
+                    if self.frame_stats_raw {
+                        self.t("Show report", "显示报告")
+                    } else {
+                        self.t(
+                            "Show raw data",
+                            "显示原始数据",
+                        )
+                    },
+                    false,
+                    |this, cx| {
+                        this.frame_stats_raw = !this.frame_stats_raw;
+                        cx.notify();
+                    },
+                    cx,
+                ));
+                if self.frame_stats_raw {
+                    detail = detail.child(
+                        div()
+                            .id("frame-stats-raw")
+                            .test_support()
+                            .child(serde_json::to_string_pretty(stats).unwrap_or_default()),
+                    );
+                } else if stats.get("recorded").and_then(serde_json::Value::as_bool) == Some(true) {
+                    detail = detail.child(renderdocx::frame_statistics::category_label(self.frame_stats_category, self.settings.language))
+                        .child(self.t("Only non-zero buckets are shown; bars are relative to the largest count in each histogram.", "仅显示非零分桶；条形长度按各直方图内的最大计数缩放。"));
+                    if let Some(rows) = renderdocx::frame_statistics::report(
+                        stats,
+                        self.frame_stats_category,
+                        self.settings.language,
+                    ) {
+                        for (index, row) in rows.into_iter().enumerate() {
+                            use renderdocx::frame_statistics::Row;
+                            detail = detail.child(match row {
+                                Row::Heading(text) => div().pt_2().child(text).into_any_element(),
+                                Row::Metric { name, value } => {
+                                    div().child(format!("{name}: {value}")).into_any_element()
+                                }
+                                Row::Bucket {
+                                    label,
+                                    count,
+                                    maximum,
+                                } => {
+                                    let width = (160.0 * count as f64 / maximum as f64) as f32;
+                                    div()
+                                        .id(("frame-stats-row", index))
+                                        .test_support()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(div().w(px(120.)).child(label))
+                                        .child(
+                                            div().w(px(160.)).child(
+                                                div().h(px(8.)).w(px(width)).bg(rgb(0x699cdb)),
+                                            ),
+                                        )
+                                        .child(count.to_string())
+                                        .into_any_element()
+                                }
+                            });
+                        }
+                    } else {
+                        detail = detail.child(self.t(
+                            "Statistics section is unavailable or invalid.",
+                            "统计分类不可用或数据无效。",
+                        ));
+                    }
+                } else {
+                    detail = detail.child(self.t(
+                        "No recorded frame statistics available.",
+                        "没有可用的帧统计记录。",
+                    ));
+                }
+            } else {
+                detail = detail.child(self.t(
+                    "No recorded frame statistics available.",
+                    "没有可用的帧统计记录。",
+                ));
+            }
+            detail
+        } else if self.tab == CaptureTab::ShaderMessages {
+            let mut detail = div().p_3().flex().flex_col().gap_2().child(self.t(
+                "Shader messages",
+                "着色器消息",
+            ));
+            if self.shader_vertex_lookup_pending {
+                detail = detail.child(button(
+                    "shader-vertex-cancel",
+                    self.t(
+                        "Cancel vertex search",
+                        "取消顶点查找",
+                    ),
+                    false,
+                    |this, cx| {
+                        this.shader_vertex_cancel
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                        this.status = Some(
+                            this.t(
+                                "Cancelling vertex search…",
+                                "正在取消顶点查找…",
+                            )
+                            .to_owned(),
+                        );
+                        cx.notify();
+                    },
+                    cx,
+                ));
+            }
+            if let Some(label) = self.shader_vertex_resolution_label() {
+                detail = detail.child(label);
+            }
+            if let Some(page) = self.shader_message_page.as_ref() {
+                let offset = page.offset.parse::<u64>().unwrap_or(0);
+                let total = page.total.parse::<u64>().unwrap_or(0);
+                let next = offset.saturating_add(page.messages.len() as u64);
+                detail = detail
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(button(
+                                "shader-messages-export-text",
+                                self.t(
+                                    "Export text",
+                                    "导出文本",
+                                ),
+                                false,
+                                |this, cx| this.choose_shader_message_export(false, cx),
+                                cx,
+                            ))
+                            .child(button(
+                                "shader-messages-export-csv",
+                                self.t("Export CSV", "导出 CSV"),
+                                false,
+                                |this, cx| this.choose_shader_message_export(true, cx),
+                                cx,
+                            )),
+                    )
+                    .child(format!("E{} · {offset}–{next} / {total}", page.event_id))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(button(
+                                "shader-messages-prev",
+                                self.t("Previous", "上一页"),
+                                false,
+                                |this, cx| {
+                                    if let Some(offset) = this
+                                        .shader_message_page
+                                        .as_ref()
+                                        .and_then(|page| page.offset.parse::<u64>().ok())
+                                        .filter(|&offset| offset > 0)
+                                    {
+                                        this.read_shader_messages(
+                                            offset.saturating_sub(u64::from(
+                                                renderdocx::replay::SHADER_MESSAGE_PAGE_LIMIT,
+                                            )),
+                                            cx,
+                                        );
+                                    }
+                                },
+                                cx,
+                            ))
+                            .child(button(
+                                "shader-messages-next",
+                                self.t("Next", "下一页"),
+                                false,
+                                |this, cx| {
+                                    if let Some(page) = &this.shader_message_page {
+                                        if let (Ok(offset), Ok(total)) =
+                                            (page.offset.parse::<u64>(), page.total.parse::<u64>())
+                                        {
+                                            let next =
+                                                offset.saturating_add(page.messages.len() as u64);
+                                            if next < total {
+                                                this.read_shader_messages(next, cx);
+                                            }
+                                        }
+                                    }
+                                },
+                                cx,
+                            )),
+                    );
+                if let Some(message) = self
+                    .selected_shader_message
+                    .and_then(|index| page.messages.get(index))
+                    .cloned()
+                {
+                    detail = detail
+                        .child(renderdocx::shader_messages::stage_name(
+                            message.stage,
+                            self.settings.language,
+                        ))
+                        .child(renderdocx::shader_messages::location(
+                            &message,
+                            self.settings.language,
+                        ))
+                        .child(format!(
+                            "{}: {}",
+                            self.t(
+                                "Disassembly line",
+                                "反汇编行",
+                            ),
+                            message.disassembly_line
+                        ))
+                        .child(message.message.clone())
+                        .child(button(
+                            "shader-message-copy",
+                            self.t(
+                                "Copy message",
+                                "复制消息",
+                            ),
+                            false,
+                            |this, cx| {
+                                if let Some(message) =
+                                    this.selected_shader_message.and_then(|index| {
+                                        this.shader_message_page.as_ref()?.messages.get(index)
+                                    })
+                                {
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                        format!(
+                                            "{}\t{}\t{}",
+                                            renderdocx::shader_messages::stage_name(
+                                                message.stage,
+                                                this.settings.language
+                                            ),
+                                            renderdocx::shader_messages::location(
+                                                message,
+                                                this.settings.language
+                                            ),
+                                            message.message
+                                        ),
+                                    ));
+                                }
+                            },
+                            cx,
+                        ));
+                    if matches!(message.stage, 0 | 3 | 4 | 6 | 7) {
+                        let navigation_message = message.clone();
+                        detail = detail.child(
+                            Button::new("shader-message-goto")
+                                .label(self.t(
+                                    "Go to invocation",
+                                    "跳转到调用位置",
+                                ))
+                                .secondary()
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.navigate_shader_message(&navigation_message, window, cx)
+                                })),
+                        );
+                    }
+                    if message.stage == 0
+                        || self
+                            .pipeline
+                            .as_ref()
+                            .and_then(|pipeline| {
+                                renderdocx::shader_messages::debug_invocation_for_pipeline(
+                                    &message, pipeline,
+                                )
+                            })
+                            .is_some()
+                    {
+                        let debug_message = message.clone();
+                        detail = detail.child(button(
+                            "shader-message-debug",
+                            self.t(
+                                "Debug invocation",
+                                "调试此调用",
+                            ),
+                            false,
+                            move |this, cx| this.debug_shader_message(&debug_message, cx),
+                            cx,
+                        ));
+                    } else if message.stage == 7 {
+                        detail = detail.child(div().id("mesh-message-debug-unavailable").test_support().child(self.t(
+                            "Mesh debugging is unavailable when the parent task or invocation coordinates are not reliably identified.",
+                            "无法可靠识别父 Task 或调用坐标，暂不能调试此 Mesh 消息。",
+                        )));
+                    } else if message.stage == 6 {
+                        detail = detail.child(self.t(
+                            "The upstream replay API does not expose task shader debugging.",
+                            "上游回放 API 尚未提供 Task 着色器调试。",
+                        ));
+                    }
+                }
+                if let Some(panel) = self.shader_debug_panel(cx) {
+                    detail = detail.child(panel);
+                }
+            } else {
+                detail = detail.child(self.t(
+                    "Select an event and load its shader messages.",
+                    "选择事件后加载着色器消息。",
+                ));
+            }
+            detail
         } else if self.tab == CaptureTab::Messages {
             let info = snapshot.frame_info.as_ref();
             let message = self
@@ -13584,12 +16373,12 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .gap_2()
-                .child(self.t("Frame information", "帧信息", "フレーム情報", "프레임 정보"))
+                .child(self.t("Frame information", "帧信息"))
                 .child(format!(
                     "{}: {}",
-                    self.t("Frame", "帧", "フレーム", "프레임"),
+                    self.t("Frame", "帧"),
                     if snapshot.frame == u32::MAX {
-                        self.t("Unavailable", "不可用", "利用不可", "사용할 수 없음")
+                        self.t("Unavailable", "不可用")
                             .to_owned()
                     } else {
                         snapshot.frame.to_string()
@@ -13600,8 +16389,6 @@ impl Workspace {
                     self.t(
                         "Capture time (UTC epoch)",
                         "捕获时间（UTC 时间戳）",
-                        "キャプチャ時刻 (UTC)",
-                        "캡처 시간 (UTC)"
                     ),
                     info.map_or("—", |v| v.capture_time.as_str())
                 ))
@@ -13610,8 +16397,6 @@ impl Workspace {
                     self.t(
                         "Compressed bytes",
                         "压缩后字节数",
-                        "圧縮サイズ",
-                        "압축 크기"
                     ),
                     info.map_or("—", |v| v.compressed_size.as_str())
                 ))
@@ -13620,51 +16405,218 @@ impl Workspace {
                     self.t(
                         "Uncompressed bytes",
                         "解压后字节数",
-                        "展開サイズ",
-                        "압축 해제 크기"
                     ),
                     info.map_or("—", |v| v.uncompressed_size.as_str())
                 ))
                 .child(self.t(
                     "Messages collected from the replay session",
                     "从回放会话收集的消息",
-                    "リプレイセッションから収集したメッセージ",
-                    "리플레이 세션에서 수집한 메시지",
                 ));
             if let Some(message) = message {
                 let event = message.event_id;
                 let source = message.source;
                 let category = message.category;
+                let severity = message.severity;
                 let message_type = (source, category, message.message_id);
+                detail = detail.child(format!(
+                    "{}: {} · ID: {} · {}: {} · {}: {} · {}: {}",
+                    self.t("Event", "事件"),
+                    event,
+                    message.message_id,
+                    self.t("Category", "类别"),
+                    format!(
+                        "{} ({})",
+                        self.message_category_label(message.category),
+                        message.category
+                    ),
+                    self.t("Severity", "严重程度"),
+                    message.severity,
+                    self.t("Source", "来源"),
+                    format!(
+                        "{} ({})",
+                        self.message_source_label(message.source),
+                        message.source
+                    )
+                ));
+                let rendered = self.render_message(&message.description);
+                let targets: Vec<_> = rendered
+                    .links
+                    .iter()
+                    .map(|link| link.target.clone())
+                    .collect();
+                let ranges: Vec<_> = rendered
+                    .links
+                    .iter()
+                    .map(|link| link.range.clone())
+                    .collect();
+                let style = gpui::HighlightStyle {
+                    color: Some(rgb(0x91cfff).into()),
+                    ..Default::default()
+                };
+                let styled = gpui::StyledText::new(rendered.text.clone())
+                    .with_highlights(ranges.iter().cloned().map(|range| (range, style.clone())));
+                let entity = cx.entity().downgrade();
+                let click_targets = targets.clone();
+                detail = detail.child(div().id("message-rich-description").test_support().child(
+                    gpui::InteractiveText::new("message-rich-text", styled).on_click(
+                        ranges,
+                        move |index, window, cx| {
+                            if let Some(target) = click_targets.get(index).cloned() {
+                                let _ = entity.update(cx, |this, cx| match target {
+                                    renderdocx::rich_message::Target::Resource(resource) => {
+                                        this.tab = CaptureTab::Resources;
+                                        this.refresh_resources();
+                                        this.read_resource_usage(resource, 0, cx);
+                                    }
+                                    renderdocx::rich_message::Target::Event(event) => {
+                                        this.jump_to_usage(event, window, cx)
+                                    }
+                                    renderdocx::rich_message::Target::ShaderMessages { event } => {
+                                        this.open_shader_messages_event(event, window, cx)
+                                    }
+                                    renderdocx::rich_message::Target::Buffer {
+                                        index,
+                                        offset,
+                                        ..
+                                    } => this.open_gpu_address(index, offset, window, cx),
+                                });
+                            }
+                        },
+                    ),
+                ));
+                for (link_index, target) in targets.into_iter().enumerate() {
+                    match target {
+                        renderdocx::rich_message::Target::Resource(resource) => {
+                            let name = rendered
+                                .links
+                                .get(link_index)
+                                .map(|link| &rendered.text[link.range.clone()])
+                                .unwrap_or("");
+                            detail = detail.child(
+                                div()
+                                    .id(("message-resource-link", link_index))
+                                    .test_support()
+                                    .cursor_pointer()
+                                    .text_color(rgb(0x91cfff))
+                                    .child(format!(
+                                        "{}: {name}",
+                                        self.t(
+                                            "Inspect resource",
+                                            "检查资源",
+                                        )
+                                    ))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.tab = CaptureTab::Resources;
+                                        this.refresh_resources();
+                                        this.read_resource_usage(resource, 0, cx);
+                                    })),
+                            );
+                        }
+                        renderdocx::rich_message::Target::Event(event) => {
+                            detail = detail.child(
+                                div()
+                                    .id(("message-inline-event", link_index))
+                                    .test_support()
+                                    .cursor_pointer()
+                                    .text_color(rgb(0x91cfff))
+                                    .child(format!(
+                                        "{}: E{event}",
+                                        self.t(
+                                            "Go to event",
+                                            "跳转到事件",
+                                        )
+                                    ))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.jump_to_usage(event, window, cx)
+                                    })),
+                            );
+                        }
+                        renderdocx::rich_message::Target::ShaderMessages { event } => {
+                            detail = detail.child(
+                                div()
+                                    .id(("message-shader-messages", link_index))
+                                    .test_support()
+                                    .cursor_pointer()
+                                    .text_color(rgb(0x91cfff))
+                                    .child(format!(
+                                        "{}: E{event}",
+                                        self.t(
+                                            "View shader messages",
+                                            "查看着色器消息",
+                                        )
+                                    ))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.open_shader_messages_event(event, window, cx)
+                                    })),
+                            );
+                        }
+                        renderdocx::rich_message::Target::Buffer {
+                            index,
+                            offset,
+                            pointer_type,
+                        } => {
+                            detail = detail.child(
+                                div()
+                                    .id(("message-gpu-address", link_index))
+                                    .test_support()
+                                    .cursor_pointer()
+                                    .text_color(rgb(0x91cfff))
+                                    .child(format!(
+                                        "{}: #{index} + {offset}",
+                                        self.t(
+                                            "Open buffer at address",
+                                            "在地址处打开缓冲区",
+                                        )
+                                    ))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.open_gpu_address(index, offset, window, cx)
+                                    })),
+                            );
+                            if let Some(type_id) = pointer_type {
+                                detail = detail.child(format!("{}: {type_id}", self.t("Pointer type formatting is unavailable; bytes open in raw mode. Type ID", "指针类型格式化尚不可用；将以原始字节模式打开。类型 ID")));
+                            }
+                        }
+                    }
+                }
                 detail = detail
-                    .child(format!(
-                        "{}: {} · ID: {} · {}: {} · {}: {} · {}: {}",
-                        self.t("Event", "事件", "イベント", "이벤트"),
-                        event,
-                        message.message_id,
-                        self.t("Category", "类别", "カテゴリ", "범주"),
-                        format!(
-                            "{} ({})",
-                            self.message_category_label(message.category),
-                            message.category
+                    .child(button(
+                        "message-copy",
+                        self.t(
+                            "Copy message",
+                            "复制消息",
                         ),
-                        self.t("Severity", "严重程度", "重大度", "심각도"),
-                        message.severity,
-                        self.t("Source", "来源", "ソース", "출처"),
-                        format!(
-                            "{} ({})",
-                            self.message_source_label(message.source),
-                            message.source
-                        )
+                        false,
+                        |this, cx| {
+                            if let Some(message) = this
+                                .selected_message
+                                .and_then(|index| this.snapshot.as_ref()?.debug_messages.get(index))
+                            {
+                                let severity = match message.severity {
+                                    0 => this.t("High", "高"),
+                                    1 => this.t("Medium", "中"),
+                                    2 => this.t("Low", "低"),
+                                    3 => this.t("Info", "信息"),
+                                    _ => this.t("Unknown", "未知"),
+                                };
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(format!(
+                                    "{}\t{}\t{}\t{}\t{}\t{}",
+                                    message.event_id,
+                                    this.message_source_label(message.source),
+                                    severity,
+                                    this.message_category_label(message.category),
+                                    message.message_id,
+                                    this.render_message(&message.description).text
+                                )));
+                            }
+                        },
+                        cx,
                     ))
-                    .child(message.description.clone());
-                detail = detail
                     .child(button(
                         "message-hide-source",
                         if self.hidden_message_sources.contains(&source) {
-                            self.t("Show source", "显示此来源", "ソースを表示", "소스 표시")
+                            self.t("Show source", "显示此来源")
                         } else {
-                            self.t("Hide source", "隐藏此来源", "ソースを非表示", "소스 숨기기")
+                            self.t("Hide source", "隐藏此来源")
                         },
                         false,
                         move |this, cx| {
@@ -13677,15 +16629,36 @@ impl Workspace {
                         cx,
                     ))
                     .child(button(
+                        "message-hide-severity",
+                        if self.hidden_message_severities.contains(&severity) {
+                            self.t(
+                                "Show severity",
+                                "显示此严重程度",
+                            )
+                        } else {
+                            self.t(
+                                "Hide severity",
+                                "隐藏此严重程度",
+                            )
+                        },
+                        false,
+                        move |this, cx| {
+                            if !this.hidden_message_severities.insert(severity) {
+                                this.hidden_message_severities.remove(&severity);
+                            }
+                            this.refresh_messages();
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(button(
                         "message-hide-category",
                         if self.hidden_message_categories.contains(&category) {
-                            self.t("Show category", "显示此类别", "カテゴリを表示", "범주 표시")
+                            self.t("Show category", "显示此类别")
                         } else {
                             self.t(
                                 "Hide category",
                                 "隐藏此类别",
-                                "カテゴリを非表示",
-                                "범주 숨기기",
                             )
                         },
                         false,
@@ -13704,15 +16677,11 @@ impl Workspace {
                             self.t(
                                 "Show message type",
                                 "显示此消息类型",
-                                "メッセージ種別を表示",
-                                "메시지 유형 표시",
                             )
                         } else {
                             self.t(
                                 "Hide message type",
                                 "隐藏此消息类型",
-                                "メッセージ種別を非表示",
-                                "메시지 유형 숨기기",
                             )
                         },
                         false,
@@ -13735,8 +16704,6 @@ impl Workspace {
                             .child(self.t(
                                 "Go to event",
                                 "跳转到事件",
-                                "イベントへ移動",
-                                "이벤트로 이동",
                             ))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.jump_to_usage(event, window, cx)
@@ -13749,52 +16716,36 @@ impl Workspace {
             let heading = self.t(
                 "RESOURCE INSPECTOR",
                 "资源检查器",
-                "リソースインスペクター",
-                "리소스 검사기",
             );
             let empty = self.t(
                 "Select a resource to inspect its relationships and usage.",
                 "选择资源以查看关联关系和使用记录。",
-                "リソースを選択して関連情報と使用履歴を表示します。",
-                "리소스를 선택하여 관계와 사용 기록을 확인하세요.",
             );
-            let parents = self.t("Parents", "父资源", "親リソース", "상위 리소스");
+            let parents = self.t("Parents", "父资源");
             let derived = self.t(
                 "Derived resources",
                 "派生资源",
-                "派生リソース",
-                "파생 리소스",
             );
             let chunks = self.t(
                 "Initialisation chunks",
                 "初始化数据块",
-                "初期化チャンク",
-                "초기화 청크",
             );
-            let usage_label = self.t("Usage", "使用记录", "使用履歴", "사용 기록");
+            let usage_label = self.t("Usage", "使用记录");
             let untracked = self.t(
                 "Usage is not tracked for this resource type.",
                 "此类资源未跟踪使用记录。",
-                "この種類のリソースでは使用履歴を追跡しません。",
-                "이 리소스 유형의 사용 기록은 추적되지 않습니다.",
             );
             let no_usage = self.t(
                 "No static usage observed.",
                 "未观察到静态使用记录。",
-                "静的な使用履歴はありません。",
-                "관찰된 정적 사용 기록이 없습니다.",
             );
             let generated_name = self.t(
                 "Automatically generated name",
                 "自动生成的名称",
-                "自動生成された名前",
-                "자동 생성된 이름",
             );
             let application_name = self.t(
                 "Application-provided name",
                 "应用提供的名称",
-                "アプリによる名前",
-                "애플리케이션에서 지정한 이름",
             );
             let mut view = div()
                 .flex()
@@ -13831,8 +16782,6 @@ impl Workspace {
                             self.t(
                                 "Custom name",
                                 "自定义名称",
-                                "カスタム名",
-                                "사용자 지정 이름",
                             )
                         } else if resource.autogenerated_name {
                             generated_name
@@ -13844,8 +16793,6 @@ impl Workspace {
                 let rename_label = self.t(
                     "Custom resource name",
                     "自定义资源名称",
-                    "カスタムリソース名",
-                    "사용자 지정 리소스 이름",
                 );
                 view = view
                     .child(
@@ -13860,17 +16807,40 @@ impl Workspace {
                             .gap_2()
                             .child(button(
                                 "resource-rename-save",
-                                self.t("Save name", "保存名称", "名前を保存", "이름 저장"),
+                                self.t("Save name", "保存名称"),
                                 false,
                                 |this, cx| this.rename_selected_resource(false, cx),
                                 cx,
                             ))
                             .child(button(
                                 "resource-rename-reset",
-                                self.t("Reset name", "重置名称", "名前をリセット", "이름 재설정"),
+                                self.t("Reset name", "重置名称"),
                                 false,
                                 |this, cx| this.rename_selected_resource(true, cx),
                                 cx,
+                            )),
+                    );
+                view = view
+                    .child(
+                        div().id("resource-preview").test_support().flex().flex_col().gap_1()
+                            .child(div().text_sm().text_color(rgb(0x82aaff)).child(self.t("Preview", "预览")))
+                            .when_some(
+                                self.preview.as_ref().map(|preview| preview.path.clone()),
+                                |card, path| {
+                                    card.child(
+                                        img(path)
+                                            .w(px(120.))
+                                            .h(px(80.))
+                                            .object_fit(gpui::ObjectFit::Contain),
+                                    )
+                                },
+                            )
+                            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(
+                                if self.selected_texture.is_some() {
+                                    self.t("Texture preview available", "纹理预览可用")
+                                } else {
+                                    self.t("No texture preview", "无纹理预览")
+                                },
                             )),
                     );
                 for (label, links) in [(parents, &resource.parents), (derived, &resource.derived)] {
@@ -13999,14 +16969,30 @@ impl Workspace {
             }
             view
         } else if self.tab == CaptureTab::VertexInput {
-            let heading = self.t("VERTEX INPUT", "顶点输入", "頂点入力", "정점 입력");
-            let note = self.t("Rows follow draw order. Unsupported formats are shown as raw bytes; unavailable attributes use —.", "行按绘制顺序排列；尚未解码的格式显示原始字节，不可用的属性显示 —。", "行は描画順です。未対応形式はバイトで、利用できない属性は — で表示します。", "행은 그리기 순서입니다. 지원하지 않는 형식은 바이트로, 사용할 수 없는 속성은 —로 표시합니다.");
+            let heading = self.t("VERTEX INPUT", "顶点输入");
+            let note = self.t("Rows follow draw order. Unsupported formats are shown as raw bytes; unavailable attributes use —.", "行按绘制顺序排列；尚未解码的格式显示原始字节，不可用的属性显示 —。");
             let mut view = div()
                 .flex()
                 .flex_col()
                 .gap_3()
                 .child(div().text_sm().text_color(rgb(0x82aaff)).child(heading))
                 .child(note);
+            if self
+                .shader_vertex_resolution
+                .as_ref()
+                .is_some_and(|resolved| {
+                    self.debug_vertex_selection
+                        == Some((
+                            resolved.result.row,
+                            resolved.instance,
+                            resolved.result.vertex_index,
+                        ))
+                })
+            {
+                if let Some(label) = self.shader_vertex_resolution_label() {
+                    view = view.child(label);
+                }
+            }
             if let Some(page) = &self.input_page {
                 view = view
                     .child(format!(
@@ -14017,20 +17003,18 @@ impl Workspace {
                     .child(self.t(
                         "Select a row to debug its vertex shader.",
                         "选择一行以调试其顶点着色器。",
-                        "行を選択して頂点シェーダーをデバッグします。",
-                        "행을 선택해 정점 셰이더를 디버깅합니다.",
                     ));
                 if let Some((vertex, instance, index)) = self.debug_vertex_selection {
                     view = view
                         .child(format!(
                             "{} {vertex} · {} {instance} · {} {index}",
-                            self.t("Vertex", "顶点", "頂点", "정점"),
-                            self.t("Instance", "实例", "インスタンス", "인스턴스"),
-                            self.t("Index", "索引", "インデックス", "인덱스")
+                            self.t("Vertex", "顶点"),
+                            self.t("Instance", "实例"),
+                            self.t("Index", "索引")
                         ))
                         .child(button(
                             "vertex-debug-start",
-                            self.t("Debug vertex", "调试顶点", "頂点をデバッグ", "정점 디버깅"),
+                            self.t("Debug vertex", "调试顶点"),
                             true,
                             |this, cx| this.debug_selected_vertex(cx),
                             cx,
@@ -14048,31 +17032,25 @@ impl Workspace {
             }
             view
         } else if self.tab == CaptureTab::Mesh {
-            let heading = self.t("MESH OUTPUT", "网格输出", "メッシュ出力", "메시 출력");
+            let heading = self.t("MESH OUTPUT", "网格输出");
             let empty = self.t(
                 "Select a draw or mesh event.",
                 "选择绘制或网格事件。",
-                "描画またはメッシュイベントを選択してください。",
-                "그리기 또는 메시 이벤트를 선택하세요.",
             );
             let note = if self.mesh.kind == MeshBufferKind::Vertex && self.mesh.selection.stage == 3
             {
-                self.t("Task payload fields follow shader reflection; unsupported fields report an error.", "任务载荷字段按着色器反射解码；不支持的字段会显示错误。", "タスクペイロードはシェーダーのリフレクションに従って解釈し、未対応のフィールドはエラーを表示します。", "태스크 페이로드는 셰이더 리플렉션에 따라 해석하며 지원하지 않는 필드는 오류로 표시합니다.")
+                self.t("Task payload fields follow shader reflection; unsupported fields report an error.", "任务载荷字段按着色器反射解码；不支持的字段会显示错误。")
             } else if self.mesh.kind == MeshBufferKind::Vertex {
-                self.t("Positions are shown in buffer order, not draw index order. Other formats are shown as bytes.", "位置按缓冲区顺序显示，非绘制索引顺序；其他格式显示为字节。", "位置は描画インデックス順ではなくバッファ順です。他の形式はバイトで表示します。", "위치는 그리기 인덱스 순서가 아닌 버퍼 순서입니다. 다른 형식은 바이트로 표시합니다.")
+                self.t("Positions are shown in buffer order, not draw index order. Other formats are shown as bytes.", "位置按缓冲区顺序显示，非绘制索引顺序；其他格式显示为字节。")
             } else if self.mesh.kind == MeshBufferKind::Index {
                 self.t(
                     "Indices show raw and base-adjusted values; restart indices are marked.",
                     "索引显示原始值和基础顶点调整后的值，并标记重启索引。",
-                    "インデックスの生値とベース頂点調整後の値、リスタートを表示します。",
-                    "원시 인덱스와 기본 정점 적용 값 및 재시작 인덱스를 표시합니다.",
                 )
             } else {
                 self.t(
                     "Positions follow draw index order. Only regular float formats are decoded.",
                     "位置按绘制索引顺序显示；当前仅解码常规浮点格式。",
-                    "位置は描画インデックス順です。通常の浮動小数点形式のみデコードします。",
-                    "위치는 그리기 인덱스 순서입니다. 일반 부동 소수점 형식만 해석합니다.",
                 )
             };
             let mut view = div()
@@ -14080,6 +17058,24 @@ impl Workspace {
                 .flex_col()
                 .gap_3()
                 .child(div().text_sm().text_color(rgb(0x82aaff)).child(heading));
+            if self.mesh.geometry_message_handoff {
+                view = view.child(div().id("geometry-message-approximation").test_support().child(self.t(
+                    "Geometry messages omit the instance; instance 0 is shown. The row follows RenderDoc's input-topology offset and may differ when geometry output counts vary.",
+                    "Geometry 消息不包含实例信息，当前显示实例 0。行号按 RenderDoc 的输入拓扑偏移计算，几何输出顶点数量变化时可能不对应。",
+                )));
+            }
+            if self
+                .shader_vertex_resolution
+                .as_ref()
+                .is_some_and(|resolved| {
+                    self.mesh.selection.stage == 1
+                        && self.mesh.highlighted_row == Some(resolved.result.row)
+                })
+            {
+                if let Some(label) = self.shader_vertex_resolution_label() {
+                    view = view.child(label);
+                }
+            }
             if let Some(info) = &self.mesh.info {
                 let stage = match info.stage {
                     1 => "VSOut",
@@ -14099,17 +17095,15 @@ impl Workspace {
                                     .t(
                                         "All meshlets",
                                         "全部网格组",
-                                        "すべてのメッシュレット",
-                                        "모든 메시렛",
                                     )
                                     .to_owned(),
                                 MeshFilter::Meshlet(id) => format!(
                                     "{} {id}",
-                                    self.t("Meshlet", "网格组", "メッシュレット", "메시렛")
+                                    self.t("Meshlet", "网格组")
                                 ),
                                 MeshFilter::Task(id) => format!(
                                     "{} {id}",
-                                    self.t("Task group", "任务组", "タスクグループ", "태스크 그룹")
+                                    self.t("Task group", "任务组")
                                 ),
                             };
                             view.child(label)
@@ -14118,7 +17112,7 @@ impl Workspace {
                     .child(format!(
                         "{instances_label}: {} · {}: {}",
                         info.instance,
-                        self.t("View", "视图", "ビュー", "뷰"),
+                        self.t("View", "视图"),
                         info.view
                     ))
                     .child(format!("{indices_label}: {}", info.num_indices))
@@ -14128,11 +17122,9 @@ impl Workspace {
                             self.t(
                                 "Index stride",
                                 "索引步幅",
-                                "インデックスストライド",
-                                "인덱스 스트라이드"
                             ),
                             info.index_stride,
-                            self.t("Base vertex", "基础顶点", "ベース頂点", "기본 정점"),
+                            self.t("Base vertex", "基础顶点"),
                             info.base_vertex
                         ))
                     })
@@ -14142,8 +17134,6 @@ impl Workspace {
                             view.child(self.t(
                                 "No index buffer for this output.",
                                 "此输出没有索引缓冲区。",
-                                "この出力にはインデックスバッファーがありません。",
-                                "이 출력에는 인덱스 버퍼가 없습니다.",
                             ))
                         },
                     )
@@ -14155,7 +17145,7 @@ impl Workspace {
                     .child(format!(
                         "{}: {}",
                         if self.mesh.kind == MeshBufferKind::Draw {
-                            self.t("First row", "起始行", "開始行", "시작 행")
+                            self.t("First row", "起始行")
                         } else {
                             offset_label
                         },
@@ -14193,26 +17183,20 @@ impl Workspace {
             let heading = self.t(
                 "STRUCTURED DATA",
                 "结构化数据",
-                "構造化データ",
-                "구조화된 데이터",
             );
-            let type_label = self.t("Type", "类型", "型", "유형");
-            let children_label = self.t("Children", "子项", "子要素", "하위 항목");
-            let size_label = self.t("Bytes", "字节", "バイト", "바이트");
+            let type_label = self.t("Type", "类型");
+            let children_label = self.t("Children", "子项");
+            let size_label = self.t("Bytes", "字节");
             let resource_label = self.t(
                 "Resource index",
                 "资源索引",
-                "リソースインデックス",
-                "리소스 인덱스",
             );
-            let resource_value_label = self.t("Resource", "资源", "リソース", "리소스");
-            let non_null_label = self.t("non-null", "非空", "非 null", "널 아님");
-            let null_label = self.t("null", "空", "null", "널");
+            let resource_value_label = self.t("Resource", "资源");
+            let non_null_label = self.t("non-null", "非空");
+            let null_label = self.t("null", "空");
             let pending_label = self.t(
                 "Select an event to inspect its parameters.",
                 "选择事件以查看参数。",
-                "イベントを選択してパラメーターを表示します。",
-                "이벤트를 선택하여 매개변수를 확인하세요.",
             );
             div()
                 .flex()
@@ -14224,8 +17208,6 @@ impl Workspace {
                     self.t(
                         "Format API call",
                         "格式化 API 调用",
-                        "API 呼び出しを整形",
-                        "API 호출 서식 지정",
                     ),
                     false,
                     |this, cx| this.format_selected_event(cx),
@@ -14241,6 +17223,10 @@ impl Workspace {
                 })
                 .when_some(page, |view, page| {
                     let value = structured_value(&page.node);
+                    let gpu_address = (page.node.basic_type == 13)
+                        .then(|| page.node.value.as_deref()?.parse::<u64>().ok())
+                        .flatten()
+                        .and_then(|address| self.resolve_gpu_address(address));
                     view.child(
                         div()
                             .font_weight(gpui::FontWeight::BOLD)
@@ -14260,6 +17246,25 @@ impl Workspace {
                         ))
                     })
                     .when(!value.is_empty(), |view| view.child(value))
+                    .when_some(gpu_address, |view, (index, offset, name)| {
+                        view.child(
+                            div()
+                                .id("structured-gpu-address")
+                                .test_support()
+                                .cursor_pointer()
+                                .text_color(rgb(0x91cfff))
+                                .child(format!(
+                                    "{}: {name}+{offset}",
+                                    self.t(
+                                        "Open buffer at address",
+                                        "在地址处打开缓冲区",
+                                    )
+                                ))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.open_gpu_address(index, offset, window, cx)
+                                })),
+                        )
+                    })
                 })
                 .when(self.structure.page.is_none(), |view| {
                     view.child(pending_label)
@@ -14268,14 +17273,10 @@ impl Workspace {
                     let title = self.t(
                         "EVENT CALL STACK",
                         "事件调用栈",
-                        "イベントの呼び出し履歴",
-                        "이벤트 호출 스택",
                     );
                     let empty = self.t(
                         "No call stack for this event.",
                         "此事件没有调用栈。",
-                        "このイベントに呼び出し履歴はありません。",
-                        "이 이벤트에 호출 스택이 없습니다.",
                     );
                     view.child(div().text_sm().text_color(rgb(0x82aaff)).child(title))
                         .when(stack.frames.is_empty(), |v| v.child(empty))
@@ -14376,29 +17377,21 @@ impl Workspace {
                     let group_label = self.t(
                         "Group ID (x,y,z)",
                         "工作组 ID（x,y,z）",
-                        "ワークグループ ID (x,y,z)",
-                        "워크그룹 ID (x,y,z)",
                     );
                     let thread_label = self.t(
                         "Thread ID in group (x,y,z)",
                         "组内线程 ID（x,y,z）",
-                        "グループ内スレッド ID (x,y,z)",
-                        "그룹 내 스레드 ID (x,y,z)",
                     );
                     view.child(format!(
                         "{}: {} · {}: {}",
                         self.t(
                             "Group counts",
                             "工作组数量",
-                            "ワークグループ数",
-                            "워크그룹 수"
                         ),
                         groups,
                         self.t(
                             "Threads per group",
                             "每组线程数",
-                            "グループごとのスレッド数",
-                            "그룹당 스레드 수"
                         ),
                         threads
                     ))
@@ -14427,8 +17420,6 @@ impl Workspace {
                                 self.t(
                                     "Debug thread",
                                     "调试线程",
-                                    "スレッドをデバッグ",
-                                    "스레드 디버깅",
                                 ),
                                 true,
                                 |this, cx| this.debug_compute_thread(cx),
@@ -14473,9 +17464,9 @@ impl Workspace {
                     let mut reflection_lines = Vec::new();
                     for block in &shader.constant_block_details {
                         reflection_lines.push(format!("{} · {} {} · {} {} · {} {}", block.name,
-                            self.t("bind", "绑定", "バインド", "바인딩"), block.bind,
-                            self.t("space", "空间", "空間", "공간"), block.space,
-                            self.t("bytes", "字节", "バイト", "바이트"), block.byte_size));
+                            self.t("bind", "绑定"), block.bind,
+                            self.t("space", "空间"), block.space,
+                            self.t("bytes", "字节"), block.byte_size));
                         let mut pending: Vec<_> = block.variables.iter().rev().map(|v| (v, 1usize)).collect();
                         while let Some((variable, depth)) = pending.pop() {
                             reflection_lines.push(format!("{}{}: {} · +{} · {}×{} · [{}]", "  ".repeat(depth), variable.name,
@@ -14485,23 +17476,23 @@ impl Workspace {
                         }
                     }
                     for (label, resources) in [
-                        (self.t("Read-only", "只读资源", "読み取り専用", "읽기 전용"), &shader.read_only_details),
-                        (self.t("Read/write", "读写资源", "読み書き", "읽기/쓰기"), &shader.read_write_details),
+                        (self.t("Read-only", "只读资源"), &shader.read_only_details),
+                        (self.t("Read/write", "读写资源"), &shader.read_write_details),
                     ] {
                         for resource in resources {
                             reflection_lines.push(format!("{label}: {} · {} {} · {} {} · [{}] · {}", resource.name,
-                                self.t("bind", "绑定", "バインド", "바인딩"), resource.bind,
-                                self.t("space", "空间", "空間", "공간"), resource.space, resource.array_size, resource.variable_type.name));
+                                self.t("bind", "绑定"), resource.bind,
+                                self.t("space", "空间"), resource.space, resource.array_size, resource.variable_type.name));
                         }
                     }
                     for sampler in &shader.sampler_details {
-                        reflection_lines.push(format!("{}: {} · {} {} · {} {} · [{}]", self.t("Sampler", "采样器", "サンプラー", "샘플러"),
-                            sampler.name, self.t("bind", "绑定", "バインド", "바인딩"), sampler.bind,
-                            self.t("space", "空间", "空間", "공간"), sampler.space, sampler.array_size));
+                        reflection_lines.push(format!("{}: {} · {} {} · {} {} · [{}]", self.t("Sampler", "采样器"),
+                            sampler.name, self.t("bind", "绑定"), sampler.bind,
+                            self.t("space", "空间"), sampler.space, sampler.array_size));
                     }
                     let constant_buttons = shader.constant_block_details.iter().enumerate().map(|(index, block)| {
                         div().id(("shader-constants", index)).test_support().cursor_pointer().text_color(rgb(0x91cfff))
-                            .child(format!("{}: {} [0]", self.t("Read values", "读取值", "値を読む", "값 읽기"), block.name))
+                            .child(format!("{}: {} [0]", self.t("Read values", "读取值"), block.name))
                             .on_click(cx.listener(move |this, _, _, cx| this.inspect_shader_constants(index as u32, 0, cx)))
                     }).collect::<Vec<_>>();
                     let constant_values = self.shader_constants.as_ref().filter(|values| values.event_id == shader.event_id && values.stage == shader.stage).map(|values| {
@@ -14526,27 +17517,27 @@ impl Workspace {
                         .children(constant_buttons)
                         .when_some(constant_page, |view, (block, element, count, name)| {
                             view.child(format!("{name} [{element}/{count}]"))
-                                .when(element > 0, |view| view.child(button("shader-constants-previous", self.t("Previous element", "上一元素", "前の要素", "이전 요소"), false,
+                                .when(element > 0, |view| view.child(button("shader-constants-previous", self.t("Previous element", "上一元素"), false,
                                     move |this, cx| this.inspect_shader_constants(block, element - 1, cx), cx)))
-                                .when(element.checked_add(1).is_some_and(|next| next < count), |view| view.child(button("shader-constants-next", self.t("Next element", "下一元素", "次の要素", "다음 요소"), false,
+                                .when(element.checked_add(1).is_some_and(|next| next < count), |view| view.child(button("shader-constants-next", self.t("Next element", "下一元素"), false,
                                     move |this, cx| this.inspect_shader_constants(block, element + 1, cx), cx)))
                         })
                         .children(constant_values.into_iter().map(|line| div().text_sm().child(line)))
                         .child(div().flex().flex_wrap().gap_2()
-                            .child(button("shader-bindings-constants", self.t("Bound constants", "常量绑定", "定数バインド", "상수 바인딩"), false, |this, cx| this.inspect_shader_bindings("constants".into(), 0, cx), cx))
-                            .child(button("shader-bindings-readonly", self.t("Read-only bindings", "只读绑定", "読み取り専用バインド", "읽기 전용 바인딩"), false, |this, cx| this.inspect_shader_bindings("read_only".into(), 0, cx), cx))
-                            .child(button("shader-bindings-readwrite", self.t("Read/write bindings", "读写绑定", "読み書きバインド", "읽기/쓰기 바인딩"), false, |this, cx| this.inspect_shader_bindings("read_write".into(), 0, cx), cx))
-                            .child(button("shader-bindings-samplers", self.t("Sampler bindings", "采样器绑定", "サンプラーバインド", "샘플러 바인딩"), false, |this, cx| this.inspect_shader_bindings("samplers".into(), 0, cx), cx)))
+                            .child(button("shader-bindings-constants", self.t("Bound constants", "常量绑定"), false, |this, cx| this.inspect_shader_bindings("constants".into(), 0, cx), cx))
+                            .child(button("shader-bindings-readonly", self.t("Read-only bindings", "只读绑定"), false, |this, cx| this.inspect_shader_bindings("read_only".into(), 0, cx), cx))
+                            .child(button("shader-bindings-readwrite", self.t("Read/write bindings", "读写绑定"), false, |this, cx| this.inspect_shader_bindings("read_write".into(), 0, cx), cx))
+                            .child(button("shader-bindings-samplers", self.t("Sampler bindings", "采样器绑定"), false, |this, cx| this.inspect_shader_bindings("samplers".into(), 0, cx), cx)))
                         .when_some(binding_page, |view, page| {
                             let offset = page.offset.parse::<u64>().unwrap_or(0);
                             let total = page.total.parse::<u64>().unwrap_or(0);
                             let next = offset.saturating_add(page.entries.len() as u64);
                             let prev_kind = page.kind.clone();
                             let next_kind = page.kind.clone();
-                            let mut view = view.child(format!("{}: {}–{} / {}", self.t("Runtime bindings", "运行时绑定", "実行時バインド", "런타임 바인딩"), offset, next, total))
-                                .when(offset > 0, |view| view.child(button("shader-bindings-previous", self.t("Previous page", "上一页", "前のページ", "이전 페이지"), false,
+                            let mut view = view.child(format!("{}: {}–{} / {}", self.t("Runtime bindings", "运行时绑定"), offset, next, total))
+                                .when(offset > 0, |view| view.child(button("shader-bindings-previous", self.t("Previous page", "上一页"), false,
                                     move |this, cx| this.inspect_shader_bindings(prev_kind.clone(), offset.saturating_sub(u64::from(renderdocx::replay::SHADER_BINDING_PAGE_LIMIT)), cx), cx)))
-                                .when(next < total, |view| view.child(button("shader-bindings-next", self.t("Next page", "下一页", "次のページ", "다음 페이지"), false,
+                                .when(next < total, |view| view.child(button("shader-bindings-next", self.t("Next page", "下一页"), false,
                                     move |this, cx| this.inspect_shader_bindings(next_kind.clone(), next, cx), cx)));
                             for (row_index, entry) in page.entries.iter().enumerate() {
                                 let binding = entry.get("binding").and_then(|v| v.as_u64()).unwrap_or(u16::MAX as u64);
@@ -14561,7 +17552,7 @@ impl Workspace {
                                 let resource = entry.get("descriptor").and_then(|d| d.get("resource")).and_then(|v| v.as_u64()).and_then(|v| usize::try_from(v).ok());
                                 let display = resource.and_then(|index| snapshot.resources.get(index).map(|res| self.resource_display_name(Some(index), &res.name))).unwrap_or("—");
                                 let unused = entry.get("statically_unused").and_then(|v| v.as_bool()).unwrap_or(false);
-                                let line = format!("{name} #{binding}[{element}] · {display}{}", if unused { self.t(" · unused", " · 未使用", " · 未使用", " · 미사용") } else { "" });
+                                let line = format!("{name} #{binding}[{element}] · {display}{}", if unused { self.t(" · unused", " · 未使用") } else { "" });
                                 view = view.child(div().id(("shader-binding", row_index)).test_support().text_sm().child(line)
                                     .when_some(resource, |row, resource| row.cursor_pointer().text_color(rgb(0x91cfff)).on_click(cx.listener(move |this, _, _, cx| {
                                         this.tab = CaptureTab::Resources; this.refresh_resources(); this.read_resource_usage(resource, 0, cx);
@@ -14569,13 +17560,16 @@ impl Workspace {
                                 if let Some(descriptor) = entry.get("descriptor").filter(|value| value.is_object()) {
                                     let text = |key: &str| descriptor.get(key).map(|v| v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string())).unwrap_or_else(|| "—".into());
                                     view = view.child(format!("{}: {} · {}: {} + {} · mip {} + {} · {} {} + {}",
-                                        self.t("Format", "格式", "形式", "형식"), text("format"),
-                                        self.t("Byte range", "字节范围", "バイト範囲", "바이트 범위"), text("byte_offset"), text("byte_size"),
-                                        text("first_mip"), text("num_mips"), self.t("slice", "切片", "スライス", "슬라이스"), text("first_slice"), text("num_slices")));
+                                        self.t("Format", "格式"), text("format"),
+                                        self.t("Byte range", "字节范围"), text("byte_offset"), text("byte_size"),
+                                        text("first_mip"), text("num_mips"), self.t("slice", "切片"), text("first_slice"), text("num_slices")));
+                                    if let Some(swizzle) = renderdocx::texture_view::descriptor_swizzle(descriptor) {
+                                        view = view.child(div().id(("shader-binding-swizzle", row_index)).test_support().text_sm().child(format!("{}: {swizzle}", self.t("Swizzle", "通道映射"))));
+                                    }
                                     if let Some(resource) = resource {
                                         if let Ok(range) = renderdocx::buffer_binding::resolve(descriptor, &snapshot.buffers) {
                                                 view = view.child(div().id(("shader-binding-buffer", row_index)).test_support().cursor_pointer().text_color(rgb(0x91cfff))
-                                                    .child(self.t("Open bound buffer range", "打开绑定的缓冲区范围", "バインド範囲を開く", "바인딩된 버퍼 범위 열기"))
+                                                    .child(self.t("Open bound buffer range", "打开绑定的缓冲区范围"))
                                                     .on_click(cx.listener(move |this, _, _, cx| this.open_bound_buffer(range, cx))));
                                         }
                                         if let Some(texture_index) = snapshot.textures.iter().position(|texture| texture.resource_index == Some(resource)) {
@@ -14584,20 +17578,14 @@ impl Workspace {
                                             let cast = descriptor.get("format_component_type").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok()).unwrap_or(0);
                                             if let (Some(mip), Some(slice)) = (mip, slice) {
                                                 view = view.child(div().id(("shader-binding-texture", row_index)).test_support().cursor_pointer().text_color(rgb(0x91cfff))
-                                                    .child(self.t("Open texture view", "打开纹理视图", "テクスチャービューを開く", "텍스처 뷰 열기"))
+                                                    .child(self.t("Open texture view", "打开纹理视图"))
                                                     .on_click(cx.listener(move |this, _, window, cx| this.open_attachment_texture(texture_index, mip, slice, cast, window, cx))));
                                             }
                                         }
                                     }
                                 }
-                                if let Some(sampler) = entry.get("sampler").filter(|value| value.get("type").and_then(|v| v.as_u64()).is_some_and(|kind| kind != 0)) {
-                                    let number = |key: &str| sampler.get(key).and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok()).map(|v| f32::from_bits(v).to_string()).unwrap_or_else(|| "—".into());
-                                    let array = |key: &str| sampler.get(key).map(|v| v.to_string()).unwrap_or_else(|| "—".into());
-                                    view = view.child(format!("{}: {} · {}: {} · LOD {}–{} · {} {} · {} {}",
-                                        self.t("Address", "寻址", "アドレス", "주소"), array("address"),
-                                        self.t("Filter", "过滤", "フィルター", "필터"), array("filter"), number("min_lod_bits"), number("max_lod_bits"),
-                                        self.t("bias", "偏移", "バイアス", "바이어스"), number("mip_bias_bits"),
-                                        self.t("anisotropy", "各向异性", "異方性", "비등방성"), number("max_anisotropy_bits")));
+                                if let Some(lines) = entry.get("sampler").and_then(|sampler| renderdocx::sampler_view::lines(sampler, self.settings.language)) {
+                                    view = view.children(lines.into_iter().map(|line| div().text_sm().child(line)));
                                 }
                             }
                             view
@@ -14607,7 +17595,7 @@ impl Workspace {
                         .child(format!("{shader_outputs_label}: {}", outputs.len()))
                         .children(outputs.into_iter().map(|line| div().text_sm().child(line)));
                     if self.shader_report_stale {
-                        view = view.child(self.t("Shader details predate the replacement; select the stage again to refresh.", "着色器详情早于本次替换；请重新选择阶段以刷新。", "シェーダーの詳細は置換前のものです。ステージを再選択して更新してください。", "셰이더 상세 정보가 교체 이전 상태입니다. 단계를 다시 선택하여 새로 고치세요."));
+                        view = view.child(self.t("Shader details predate the replacement; select the stage again to refresh.", "着色器详情早于本次替换；请重新选择阶段以刷新。"));
                     }
                     let mut selectors = div().flex().flex_wrap().gap_2().child(button(
                         "shader-show-disassembly",
@@ -14624,7 +17612,7 @@ impl Workspace {
                         let label = if file.filename.is_empty() {
                             format!(
                                 "{} {}",
-                                self.t("Source", "源码", "ソース", "소스"),
+                                self.t("Source", "源码"),
                                 index + 1
                             )
                         } else {
@@ -14656,29 +17644,27 @@ impl Workspace {
                         self.t(
                             "Export full text",
                             "导出完整文本",
-                            "全文を書き出す",
-                            "전체 텍스트 내보내기",
                         ),
                         false,
                         |this, cx| this.export_shader_text(cx),
                         cx,
                     ));
-                    let edit_label = self.t("Edit source", "编辑源码", "ソースを編集", "소스 편집");
+                    let edit_label = self.t("Edit source", "编辑源码");
                     view = view.child(div().flex().flex_wrap().gap_2()
                         .child(div().id("shader-edit-begin").test_support().cursor_pointer().px_3().py_2().rounded_md().bg(rgb(0x252f40)).child(edit_label).on_click(cx.listener(|this, _, window, cx| this.begin_shader_edit(window, cx))))
-                        .child(button("shader-edit-revert", self.t("Revert replacement", "还原替换", "置換を元に戻す", "교체 되돌리기"), false, |this, cx| this.edit_shader(true, cx), cx)));
+                        .child(button("shader-edit-revert", self.t("Revert replacement", "还原替换"), false, |this, cx| this.edit_shader(true, cx), cx)));
                     if let Some(editor) = &self.shader_editor {
-                        let entry_label = self.t("Entry point", "入口函数", "エントリーポイント", "진입점");
-                        let encoding_label = self.t("Encoding ID", "编码 ID", "エンコーディング ID", "인코딩 ID");
-                        let command_label = self.t("Compiler command line", "编译参数", "コンパイラーコマンドライン", "컴파일러 명령줄");
+                        let entry_label = self.t("Entry point", "入口函数");
+                        let encoding_label = self.t("Encoding ID", "编码 ID");
+                        let command_label = self.t("Compiler command line", "编译参数");
                         let mut editor_files = div().flex().flex_wrap().gap_2();
                         for (index, file) in editor.files.iter().enumerate() {
                             let name = file.get("name").and_then(serde_json::Value::as_str).unwrap_or("").to_owned();
                             editor_files = editor_files.child(div().id(("shader-edit-file", index)).test_support().cursor_pointer().px_3().py_2().rounded_md().bg(rgb(if editor.file_index == index { 0x4169e1 } else { 0x252f40 })).child(name).on_click(cx.listener(move |this, _, window, cx| this.switch_shader_editor_file(index, window, cx))));
                         }
                         let mut processor_buttons = div().flex().flex_wrap().gap_2()
-                            .child(button("shader-processor-builtin", self.t("Built-in compiler", "内置编译器", "組み込みコンパイラー", "기본 컴파일러"), editor.tool == "Builtin", |this, cx| { if !this.resource_pending { if let Some(editor) = &mut this.shader_editor { editor.tool = "Builtin".into(); cx.notify(); } } }, cx))
-                            .child(button("shader-processor-import", self.t("Import processor", "导入处理器", "プロセッサーを読み込む", "처리기 가져오기"), false, |this, cx| this.import_shader_processor(cx), cx));
+                            .child(button("shader-processor-builtin", self.t("Built-in compiler", "内置编译器"), editor.tool == "Builtin", |this, cx| { if !this.resource_pending { if let Some(editor) = &mut this.shader_editor { editor.tool = "Builtin".into(); cx.notify(); } } }, cx))
+                            .child(button("shader-processor-import", self.t("Import processor", "导入处理器"), false, |this, cx| this.import_shader_processor(cx), cx));
                         for (index, config) in self.settings.shader_processors.iter().enumerate() {
                             let name = config.name.clone();
                             let remove_name = name.clone();
@@ -14687,20 +17673,20 @@ impl Workspace {
                                 .child(div().id(("shader-processor-remove", index)).test_support().cursor_pointer().px_2().py_2().child("×").on_click(cx.listener(move |this, _, _, cx| this.remove_shader_processor(&remove_name, cx)))));
                         }
                         view = view.child(format!("{}: {}", edit_label, editor.filename))
-                            .child(self.t("Replacements affect this replay session only. External processor arguments come from the imported configuration; the command-line field is passed to RenderDoc as a compile flag.", "替换仅作用于当前回放会话。外部处理器参数来自导入的配置；命令行字段作为编译参数传给 RenderDoc。", "置換はこのリプレイセッションにのみ適用されます。外部プロセッサーの引数は読み込んだ設定を使用し、コマンドライン欄は RenderDoc のコンパイルフラグとして渡されます。", "교체는 현재 리플레이 세션에만 적용됩니다. 외부 처리기 인수는 가져온 설정에서 사용하며 명령줄 필드는 RenderDoc 컴파일 플래그로 전달됩니다."))
-                            .child(format!("{}: {}", self.t("Processor", "处理器", "プロセッサー", "처리기"), editor.tool))
+                            .child(self.t("Replacements affect this replay session only. External processor arguments come from the imported configuration; the command-line field is passed to RenderDoc as a compile flag.", "替换仅作用于当前回放会话。外部处理器参数来自导入的配置；命令行字段作为编译参数传给 RenderDoc。"))
+                            .child(format!("{}: {}", self.t("Processor", "处理器"), editor.tool))
                             .child(processor_buttons)
-                            .child(self.t("Import a JSON object with name, executable, input_encoding, output_encoding and arguments.", "导入包含 name、executable、input_encoding、output_encoding、arguments 的 JSON 对象。", "name、executable、input_encoding、output_encoding、arguments を含む JSON オブジェクトを読み込みます。", "name, executable, input_encoding, output_encoding, arguments가 포함된 JSON 객체를 가져옵니다."))
-                            .child(format!("{}: {:?}", self.t("Supported encoding IDs", "支持的编码 ID", "対応エンコーディング ID", "지원 인코딩 ID"), shader.target_encodings))
+                            .child(self.t("Import a JSON object with name, executable, input_encoding, output_encoding and arguments.", "导入包含 name、executable、input_encoding、output_encoding、arguments 的 JSON 对象。"))
+                            .child(format!("{}: {:?}", self.t("Supported encoding IDs", "支持的编码 ID"), shader.target_encodings))
                             .child(div().flex().flex_wrap().gap_2().child(entry_label).child(Input::new(&self.shader_edit_entry).id("shader-edit-entry").aria_label(entry_label).w(px(150.)))
                                 .child(encoding_label).child(Input::new(&self.shader_edit_encoding).id("shader-edit-encoding").aria_label(encoding_label).w(px(80.)))
                                 .child(command_label).child(Input::new(&self.shader_edit_command).id("shader-edit-command").aria_label(command_label).w(px(220.))))
                             .child(editor_files)
                             .child(Textarea::new(&editor.input).aria_label(edit_label))
                             .child(div().flex().gap_2()
-                                .child(button("shader-edit-apply", self.t("Compile and apply", "编译并应用", "コンパイルして適用", "컴파일 및 적용"), true, |this, cx| this.edit_shader(false, cx), cx))
-                                .child(button("shader-edit-save", self.t("Save draft to capture", "保存草稿到捕获", "下書きをキャプチャに保存", "초안을 캡처에 저장"), false, |this, cx| this.save_shader_draft(cx), cx))
-                                .child(button("shader-edit-discard", self.t("Discard draft", "放弃草稿", "下書きを破棄", "초안 버리기"), false, |this, cx| { if !this.resource_pending { this.shader_editor = None; cx.notify(); } }, cx)));
+                                .child(button("shader-edit-apply", self.t("Compile and apply", "编译并应用"), true, |this, cx| this.edit_shader(false, cx), cx))
+                                .child(button("shader-edit-save", self.t("Save draft to capture", "保存草稿到捕获"), false, |this, cx| this.save_shader_draft(cx), cx))
+                                .child(button("shader-edit-discard", self.t("Discard draft", "放弃草稿"), false, |this, cx| { if !this.resource_pending { this.shader_editor = None; cx.notify(); } }, cx)));
                     }
                     if let Some(file) = self
                         .shader_source
@@ -14720,6 +17706,43 @@ impl Workspace {
                             start + lines.len(),
                             total
                         ))
+                        .child(button(
+                            "shader-find-toggle",
+                            self.t("Find / Replace", "查找/替换"),
+                            self.show_find_replace,
+                            |this, cx| {
+                                this.show_find_replace = !this.show_find_replace;
+                                cx.notify();
+                            },
+                            cx,
+                        ))
+                        .when(self.show_find_replace, |view| {
+                            view.child(
+                                div().flex().flex_col().gap_2()
+                                    .child(div().flex().flex_wrap().gap_2()
+                                        .child(Input::new(&self.shader_find).id("shader-find").aria_label(self.t("Find", "查找")).w(px(180.)))
+                                        .child(Input::new(&self.shader_replace).id("shader-replace").aria_label(self.t("Replace with", "替换为")).w(px(180.)))
+                                        .child(button("shader-find-next", self.t("Find next", "查找下一个"), false, |this, cx| this.shader_find_next(cx), cx))
+                                        .child(button("shader-replace-all", self.t("Replace all", "全部替换"), false, |this, cx| this.shader_replace_all(cx), cx)))
+                                    .child(div().flex().flex_wrap().gap_2()
+                                        .child(button("shader-find-case", self.t("Match case", "区分大小写"), self.find_options.case_sensitive, |this, cx| {
+                                            this.find_options.case_sensitive = !this.find_options.case_sensitive; cx.notify();
+                                        }, cx))
+                                        .child(button("shader-find-word", self.t("Whole word", "全字匹配"), self.find_options.whole_word, |this, cx| {
+                                            this.find_options.whole_word = !this.find_options.whole_word; cx.notify();
+                                        }, cx))
+                                        .child(button("shader-find-direction", match self.find_options.direction {
+                                            renderdocx::find_replace::FindDirection::Down => self.t("Search down", "向下搜索"),
+                                            renderdocx::find_replace::FindDirection::Up => self.t("Search up", "向上搜索"),
+                                        }, false, |this, cx| {
+                                            this.find_options.direction = match this.find_options.direction {
+                                                renderdocx::find_replace::FindDirection::Down => renderdocx::find_replace::FindDirection::Up,
+                                                renderdocx::find_replace::FindDirection::Up => renderdocx::find_replace::FindDirection::Down,
+                                            };
+                                            cx.notify();
+                                        }, cx))),
+                            )
+                        })
                         .child(
                             div()
                                 .flex()
@@ -14791,8 +17814,6 @@ impl Workspace {
                                 self.t(
                                     "Match at byte",
                                     "匹配字节偏移",
-                                    "一致したバイト位置",
-                                    "일치 바이트 위치"
                                 ),
                                 hit.offset
                             ),
@@ -14882,8 +17903,6 @@ impl Workspace {
                                         self.t(
                                             "Trailing bytes",
                                             "剩余字节",
-                                            "残りのバイト",
-                                            "남은 바이트"
                                         ),
                                         page.trailing_hex
                                     ),
@@ -14897,8 +17916,6 @@ impl Workspace {
                                 self.t(
                                     "Cannot decode layout at this offset",
                                     "无法在此偏移解码布局",
-                                    "このオフセットではレイアウトをデコードできません",
-                                    "이 오프셋에서 레이아웃을 디코딩할 수 없습니다"
                                 )
                             ),
                             None,
@@ -14920,8 +17937,6 @@ impl Workspace {
                                     self.t(
                                         "Trailing bytes",
                                         "剩余字节",
-                                        "残りのバイト",
-                                        "남은 바이트"
                                     ),
                                     page.trailing_hex
                                 ),
@@ -14948,7 +17963,7 @@ impl Workspace {
                 .flex()
                 .flex_wrap()
                 .gap_2()
-                .child(self.t("Display type", "显示类型", "表示型", "표시 형식"))
+                .child(self.t("Display type", "显示类型"))
                 .child(
                     div()
                         .id("buffer-format-raw")
@@ -14964,7 +17979,7 @@ impl Workspace {
                                 0x252f40
                             },
                         ))
-                        .child(self.t("Raw", "原始", "生データ", "원시"))
+                        .child(self.t("Raw", "原始"))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.buffer_format = None;
                             this.buffer_layout = None;
@@ -15101,7 +18116,7 @@ impl Workspace {
                     .when_some(self.buffer_binding_range, |view, range| {
                         view.child(format!(
                             "{}: {}–{}",
-                            self.t("Bound range", "绑定范围", "バインド範囲", "바인딩 범위"),
+                            self.t("Bound range", "绑定范围"),
                             range.start,
                             range.end
                         ))
@@ -15110,8 +18125,6 @@ impl Workspace {
                             self.t(
                                 "View full resource",
                                 "查看完整资源",
-                                "リソース全体を表示",
-                                "전체 리소스 보기",
                             ),
                             false,
                             |this, cx| {
@@ -15132,20 +18145,20 @@ impl Workspace {
                     .child(format!("{flags_label}: 0x{:08X}", buffer.creation_flags))
                     .child(formats)
                     .child(div().flex().flex_wrap().gap_2()
-                        .child(self.t("Buffer layout (#pack)", "缓冲区布局（#pack）", "バッファ配置（#pack）", "버퍼 레이아웃 (#pack)"))
-                        .child(div().id("buffer-layout-input").test_support().w(px(240.)).h(px(96.)).child(Textarea::new(&self.buffer_layout_input).aria_label(self.t("Buffer layout (#pack)", "缓冲区布局（#pack）", "バッファ配置（#pack）", "버퍼 레이아웃 (#pack)")).h(px(96.))))
-                        .child(button("buffer-layout-apply", self.t("Apply layout", "应用布局", "レイアウト適用", "레이아웃 적용"), false, |this, cx| this.apply_buffer_layout(cx), cx)))
+                        .child(self.t("Buffer layout (#pack)", "缓冲区布局（#pack）"))
+                        .child(div().id("buffer-layout-input").test_support().w(px(240.)).h(px(96.)).child(Textarea::new(&self.buffer_layout_input).aria_label(self.t("Buffer layout (#pack)", "缓冲区布局（#pack）")).h(px(96.))))
+                        .child(button("buffer-layout-apply", self.t("Apply layout", "应用布局"), false, |this, cx| this.apply_buffer_layout(cx), cx)))
                     .child(div().flex().flex_wrap().gap_2()
-                        .child(Input::new(&self.buffer_format_name).id("buffer-format-name").aria_label(self.t("Saved format name", "已保存格式名称", "保存形式の名前", "저장된 형식 이름")).w(px(180.)))
-                        .child(button("buffer-format-save", self.t("Save format", "保存格式", "形式を保存", "형식 저장"), false, |this, cx| this.save_buffer_format(cx), cx))
-                        .child(button("buffer-format-delete", self.t("Delete format", "删除格式", "形式を削除", "형식 삭제"), false, |this, cx| this.delete_buffer_format(cx), cx))
-                        .child(button("buffer-format-refresh", self.t("Refresh formats", "刷新格式", "形式を更新", "형식 새로고침"), false, |this, cx| this.refresh_buffer_formats(cx), cx)))
+                        .child(Input::new(&self.buffer_format_name).id("buffer-format-name").aria_label(self.t("Saved format name", "已保存格式名称")).w(px(180.)))
+                        .child(button("buffer-format-save", self.t("Save format", "保存格式"), false, |this, cx| this.save_buffer_format(cx), cx))
+                        .child(button("buffer-format-delete", self.t("Delete format", "删除格式"), false, |this, cx| this.delete_buffer_format(cx), cx))
+                        .child(button("buffer-format-refresh", self.t("Refresh formats", "刷新格式"), false, |this, cx| this.refresh_buffer_formats(cx), cx)))
                     .child(div().flex().flex_wrap().gap_2().children(self.saved_buffer_formats.iter().enumerate().map(|(index, format)| {
                         let name = format.name.clone();
                         div().id(("saved-buffer-format", index)).test_support().cursor_pointer().px_2().py_1().bg(rgb(0x252f40)).child(name.clone())
                             .on_click(cx.listener(move |this, _, window, cx| this.load_buffer_format(&name, window, cx)))
                     })))
-                    .when(self.buffer_format.is_some() || self.buffer_layout.is_some(), |view| view.child(self.t("Typed offsets are decimal; values start at the current byte offset.", "类型视图的偏移为十进制；值从当前字节偏移开始解码。", "型付き表示のオフセットは 10 進数で、現在のバイト位置からデコードします。", "형식 보기의 오프셋은 10진수이며 현재 바이트 위치부터 디코딩합니다.")))
+                    .when(self.buffer_format.is_some() || self.buffer_layout.is_some(), |view| view.child(self.t("Typed offsets are decimal; values start at the current byte offset.", "类型视图的偏移为十进制；值从当前字节偏移开始解码。")))
                     .child(
                         div()
                             .flex()
@@ -15154,8 +18167,6 @@ impl Workspace {
                             .child(self.t(
                                 "Byte offset (decimal or 0x)",
                                 "字节偏移（十进制或 0x）",
-                                "バイトオフセット（10 進数または 0x）",
-                                "바이트 오프셋 (10진수 또는 0x)",
                             ))
                             .child(
                                 Input::new(&self.buffer_seek)
@@ -15163,14 +18174,12 @@ impl Workspace {
                                     .aria_label(self.t(
                                         "Byte offset",
                                         "字节偏移",
-                                        "バイトオフセット",
-                                        "바이트 오프셋",
                                     ))
                                     .w(px(220.)),
                             )
                             .child(button(
                                 "buffer-seek",
-                                self.t("Go", "跳转", "移動", "이동"),
+                                self.t("Go", "跳转"),
                                 false,
                                 |this, cx| this.seek_buffer(cx),
                                 cx,
@@ -15184,8 +18193,6 @@ impl Workspace {
                             .child(self.t(
                                 "Hex bytes",
                                 "十六进制字节",
-                                "16 進バイト",
-                                "16진수 바이트",
                             ))
                             .child(
                                 Input::new(&self.buffer_search)
@@ -15193,14 +18200,12 @@ impl Workspace {
                                     .aria_label(self.t(
                                         "Hex bytes",
                                         "十六进制字节",
-                                        "16 進バイト",
-                                        "16진수 바이트",
                                     ))
                                     .w(px(220.)),
                             )
                             .child(button(
                                 "buffer-search-next",
-                                self.t("Find next", "查找下一个", "次を検索", "다음 찾기"),
+                                self.t("Find next", "查找下一个"),
                                 false,
                                 |this, cx| this.find_buffer(cx),
                                 cx,
@@ -15219,15 +18224,13 @@ impl Workspace {
                                 self.t(
                                     "Export current range",
                                     "导出当前范围",
-                                    "現在の範囲を書き出す",
-                                    "현재 범위 내보내기",
                                 ),
                                 false,
                                 |this, cx| this.export_buffer(cx),
                                 cx,
                             ))
-                            .when(self.buffer_layout.as_ref().is_some_and(|layout| !layout.is_single()), |view| view.child(button("buffer-export-csv", self.t("Export rows CSV", "导出行 CSV", "行を CSV で出力", "행 CSV 내보내기"), false, |this, cx| this.export_buffer_csv(renderdocx::buffer_csv::CsvScope::Repeating, cx), cx)))
-                            .when(self.buffer_layout.as_ref().is_some_and(|layout| layout.is_single() || layout.repeat_offset().is_some_and(|offset| offset > 0)), |view| view.child(button("buffer-export-fixed-csv", self.t("Export fixed CSV", "导出固定区 CSV", "固定部を CSV で出力", "고정 영역 CSV 내보내기"), false, |this, cx| this.export_buffer_csv(renderdocx::buffer_csv::CsvScope::Fixed, cx), cx))),
+                            .when(self.buffer_layout.as_ref().is_some_and(|layout| !layout.is_single()), |view| view.child(button("buffer-export-csv", self.t("Export rows CSV", "导出行 CSV"), false, |this, cx| this.export_buffer_csv(renderdocx::buffer_csv::CsvScope::Repeating, cx), cx)))
+                            .when(self.buffer_layout.as_ref().is_some_and(|layout| layout.is_single() || layout.repeat_offset().is_some_and(|offset| offset > 0)), |view| view.child(button("buffer-export-fixed-csv", self.t("Export fixed CSV", "导出固定区 CSV"), false, |this, cx| this.export_buffer_csv(renderdocx::buffer_csv::CsvScope::Fixed, cx), cx))),
                     )
                     .children(
                         rows.unwrap_or_default()
@@ -15314,107 +18317,77 @@ impl Workspace {
             let pixel_title = self.t(
                 "Pixel coordinates (top-left)",
                 "像素坐标（左上角为原点）",
-                "ピクセル座標（左上原点）",
-                "픽셀 좌표 (왼쪽 위 원점)",
             );
-            let pick = self.t("Pick pixel", "读取像素", "ピクセルを取得", "픽셀 읽기");
-            let history_label = self.t("Pixel history", "像素历史", "ピクセル履歴", "픽셀 기록");
+            let pick = self.t("Pick pixel", "读取像素");
+            let history_label = self.t("Pixel history", "像素历史");
             let history_empty = self.t(
                 "No modifications were returned through this event.",
                 "截至当前事件未返回修改记录。",
-                "このイベントまでの変更履歴はありません。",
-                "이 이벤트까지 반환된 수정 기록이 없습니다.",
             );
             let history_note = self.t(
                 "An empty result can mean the backend could not inspect this pixel; RenderDoc excludes CPU writes and resource discards.",
                 "空结果也可能表示后端无法检查此像素；RenderDoc 不包含 CPU 写入和资源丢弃。",
-                "空の結果は検査できなかった場合もあります。RenderDoc は CPU 書き込みとリソース破棄を含めません。",
-                "빈 결과는 픽셀을 검사할 수 없다는 뜻일 수도 있습니다. RenderDoc은 CPU 쓰기와 리소스 폐기를 제외합니다.",
             );
-            let history_sample_note = self.t("For multisampling, choose a sample explicitly; backend default handling varies.", "多重采样请明确选择样本；后端默认处理可能不同。", "マルチサンプルの場合はサンプルを明示してください。既定の処理はバックエンドにより異なります。", "멀티샘플링에서는 샘플을 명시적으로 선택하세요. 기본 처리는 백엔드마다 다를 수 있습니다.");
+            let history_sample_note = self.t("For multisampling, choose a sample explicitly; backend default handling varies.", "多重采样请明确选择样本；后端默认处理可能不同。");
             let backend_default = self.t(
                 "backend default",
                 "后端默认",
-                "バックエンド既定",
-                "백엔드 기본값",
             );
-            let fragment_label = self.t("Fragment", "片元", "フラグメント", "프래그먼트");
-            let primitive_label = self.t("Primitive", "图元", "プリミティブ", "프리미티브");
-            let passed_label = self.t("Passed", "通过", "通過", "통과");
-            let failed_label = self.t("Failed", "未通过", "失敗", "실패");
-            let before_label = self.t("Before", "修改前", "変更前", "변경 전");
+            let fragment_label = self.t("Fragment", "片元");
+            let primitive_label = self.t("Primitive", "图元");
+            let passed_label = self.t("Passed", "通过");
+            let failed_label = self.t("Failed", "未通过");
+            let before_label = self.t("Before", "修改前");
             let shader_output_label = self.t(
                 "Shader output",
                 "着色器输出",
-                "シェーダー出力",
-                "셰이더 출력",
             );
-            let after_label = self.t("After", "修改后", "変更後", "변경 후");
+            let after_label = self.t("After", "修改后");
             let jump_label = self.t(
                 "Go to event",
                 "跳转到事件",
-                "イベントへ移動",
-                "이벤트로 이동",
             );
-            let unavailable_history = self.t("Unavailable", "不可用", "利用不可", "사용할 수 없음");
+            let unavailable_history = self.t("Unavailable", "不可用");
             let direct_write_label = self.t(
                 "Direct shader write",
                 "着色器直接写入",
-                "シェーダー直接書き込み",
-                "셰이더 직접 쓰기",
             );
             let unbound_shader_label = self.t(
                 "Pixel shader unbound",
                 "像素着色器未绑定",
-                "ピクセルシェーダー未バインド",
-                "픽셀 셰이더 바인딩 안 됨",
             );
-            let stencil_label = self.t("Stencil", "模板", "ステンシル", "스텐실");
+            let stencil_label = self.t("Stencil", "模板");
             let float_label = self.t(
                 "Float interpretation",
                 "浮点解释",
-                "浮動小数点として解釈",
-                "부동소수점 해석",
             );
             let uint_label = self.t(
                 "Unsigned interpretation",
                 "无符号整数解释",
-                "符号なし整数として解釈",
-                "부호 없는 정수 해석",
             );
             let int_label = self.t(
                 "Signed interpretation",
                 "有符号整数解释",
-                "符号付き整数として解釈",
-                "부호 있는 정수 해석",
             );
             let statistics = self.statistics.clone();
             let histogram_label = self.t(
                 "Histogram range",
                 "直方图范围",
-                "ヒストグラム範囲",
-                "히스토그램 범위",
             );
-            let analyze_label = self.t("Analyze", "分析", "解析", "분석");
-            let minimum_label = self.t("Minimum", "最小值", "最小値", "최솟값");
-            let maximum_label = self.t("Maximum", "最大值", "最大値", "최댓값");
+            let analyze_label = self.t("Analyze", "分析");
+            let minimum_label = self.t("Minimum", "最小值");
+            let maximum_label = self.t("Maximum", "最大值");
             let no_histogram = self.t(
                 "Histogram unavailable or empty.",
                 "直方图不可用或为空。",
-                "ヒストグラムが利用できないか空です。",
-                "히스토그램을 사용할 수 없거나 비어 있습니다.",
             );
             let stats_note = self.t(
                 "RenderDoc does not report a separate success status for minimum/maximum.",
                 "RenderDoc 不提供最小值／最大值的单独成功状态。",
-                "RenderDoc は最小値・最大値の個別の成功状態を返しません。",
-                "RenderDoc은 최솟값과 최댓값의 별도 성공 상태를 반환하지 않습니다.",
             );
             let channels_note = self.t(
                 "The histogram uses the selected channel; minimum and maximum cover RGBA.",
                 "直方图使用选中通道，最小值和最大值覆盖 RGBA。",
-                "ヒストグラムは選択チャンネルを使用し、最小値と最大値は RGBA を対象にします。",
-                "히스토그램은 선택한 채널을 사용하며 최솟값과 최댓값은 RGBA를 포함합니다.",
             );
             div()
                 .flex()
@@ -15457,9 +18430,9 @@ impl Workspace {
                             .unwrap_or_else(|| all_label.to_owned())
                     ))
                     .when(selection.preview_type_cast != 0 || selection.analysis_type_cast != 0, |view| view
-                        .child(format!("{}: {} · {}: {}", self.t("Preview/export type", "预览与导出类型", "プレビュー・書き出しの型", "미리보기·내보내기 형식"), selection.preview_type_cast,
-                            self.t("Analysis type", "分析类型", "解析の型", "분석 형식"), selection.analysis_type_cast))
-                        .child(button("texture-clear-preview-cast", self.t("Clear type casts", "清除类型转换", "型変換を解除", "형식 변환 지우기"), false, |this, cx| {
+                        .child(format!("{}: {} · {}: {}", self.t("Preview/export type", "预览与导出类型"), selection.preview_type_cast,
+                            self.t("Analysis type", "分析类型"), selection.analysis_type_cast))
+                        .child(button("texture-clear-preview-cast", self.t("Clear type casts", "清除类型转换"), false, |this, cx| {
                             this.texture_selection.preview_type_cast = 0;
                             this.texture_selection.analysis_type_cast = 0;
                             this.preview = None;
@@ -15500,7 +18473,7 @@ impl Workspace {
                             .gap_2()
                             .child(preview)
                             .child(export)
-                            .child(button("texture-export-raw", self.t("Export raw subresource", "导出原始子资源", "生サブリソースを出力", "원시 하위 리소스 내보내기"), false, |this, cx| this.export_texture_raw(cx), cx)),
+                            .child(button("texture-export-raw", self.t("Export raw subresource", "导出原始子资源"), false, |this, cx| this.export_texture_raw(cx), cx)),
                     )
                     .child(self.texture_export_controls(cx))
                     .child(self.texture_preview_controls(cx))
@@ -15533,22 +18506,22 @@ impl Workspace {
                                 |this, cx| this.pick_texture_pixel(cx),
                                 cx,
                             ))
-                            .child(Button::new("pixel-center").label(self.t("Center and pick", "居中并拾取", "中央に移動して取得", "중앙 이동 및 선택")).secondary().on_click(cx.listener(|this, _, window, cx| this.center_texture_pixel(window, cx))))
-                            .child(button("pixel-context-render", self.t("Pixel context", "像素上下文", "ピクセルコンテキスト", "픽셀 컨텍스트"), false, |this, cx| this.render_pixel_context(cx), cx))
+                            .child(Button::new("pixel-center").label(self.t("Center and pick", "居中并拾取")).secondary().on_click(cx.listener(|this, _, window, cx| this.center_texture_pixel(window, cx))))
+                            .child(button("pixel-context-render", self.t("Pixel context", "像素上下文"), false, |this, cx| this.render_pixel_context(cx), cx))
                             .child(button("pixel-history", history_label, false, |this, cx| this.read_pixel_history(0, false, cx), cx))
-                            .child(button("pixel-debug-start", self.t("Debug pixel", "调试像素", "ピクセルをデバッグ", "픽셀 디버깅"), true, |this, cx| this.debug_selected_pixel(cx), cx)),
+                            .child(button("pixel-debug-start", self.t("Debug pixel", "调试像素"), true, |this, cx| this.debug_selected_pixel(cx), cx)),
                     )
                     .child(div().flex().flex_wrap().items_center().gap_2()
-                        .child(self.t("Top-left UV [0, 1)", "左上原点 UV [0, 1)", "左上原点 UV [0, 1)", "왼쪽 위 원점 UV [0, 1)"))
+                        .child(self.t("Top-left UV [0, 1)", "左上原点 UV [0, 1)"))
                         .child(Input::new(&self.pixel_u).id("pixel-u").aria_label("U").w(px(75.)))
                         .child(Input::new(&self.pixel_v).id("pixel-v").aria_label("V").w(px(75.)))
-                        .child(Button::new("pixel-pick-uv").label(self.t("Pick UV", "按 UV 拾取", "UV で取得", "UV로 선택")).secondary().on_click(cx.listener(|this, _, window, cx| this.pick_texture_uv(window, cx)))))
+                        .child(Button::new("pixel-pick-uv").label(self.t("Pick UV", "按 UV 拾取")).secondary().on_click(cx.listener(|this, _, window, cx| this.pick_texture_uv(window, cx)))))
                     .child(div().flex().flex_wrap().items_center().gap_2()
-                        .child(self.t("Primitive", "图元", "プリミティブ", "프리미티브"))
-                        .child(Input::new(&self.pixel_debug_primitive).id("pixel-debug-primitive").aria_label(self.t("Primitive", "图元", "プリミティブ", "프리미티브")).w(px(100.)))
-                        .child(self.t("View", "视图", "ビュー", "뷰"))
-                        .child(Input::new(&self.pixel_debug_view).id("pixel-debug-view").aria_label(self.t("View", "视图", "ビュー", "뷰")).w(px(100.))))
-                    .child(div().text_sm().text_color(rgb(0x91a7c0)).child(self.t("Leave primitive and view blank for RenderDoc's default. Fragment history uses its own primitive and the selected view. The selected texture need not be bound to the draw.", "图元和视图留空时由 RenderDoc 选择。片元历史使用该记录的图元和所选视图。所选纹理不一定绑定到当前绘制。", "プリミティブとビューを空欄にすると RenderDoc が選択します。フラグメント履歴は記録されたプリミティブと選択ビューを使います。テクスチャは描画にバインドされているとは限りません。", "프리미티브와 뷰를 비우면 RenderDoc이 선택합니다. 프래그먼트 기록은 해당 프리미티브와 선택한 뷰를 사용합니다. 텍스처가 그리기에 바인딩되어 있지 않을 수 있습니다.")))
+                        .child(self.t("Primitive", "图元"))
+                        .child(Input::new(&self.pixel_debug_primitive).id("pixel-debug-primitive").aria_label(self.t("Primitive", "图元")).w(px(100.)))
+                        .child(self.t("View", "视图"))
+                        .child(Input::new(&self.pixel_debug_view).id("pixel-debug-view").aria_label(self.t("View", "视图")).w(px(100.))))
+                    .child(div().text_sm().text_color(rgb(0x91a7c0)).child(self.t("Leave primitive and view blank for RenderDoc's default. Fragment history uses its own primitive and the selected view. The selected texture need not be bound to the draw.", "图元和视图留空时由 RenderDoc 选择。片元历史使用该记录的图元和所选视图。所选纹理不一定绑定到当前绘制。")))
                     .when_some(pixel_debug_panel, |view, panel| view.child(panel))
                     .when(self.selected_texture.is_some(), |view| view.child(self.pixel_context_view(cx)))
                     .when_some(pixel, |view, pixel| {
@@ -15559,25 +18532,25 @@ impl Workspace {
                             .collect::<Vec<_>>()
                             .join(" ");
                         view.child(div().text_sm().text_color(rgb(0x91a7c0)).child(if pixel.overlay {
-                            self.t("Overlay pixel", "叠加层像素", "オーバーレイのピクセル", "오버레이 픽셀")
+                            self.t("Overlay pixel", "叠加层像素")
                         } else {
-                            self.t("Texture pixel", "纹理像素", "テクスチャのピクセル", "텍스처 픽셀")
+                            self.t("Texture pixel", "纹理像素")
                         })).child(
                             div()
                                 .id("pixel-result")
                                 .test_support()
                                 .child(format!("({}, {}) · RGBA: {bits}", pixel.x, pixel.y)),
                         )
-                        .when_some(pixel.coordinates.as_ref(), |view, coords| view.child(div().id("pixel-uv").test_support().child(format!("{}: {:.4}, {:.4} · {} × {}", self.t("Top-left UV", "左上原点 UV", "左上原点 UV", "왼쪽 위 원점 UV"), coords.normalized[0], coords.normalized[1], coords.mip_width, coords.mip_height))))
+                        .when_some(pixel.coordinates.as_ref(), |view, coords| view.child(div().id("pixel-uv").test_support().child(format!("{}: {:.4}, {:.4} · {} × {}", self.t("Top-left UV", "左上原点 UV"), coords.normalized[0], coords.normalized[1], coords.mip_width, coords.mip_height))))
                         .when_some(pixel.depth_stencil.as_ref(), |view, value| {
-                            let depth = value.depth.as_ref().map(|depth| format!("{}: {depth}", self.t("Depth", "深度", "深度", "깊이")));
-                            let stencil = value.stencil.map(|stencil| format!("{}: {stencil} / 0x{stencil:02X} / 0b{stencil:08b}", self.t("Stencil", "模板", "ステンシル", "스텐실")));
+                            let depth = value.depth.as_ref().map(|depth| format!("{}: {depth}", self.t("Depth", "深度")));
+                            let stencil = value.stencil.map(|stencil| format!("{}: {stencil} / 0x{stencil:02X} / 0b{stencil:08b}", self.t("Stencil", "模板")));
                             view.child(div().id("pixel-depth-stencil").test_support().child([depth, stencil].into_iter().flatten().collect::<Vec<_>>().join(" · ")))
                         })
-                        .when_some(pixel.alpha.as_ref(), |view, alpha| view.child(div().id("pixel-alpha").test_support().child(format!("{}: {alpha}", self.t("Alpha", "透明度", "アルファ", "알파")))))
+                        .when_some(pixel.alpha.as_ref(), |view, alpha| view.child(div().id("pixel-alpha").test_support().child(format!("{}: {alpha}", self.t("Alpha", "透明度")))))
                         .child(format!("{float_label}: {}", pixel.float_values.join(", ")))
                         .when_some(pixel.custom, |view, custom| view
-                            .child(div().id("custom-pixel-result").test_support().text_sm().text_color(rgb(0x82aaff)).child(self.t("Custom shader output", "自定义着色器输出", "カスタムシェーダー出力", "사용자 셰이더 출력")))
+                            .child(div().id("custom-pixel-result").test_support().text_sm().text_color(rgb(0x82aaff)).child(self.t("Custom shader output", "自定义着色器输出")))
                             .child(format!("{float_label}: {}", custom.float_values.join(", ")))
                             .child(format!("{uint_label}: {:?}", custom.uint_values))
                             .child(format!("{int_label}: {:?}", custom.int_values)))
@@ -15614,16 +18587,16 @@ impl Workspace {
                                 let mut failures = Vec::new();
                                 let tests = &entry.tests;
                                 for (failed, label) in [
-                                    (tests.sample_masked, self.t("Sample mask", "采样掩码", "サンプルマスク", "샘플 마스크")),
-                                    (tests.backface_culled, self.t("Backface culling", "背面剔除", "背面カリング", "후면 컬링")),
-                                    (tests.depth_clipped, self.t("Depth clip", "深度裁剪", "深度クリップ", "깊이 클립")),
-                                    (tests.depth_bounds_failed, self.t("Depth bounds", "深度范围", "深度範囲", "깊이 범위")),
-                                    (tests.view_clipped, self.t("Viewport clip", "视口裁剪", "ビューポートクリップ", "뷰포트 클립")),
-                                    (tests.scissor_clipped, self.t("Scissor clip", "裁剪矩形", "シザークリップ", "시저 클립")),
-                                    (tests.shader_discarded, self.t("Shader discard", "着色器丢弃", "シェーダー破棄", "셰이더 폐기")),
-                                    (tests.depth_test_failed, self.t("Depth test", "深度测试", "深度テスト", "깊이 테스트")),
-                                    (tests.stencil_test_failed, self.t("Stencil test", "模板测试", "ステンシルテスト", "스텐실 테스트")),
-                                    (tests.predication_skipped, self.t("Predication", "谓词跳过", "プレディケーション", "조건부 렌더링")),
+                                    (tests.sample_masked, self.t("Sample mask", "采样掩码")),
+                                    (tests.backface_culled, self.t("Backface culling", "背面剔除")),
+                                    (tests.depth_clipped, self.t("Depth clip", "深度裁剪")),
+                                    (tests.depth_bounds_failed, self.t("Depth bounds", "深度范围")),
+                                    (tests.view_clipped, self.t("Viewport clip", "视口裁剪")),
+                                    (tests.scissor_clipped, self.t("Scissor clip", "裁剪矩形")),
+                                    (tests.shader_discarded, self.t("Shader discard", "着色器丢弃")),
+                                    (tests.depth_test_failed, self.t("Depth test", "深度测试")),
+                                    (tests.stencil_test_failed, self.t("Stencil test", "模板测试")),
+                                    (tests.predication_skipped, self.t("Predication", "谓词跳过")),
                                 ] { if failed { failures.push(label); } }
                                 let event = entry.event_id;
                                 let primitive = if entry.primitive == u32::MAX { unavailable_history.to_owned() } else { entry.primitive.to_string() };
@@ -15632,7 +18605,7 @@ impl Workspace {
                                         .on_click(cx.listener(move |this, _, window, cx| this.jump_to_usage(event, window, cx))));
                                 if entry.event_id == page.event_id {
                                     let selection = PixelDebugSelection { x: page.x, y: page.y, sample: (page.sample != u32::MAX).then_some(page.sample), primitive: (entry.primitive != u32::MAX).then_some(entry.primitive), view: None };
-                                    view = view.child(button("pixel-history-debug", self.t("Debug this fragment", "调试此片元", "このフラグメントをデバッグ", "이 프래그먼트 디버깅"), true,
+                                    view = view.child(button("pixel-history-debug", self.t("Debug this fragment", "调试此片元"), true,
                                         move |this, cx| this.debug_history_pixel(selection, cx), cx));
                                 }
                                 if entry.direct_shader_write { view = view.child(direct_write_label); }
@@ -15697,7 +18670,7 @@ impl Workspace {
                             .collect::<Vec<_>>()
                             .join(" ");
                         let mut view = view
-                            .when(stats.custom_shader, |view| view.child(div().text_sm().text_color(rgb(0x91a7c0)).child(self.t("Custom shader output statistics", "自定义着色器输出统计", "カスタムシェーダー出力の統計", "사용자 셰이더 출력 통계"))))
+                            .when(stats.custom_shader, |view| view.child(div().text_sm().text_color(rgb(0x91a7c0)).child(self.t("Custom shader output statistics", "自定义着色器输出统计"))))
                             .child(div().id("texture-statistics").test_support().child(format!(
                                 "{event_label} {} · {} — {} · {channel_label}: {channels}",
                                 stats.event_id, stats.request.min, stats.request.max
@@ -15752,9 +18725,42 @@ impl Workspace {
                         view
                     })
                     .child(div().text_sm().text_color(rgb(0x91a7c0)).child(export_note))
+                    .when(!self.thumbnail_history.is_empty(), |view| {
+                        view.child(
+                            div().id("thumbnail-strip").test_support().flex().flex_wrap().gap_1()
+                                .children(self.thumbnail_history.iter().copied().map(|entry| {
+                                    let label = format!(
+                                        "T{} · m{} a{}",
+                                        entry.texture + 1,
+                                        entry.mip,
+                                        entry.slice
+                                    );
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "thumbnail-{}-{}-{}",
+                                            entry.texture, entry.mip, entry.slice
+                                        )))
+                                        .test_support()
+                                        .cursor_pointer()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .bg(rgb(0x252f40))
+                                        .child(label)
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.switch_texture(
+                                                entry.texture,
+                                                Some((entry.mip, entry.slice, entry.sample)),
+                                                window,
+                                                cx,
+                                            );
+                                        }))
+                                })),
+                        )
+                    })
                     .when_some(preview_path, |view, path| {
                         view.child(self.texture_preview_image(path, cx))
-                        .child(div().text_sm().text_color(rgb(0x91a7c0)).child(self.t("Click the preview or pixel context, then use the arrow keys to move the selected pixel.", "点击预览或像素上下文后使用方向键移动所选像素。", "プレビューまたはピクセルコンテキストをクリックし、方向キーで選択ピクセルを移動します。", "미리 보기 또는 픽셀 컨텍스트를 클릭한 뒤 방향키로 선택한 픽셀을 이동하세요.")))
+                        .child(div().text_sm().text_color(rgb(0x91a7c0)).child(self.t("Click the preview or pixel context, then use the arrow keys to move the selected pixel.", "点击预览或像素上下文后使用方向键移动所选像素。")))
                         .child(
                             div()
                                 .text_sm()
@@ -15840,10 +18846,10 @@ impl Workspace {
                     let attachment_text = |attachment: &renderdocx::replay::PipelineAttachment| {
                         if !attachment.resource.bound {
                             return self
-                                .t("Unbound", "未绑定", "未バインド", "바인딩되지 않음")
+                                .t("Unbound", "未绑定")
                                 .to_owned();
                         }
-                        format!(
+                        let mut text = format!(
                             "{} · {} · mip {} + {} · {} {} + {}",
                             self.resource_display_name(
                                 attachment.resource.resource_index,
@@ -15852,10 +18858,19 @@ impl Workspace {
                             attachment.format,
                             attachment.first_mip,
                             attachment.mip_count,
-                            self.t("slice", "切片", "スライス", "슬라이스"),
+                            self.t("slice", "切片"),
                             attachment.first_slice,
                             attachment.slice_count
-                        )
+                        );
+                        if let Some(swizzle) =
+                            renderdocx::texture_view::swizzle_label(attachment.swizzle)
+                        {
+                            text.push_str(&format!(
+                                " · {}: {swizzle}",
+                                self.t("Swizzle", "通道映射")
+                            ));
+                        }
+                        text
                     };
                     let attachment_target =
                         |attachment: &renderdocx::replay::PipelineAttachment| {
@@ -16070,19 +19085,19 @@ impl Workspace {
                         let mut lines = vec![
                             format!(
                                 "{}: {} · {} · CCW {}",
-                                self.t("Raster", "光栅", "ラスタ", "래스터"),
+                                self.t("Raster", "光栅"),
                                 name(&fill, fixed.raster.fill),
                                 name(&cull, fixed.raster.cull),
                                 fixed.raster.front_ccw
                             ),
                             format!(
                                 "{}: {} · {} · {} {} · {} {} ({}–{})",
-                                self.t("Depth", "深度", "深度", "깊이"),
+                                self.t("Depth", "深度"),
                                 on(fixed.depth.enabled),
                                 name(&compare, fixed.depth.function),
-                                self.t("writes", "写入", "書き込み", "쓰기"),
+                                self.t("writes", "写入"),
                                 on(fixed.depth.writes),
-                                self.t("bounds", "范围", "範囲", "범위"),
+                                self.t("bounds", "范围"),
                                 on(fixed.depth.bounds_enabled),
                                 fixed
                                     .depth
@@ -16097,16 +19112,16 @@ impl Workspace {
                             ),
                             format!(
                                 "{}: {}",
-                                self.t("Stencil", "模板", "ステンシル", "스텐실"),
+                                self.t("Stencil", "模板"),
                                 on(fixed.stencil_enabled)
                             ),
                         ];
                         for (label, face) in [
                             (
-                                self.t("Front", "正面", "前面", "앞면"),
+                                self.t("Front", "正面"),
                                 &fixed.stencil_front,
                             ),
-                            (self.t("Back", "背面", "背面", "뒷면"), &fixed.stencil_back),
+                            (self.t("Back", "背面"), &fixed.stencil_back),
                         ] {
                             lines.push(format!(
                                 "{label}: {} · {}/{}/{} · ref {} · masks {:#x}/{:#x}",
@@ -16124,8 +19139,6 @@ impl Workspace {
                             self.t(
                                 "Independent blend",
                                 "独立混合",
-                                "独立ブレンド",
-                                "독립 블렌드"
                             ),
                             on(fixed.independent_blend),
                             fixed
@@ -16149,7 +19162,7 @@ impl Workspace {
                                 on(blend.enabled),
                                 eq(&blend.color),
                                 eq(&blend.alpha),
-                                self.t("logic", "逻辑", "論理", "논리"),
+                                self.t("logic", "逻辑"),
                                 if blend.logic_enabled {
                                     name(&logic_ops, blend.logic_operation)
                                 } else {
@@ -16175,14 +19188,13 @@ impl Workspace {
                         view.child(self.t(
                             "Color attachment views",
                             "颜色附件视图",
-                            "カラーアタッチメントビュー",
-                            "색상 첨부 뷰",
                         ))
                         .children(lines.into_iter().map(
                             |(slot, line, target, mip, slice, cast)| {
                                 div()
                                     .id(("pipeline-color-attachment", slot))
                                     .test_support()
+                                    .aria_label(line.clone())
                                     .text_sm()
                                     .child(line)
                                     .when_some(target, |row, index| {
@@ -16210,8 +19222,6 @@ impl Workspace {
                                         self.t(
                                             "Depth attachment",
                                             "深度附件",
-                                            "深度アタッチメント",
-                                            "깊이 첨부"
                                         )
                                     ))
                                     .when_some(target, |row, index| {
@@ -16237,8 +19247,6 @@ impl Workspace {
                                     self.t(
                                         "Depth resolve",
                                         "深度解析",
-                                        "深度リゾルブ",
-                                        "깊이 리졸브"
                                     )
                                 ))
                                 .when_some(target, |row, index| {
@@ -16342,18 +19350,21 @@ impl Workspace {
                         false,
                         |this, cx| {
                             if this.resource_pending || this.replay_pending || this.export_pending {
-                                this.status = Some(this.t("Wait for the current operation.", "请等待当前操作完成。", "現在の処理が完了するまでお待ちください。", "현재 작업이 끝날 때까지 기다려 주세요.").to_owned());
+                                this.status = Some(this.t("Wait for the current operation.", "请等待当前操作完成。").to_owned());
                                 cx.notify();
                                 return;
                             }
                             if this.protect_shader_draft(cx) { return; }
                             if this.annotation_dirty(cx) {
-                                this.status = Some(this.t("Save or discard the comment draft first.", "请先保存或放弃注释草稿。", "コメントを保存または破棄してください。", "먼저 댓글을 저장하거나 취소하세요.").to_owned());
+                                this.status = Some(this.t("Save or discard the comment draft first.", "请先保存或放弃注释草稿。").to_owned());
                                 this.tab = CaptureTab::Annotations;
                                 cx.notify();
                                 return;
                             }
                             this.open_revision += 1;
+                            this.event_name_worker = false;
+                            this.requested_event = None;
+                            this.queued_event_key = None;
                             this.event_filter_revision.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             this.event_annotation_revision.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             this.event_annotation_values.clear();
@@ -16363,6 +19374,12 @@ impl Workspace {
                             this.message_generation += 1;
                             this.message_poll_pending = false;
                             this.message_visible.clear();
+                            this.show_hidden_messages = false;
+                            this.shader_message_page = None;
+                            this.selected_shader_message = None;
+                            this.pending_shader_messages_event = None;
+                            this.shader_vertex_resolution = None;
+                            this.shader_vertex_lookup_pending = false;
                             this.selected_message = None;
                             this.event_tree.reset(&[]);
                             this.capture = None;
@@ -16397,6 +19414,11 @@ impl Workspace {
                         },
                         cx,
                     ))
+                    .child(button("capture-replay-loop", self.t("Replay loop", "重放循环"), self.replay_loop.as_ref().is_some_and(|state| state.playing), |this, cx| this.toggle_replay_loop(cx), cx))
+                    .child(Input::new(&self.replay_loop_delay).id("replay-loop-delay").aria_label(self.t("Loop interval in milliseconds", "循环间隔（毫秒）")).w(px(90.)))
+                    .child(button("capture-recompress", self.t("Recompress", "重压缩"), false, |this, cx| this.recompress_capture(cx), cx))
+                    .child(button("capture-save", self.t("Save", "保存"), false, |this, cx| this.save_capture_inplace(cx), cx))
+                    .child(button("capture-save-as", self.t("Save as…", "另存为…"), false, |this, cx| this.save_capture_as(cx), cx))
                     .child(button(
                         "capture-open",
                         open,
@@ -16412,9 +19434,10 @@ impl Workspace {
                         cx,
                     ))
                     .when(self.session.as_ref().and_then(Session::remote_server_url).is_some(), |row| row.child(button(
-                        "capture-remote-browser", self.t("Remote files", "远程文件", "リモートファイル", "원격 파일"), self.show_remote_browser,
+                        "capture-remote-browser", self.t("Remote files", "远程文件"), self.show_remote_browser,
                         |this, cx| { this.show_remote_browser = !this.show_remote_browser; cx.notify(); }, cx)))
-                    .child(button("capture-timeline", self.t("Timeline", "时间线", "タイムライン", "타임라인"), self.timeline.shown, |this, cx| { this.timeline.shown = !this.timeline.shown; cx.notify(); }, cx))
+                    .child(button("capture-timeline", self.t("Timeline", "时间线"), self.timeline.shown, |this, cx| { this.timeline.shown = !this.timeline.shown; cx.notify(); }, cx))
+                    .child(button("capture-log", self.t("Log", "日志"), self.show_log, |this, cx| { if this.show_log { this.show_log = false; cx.notify(); } else { this.open_log(cx); } }, cx))
                     .child(button(
                         "capture-upstream",
                         upstream,
@@ -16529,7 +19552,7 @@ impl Workspace {
                                     ))
                                     .child(button(
                                         "mesh-tab",
-                                        self.t("Mesh", "网格", "メッシュ", "메시"),
+                                        self.t("Mesh", "网格"),
                                         self.tab == CaptureTab::Mesh,
                                         |this, cx| {
                                             this.tab = CaptureTab::Mesh;
@@ -16542,7 +19565,7 @@ impl Workspace {
                                     ))
                                     .child(button(
                                         "vertex-input-tab",
-                                        self.t("Vertex input", "顶点输入", "頂点入力", "정점 입력"),
+                                        self.t("Vertex input", "顶点输入"),
                                         self.tab == CaptureTab::VertexInput,
                                         |this, cx| {
                                             this.tab = CaptureTab::VertexInput;
@@ -16555,7 +19578,7 @@ impl Workspace {
                                     ))
                                     .child(button(
                                         "resources-tab",
-                                        self.t("Resources", "资源", "リソース", "리소스"),
+                                        self.t("Resources", "资源"),
                                         self.tab == CaptureTab::Resources,
                                         |this, cx| {
                                             this.tab = CaptureTab::Resources;
@@ -16569,8 +19592,6 @@ impl Workspace {
                                         self.t(
                                             "Messages",
                                             "调试消息",
-                                            "デバッグメッセージ",
-                                            "디버그 메시지",
                                         ),
                                         self.tab == CaptureTab::Messages,
                                         |this, cx| {
@@ -16579,9 +19600,11 @@ impl Workspace {
                                         },
                                         cx,
                                     ))
+                                    .child(button("shader-messages-tab", self.t("Shader messages", "着色器消息"), self.tab == CaptureTab::ShaderMessages,
+                                        |this, cx| { this.tab = CaptureTab::ShaderMessages; if this.shader_message_page.is_none() { this.read_shader_messages(0, cx); } cx.notify(); }, cx))
                                     .child(button(
                                         "statistics-tab",
-                                        self.t("Statistics", "统计", "統計", "통계"),
+                                        self.t("Statistics", "统计"),
                                         self.tab == CaptureTab::Statistics,
                                         |this, cx| {
                                             this.tab = CaptureTab::Statistics;
@@ -16594,8 +19617,6 @@ impl Workspace {
                                         self.t(
                                             "GPU counters",
                                             "GPU 计数器",
-                                            "GPU カウンター",
-                                            "GPU 카운터",
                                         ),
                                         self.tab == CaptureTab::Counters,
                                         |this, cx| {
@@ -16604,9 +19625,9 @@ impl Workspace {
                                         },
                                         cx,
                                     ))
-                                    .child(button("descriptors-tab", self.t("Descriptors", "描述符", "ディスクリプター", "디스크립터"), self.tab == CaptureTab::Descriptors,
+                                    .child(button("descriptors-tab", self.t("Descriptors", "描述符"), self.tab == CaptureTab::Descriptors,
                                         |this, cx| { this.tab = CaptureTab::Descriptors; if this.descriptor_page.is_none() { this.read_descriptors(this.descriptor_store, 0, cx); } cx.notify(); }, cx))
-                                    .child(button("annotations-tab", self.t("Annotations", "注释与书签", "注釈", "주석"), self.tab == CaptureTab::Annotations,
+                                    .child(button("annotations-tab", self.t("Annotations", "注释与书签"), self.tab == CaptureTab::Annotations,
                                         |this, cx| { this.tab = CaptureTab::Annotations; if this.annotations.notes.is_none() { this.load_annotations(cx); } cx.notify(); }, cx))
                                     .child(
                                         div()
@@ -16620,8 +19641,6 @@ impl Workspace {
                                 let label = self.t(
                                     "Filter resources by name, type or #index",
                                     "按名称、类型或 #序号筛选资源",
-                                    "名前・種類・#番号でリソースを絞り込み",
-                                    "이름, 유형 또는 #번호로 리소스 필터링",
                                 );
                                 view.child(
                                     div()
@@ -16638,25 +19657,42 @@ impl Workspace {
                                         ),
                                 )
                             })
+                            .when(self.tab == CaptureTab::ShaderMessages, |view| {
+                                let label = self.t("Filter message text or location", "按消息文本或位置筛选");
+                                let stages = [
+                                    ("shader-filter-vertex", 0u32), ("shader-filter-hull", 1), ("shader-filter-domain", 2), ("shader-filter-geometry", 3),
+                                    ("shader-filter-pixel", 4), ("shader-filter-compute", 5), ("shader-filter-task", 6), ("shader-filter-mesh", 7),
+                                    ("shader-filter-raygen", 8), ("shader-filter-intersection", 9), ("shader-filter-anyhit", 10), ("shader-filter-closesthit", 11),
+                                    ("shader-filter-miss", 12), ("shader-filter-callable", 13),
+                                ];
+                                view.child(div().px_3().pb_2().child(Input::new(&self.shader_message_search).id("shader-message-filter").aria_label(label).w_full()))
+                                    .child(div().flex().flex_wrap().gap_2().px_3().pb_2()
+                                        .child(button("shader-filter-all", self.t("All stages", "全部阶段"), self.shader_message_draft_mask == u16::MAX, |this, cx| { this.shader_message_draft_mask = u16::MAX; cx.notify(); }, cx))
+                                        .children(stages.into_iter().map(|(id, stage)| button(id, renderdocx::shader_messages::stage_name(stage, self.settings.language), self.shader_message_draft_mask != u16::MAX && self.shader_message_draft_mask & (1u16 << stage) != 0, move |this, cx| {
+                                            let bit = 1u16 << stage;
+                                            this.shader_message_draft_mask = if this.shader_message_draft_mask == u16::MAX { bit } else { this.shader_message_draft_mask ^ bit };
+                                            cx.notify();
+                                        }, cx)))
+                                        .child(button("shader-filter-apply", self.t("Apply", "应用"), self.shader_message_filter_dirty(cx), |this, cx| this.apply_shader_message_filter(cx), cx))
+                                        .when(self.shader_message_filter_dirty(cx), |view| view.child(self.t("Filter changes not applied", "筛选更改尚未应用"))))
+                            })
                             .when(self.tab == CaptureTab::Messages, |view| {
                                 let label = self.t(
                                     "Filter messages by text, event or ID",
                                     "按文本、事件或 ID 筛选消息",
-                                    "テキスト・イベント・ID で絞り込み",
-                                    "텍스트, 이벤트 또는 ID로 필터링",
                                 );
                                 let options = [
-                                    ("message-all", self.t("All", "全部", "すべて", "전체"), None),
-                                    ("message-high", self.t("High", "高", "高", "높음"), Some(0)),
+                                    ("message-all", self.t("All", "全部"), None),
+                                    ("message-high", self.t("High", "高"), Some(0)),
                                     (
                                         "message-medium",
-                                        self.t("Medium", "中", "中", "중간"),
+                                        self.t("Medium", "中"),
                                         Some(1),
                                     ),
-                                    ("message-low", self.t("Low", "低", "低", "낮음"), Some(2)),
+                                    ("message-low", self.t("Low", "低"), Some(2)),
                                     (
                                         "message-info",
-                                        self.t("Info", "信息", "情報", "정보"),
+                                        self.t("Info", "信息"),
                                         Some(3),
                                     ),
                                 ];
@@ -16668,6 +19704,27 @@ impl Workspace {
                                             .w_full(),
                                     ),
                                 )
+                                .child({
+                                    use renderdocx::debug_message_view::SortKey;
+                                    let sort_options = [
+                                        ("messages-sort-event", self.t("Event", "事件"), SortKey::Event),
+                                        ("messages-sort-source", self.t("Source", "来源"), SortKey::Source),
+                                        ("messages-sort-severity", self.t("Severity", "严重程度"), SortKey::Severity),
+                                        ("messages-sort-category", self.t("Category", "类别"), SortKey::Category),
+                                        ("messages-sort-id", "ID", SortKey::Id),
+                                        ("messages-sort-description", self.t("Description", "描述"), SortKey::Description),
+                                    ];
+                                    div().flex().flex_wrap().gap_2().px_3().pb_2()
+                                        .child(self.t("Sort:", "排序："))
+                                        .children(sort_options.into_iter().map(|(id, label, key)| button(id, label, self.message_sort == key, move |this, cx| {
+                                            if this.message_sort == key { this.message_sort_descending = !this.message_sort_descending; }
+                                            else { this.message_sort = key; this.message_sort_descending = false; }
+                                            this.refresh_messages(); cx.notify();
+                                        }, cx)))
+                                        .child(button("messages-sort-direction", if self.message_sort_descending { self.t("Descending ↓", "降序 ↓") } else { self.t("Ascending ↑", "升序 ↑") }, false, |this, cx| {
+                                            this.message_sort_descending = !this.message_sort_descending; this.refresh_messages(); cx.notify();
+                                        }, cx))
+                                })
                                 .child(
                                     div()
                                         .flex()
@@ -16695,8 +19752,6 @@ impl Workspace {
                                             self.t(
                                                 "Show hidden",
                                                 "显示已隐藏",
-                                                "非表示を表示",
-                                                "숨긴 항목 표시",
                                             ),
                                             self.show_hidden_messages,
                                             |this, cx| {
@@ -16707,9 +19762,14 @@ impl Workspace {
                                             },
                                             cx,
                                         ))
+                                        .child(button("messages-reset-hidden", self.t("Reset hidden", "重置隐藏"), false, |this, cx| {
+                                            this.hidden_message_sources.clear(); this.hidden_message_severities.clear();
+                                            this.hidden_message_categories.clear(); this.hidden_message_types.clear();
+                                            this.refresh_messages(); cx.notify();
+                                        }, cx))
                                         .child(button(
                                             "messages-clear",
-                                            self.t("Clear", "清空", "クリア", "지우기"),
+                                            self.t("Clear", "清空"),
                                             false,
                                             |this, cx| {
                                                 if !this.message_poll_pending {
@@ -16720,7 +19780,7 @@ impl Workspace {
                                                     this.refresh_messages();
                                                     cx.notify();
                                                 } else {
-                                                    this.status = Some(this.t("Wait for the message refresh.", "请等待消息刷新完成。", "メッセージの更新をお待ちください。", "메시지 새로 고침이 완료될 때까지 기다려 주세요.").to_owned());
+                                                    this.status = Some(this.t("Wait for the message refresh.", "请等待消息刷新完成。").to_owned());
                                                     cx.notify();
                                                 }
                                             },
@@ -16729,8 +19789,8 @@ impl Workspace {
                                 )
                             })
                             .when(self.tab == CaptureTab::VertexInput, |view| {
-                                let instance_label = self.t("Instance", "实例", "インスタンス", "인스턴스");
-                                let view_label = self.t("View", "视图", "ビュー", "뷰");
+                                let instance_label = self.t("Instance", "实例");
+                                let view_label = self.t("View", "视图");
                                 view.child(
                                     div()
                                         .flex()
@@ -16740,7 +19800,7 @@ impl Workspace {
                                         .pb_2()
                                         .child(instance_label)
                                         .child(Input::new(&self.vertex_instance).id("vertex-instance").aria_label(instance_label).w(px(80.)))
-                                        .child(button("vertex-instance-apply", self.t("Load instance", "加载实例", "インスタンスを読み込む", "인스턴스 불러오기"), false, |this, cx| this.load_vertex_instance(cx), cx))
+                                        .child(button("vertex-instance-apply", self.t("Load instance", "加载实例"), false, |this, cx| this.load_vertex_instance(cx), cx))
                                         .child(view_label)
                                         .child(Input::new(&self.vertex_view).id("vertex-view").aria_label(view_label).w(px(80.)))
                                         .child(button(
@@ -16782,8 +19842,8 @@ impl Workspace {
                                 )
                             })
                             .when(self.tab == CaptureTab::Mesh, |view| {
-                                let instance_label = self.t("Instance", "实例", "インスタンス", "인스턴스");
-                                let view_label = self.t("View", "视图", "ビュー", "뷰");
+                                let instance_label = self.t("Instance", "实例");
+                                let view_label = self.t("View", "视图");
                                 view.child(
                                     div()
                                         .flex()
@@ -16795,22 +19855,20 @@ impl Workspace {
                                         .child(Input::new(&self.vertex_instance).id("mesh-instance").aria_label(instance_label).w(px(80.)))
                                         .child(view_label)
                                         .child(Input::new(&self.vertex_view).id("mesh-view").aria_label(view_label).w(px(80.)))
-                                        .child(button("mesh-selection-apply", self.t("Load selection", "加载选择", "選択を読み込む", "선택 불러오기"), false, |this, cx| this.load_mesh_selection(cx), cx))
-                                        .child(button("mesh-buffer-vertex", self.t("Vertices", "顶点", "頂点", "정점"), self.mesh.kind == MeshBufferKind::Vertex, |this, cx| this.read_mesh(this.mesh.selection, MeshBufferKind::Vertex, 0, cx), cx))
-                                        .child(button("mesh-buffer-index", self.t("Indices", "索引", "インデックス", "인덱스"), self.mesh.kind == MeshBufferKind::Index, |this, cx| this.read_mesh(this.mesh.selection, MeshBufferKind::Index, 0, cx), cx))
-                                        .child(button("mesh-buffer-draw", self.t("Draw order", "绘制顺序", "描画順", "그리기 순서"), self.mesh.kind == MeshBufferKind::Draw, |this, cx| this.read_mesh(this.mesh.selection, MeshBufferKind::Draw, 0, cx), cx))
+                                        .child(button("mesh-selection-apply", self.t("Load selection", "加载选择"), false, |this, cx| this.load_mesh_selection(cx), cx))
+                                        .child(button("mesh-buffer-vertex", self.t("Vertices", "顶点"), self.mesh.kind == MeshBufferKind::Vertex, |this, cx| this.read_mesh(this.mesh.selection, MeshBufferKind::Vertex, 0, cx), cx))
+                                        .child(button("mesh-buffer-index", self.t("Indices", "索引"), self.mesh.kind == MeshBufferKind::Index, |this, cx| this.read_mesh(this.mesh.selection, MeshBufferKind::Index, 0, cx), cx))
+                                        .child(button("mesh-buffer-draw", self.t("Draw order", "绘制顺序"), self.mesh.kind == MeshBufferKind::Draw, |this, cx| this.read_mesh(this.mesh.selection, MeshBufferKind::Draw, 0, cx), cx))
                                         .when(self.mesh.selection.stage == 4 && self.mesh.kind == MeshBufferKind::Draw, |view| view
-                                            .when(self.mesh.info.as_ref().is_some_and(|info| !info.meshlets.is_empty()), |view| view.child(button("mesh-filter-meshlet", self.t("Next meshlet", "下一个网格组", "次のメッシュレット", "다음 메시렛"), matches!(self.mesh.filter, renderdocx::mesh_draw::MeshFilter::Meshlet(_)), |this, cx| this.cycle_mesh_filter(false, cx), cx)))
-                                            .when(!self.mesh.task_sizes.is_empty(), |view| view.child(button("mesh-filter-task", self.t("Next task group", "下一个任务组", "次のタスクグループ", "다음 태스크 그룹"), matches!(self.mesh.filter, renderdocx::mesh_draw::MeshFilter::Task(_)), |this, cx| this.cycle_mesh_filter(true, cx), cx))))
-                                        .child(button("mesh-export-csv", self.t("Export positions CSV", "导出位置 CSV", "位置を CSV で書き出す", "위치 CSV 내보내기"), false, |this, cx| this.export_mesh_draw_csv(false, cx), cx))
-                                        .child(button("mesh-export-attributes", self.t("Export attributes CSV", "导出属性 CSV", "属性を CSV で書き出す", "속성 CSV 내보내기"), false, |this, cx| this.export_mesh_draw_csv(true, cx), cx))
+                                            .when(self.mesh.info.as_ref().is_some_and(|info| !info.meshlets.is_empty()), |view| view.child(button("mesh-filter-meshlet", self.t("Next meshlet", "下一个网格组"), matches!(self.mesh.filter, renderdocx::mesh_draw::MeshFilter::Meshlet(_)), |this, cx| this.cycle_mesh_filter(false, cx), cx)))
+                                            .when(!self.mesh.task_sizes.is_empty(), |view| view.child(button("mesh-filter-task", self.t("Next task group", "下一个任务组"), matches!(self.mesh.filter, renderdocx::mesh_draw::MeshFilter::Task(_)), |this, cx| this.cycle_mesh_filter(true, cx), cx))))
+                                        .child(button("mesh-export-csv", self.t("Export positions CSV", "导出位置 CSV"), false, |this, cx| this.export_mesh_draw_csv(false, cx), cx))
+                                        .child(button("mesh-export-attributes", self.t("Export attributes CSV", "导出属性 CSV"), false, |this, cx| this.export_mesh_draw_csv(true, cx), cx))
                                         .child(button(
                                             "mesh-stage",
                                             self.t(
                                                 "Next stage",
                                                 "切换阶段",
-                                                "ステージ切替",
-                                                "단계 전환",
                                             ),
                                             false,
                                             |this, cx| {
@@ -16877,15 +19935,15 @@ impl Workspace {
                                     div()
                                         .px_3()
                                         .child(div().text_sm().text_color(rgb(0x9eacc0)).child(
-                                            self.t("Find name or @EID", "查找名称或 @事件 ID", "名前または @EID を検索", "이름 또는 @EID 찾기")
+                                            self.t("Find name or @EID", "查找名称或 @事件 ID")
                                         ))
                                         .child(Input::new(&self.event_find).id("event-find").aria_label(
-                                            self.t("Find name or @EID", "查找名称或 @事件 ID", "名前または @EID を検索", "이름 또는 @EID 찾기")
+                                            self.t("Find name or @EID", "查找名称或 @事件 ID")
                                         ).w_full())
-                                        .when(self.event_find_pending.is_some(), |view| view.child(div().id("event-find-loading").test_support().text_sm().text_color(rgb(0x91a7c0)).child(self.t("Searching event names…", "正在搜索事件名称…", "イベント名を検索中…", "이벤트 이름을 검색하는 중…"))))
+                                        .when(self.event_find_pending.is_some(), |view| view.child(div().id("event-find-loading").test_support().text_sm().text_color(rgb(0x91a7c0)).child(self.t("Searching event names…", "正在搜索事件名称…"))))
                                         .child(div().flex().gap_2()
-                                            .child(button("event-find-prev", self.t("Previous match", "上一个匹配", "前の一致", "이전 일치"), false, |this, cx| this.find_event(false, cx), cx))
-                                            .child(button("event-find-next", self.t("Next match", "下一个匹配", "次の一致", "다음 일치"), false, |this, cx| this.find_event(true, cx), cx)))
+                                            .child(button("event-find-prev", self.t("Previous match", "上一个匹配"), false, |this, cx| this.find_event(false, cx), cx))
+                                            .child(button("event-find-next", self.t("Next match", "下一个匹配"), false, |this, cx| this.find_event(true, cx), cx)))
                                         .child(
                                             div()
                                                 .text_sm()
@@ -16898,43 +19956,50 @@ impl Workspace {
                                                 .aria_label(event_filter_label)
                                                 .w_full(),
                                         )
-                                        .when(self.event_filter_pending.is_some(), |view| view.child(div().id("event-filter-loading").test_support().text_sm().text_color(rgb(0x91a7c0)).child(self.t("Searching event details…", "正在搜索事件详情…", "イベント詳細を検索中…", "이벤트 세부 정보를 검색하는 중…"))))
+                                        .when(self.event_filter_pending.is_some(), |view| view.child(div().id("event-filter-loading").test_support().text_sm().text_color(rgb(0x91a7c0)).child(self.t("Searching event details…", "正在搜索事件详情…"))))
                                         .child(div().flex().flex_wrap().gap_2()
-                                            .child(Input::new(&self.event_filter_name).id("event-filter-name").aria_label(self.t("Saved filter name", "已保存筛选名称", "保存フィルター名", "저장된 필터 이름")).w(px(180.)))
-                                            .child(button("event-filter-save", self.t("Save filter", "保存筛选", "フィルターを保存", "필터 저장"), false, |this, cx| this.save_event_filter(cx), cx))
-                                            .child(button("event-filter-delete", self.t("Delete filter", "删除筛选", "フィルターを削除", "필터 삭제"), false, |this, cx| this.delete_event_filter(cx), cx))
-                                            .child(button("event-filter-refresh", self.t("Refresh filters", "刷新筛选", "フィルターを更新", "필터 새로고침"), false, |this, cx| this.refresh_event_filters(cx), cx)))
+                                            .child(Input::new(&self.event_filter_name).id("event-filter-name").aria_label(self.t("Saved filter name", "已保存筛选名称")).w(px(180.)))
+                                            .child(button("event-filter-save", self.t("Save filter", "保存筛选"), false, |this, cx| this.save_event_filter(cx), cx))
+                                            .child(button("event-filter-delete", self.t("Delete filter", "删除筛选"), false, |this, cx| this.delete_event_filter(cx), cx))
+                                            .child(button("event-filter-refresh", self.t("Refresh filters", "刷新筛选"), false, |this, cx| this.refresh_event_filters(cx), cx)))
                                         .child(div().flex().flex_wrap().gap_2().children(self.saved_event_filters.iter().enumerate().map(|(index, filter)| {
                                             let name = filter.name.clone();
                                             div().id(("saved-event-filter", index)).test_support().cursor_pointer().px_2().py_1().bg(rgb(0x252f40)).child(name.clone())
                                                 .on_click(cx.listener(move |this, _, window, cx| this.load_event_filter(&name, window, cx)))
                                         })))
-                                        .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t("Annotation column key (empty hides column)", "注释列键路径（留空隐藏）", "注釈列のキーパス（空欄で非表示）", "주석 열 키 경로 (비우면 숨김)")))
-                                        .child(Input::new(&self.event_annotation_key).id("event-annotation-key").aria_label(self.t("Annotation column key", "注释列键路径", "注釈列のキーパス", "주석 열 키 경로")).w_full())
+                                        .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t("Annotation column key (empty hides column)", "注释列键路径（留空隐藏）")))
+                                        .child(Input::new(&self.event_annotation_key).id("event-annotation-key").aria_label(self.t("Annotation column key", "注释列键路径")).w_full())
                                         .when(self.event_tree.filter_error(), |view| {
                                             view.child(
                                                 div().text_sm().text_color(rgb(0xef7777)).child(self.t(
                                                     "Invalid or unsupported filter; showing the last valid result.",
                                                     "筛选表达式无效或尚不支持；显示上一次有效结果。",
-                                                    "フィルターが無効か未対応です。前回の有効な結果を表示します。",
-                                                    "필터가 잘못되었거나 지원되지 않습니다. 마지막 유효 결과를 표시합니다.",
                                                 )),
                                             )
                                         }),
                                 )
                                 .child(button(
                                     "event-collect-times",
-                                    self.t("Collect GPU durations", "采集 GPU 耗时", "GPU 時間を収集", "GPU 시간 수집"),
+                                    self.t("Collect GPU durations", "采集 GPU 耗时"),
                                     false,
                                     |this, cx| this.collect_event_times(cx),
                                     cx,
                                 ))
                                 .child(div().flex().gap_2()
-                                    .child(button("event-step-prev", self.t("Previous action", "上一个动作", "前のアクション", "이전 동작"), false, |this, cx| this.step_event(false, cx), cx))
-                                    .child(button("event-step-next", self.t("Next action", "下一个动作", "次のアクション", "다음 동작"), false, |this, cx| this.step_event(true, cx), cx)))
+                                    .child(button("event-step-prev", self.t("Previous action", "上一个动作"), false, |this, cx| this.step_event(false, cx), cx))
+                                    .child(button("event-step-next", self.t("Next action", "下一个动作"), false, |this, cx| this.step_event(true, cx), cx))
+                                    .child(button("event-toggle-bookmark", self.t("Bookmark", "书签"), false, |this, cx| this.toggle_event_bookmark(cx), cx))
+                                    .child(div().id("event-bookmarks").test_support().min_w_0().flex_1().overflow_x_scroll().flex().gap_2().children(
+                                        self.annotations.bookmarks.as_ref().and_then(|(_, doc)| annotations::bookmarks(doc).ok()).unwrap_or_default().into_iter().enumerate().map(|(index, (event, text))| {
+                                            let label = if text.is_empty() { format!("E{event}") } else { text };
+                                            div().id(("event-bookmark", index)).test_support().aria_label(label.clone()).flex_none().cursor_pointer().px_2().py_1()
+                                                .bg(rgb(if self.selected_event_id() == Some(event) { 0x4169e1 } else { 0x252f40 }))
+                                                .child(label).on_click(cx.listener(move |this, _, _, cx| this.jump_to_bookmark(event, cx)))
+                                        })
+                                    )))
                                 .child(button(
                                     "event-export",
-                                    self.t("Export events", "导出事件", "イベントを書き出す", "이벤트 내보내기"),
+                                    self.t("Export events", "导出事件"),
                                     false, |this, cx| this.export_events(cx), cx,
                                 ))
                                 .child(button(
@@ -16956,8 +20021,8 @@ impl Workspace {
                                         .gap_2()
                                         .px_3()
                                         .pb_2()
-                                        .child(button("callstack-load", self.t("Call stack", "调用栈", "呼び出し履歴", "호출 스택"), false, |this, cx| this.read_event_callstack(false, cx), cx))
-                                        .child(button("callstack-resolve", self.t("Resolve symbols", "解析符号", "シンボルを解決", "심볼 확인"), false, |this, cx| this.read_event_callstack(true, cx), cx))
+                                        .child(button("callstack-load", self.t("Call stack", "调用栈"), false, |this, cx| this.read_event_callstack(false, cx), cx))
+                                        .child(button("callstack-resolve", self.t("Resolve symbols", "解析符号"), false, |this, cx| this.read_event_callstack(true, cx), cx))
                                         .child(button(
                                             "structure-parent",
                                             parent_label,
@@ -17091,10 +20156,10 @@ impl Workspace {
                                     .child(div().w(px(22.)).flex_none())
                                     .child(div().flex_1().min_w_0().flex().items_center().gap_3()
                                         .when(self.settings.event_columns.event_id, |row| row.child(div().id("event-header-eid").test_support().w(px(108.)).flex_none().child("EID")))
-                                        .when(self.settings.event_columns.action, |row| row.child(div().id("event-header-action").test_support().w(px(76.)).flex_none().child(self.t("Action #", "动作编号", "アクション番号", "동작 번호"))))
-                                        .child(div().flex_1().min_w_0().when(self.settings.event_columns.name, |row| row.child(self.t("Name", "名称", "名前", "이름"))))
-                                        .when(self.settings.event_columns.annotation && !self.event_annotation_key.read(cx).value().is_empty(), |row| row.child(div().w(px(112.)).flex_none().child(self.t("Annotation", "注释", "注釈", "주석"))))
-                                        .when(self.settings.event_columns.duration && self.event_tree.has_durations(), |row| row.child(div().w(px(80.)).flex_none().child(self.t("Duration", "耗时", "時間", "소요 시간")))))
+                                        .when(self.settings.event_columns.action, |row| row.child(div().id("event-header-action").test_support().w(px(76.)).flex_none().child(self.t("Action #", "动作编号"))))
+                                        .child(div().flex_1().min_w_0().when(self.settings.event_columns.name, |row| row.child(self.t("Name", "名称"))))
+                                        .when(self.settings.event_columns.annotation && !self.event_annotation_key.read(cx).value().is_empty(), |row| row.child(div().w(px(112.)).flex_none().child(self.t("Annotation", "注释"))))
+                                        .when(self.settings.event_columns.duration && self.event_tree.has_durations(), |row| row.child(div().w(px(80.)).flex_none().child(self.t("Duration", "耗时")))))
                             ))
                             .child(list),
                     )
@@ -17113,7 +20178,7 @@ impl Workspace {
                             .when(self.tab == CaptureTab::Events, |view| view.child(
                                 div().id("event-breadcrumbs").test_support().flex().flex_wrap().items_center().gap_2()
                                     .child(div().id("event-breadcrumb-root").test_support().cursor_pointer().text_color(rgb(0x8dbbff))
-                                        .child(self.t("Capture start", "捕获开始", "キャプチャ開始", "캡처 시작"))
+                                        .child(self.t("Capture start", "捕获开始"))
                                         .on_click(cx.listener(|this, _, _, cx| this.select_capture_start(cx))))
                                     .children(breadcrumbs.into_iter().map(|(index, label)| {
                                         div().flex().items_center().gap_2().child("/")
@@ -17121,46 +20186,46 @@ impl Workspace {
                                                 .on_click(cx.listener(move |this, _, _, cx| this.select_event(index, None, cx))))
                                     }))
                                     .child(div().id("event-path-edit").test_support().cursor_pointer().px_2().text_color(rgb(0x8dbbff))
-                                        .child(self.t("Edit path", "编辑路径", "パスを編集", "경로 편집"))
+                                        .child(self.t("Edit path", "编辑路径"))
                                         .on_click(cx.listener(|this, _, window, cx| this.edit_event_path(window, cx))))
                                     .when(self.event_path_editing, |view| view.child(div().w_full().flex().flex_wrap().gap_2()
-                                        .child(Input::new(&self.event_path_input).id("event-path-input").aria_label(self.t("Event path", "事件路径", "イベントパス", "이벤트 경로")).w_full())
-                                        .child(button("event-path-go", self.t("Go", "跳转", "移動", "이동"), false, |this, cx| this.navigate_event_path(cx), cx))
-                                        .child(button("event-path-cancel", self.t("Cancel", "取消", "キャンセル", "취소"), false, |this, cx| { this.event_path_editing = false; cx.notify(); }, cx))))
+                                        .child(Input::new(&self.event_path_input).id("event-path-input").aria_label(self.t("Event path", "事件路径")).w_full())
+                                        .child(button("event-path-go", self.t("Go", "跳转"), false, |this, cx| this.navigate_event_path(cx), cx))
+                                        .child(button("event-path-cancel", self.t("Cancel", "取消"), false, |this, cx| { this.event_path_editing = false; cx.notify(); }, cx))))
                             ))
                             .when(self.tab == CaptureTab::Events, |view| view.child(div().id("event-column-settings").test_support().flex().flex_col().gap_2()
-                                .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t("Event columns", "事件列", "イベント列", "이벤트 열")))
+                                .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t("Event columns", "事件列")))
                                 .child(div().flex().flex_wrap().gap_2()
-                                    .child(button("event-column-name", self.t("Name", "名称", "名前", "이름"), self.settings.event_columns.name, |this, cx| { this.settings.event_columns.name = !this.settings.event_columns.name; this.save(); cx.notify(); }, cx))
+                                    .child(button("event-column-name", self.t("Name", "名称"), self.settings.event_columns.name, |this, cx| { this.settings.event_columns.name = !this.settings.event_columns.name; this.save(); cx.notify(); }, cx))
                                     .child(button("event-column-eid", "EID", self.settings.event_columns.event_id, |this, cx| { this.settings.event_columns.event_id = !this.settings.event_columns.event_id; this.save(); cx.notify(); }, cx))
-                                    .child(button("event-column-action", self.t("Action #", "动作编号", "アクション番号", "동작 번호"), self.settings.event_columns.action, |this, cx| { this.settings.event_columns.action = !this.settings.event_columns.action; this.save(); cx.notify(); }, cx))
-                                    .child(button("event-column-duration", self.t("Duration", "耗时", "時間", "소요 시간"), self.settings.event_columns.duration, |this, cx| { this.settings.event_columns.duration = !this.settings.event_columns.duration; this.save(); cx.notify(); }, cx))
-                                    .child(button("event-column-annotation", self.t("Annotation", "注释", "注釈", "주석"), self.settings.event_columns.annotation, |this, cx| { this.settings.event_columns.annotation = !this.settings.event_columns.annotation; this.save(); cx.notify(); }, cx)))))
+                                    .child(button("event-column-action", self.t("Action #", "动作编号"), self.settings.event_columns.action, |this, cx| { this.settings.event_columns.action = !this.settings.event_columns.action; this.save(); cx.notify(); }, cx))
+                                    .child(button("event-column-duration", self.t("Duration", "耗时"), self.settings.event_columns.duration, |this, cx| { this.settings.event_columns.duration = !this.settings.event_columns.duration; this.save(); cx.notify(); }, cx))
+                                    .child(button("event-column-annotation", self.t("Annotation", "注释"), self.settings.event_columns.annotation, |this, cx| { this.settings.event_columns.annotation = !this.settings.event_columns.annotation; this.save(); cx.notify(); }, cx)))))
                             .when(self.tab == CaptureTab::Events, |view| view.child(div().flex().flex_wrap().gap_2()
-                                .child(button("event-auto-format", self.t("Automatic event names", "自动格式化事件名", "イベント名を自動整形", "이벤트 이름 자동 서식"), self.settings.event_auto_format, |this, cx| {
+                                .child(button("event-auto-format", self.t("Automatic event names", "自动格式化事件名"), self.settings.event_auto_format, |this, cx| {
                                     this.settings.event_auto_format = !this.settings.event_auto_format;
                                     this.save(); let expression = this.event_search.read(cx).value().to_string(); this.apply_event_filter(expression, cx);
                                 }, cx))
-                                .child(button("event-format-visible", self.t("Format visible events", "格式化可见事件", "表示イベントを整形", "표시된 이벤트 서식 지정"), false, |this, cx| this.format_visible_events(cx), cx))
-                                .child(button("event-show-param-names", self.t("Parameter names", "参数名称", "パラメーター名", "매개변수 이름"), self.settings.event_show_parameter_names, |this, cx| {
+                                .child(button("event-format-visible", self.t("Format visible events", "格式化可见事件"), false, |this, cx| this.format_visible_events(cx), cx))
+                                .child(button("event-show-param-names", self.t("Parameter names", "参数名称"), self.settings.event_show_parameter_names, |this, cx| {
                                     if this.resource_pending || this.replay_pending || this.export_pending { return; }
                                     this.settings.event_show_parameter_names = !this.settings.event_show_parameter_names;
                                     this.event_tree.clear_formatted_names(); this.save(); let expression = this.event_search.read(cx).value().to_string(); let empty = expression.is_empty(); this.apply_event_filter(expression, cx); if empty { this.format_visible_events(cx); }
                                 }, cx))
-                                .child(button("event-show-all-params", self.t("All parameters", "全部参数", "すべてのパラメーター", "모든 매개변수"), self.settings.event_show_all_parameters, |this, cx| {
+                                .child(button("event-show-all-params", self.t("All parameters", "全部参数"), self.settings.event_show_all_parameters, |this, cx| {
                                     if this.resource_pending || this.replay_pending || this.export_pending { return; }
                                     this.settings.event_show_all_parameters = !this.settings.event_show_all_parameters;
                                     this.event_tree.clear_formatted_names(); this.save(); let expression = this.event_search.read(cx).value().to_string(); let empty = expression.is_empty(); this.apply_event_filter(expression, cx); if empty { this.format_visible_events(cx); }
                                 }, cx))
-                                .child(button("event-use-custom-names", self.t("Custom action names", "自定义动作名称", "カスタムアクション名", "사용자 작업 이름"), self.settings.event_use_custom_action_names, |this, cx| {
+                                .child(button("event-use-custom-names", self.t("Custom action names", "自定义动作名称"), self.settings.event_use_custom_action_names, |this, cx| {
                                     if this.resource_pending || this.replay_pending || this.export_pending { return; }
                                     this.settings.event_use_custom_action_names = !this.settings.event_use_custom_action_names;
                                     this.event_tree.set_use_custom_action_names(this.settings.event_use_custom_action_names);
                                     this.save(); let expression = this.event_search.read(cx).value().to_string(); let empty = expression.is_empty(); this.apply_event_filter(expression, cx); if empty { this.format_visible_events(cx); }
                                 }, cx))
-                                .child(button("event-expand-subtree", self.t("Expand subtree", "展开分组", "グループを展開", "그룹 펼치기"), false, |this, cx| this.set_event_expansion(false, cx), cx))
-                                .child(button("event-collapse-subtree", self.t("Collapse subtree", "折叠分组", "グループを折りたたむ", "그룹 접기"), false, |this, cx| this.set_event_expansion(true, cx), cx))
-                                .child(button("event-show-empty", self.t("Show empty regions", "显示空分组", "空の領域を表示", "빈 영역 표시"), self.event_tree.show_empty_regions(), |this, cx| { this.event_tree.set_show_empty_regions(!this.event_tree.show_empty_regions()); cx.notify(); }, cx)))),
+                                .child(button("event-expand-subtree", self.t("Expand subtree", "展开分组"), false, |this, cx| this.set_event_expansion(false, cx), cx))
+                                .child(button("event-collapse-subtree", self.t("Collapse subtree", "折叠分组"), false, |this, cx| this.set_event_expansion(true, cx), cx))
+                                .child(button("event-show-empty", self.t("Show empty regions", "显示空分组"), self.event_tree.show_empty_regions(), |this, cx| { this.event_tree.set_show_empty_regions(!this.event_tree.show_empty_regions()); cx.notify(); }, cx)))),
                     ),
             )
     }
@@ -17185,120 +20250,123 @@ fn button(
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.pending_launch_inputs.is_some() {
+            let handle = window.window_handle();
+            let weak = cx.weak_entity();
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    let _ = weak.update(cx, |this, cx| {
+                        if let Some((arguments, delay, memory)) = this.pending_launch_inputs.take() {
+                            this.launch_arguments.update(cx, |input, cx| {
+                                input.set_value(arguments, window, cx)
+                            });
+                            this.launch_delay.update(cx, |input, cx| {
+                                input.set_value(delay, window, cx)
+                            });
+                            this.launch_memory.update(cx, |input, cx| {
+                                input.set_value(memory, window, cx)
+                            });
+                            cx.notify();
+                        }
+                    });
+                });
+            });
+        }
         if self.snapshot.is_some() {
             self.schedule_auto_texture_fit(window, cx);
-            return self.capture_view(window, cx).into_any_element();
+            let overlay = self.info_overlay(cx);
+            return div()
+                .relative()
+                .size_full()
+                .child(self.capture_view(window, cx))
+                .children(overlay)
+                .children(self.log_panel(cx))
+                .into_any_element();
         }
         let title = self.t(
             "A clearer view of every frame.",
             "让每一帧都清晰可见。",
-            "すべてのフレームを、より明確に。",
-            "모든 프레임을 더 선명하게.",
         );
         let intro = self.t(
             "A native workspace built around RenderDoc.",
             "基于 RenderDoc 的原生图形调试工作台。",
-            "RenderDoc を中心にしたネイティブワークスペース。",
-            "RenderDoc 기반의 네이티브 작업 공간입니다.",
         );
         let open = self.t(
             "Open capture",
             "打开捕获文件",
-            "キャプチャを開く",
-            "캡처 열기",
         );
         let launch = self.t(
             "Launch application",
             "启动应用并捕获",
-            "アプリを起動してキャプチャ",
-            "앱 실행 및 캡처",
         );
         let discover = self.t(
             "Find local targets",
             "查找本机目标",
-            "ローカルターゲットを検索",
-            "로컬 대상 찾기",
         );
         let launch_config_label = self.t(
             "Capture settings",
             "捕获设置",
-            "キャプチャ設定",
-            "캡처 설정",
         );
-        let arguments_label = self.t("Application arguments", "启动参数", "起動引数", "실행 인수");
+        let arguments_label = self.t("Application arguments", "启动参数");
         let working_label = self.t(
             "Working directory",
             "工作目录",
-            "作業ディレクトリ",
-            "작업 디렉터리",
         );
         let working_default = self.t(
             "Application directory",
             "程序所在目录",
-            "アプリケーションのディレクトリ",
-            "응용 프로그램 디렉터리",
         );
         let choose_directory = self.t(
             "Choose directory",
             "选择目录",
-            "ディレクトリを選択",
-            "디렉터리 선택",
         );
-        let clear_directory = self.t("Use default", "使用默认", "既定を使用", "기본값 사용");
+        let clear_directory = self.t("Use default", "使用默认");
         let delay_label = self.t(
             "Debugger delay (seconds)",
             "等待调试器（秒）",
-            "デバッガー待機（秒）",
-            "디버거 대기（초）",
         );
         let memory_label = self.t(
             "Soft memory limit (MB)",
             "软内存限制（MB）",
-            "ソフトメモリ制限（MB）",
-            "소프트 메모리 제한（MB）",
         );
         let environment_label = self.t(
             "Environment modifications",
             "环境变量修改",
-            "環境変数の変更",
-            "환경 변수 변경",
         );
-        let environment_name = self.t("Variable name", "变量名", "変数名", "변수 이름");
-        let environment_value = self.t("Variable value", "变量值", "変数値", "변수 값");
-        let environment_add = self.t("Add modification", "添加修改", "変更を追加", "변경 추가");
-        let environment_remove = self.t("Remove", "移除", "削除", "제거");
+        let environment_name = self.t("Variable name", "变量名");
+        let environment_value = self.t("Variable value", "变量值");
+        let environment_add = self.t("Add modification", "添加修改");
+        let environment_remove = self.t("Remove", "移除");
         let operation_label = match self.launch_env_operation {
-            EnvOperation::Set => self.t("Set", "设置", "設定", "설정"),
-            EnvOperation::Append => self.t("Append", "追加", "末尾に追加", "뒤에 추가"),
-            EnvOperation::Prepend => self.t("Prepend", "前置", "先頭に追加", "앞에 추가"),
+            EnvOperation::Set => self.t("Set", "设置"),
+            EnvOperation::Append => self.t("Append", "追加"),
+            EnvOperation::Prepend => self.t("Prepend", "前置"),
         };
         let separator_label = match self.launch_env_separator {
             EnvSeparator::Platform => self.t(
                 "Platform separator",
                 "平台分隔符",
-                "プラットフォーム区切り",
-                "플랫폼 구분자",
             ),
-            EnvSeparator::SemiColon => self.t("Semicolon", "分号", "セミコロン", "세미콜론"),
-            EnvSeparator::Colon => self.t("Colon", "冒号", "コロン", "콜론"),
-            EnvSeparator::NoSep => self.t("No separator", "无分隔符", "区切りなし", "구분자 없음"),
+            EnvSeparator::SemiColon => self.t("Semicolon", "分号"),
+            EnvSeparator::Colon => self.t("Colon", "冒号"),
+            EnvSeparator::NoSep => self.t("No separator", "无分隔符"),
         };
         let environment_rows: Vec<String> = self
             .launch_environment
             .iter()
             .map(|entry| {
                 let operation = match entry.operation {
-                    EnvOperation::Set => self.t("Set", "设置", "設定", "설정"),
-                    EnvOperation::Append => self.t("Append", "追加", "末尾に追加", "뒤에 추가"),
-                    EnvOperation::Prepend => self.t("Prepend", "前置", "先頭に追加", "앞에 추가"),
+                    EnvOperation::Set => self.t("Set", "设置"),
+                    EnvOperation::Append => self.t("Append", "追加"),
+                    EnvOperation::Prepend => self.t("Prepend", "前置"),
                 };
                 let separator = match entry.separator {
                     EnvSeparator::Platform => {
-                        self.t("Platform", "平台", "プラットフォーム", "플랫폼")
+                        self.t("Platform", "平台")
                     }
                     EnvSeparator::SemiColon => ";",
                     EnvSeparator::Colon => ":",
-                    EnvSeparator::NoSep => self.t("None", "无", "なし", "없음"),
+                    EnvSeparator::NoSep => self.t("None", "无"),
                 };
                 format!("{} · {operation} · {separator}", entry.name)
             })
@@ -17309,8 +20377,6 @@ impl Render for Workspace {
                 self.t(
                     "Allow VSync",
                     "允许垂直同步",
-                    "VSync を許可",
-                    "수직 동기화 허용",
                 ),
                 opts.allow_vsync,
             ),
@@ -17318,21 +20384,17 @@ impl Render for Workspace {
                 self.t(
                     "Allow fullscreen",
                     "允许全屏",
-                    "全画面を許可",
-                    "전체 화면 허용",
                 ),
                 opts.allow_fullscreen,
             ),
             (
-                self.t("API validation", "API 验证", "API 検証", "API 검증"),
+                self.t("API validation", "API 验证"),
                 opts.api_validation,
             ),
             (
                 self.t(
                     "Capture callstacks",
                     "捕获调用栈",
-                    "コールスタックを記録",
-                    "호출 스택 캡처",
                 ),
                 opts.capture_callstacks,
             ),
@@ -17340,8 +20402,6 @@ impl Render for Workspace {
                 self.t(
                     "Callstacks for actions only",
                     "仅捕获操作调用栈",
-                    "アクションのみ記録",
-                    "작업 호출 스택만 캡처",
                 ),
                 opts.capture_callstacks_only_actions,
             ),
@@ -17349,8 +20409,6 @@ impl Render for Workspace {
                 self.t(
                     "Verify buffer access",
                     "验证缓冲访问",
-                    "バッファアクセスを検証",
-                    "버퍼 접근 검증",
                 ),
                 opts.verify_buffer_access,
             ),
@@ -17358,8 +20416,6 @@ impl Render for Workspace {
                 self.t(
                     "Hook child processes",
                     "接入子进程",
-                    "子プロセスをフック",
-                    "자식 프로세스 후킹",
                 ),
                 opts.hook_into_children,
             ),
@@ -17367,8 +20423,6 @@ impl Render for Workspace {
                 self.t(
                     "Include all resources",
                     "包含全部资源",
-                    "全リソースを含める",
-                    "모든 리소스 포함",
                 ),
                 opts.ref_all_resources,
             ),
@@ -17376,8 +20430,6 @@ impl Render for Workspace {
                 self.t(
                     "Capture all command lists",
                     "捕获全部命令列表",
-                    "全コマンドリストを記録",
-                    "모든 명령 목록 캡처",
                 ),
                 opts.capture_all_cmd_lists,
             ),
@@ -17385,8 +20437,6 @@ impl Render for Workspace {
                 self.t(
                     "Mute debug output",
                     "静音调试输出",
-                    "デバッグ出力を抑制",
-                    "디버그 출력 음소거",
                 ),
                 opts.debug_output_mute,
             ),
@@ -17396,58 +20446,44 @@ impl Render for Workspace {
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| working_default.to_owned());
-        let connect_target = self.t("Connect", "连接", "接続", "연결");
+        let connect_target = self.t("Connect", "连接");
         let upstream = self.t(
             "Open RenderDoc",
             "打开 RenderDoc",
-            "RenderDoc を開く",
-            "RenderDoc 열기",
         );
         let configure_ui = self.t(
             "Select qrenderdoc",
             "选择 qrenderdoc",
-            "qrenderdoc を選択",
-            "qrenderdoc 선택",
         );
         let configure_bridge = self.t(
             "Select replay bridge",
             "选择回放桥接程序",
-            "リプレイブリッジを選択",
-            "리플레이 브리지 선택",
         );
-        let language = self.t("LANGUAGE", "语言", "言語", "언어");
+        let language = self.t("LANGUAGE", "语言");
+        let export_settings_label = self.t("Export settings…", "导出设置…");
+        let import_settings_label = self.t("Import settings…", "导入设置…");
         let integration = self.t(
             "UNITY / TUANJIE",
             "UNITY / 团结引擎",
-            "UNITY / TUANJIE",
-            "UNITY / TUANJIE",
         );
-        let integration_text = self.t("Use the engine's RenderDoc integration or launch a standalone player. Some detailed inspection still requires RenderDoc.", "使用引擎自带的 RenderDoc 集成，或启动独立播放器。部分详细调试仍需要 RenderDoc。", "エンジンの RenderDoc 統合またはスタンドアロンプレイヤーを使用します。詳細な解析の一部には RenderDoc が必要です。", "엔진의 RenderDoc 통합 또는 독립 실행형 플레이어를 사용하세요. 일부 상세 분석에는 RenderDoc이 필요합니다.");
+        let integration_text = self.t("Use the engine's RenderDoc integration or launch a standalone player. Some detailed inspection still requires RenderDoc.", "使用引擎自带的 RenderDoc 集成，或启动独立播放器。部分详细调试仍需要 RenderDoc。");
         let live_title = self.t(
             "LIVE CAPTURE",
             "实时捕获",
-            "ライブキャプチャ",
-            "실시간 캡처",
         );
         let trigger = self.t(
             "Capture next frame",
             "捕获下一帧",
-            "次のフレームをキャプチャ",
-            "다음 프레임 캡처",
         );
-        let disconnect = self.t("Disconnect", "断开连接", "切断", "연결 끊기");
-        let frame_label = self.t("Frame", "帧", "フレーム", "프레임");
+        let disconnect = self.t("Disconnect", "断开连接");
+        let frame_label = self.t("Frame", "帧");
         let remote_label = self.t(
             " · remote · select to copy",
             " · 远程 · 点击复制",
-            " · リモート · 選択してコピー",
-            " · 원격 · 선택하여 복사",
         );
         let remote_unavailable = self.t(
             " · remote · original session closed",
             " · 远程 · 原连接已关闭",
-            " · リモート · 元の接続は終了",
-            " · 원격 · 원래 연결이 종료됨",
         );
         let active = self.live.is_some();
         let live_connected = self.live.as_ref().is_some_and(LiveSession::is_alive);
@@ -17459,6 +20495,7 @@ impl Render for Workspace {
 
         div()
             .id("home-scroll")
+            .relative()
             .test_support()
             .size_full()
             .overflow_y_scroll()
@@ -17506,6 +20543,7 @@ impl Render for Workspace {
                         false,
                         |this, cx| {
                             if let Some(path) = rfd::FileDialog::new().pick_file() {
+                                this.launch_executable = Some(path.clone());
                                 this.launch_live(path, cx);
                             }
                         },
@@ -17670,7 +20708,7 @@ impl Render for Workspace {
                                     let entry = EnvironmentModification { name: this.launch_env_name.read(cx).value().to_string(), value: this.launch_env_value.read(cx).value().to_string(), operation: this.launch_env_operation, separator: this.launch_env_separator };
                                     let validation = LaunchConfiguration { environment: vec![entry.clone()], ..Default::default() }.validate();
                                     if validation.is_err() {
-                                        this.status = Some(this.t("Invalid environment variable name or value.", "环境变量名或值无效。", "環境変数名または値が無効です。", "환경 변수 이름 또는 값이 올바르지 않습니다.").to_owned());
+                                        this.status = Some(this.t("Invalid environment variable name or value.", "环境变量名或值无效。").to_owned());
                                     } else {
                                         this.launch_environment.push(entry);
                                         this.launch_env_name.update(cx, |state, cx| state.set_value("", window, cx));
@@ -17683,19 +20721,29 @@ impl Render for Workspace {
                             div().flex().items_center().gap_3().child(label)
                                 .child(div().id(SharedString::from(format!("launch-env-remove-{index}"))).test_support().cursor_pointer().px_3().py_2().rounded_md().bg(rgb(0x252f40)).child(environment_remove)
                                     .on_click(cx.listener(move |this, _, _, cx| { if index < this.launch_environment.len() { this.launch_environment.remove(index); cx.notify(); } })))
-                        })),
+                        }))
+                        .child(div().flex().flex_wrap().gap_2()
+                            .child(Button::new("export-capture-settings")
+                                .label(export_settings_label)
+                                .secondary()
+                                .on_click(cx.listener(|this, _, _, cx| this.export_capture_settings(cx))))
+                            .child(Button::new("import-capture-settings")
+                                .label(import_settings_label)
+                                .secondary()
+                                .on_click(cx.listener(|this, _, window, cx| this.import_capture_settings(window, cx))))),
                 )
             })
             .child(div().flex().flex_wrap().gap_2()
-                .child(div().flex().flex_col().gap_1().child(self.t("Remote server / target address", "远程服务器 / 目标地址", "リモートサーバー / ターゲットアドレス", "원격 서버 / 대상 주소")).child(Input::new(&self.remote_target_url).id("remote-target-url").aria_label(self.t("Remote target URL", "远程目标地址", "リモートターゲット URL", "원격 대상 URL")).w(px(260.))))
-                .child(button("discover-remote-targets", self.t("Discover remote targets", "查找远程目标", "リモートターゲットを検索", "원격 대상 검색"), false, |this, cx| {
+                .child(div().flex().flex_col().gap_1().child(self.t("Remote server / target address", "远程服务器 / 目标地址")).child(Input::new(&self.remote_target_url).id("remote-target-url").aria_label(self.t("Remote target URL", "远程目标地址")).w(px(260.))))
+                .child(button("suggest-remote-open", self.t("Suggest remote replay", "建议远程回放"), false, |this, cx| this.open_suggest_remote(cx), cx))
+                .child(button("discover-remote-targets", self.t("Discover remote targets", "查找远程目标"), false, |this, cx| {
                     let url = this.remote_target_url.read(cx).value().to_string();
                     this.discover_target(Some(url), cx);
                 }, cx))
-                .child(button("open-remote-replay", self.t("Replay capture on remote server", "在远程服务器回放捕获", "リモートサーバーでキャプチャを再生", "원격 서버에서 캡처 리플레이"), false, |this, cx| {
+                .child(button("open-remote-replay", self.t("Replay capture on remote server", "在远程服务器回放捕获"), false, |this, cx| {
                     let url = this.remote_target_url.read(cx).value().to_string();
                     if url.trim().is_empty() {
-                        this.status = Some(this.t("Enter a remote server URL.", "请输入远程服务器地址。", "リモートサーバーの URL を入力してください。", "원격 서버 URL을 입력하세요.").to_owned());
+                        this.status = Some(this.t("Enter a remote server URL.", "请输入远程服务器地址。").to_owned());
                         cx.notify();
                         return;
                     }
@@ -17704,32 +20752,215 @@ impl Render for Workspace {
                     }
                 }, cx)))
             .child(div().flex().flex_wrap().gap_2()
-                .child(div().flex().flex_col().gap_1().child(self.t("Remote application path", "远程应用路径", "リモートアプリのパス", "원격 앱 경로")).child(Input::new(&self.remote_app_path).id("remote-app-path").aria_label(self.t("Remote application path", "远程应用路径", "リモートアプリのパス", "원격 앱 경로")).w(px(300.))))
-                .child(div().flex().flex_col().gap_1().child(self.t("Remote working directory (optional)", "远程工作目录（可选）", "リモート作業ディレクトリ（任意）", "원격 작업 디렉터리 (선택)")).child(Input::new(&self.remote_working_directory).id("remote-working-directory").aria_label(self.t("Remote working directory (optional)", "远程工作目录（可选）", "リモート作業ディレクトリ（任意）", "원격 작업 디렉터리 (선택)")).w(px(260.))))
-                .child(button("launch-remote", self.t("Launch remote capture", "启动远程捕获", "リモートキャプチャを起動", "원격 캡처 시작"), false, |this, cx| {
+                .child(div().flex().flex_col().gap_1().child(self.t("Remote application path", "远程应用路径")).child(Input::new(&self.remote_app_path).id("remote-app-path").aria_label(self.t("Remote application path", "远程应用路径")).w(px(300.))))
+                .child(div().flex().flex_col().gap_1().child(self.t("Remote working directory (optional)", "远程工作目录（可选）")).child(Input::new(&self.remote_working_directory).id("remote-working-directory").aria_label(self.t("Remote working directory (optional)", "远程工作目录（可选）")).w(px(260.))))
+                .child(button("launch-remote", self.t("Launch remote capture", "启动远程捕获"), false, |this, cx| {
                     let url = this.remote_target_url.read(cx).value().to_string();
                     let app = this.remote_app_path.read(cx).value().to_string();
                     if url.trim().is_empty() || app.trim().is_empty() {
-                        this.status = Some(this.t("Enter a remote server URL and application path.", "请输入远程服务器地址和应用路径。", "リモートサーバーの URL とアプリのパスを入力してください。", "원격 서버 URL과 앱 경로를 입력하세요.").to_owned());
+                        this.status = Some(this.t("Enter a remote server URL and application path.", "请输入远程服务器地址和应用路径。").to_owned());
                         cx.notify();
-                    } else { this.launch_live_with_remote(PathBuf::from(app), Some(url), cx); }
+                    } else {
+                        this.launch_executable = Some(PathBuf::from(&app));
+                        this.launch_live_with_remote(PathBuf::from(app), Some(url), cx);
+                    }
                 }, cx)))
-            .child(div().flex().flex_col().gap_2()
-                .child(self.t("Replay options for newly opened captures", "新打开捕获的回放选项", "新しく開くキャプチャのリプレイ設定", "새 캡처의 리플레이 옵션"))
-                .child(self.t("Faster optimisation may reduce replay correctness; OpenGL ignores GPU selection.", "较快的优化可能影响回放正确性；OpenGL 不支持 GPU 选择。", "高速な最適化はリプレイの正確性に影響する場合があります。OpenGL は GPU 選択に対応しません。", "빠른 최적화는 리플레이 정확도에 영향을 줄 수 있으며 OpenGL은 GPU 선택을 지원하지 않습니다."))
+            .child(div().flex().flex_col().gap_1()
+                .child(self.t("Recent captures", "最近的捕获"))
+                .child(div().flex().flex_wrap().gap_1()
+                    .children(self.settings.recent_captures.iter().take(5).enumerate().map(|(index, path)| {
+                        let label = path
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.display().to_string());
+                        Button::new(("recent-capture", index))
+                            .label(label)
+                            .secondary()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let Some(path) = this.settings.recent_captures.get(index).cloned() else { return };
+                                this.open(path, cx);
+                            }))
+                    })))
+                .child(Button::new("recent-captures-clear")
+                    .label(self.t("Clear recent captures", "清除最近捕获"))
+                    .secondary()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.settings.clear_recent_captures();
+                        this.save();
+                        cx.notify();
+                    })))
+                .child(self.t("Recent capture settings", "最近的捕获设置"))
+                .child(div().flex().flex_wrap().gap_1()
+                    .children(self.settings.recent_capture_settings.iter().take(5).enumerate().map(|(index, path)| {
+                        let label = path
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.display().to_string());
+                        Button::new(("recent-settings", index))
+                            .label(label)
+                            .secondary()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let Some(path) = this.settings.recent_capture_settings.get(index).cloned() else { return };
+                                this.import_capture_settings_from(&path, Some(window), cx);
+                            }))
+                    })))
+                .child(Button::new("recent-settings-clear")
+                    .label(self.t("Clear recent settings", "清除最近设置"))
+                    .secondary()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.settings.clear_recent_capture_settings();
+                        this.save();
+                        cx.notify();
+                    }))))
+            .child(div().flex().flex_col().gap_1()
+                .child(self.t("Configuration", "配置"))
+                .child(Button::new("config-editor-open")
+                    .label(self.t("Edit configuration JSON", "编辑配置 JSON"))
+                    .secondary()
+                    .on_click(cx.listener(|this, _, window, cx| this.open_config_editor(window, cx))))
+                .when(self.show_config_editor, |view| view.child(
+                    div().flex().flex_col().gap_2()
+                        .child(div().id("config-editor").test_support().w_full().h(px(240.)).child(
+                            Textarea::new(&self.config_editor).aria_label(self.t("Configuration JSON", "配置 JSON")).h(px(240.))
+                        ))
+                        .child(div().flex().flex_wrap().gap_2()
+                            .child(Button::new("config-editor-apply")
+                                .label(self.t("Apply", "应用")).primary()
+                                .on_click(cx.listener(|this, _, _, cx| this.apply_config_editor(cx))))
+                            .child(Button::new("config-editor-cancel")
+                                .label(self.t("Cancel", "取消")).secondary()
+                                .on_click(cx.listener(|this, _, _, cx| { this.show_config_editor = false; cx.notify(); }))))))
+            )
+            .when_some(self.suggest_remote.clone(), |view, dialog| {
+                let remote_enabled = dialog.remote_enabled();
+                view.child(
+                    div().id("suggest-remote").test_support().flex().flex_col().gap_2().p_3().rounded_lg().bg(rgb(0x192332))
+                        .child(div().text_sm().child(format!("{} · {}", dialog.driver, dialog.machine_ident)))
+                        .child(div().text_sm().text_color(rgb(0xd4b77c)).child(self.t(
+                            "This capture may need remote replay. Load it locally, replay remotely, or cancel to configure a remote server.",
+                            "此捕获可能需要远程回放。可本地加载、远程回放，或取消后配置远程服务器。",
+                        )))
+                        .child(div().flex().flex_wrap().gap_2()
+                            .child(Button::new("suggest-remote-local")
+                                .label(self.t("Load locally", "本地加载")).primary()
+                                .on_click(cx.listener(|this, _, _, cx| this.choose_suggest_remote(renderdocx::suggest_remote::SuggestRemoteChoice::Local, cx))))
+                            .child(Button::new("suggest-remote-remote")
+                                .label(self.t("Replay remotely", "远程回放")).secondary()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if remote_enabled {
+                                        this.choose_suggest_remote(renderdocx::suggest_remote::SuggestRemoteChoice::Remote, cx);
+                                    }
+                                })))
+                            .child(Button::new("suggest-remote-cancel")
+                                .label(self.t("Cancel", "取消")).secondary()
+                                .on_click(cx.listener(|this, _, _, cx| this.choose_suggest_remote(renderdocx::suggest_remote::SuggestRemoteChoice::Cancel, cx)))))
+                        .child(Button::new("suggest-remote-always-local")
+                            .label(format!("{}: {}", self.t("Always replay locally", "始终本地回放"), if dialog.always_replay_locally { self.t("On", "开") } else { self.t("Off", "关") }))
+                            .secondary()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(dialog) = this.suggest_remote.as_mut() {
+                                    dialog.always_replay_locally = !dialog.always_replay_locally;
+                                }
+                                cx.notify();
+                            }))),
+                )
+            })
+            .child(div().flex().flex_col().gap_1()
+                .child(self.t("Python scripting", "Python 脚本"))
+                .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
+                    "Scripts run in an external Python process and cannot access the open capture.",
+                    "脚本在外部 Python 进程中运行，无法访问已打开的捕获。",
+                )))
                 .child(div().flex().flex_wrap().gap_2()
-                    .child(button("replay-validation", self.t("API validation", "API 验证", "API 検証", "API 검증"), self.settings.replay_options.api_validation, |this, cx| { this.settings.replay_options.api_validation = !this.settings.replay_options.api_validation; this.save(); cx.notify(); }, cx))
+                    .child(Input::new(&self.python_input).id("python-input").aria_label(self.t("Python expression", "Python 表达式")).w(px(280.)))
+                    .child(button("python-execute", self.t("Execute", "执行"), false, |this, cx| this.execute_python_input(cx), cx))
+                    .child(button("python-run", self.t("Run script", "运行脚本"), false, |this, cx| this.run_python_script(cx), cx))
+                    .child(button("python-clear", self.t("Clear output", "清除输出"), false, |this, cx| { this.python_output.clear(); cx.notify(); }, cx)))
+                .child(div().id("python-script").test_support().w_full().child(
+                    Textarea::new(&self.python_script).aria_label(self.t("Python script", "Python 脚本"))
+                ))
+                .child(div().id("python-output").test_support().flex().flex_col().gap_0().text_sm()
+                    .children(self.python_output.iter().enumerate().map(|(index, line)| {
+                        div().id(("python-line", index)).test_support().child(line.clone())
+                    })))
+            )
+            .child(div().flex().flex_col().gap_1()
+                .child(self.t("Mesh viewer settings", "网格查看器设置"))
+                .child(div().flex().flex_wrap().gap_2()
+                    .child(Button::new("viewer-axis-open").label(self.t("Axis mapping", "轴映射")).secondary()
+                        .on_click(cx.listener(|this, _, window, cx| this.open_viewer_dialog(ViewerDialog::Axis, window, cx))))
+                    .child(Button::new("viewer-projection-open").label(self.t("Projection guess", "投影推测")).secondary()
+                        .on_click(cx.listener(|this, _, window, cx| this.open_viewer_dialog(ViewerDialog::Projection, window, cx))))
+                    .child(Button::new("viewer-camera-open").label(self.t("Camera controls", "相机控制")).secondary()
+                        .on_click(cx.listener(|this, _, window, cx| this.open_viewer_dialog(ViewerDialog::Camera, window, cx)))))
+                .children(self.viewer_panel(cx)))
+            .child(div().flex().flex_col().gap_1()
+                .child(self.t("Window layouts", "窗口布局"))
+                .child(div().flex().flex_wrap().gap_1()
+                    .children((0..=6).map(|slot| {
+                        let label = if slot == 0 {
+                            self.t("Default", "默认").to_owned()
+                        } else {
+                            slot.to_string()
+                        };
+                        Button::new(("save-layout", slot))
+                            .label(format!("{} {label}", self.t("Save", "保存")))
+                            .secondary()
+                            .on_click(cx.listener(move |this, _, _, cx| this.save_layout(slot, cx)))
+                    })))
+                .child(div().flex().flex_wrap().gap_1()
+                    .children((0..=6).map(|slot| {
+                        let label = if slot == 0 {
+                            self.t("Default", "默认").to_owned()
+                        } else {
+                            slot.to_string()
+                        };
+                        Button::new(("load-layout", slot))
+                            .label(format!("{} {label}", self.t("Load", "加载")))
+                            .secondary()
+                            .on_click(cx.listener(move |this, _, _, cx| this.load_layout(slot, cx)))
+                    })))
+                .child(div().flex().flex_wrap().gap_2()
+                    .child(Button::new("help-docs")
+                        .label(self.t("Documentation", "文档"))
+                        .secondary()
+                        .on_click(cx.listener(|_, _, _, cx| cx.open_url("https://renderdoc.org/docs/"))))
+                    .child(Button::new("help-github")
+                        .label(self.t("GitHub", "GitHub"))
+                        .secondary()
+                        .on_click(cx.listener(|_, _, _, cx| cx.open_url("https://github.com/baldurk/renderdoc"))))
+                    .child(Button::new("help-releases")
+                        .label(self.t("Releases", "发布页"))
+                        .secondary()
+                        .on_click(cx.listener(|_, _, _, cx| cx.open_url("https://github.com/baldurk/renderdoc/releases"))))
+                    .child(Button::new("help-about")
+                        .label(self.t("About", "关于"))
+                        .secondary()
+                        .on_click(cx.listener(|this, _, _, cx| { this.info_dialog = Some(InfoDialog::About); cx.notify(); })))
+                    .child(Button::new("help-tips")
+                        .label(self.t("Tips", "提示"))
+                        .secondary()
+                        .on_click(cx.listener(|this, _, _, cx| { this.info_dialog = Some(InfoDialog::Tips); cx.notify(); })))
+                    .child(Button::new("help-log")
+                        .label(self.t("Log", "日志"))
+                        .secondary()
+                        .on_click(cx.listener(|this, _, _, cx| this.open_log(cx))))))
+            .child(div().flex().flex_col().gap_2()
+                .child(self.t("Replay options for newly opened captures", "新打开捕获的回放选项"))
+                .child(self.t("Faster optimisation may reduce replay correctness; OpenGL ignores GPU selection.", "较快的优化可能影响回放正确性；OpenGL 不支持 GPU 选择。"))
+                .child(div().flex().flex_wrap().gap_2()
+                    .child(button("replay-validation", self.t("API validation", "API 验证"), self.settings.replay_options.api_validation, |this, cx| { this.settings.replay_options.api_validation = !this.settings.replay_options.api_validation; this.save(); cx.notify(); }, cx))
                     .child(button("replay-optimisation", match self.settings.replay_options.optimisation {
-                        0 => self.t("Optimisation: none", "优化：无", "最適化：なし", "최적화: 없음"),
-                        1 => self.t("Optimisation: conservative", "优化：保守", "最適化：保守的", "최적화: 보수적"),
-                        3 => self.t("Optimisation: fastest", "优化：最快", "最適化：最速", "최적화: 가장 빠름"),
-                        _ => self.t("Optimisation: balanced", "优化：平衡", "最適化：バランス", "최적화: 균형"),
+                        0 => self.t("Optimisation: none", "优化：无"),
+                        1 => self.t("Optimisation: conservative", "优化：保守"),
+                        3 => self.t("Optimisation: fastest", "优化：最快"),
+                        _ => self.t("Optimisation: balanced", "优化：平衡"),
                     }, false, |this, cx| { this.settings.replay_options.optimisation = (this.settings.replay_options.optimisation % 4 + 1) % 4; this.save(); cx.notify(); }, cx))
-                    .child(button("replay-gpu-local", self.t("Discover local GPUs", "发现本地 GPU", "ローカル GPU を検索", "로컬 GPU 검색"), false, |this, cx| this.query_replay_gpus(false, cx), cx))
-                    .child(button("replay-gpu-remote", self.t("Discover remote GPUs", "发现远程 GPU", "リモート GPU を検索", "원격 GPU 검색"), false, |this, cx| this.query_replay_gpus(true, cx), cx))
-                    .child(button("replay-gpu-default", self.t("Default GPU", "默认 GPU", "既定の GPU", "기본 GPU"), false, |this, cx| { this.settings.replay_options.gpu_vendor = 0; this.settings.replay_options.gpu_device_id = 0; this.settings.replay_options.gpu_driver.clear(); this.save(); cx.notify(); }, cx)))
-                .child(format!("{}: {} / {} / {}", self.t("GPU override", "GPU 指定", "GPU 指定", "GPU 지정"), self.settings.replay_options.gpu_vendor, self.settings.replay_options.gpu_device_id, self.settings.replay_options.gpu_driver))
-                .child(format!("{}: {}", self.t("GPU list source", "GPU 列表来源", "GPU リストの取得元", "GPU 목록 출처"), self.replay_gpu_source.as_deref().unwrap_or(self.t("Local", "本地", "ローカル", "로컬"))))
+                    .child(button("replay-gpu-local", self.t("Discover local GPUs", "发现本地 GPU"), false, |this, cx| this.query_replay_gpus(false, cx), cx))
+                    .child(button("replay-gpu-remote", self.t("Discover remote GPUs", "发现远程 GPU"), false, |this, cx| this.query_replay_gpus(true, cx), cx))
+                    .child(button("replay-gpu-default", self.t("Default GPU", "默认 GPU"), false, |this, cx| { this.settings.replay_options.gpu_vendor = 0; this.settings.replay_options.gpu_device_id = 0; this.settings.replay_options.gpu_driver.clear(); this.save(); cx.notify(); }, cx)))
+                .child(format!("{}: {} / {} / {}", self.t("GPU override", "GPU 指定"), self.settings.replay_options.gpu_vendor, self.settings.replay_options.gpu_device_id, self.settings.replay_options.gpu_driver))
+                .child(format!("{}: {}", self.t("GPU list source", "GPU 列表来源"), self.replay_gpu_source.as_deref().unwrap_or(self.t("Local", "本地"))))
                 .children(self.replay_gpus.clone().into_iter().filter(|_| self.replay_gpu_source.as_ref().is_none_or(|url| self.remote_target_url.read(cx).value().as_ref() == url)).enumerate().map(|(index, gpu)| {
                     let label = format!("{} · {} / {} · {} · {:?}", gpu.name, gpu.vendor, gpu.device_id, gpu.driver, gpu.apis);
                     div().id(("replay-gpu", index)).test_support().cursor_pointer().px_3().py_2().bg(rgb(0x252f40)).child(label)
@@ -17775,8 +21006,6 @@ impl Render for Workspace {
                                         .t(
                                             "Capture request submitted",
                                             "捕获请求已提交",
-                                            "キャプチャ要求を送信しました",
-                                            "캡처 요청을 보냈습니다",
                                         )
                                         .to_owned(),
                                     Err(error) => format!(
@@ -17784,8 +21013,6 @@ impl Render for Workspace {
                                         this.t(
                                             "Target error",
                                             "目标错误",
-                                            "ターゲットエラー",
-                                            "대상 오류"
                                         )
                                     ),
                                 });
@@ -17806,8 +21033,6 @@ impl Render for Workspace {
                                     this.t(
                                         "Disconnecting…",
                                         "正在断开…",
-                                        "切断中…",
-                                        "연결 해제 중…",
                                     )
                                     .to_owned(),
                                 );
@@ -17825,8 +21050,6 @@ impl Render for Workspace {
                                                 .t(
                                                     "Target disconnected",
                                                     "目标已断开",
-                                                    "ターゲット切断",
-                                                    "대상 연결 끊김",
                                                 )
                                                 .to_owned(),
                                             Err(error) => format!(
@@ -17834,8 +21057,6 @@ impl Render for Workspace {
                                                 this.t(
                                                     "Disconnect failed",
                                                     "断开失败",
-                                                    "切断に失敗しました",
-                                                    "연결 해제 실패"
                                                 )
                                             ),
                                         });
@@ -17871,6 +21092,7 @@ impl Render for Workspace {
                             .children(live_captures.into_iter().enumerate().map(
                                 |(index, capture)| {
                                     let LiveCapture { frame, path, local, capture_id, generation } = capture;
+                                    let save_path = path.clone();
                                     let label = format!(
                                         "{frame_label} {frame} · {}{}",
                                         path.display(),
@@ -17881,15 +21103,29 @@ impl Render for Workspace {
                                         .test_support()
                                         .cursor_pointer()
                                         .text_sm()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
                                         .child(label)
+                                        .when(local, |row| {
+                                            row.child(button(
+                                                "live-capture-save",
+                                                self.t("Save", "保存"),
+                                                false,
+                                                move |this, cx| {
+                                                    this.save_capture_copy(save_path.clone(), cx);
+                                                },
+                                                cx,
+                                            ))
+                                        })
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             if local {
                                                 this.open(path.clone(), cx);
                                             } else if generation == this.live_generation {
                                                 if let (Some(session), Some(id)) = (&this.live, capture_id) {
                                                     this.live_status = Some(match session.copy_capture(id) {
-                                                        Ok(_) => this.t("Copy requested; waiting for completion…", "已请求复制，等待完成…", "コピーを要求しました。完了を待っています…", "복사를 요청했습니다. 완료를 기다리는 중…").to_owned(),
-                                                        Err(error) => format!("{}: {error}", this.t("Copy failed", "复制失败", "コピー失敗", "복사 실패")),
+                                                        Ok(_) => this.t("Copy requested; waiting for completion…", "已请求复制，等待完成…").to_owned(),
+                                                        Err(error) => format!("{}: {error}", this.t("Copy failed", "复制失败")),
                                                     });
                                                     cx.notify();
                                                 }
@@ -17955,6 +21191,8 @@ impl Render for Workspace {
             .when_some(status, |s, status| {
                 s.child(div().text_color(rgb(0xd4b77c)).child(status))
             })
+            .children(self.info_overlay(cx))
+            .children(self.log_panel(cx))
             .into_any_element()
     }
 }
@@ -17989,6 +21227,21 @@ fn main() {
                     let launch_memory = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let launch_env_name = cx.new(|cx| InputState::new(window, cx));
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
+                    let log_filter = cx.new(|cx| InputState::new(window, cx));
+                    let replay_loop_delay =
+                        cx.new(|cx| InputState::new(window, cx).default_value("150"));
+                    let proj_fov = cx.new(|cx| InputState::new(window, cx).default_value("90"));
+                    let proj_aspect = cx.new(|cx| InputState::new(window, cx));
+                    let proj_near = cx.new(|cx| InputState::new(window, cx));
+                    let proj_far = cx.new(|cx| InputState::new(window, cx));
+                    let camera_near = cx.new(|cx| InputState::new(window, cx).default_value("0.01"));
+                    let camera_far = cx.new(|cx| InputState::new(window, cx).default_value("10000"));
+                    let config_editor = cx.new(|cx| TextareaState::new(window, cx));
+                    let shader_find = cx.new(|cx| InputState::new(window, cx));
+                    let shader_replace = cx.new(|cx| InputState::new(window, cx));
+                    let python_input = cx.new(|cx| InputState::new(window, cx));
+                    let python_script =
+                        cx.new(|cx| TextareaState::new(window, cx).rows(6).auto_grow(4, 12));
                     let vertex_instance =
                         cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let vertex_view = cx.new(|cx| InputState::new(window, cx).default_value("0"));
@@ -18014,6 +21267,7 @@ fn main() {
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
                     let message_search = cx.new(|cx| InputState::new(window, cx));
+                    let shader_message_search = cx.new(|cx| InputState::new(window, cx));
                     let bookmark_text = cx.new(|cx| InputState::new(window, cx));
                     let stats_min = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let texture_black_point =
@@ -18054,6 +21308,9 @@ fn main() {
                         snapshot: None,
                         event_tree: EventTree::default(),
                         event_scroll: UniformListScrollHandle::new(),
+                        event_focus: cx.focus_handle(),
+                        requested_event: None,
+                        queued_event_key: None,
                         _resource_search_subscription: Workspace::watch_resource_search(
                             &resource_search,
                             cx,
@@ -18070,12 +21327,25 @@ fn main() {
                         message_query: String::new(),
                         message_visible: Vec::new(),
                         message_severity: None,
+                        message_sort: Default::default(),
+                        message_sort_descending: false,
                         hidden_message_sources: Default::default(),
+                        hidden_message_severities: Default::default(),
                         hidden_message_categories: Default::default(),
                         hidden_message_types: Default::default(),
                         show_hidden_messages: false,
                         message_poll_pending: false,
                         message_generation: 0,
+                        shader_message_page: None,
+                        selected_shader_message: None,
+                        pending_shader_messages_event: None,
+                        shader_vertex_resolution: None,
+                        shader_vertex_lookup_pending: false,
+                        shader_vertex_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        _shader_message_search_subscription: Workspace::watch_shader_message_search(&shader_message_search, cx),
+                        shader_message_search,
+                        shader_message_draft_mask: u16::MAX,
+                        shader_message_filter: renderdocx::shader_messages::Filter { stage_mask: u16::MAX, query: String::new(), language: Language::English },
                         _event_search_subscription: Workspace::watch_event_search(
                             &event_search,
                             cx,
@@ -18152,6 +21422,8 @@ fn main() {
                         stats_min,
                         stats_max,
                         statistics: None,
+                        frame_stats_category: renderdocx::frame_statistics::OVERVIEW,
+                        frame_stats_raw: false,
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_format: None,
@@ -18196,6 +21468,7 @@ fn main() {
                         counter_page: None,
                         descriptor_store: None,
                         descriptor_page: None,
+                        descriptor_show_raw: false,
                         annotations: AnnotationView::default(),
                         bookmark_text,
                         usage_page: None,
@@ -18230,12 +21503,42 @@ fn main() {
                         launch_delay,
                         launch_memory,
                         launch_working_directory: None,
+                        launch_executable: None,
                         capture_options: CaptureOptions::default(),
                         launch_env_name,
                         launch_env_value,
                         launch_environment: Vec::new(),
                         launch_env_operation: EnvOperation::Set,
                         launch_env_separator: EnvSeparator::Platform,
+                        pending_launch_inputs: None,
+                        info_dialog: None,
+                        log_messages: Vec::new(),
+                        log_filter,
+                        show_log: false,
+                        log_pending: false,
+                        replay_loop: None,
+                        replay_loop_generation: 0,
+                        replay_loop_delay,
+                        viewer_dialog: None,
+                        proj_fov,
+                        proj_aspect,
+                        proj_near,
+                        proj_far,
+                        camera_near,
+                        camera_far,
+                        config_editor,
+                        show_config_editor: false,
+                        show_find_replace: false,
+                        find_options: renderdocx::find_replace::FindOptions::default(),
+                        find_cursor: 0,
+                        shader_find,
+                        shader_replace,
+                        thumbnail_history: Vec::new(),
+                        suggest_remote: None,
+                        python_input,
+                        python_script,
+                        python_output: Vec::new(),
+                        python_pending: false,
                     });
                     Workspace::install_close_guard(window, cx, &entity);
                     if let Some(path) = initial_capture {
@@ -18249,8 +21552,6 @@ fn main() {
                                 view.t(
                                     "Invalid Editor process ID.",
                                     "Editor 进程 ID 无效。",
-                                    "Editor のプロセス ID が無効です。",
-                                    "Editor 프로세스 ID가 올바르지 않습니다.",
                                 )
                                 .to_owned(),
                             );
@@ -18760,6 +22061,21 @@ mod ui_tests {
                     let launch_memory = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let launch_env_name = cx.new(|cx| InputState::new(window, cx));
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
+                    let log_filter = cx.new(|cx| InputState::new(window, cx));
+                    let replay_loop_delay =
+                        cx.new(|cx| InputState::new(window, cx).default_value("150"));
+                    let proj_fov = cx.new(|cx| InputState::new(window, cx).default_value("90"));
+                    let proj_aspect = cx.new(|cx| InputState::new(window, cx));
+                    let proj_near = cx.new(|cx| InputState::new(window, cx));
+                    let proj_far = cx.new(|cx| InputState::new(window, cx));
+                    let camera_near = cx.new(|cx| InputState::new(window, cx).default_value("0.01"));
+                    let camera_far = cx.new(|cx| InputState::new(window, cx).default_value("10000"));
+                    let config_editor = cx.new(|cx| TextareaState::new(window, cx));
+                    let shader_find = cx.new(|cx| InputState::new(window, cx));
+                    let shader_replace = cx.new(|cx| InputState::new(window, cx));
+                    let python_input = cx.new(|cx| InputState::new(window, cx));
+                    let python_script =
+                        cx.new(|cx| TextareaState::new(window, cx).rows(6).auto_grow(4, 12));
                     let vertex_instance =
                         cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let vertex_view = cx.new(|cx| InputState::new(window, cx).default_value("0"));
@@ -18785,6 +22101,7 @@ mod ui_tests {
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
                     let message_search = cx.new(|cx| InputState::new(window, cx));
+                    let shader_message_search = cx.new(|cx| InputState::new(window, cx));
                     let bookmark_text = cx.new(|cx| InputState::new(window, cx));
                     let stats_min = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let texture_black_point =
@@ -18844,6 +22161,9 @@ mod ui_tests {
                         }),
                         event_tree: EventTree::default(),
                         event_scroll: UniformListScrollHandle::new(),
+                        event_focus: cx.focus_handle(),
+                        requested_event: None,
+                        queued_event_key: None,
                         _resource_search_subscription: Workspace::watch_resource_search(
                             &resource_search,
                             cx,
@@ -18860,12 +22180,25 @@ mod ui_tests {
                         message_query: String::new(),
                         message_visible: Vec::new(),
                         message_severity: None,
+                        message_sort: Default::default(),
+                        message_sort_descending: false,
                         hidden_message_sources: Default::default(),
+                        hidden_message_severities: Default::default(),
                         hidden_message_categories: Default::default(),
                         hidden_message_types: Default::default(),
                         show_hidden_messages: false,
                         message_poll_pending: false,
                         message_generation: 0,
+                        shader_message_page: None,
+                        selected_shader_message: None,
+                        pending_shader_messages_event: None,
+                        shader_vertex_resolution: None,
+                        shader_vertex_lookup_pending: false,
+                        shader_vertex_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        _shader_message_search_subscription: Workspace::watch_shader_message_search(&shader_message_search, cx),
+                        shader_message_search,
+                        shader_message_draft_mask: u16::MAX,
+                        shader_message_filter: renderdocx::shader_messages::Filter { stage_mask: u16::MAX, query: String::new(), language: Language::English },
                         _event_search_subscription: Workspace::watch_event_search(
                             &event_search,
                             cx,
@@ -18942,6 +22275,8 @@ mod ui_tests {
                         stats_min,
                         stats_max,
                         statistics: None,
+                        frame_stats_category: renderdocx::frame_statistics::OVERVIEW,
+                        frame_stats_raw: false,
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_format: None,
@@ -18986,6 +22321,7 @@ mod ui_tests {
                         counter_page: None,
                         descriptor_store: None,
                         descriptor_page: None,
+                        descriptor_show_raw: false,
                         annotations: AnnotationView::default(),
                         bookmark_text,
                         usage_page: None,
@@ -19020,12 +22356,42 @@ mod ui_tests {
                         launch_delay,
                         launch_memory,
                         launch_working_directory: None,
+                        launch_executable: None,
                         capture_options: CaptureOptions::default(),
                         launch_env_name,
                         launch_env_value,
                         launch_environment: Vec::new(),
                         launch_env_operation: EnvOperation::Set,
                         launch_env_separator: EnvSeparator::Platform,
+                        pending_launch_inputs: None,
+                        info_dialog: None,
+                        log_messages: Vec::new(),
+                        log_filter,
+                        show_log: false,
+                        log_pending: false,
+                        replay_loop: None,
+                        replay_loop_generation: 0,
+                        replay_loop_delay,
+                        viewer_dialog: None,
+                        proj_fov,
+                        proj_aspect,
+                        proj_near,
+                        proj_far,
+                        camera_near,
+                        camera_far,
+                        config_editor,
+                        show_config_editor: false,
+                        show_find_replace: false,
+                        find_options: renderdocx::find_replace::FindOptions::default(),
+                        find_cursor: 0,
+                        shader_find,
+                        shader_replace,
+                        thumbnail_history: Vec::new(),
+                        suggest_remote: None,
+                        python_input,
+                        python_script,
+                        python_output: Vec::new(),
+                        python_pending: false,
                     })
                 },
             )
@@ -19102,11 +22468,14 @@ mod ui_tests {
             assert!(view.read(cx).launch_env_value.read(cx).value().is_empty());
         });
         cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let remove_y = window.find("launch-env-remove-0").bounds().origin.y;
             window.scroll(
                 "home-scroll",
-                ScrollDelta::Pixels(point(px(0.), px(-700.))),
+                ScrollDelta::Pixels(point(px(0.), px(180.) - remove_y)),
                 cx,
             );
+            window.render_frame(cx);
             window.click("launch-env-remove-0", cx);
         })
         .unwrap();
@@ -19199,6 +22568,105 @@ mod ui_tests {
             });
         })
         .unwrap();
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.settings
+                    .record_capture(std::path::Path::new("fixture.rdc"));
+                view.settings
+                    .record_capture_settings(std::path::Path::new("fixture.cap"));
+                cx.notify();
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let y = window.find(("recent-capture", 0usize)).bounds().origin.y;
+            window.scroll(
+                "home-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(300.) - y)),
+                cx,
+            );
+            window.render_frame(cx);
+            assert!(window.find(("recent-capture", 0usize)).visible());
+            assert!(window.find(("recent-settings", 0usize)).visible());
+            let y = window.find("help-about").bounds().origin.y;
+            window.scroll(
+                "home-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(300.) - y)),
+                cx,
+            );
+            window.render_frame(cx);
+            window.click("help-about", cx);
+        })
+        .unwrap();
+        cx.update(|cx| assert_eq!(view.read(cx).info_dialog, Some(InfoDialog::About)));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let y = window.find("info-close").bounds().origin.y;
+            window.scroll(
+                "home-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(300.) - y)),
+                cx,
+            );
+            window.render_frame(cx);
+            assert!(window.find("info-panel").visible());
+            window.click("info-close", cx);
+        })
+        .unwrap();
+        cx.update(|cx| assert_eq!(view.read(cx).info_dialog, None));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let y = window.find("help-log").bounds().origin.y;
+            window.scroll(
+                "home-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(300.) - y)),
+                cx,
+            );
+            window.render_frame(cx);
+            window.click("help-log", cx);
+        })
+        .unwrap();
+        cx.update(|cx| assert!(view.read(cx).show_log));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let y = window.find("log-close").bounds().origin.y;
+            window.scroll(
+                "home-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(300.) - y)),
+                cx,
+            );
+            window.render_frame(cx);
+            assert!(window.find("log-panel").visible());
+            window.click("log-close", cx);
+        })
+        .unwrap();
+        cx.update(|cx| assert!(!view.read(cx).show_log));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let y = window.find("config-editor-open").bounds().origin.y;
+            window.scroll(
+                "home-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(300.) - y)),
+                cx,
+            );
+            window.render_frame(cx);
+            window.click("config-editor-open", cx);
+        })
+        .unwrap();
+        cx.update(|cx| assert!(view.read(cx).show_config_editor));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("config-editor").visible());
+            let y = window.find("config-editor-cancel").bounds().origin.y;
+            window.scroll(
+                "home-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(300.) - y)),
+                cx,
+            );
+            window.render_frame(cx);
+            window.click("config-editor-cancel", cx);
+        })
+        .unwrap();
+        cx.update(|cx| assert!(!view.read(cx).show_config_editor));
         let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
         assert!(!visual.simulate_close());
         cx.update(|cx| {
@@ -19237,6 +22705,21 @@ mod ui_tests {
                     let launch_memory = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let launch_env_name = cx.new(|cx| InputState::new(window, cx));
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
+                    let log_filter = cx.new(|cx| InputState::new(window, cx));
+                    let replay_loop_delay =
+                        cx.new(|cx| InputState::new(window, cx).default_value("150"));
+                    let proj_fov = cx.new(|cx| InputState::new(window, cx).default_value("90"));
+                    let proj_aspect = cx.new(|cx| InputState::new(window, cx));
+                    let proj_near = cx.new(|cx| InputState::new(window, cx));
+                    let proj_far = cx.new(|cx| InputState::new(window, cx));
+                    let camera_near = cx.new(|cx| InputState::new(window, cx).default_value("0.01"));
+                    let camera_far = cx.new(|cx| InputState::new(window, cx).default_value("10000"));
+                    let config_editor = cx.new(|cx| TextareaState::new(window, cx));
+                    let shader_find = cx.new(|cx| InputState::new(window, cx));
+                    let shader_replace = cx.new(|cx| InputState::new(window, cx));
+                    let python_input = cx.new(|cx| InputState::new(window, cx));
+                    let python_script =
+                        cx.new(|cx| TextareaState::new(window, cx).rows(6).auto_grow(4, 12));
                     let vertex_instance =
                         cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let vertex_view = cx.new(|cx| InputState::new(window, cx).default_value("0"));
@@ -19262,6 +22745,7 @@ mod ui_tests {
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
                     let message_search = cx.new(|cx| InputState::new(window, cx));
+                    let shader_message_search = cx.new(|cx| InputState::new(window, cx));
                     let bookmark_text = cx.new(|cx| InputState::new(window, cx));
                     let stats_min = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let texture_black_point =
@@ -19443,6 +22927,9 @@ mod ui_tests {
                         }),
                         event_tree: EventTree::default(),
                         event_scroll: UniformListScrollHandle::new(),
+                        event_focus: cx.focus_handle(),
+                        requested_event: None,
+                        queued_event_key: None,
                         _resource_search_subscription: Workspace::watch_resource_search(
                             &resource_search,
                             cx,
@@ -19459,12 +22946,25 @@ mod ui_tests {
                         message_query: String::new(),
                         message_visible: Vec::new(),
                         message_severity: None,
+                        message_sort: Default::default(),
+                        message_sort_descending: false,
                         hidden_message_sources: Default::default(),
+                        hidden_message_severities: Default::default(),
                         hidden_message_categories: Default::default(),
                         hidden_message_types: Default::default(),
                         show_hidden_messages: false,
                         message_poll_pending: false,
                         message_generation: 0,
+                        shader_message_page: None,
+                        selected_shader_message: None,
+                        pending_shader_messages_event: None,
+                        shader_vertex_resolution: None,
+                        shader_vertex_lookup_pending: false,
+                        shader_vertex_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        _shader_message_search_subscription: Workspace::watch_shader_message_search(&shader_message_search, cx),
+                        shader_message_search,
+                        shader_message_draft_mask: u16::MAX,
+                        shader_message_filter: renderdocx::shader_messages::Filter { stage_mask: u16::MAX, query: String::new(), language: Language::English },
                         _event_search_subscription: Workspace::watch_event_search(
                             &event_search,
                             cx,
@@ -19541,6 +23041,8 @@ mod ui_tests {
                         stats_min,
                         stats_max,
                         statistics: None,
+                        frame_stats_category: renderdocx::frame_statistics::OVERVIEW,
+                        frame_stats_raw: false,
                         selected_buffer: None,
                         buffer_offset: 0,
                         buffer_format: None,
@@ -19585,6 +23087,7 @@ mod ui_tests {
                         counter_page: None,
                         descriptor_store: None,
                         descriptor_page: None,
+                        descriptor_show_raw: false,
                         annotations: AnnotationView::default(),
                         bookmark_text,
                         usage_page: None,
@@ -19619,12 +23122,42 @@ mod ui_tests {
                         launch_delay,
                         launch_memory,
                         launch_working_directory: None,
+                        launch_executable: None,
                         capture_options: CaptureOptions::default(),
                         launch_env_name,
                         launch_env_value,
                         launch_environment: Vec::new(),
                         launch_env_operation: EnvOperation::Set,
                         launch_env_separator: EnvSeparator::Platform,
+                        pending_launch_inputs: None,
+                        info_dialog: None,
+                        log_messages: Vec::new(),
+                        log_filter,
+                        show_log: false,
+                        log_pending: false,
+                        replay_loop: None,
+                        replay_loop_generation: 0,
+                        replay_loop_delay,
+                        viewer_dialog: None,
+                        proj_fov,
+                        proj_aspect,
+                        proj_near,
+                        proj_far,
+                        camera_near,
+                        camera_far,
+                        config_editor,
+                        show_config_editor: false,
+                        show_find_replace: false,
+                        find_options: renderdocx::find_replace::FindOptions::default(),
+                        find_cursor: 0,
+                        shader_find,
+                        shader_replace,
+                        thumbnail_history: Vec::new(),
+                        suggest_remote: None,
+                        python_input,
+                        python_script,
+                        python_output: Vec::new(),
+                        python_pending: false,
                     })
                 },
             )
@@ -19632,6 +23165,189 @@ mod ui_tests {
         });
         let handle = handle.downcast::<Root>().unwrap();
         exercise_remote_browser(cx, &view, handle);
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.snapshot.as_mut().unwrap().debug_messages = vec![
+                    renderdocx::replay::DebugMessage {
+                        event_id: 2,
+                        source: 0,
+                        severity: 1,
+                        category: 1,
+                        message_id: 90,
+                        description: "message ninety".into(),
+                    },
+                    renderdocx::replay::DebugMessage {
+                        event_id: 1,
+                        source: 1,
+                        severity: 0,
+                        category: 2,
+                        message_id: 10,
+                        description: "message ten".into(),
+                    },
+                    renderdocx::replay::DebugMessage {
+                        event_id: 3,
+                        source: 0,
+                        severity: 1,
+                        category: 2,
+                        message_id: 5,
+                        description: "message five ResourceId::1 @43 ResourceId::999".into(),
+                    },
+                ];
+                view.tab = CaptureTab::Messages;
+                view.refresh_messages();
+                cx.notify();
+            })
+        });
+        cx.update(|cx| assert_eq!(view.read(cx).message_visible, vec![1, 0, 2]));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("messages-sort-id", cx);
+        })
+        .unwrap();
+        cx.update(|cx| assert_eq!(view.read(cx).message_visible, vec![2, 1, 0]));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("debug-message", 2usize), cx);
+            window.render_frame(cx);
+            assert!(window.try_find(("message-resource-link", 0usize)).is_some());
+            assert!(window.try_find(("message-inline-event", 1usize)).is_some());
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(-1000.))),
+                cx,
+            );
+            window.render_frame(cx);
+            window.click("message-copy", cx);
+        })
+        .unwrap();
+        let copied = cx.read_from_clipboard().unwrap().text().unwrap();
+        assert!(copied.contains("message five Fixture EID @43 ResourceId::999"));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("message-hide-severity", cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        cx.update(|cx| assert_eq!(view.read(cx).message_visible, vec![1]));
+        cx.update(|cx| view.update(cx, |view, _| view.status = None));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("messages-show-hidden", cx);
+            window.render_frame(cx);
+            window.click("messages-reset-hidden", cx);
+            window.render_frame(cx);
+            let position = window.find(("debug-message", 2usize)).bounds().center();
+            window.dispatch_event(
+                gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Left,
+                    position,
+                    modifiers: Default::default(),
+                    click_count: 2,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                    button: gpui::MouseButton::Left,
+                    position,
+                    modifiers: Default::default(),
+                    click_count: 2,
+                }),
+                cx,
+            );
+        })
+        .unwrap();
+        cx.update(|cx| assert!(view.read(cx).status.is_some()));
+        cx.update_window(handle.into(), |_, window, cx| {
+            for _ in 0..30 {
+                window.render_frame(cx);
+                let target = window.find(("message-resource-link", 0usize));
+                let viewport = window.find("capture-details-scroll").bounds();
+                let bounds = target.bounds();
+                if target.visible()
+                    && bounds.origin.y >= viewport.origin.y
+                    && bounds.origin.y + bounds.size.height
+                        <= viewport.origin.y + viewport.size.height
+                {
+                    break;
+                }
+                let delta = if bounds.origin.y < viewport.origin.y {
+                    100.0
+                } else {
+                    -100.0
+                };
+                window.scroll(
+                    "capture-details-scroll",
+                    ScrollDelta::Pixels(point(px(0.), px(delta))),
+                    cx,
+                );
+            }
+            window.click(("message-resource-link", 0usize), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                assert_eq!(view.message_visible, vec![2, 1, 0]);
+                assert!(view.tab == CaptureTab::Resources);
+                assert_eq!(view.selected_resource, Some(0));
+                view.selected_resource = None;
+                view.usage_page = None;
+                view.timeline.usage = None;
+                view.status = None;
+                view.snapshot.as_mut().unwrap().debug_messages.clear();
+                view.selected_message = None;
+                view.show_hidden_messages = false;
+                view.message_sort = Default::default();
+                view.refresh_messages();
+                cx.notify();
+            })
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.snapshot.as_mut().unwrap().frame_statistics = Some(serde_json::json!({
+                    "recorded": true,
+                    "draws": {"calls": 4, "instanced": 3, "counts": [0, 2, 0, 1]},
+                    "dispatches": {"calls": 2, "indirect": 1}
+                }));
+                view.tab = CaptureTab::Statistics;
+                view.frame_stats_category = 0;
+                cx.notify();
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find(("frame-stats-row", 3usize)).visible());
+            window.click(("frame-stats-category", 1usize), cx);
+            window.render_frame(cx);
+            window.click("frame-stats-toggle-raw", cx);
+            window.render_frame(cx);
+            assert!(window.find("frame-stats-raw").visible());
+            window.click(("frame-stats-category", 0usize), cx);
+            window.render_frame(cx);
+            assert!(window.find(("frame-stats-row", 3usize)).visible());
+            window.click(
+                (
+                    "frame-stats-category",
+                    renderdocx::frame_statistics::OVERVIEW,
+                ),
+                cx,
+            );
+            window.render_frame(cx);
+            assert!(window.find("frame-stats-export").visible());
+        })
+        .unwrap();
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                assert_eq!(
+                    view.frame_stats_category,
+                    renderdocx::frame_statistics::OVERVIEW
+                );
+                assert!(!view.frame_stats_raw);
+                view.snapshot.as_mut().unwrap().frame_statistics = None;
+                cx.notify();
+            })
+        });
         cx.update(|cx| {
             view.update(cx, |view, cx| {
                 view.tab = CaptureTab::Annotations;
@@ -19815,6 +23531,478 @@ mod ui_tests {
             assert_eq!(pipeline.topology, 5);
             assert_eq!(pipeline.index_buffer.as_ref().unwrap().byte_offset, "2");
         });
+        let events_before_shader_messages = events.lock().unwrap().clone();
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.snapshot.as_mut().unwrap().debug_messages =
+                    vec![renderdocx::replay::DebugMessage {
+                        event_id: 42,
+                        category: 1,
+                        severity: 0,
+                        source: 0,
+                        message_id: 1,
+                        description: "shader __rd_msgs::43:130".into(),
+                    }];
+                view.selected_message = Some(0);
+                view.tab = CaptureTab::Messages;
+                view.refresh_messages();
+                cx.notify();
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find(("message-shader-messages", 0usize)).visible());
+            window.click(("message-shader-messages", 0usize), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(view.read(cx).tab == CaptureTab::ShaderMessages);
+            let page = view.read(cx).shader_message_page.as_ref().unwrap();
+            assert_eq!(page.event_id, 43);
+            assert_eq!(page.messages.len(), 128);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("shader-messages-next", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                view.read(cx).shader_message_page.as_ref().unwrap().offset,
+                "128"
+            )
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("shader-message", 1usize), cx);
+            window.render_frame(cx);
+            assert!(window.find("shader-message-debug").visible());
+            window.click("shader-message-copy", cx);
+        })
+        .unwrap();
+        assert!(
+            cx.read_from_clipboard()
+                .unwrap()
+                .text()
+                .unwrap()
+                .contains("fixture message 129")
+        );
+        let shader_export = format_dir.path().join("all-shader-messages.csv");
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.export_shader_messages_to(shader_export.clone(), true, cx)
+            })
+        });
+        cx.run_until_parked();
+        let csv = std::fs::read_to_string(&shader_export).unwrap();
+        assert_eq!(csv.lines().count(), 131);
+        assert!(csv.contains("fixture message 0") && csv.contains("fixture message 129"));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("shader-filter-compute", cx);
+            window.click("shader-message-filter", cx);
+            window.input("fixture message 129", cx);
+            window.click("shader-filter-apply", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let page = view.read(cx).shader_message_page.as_ref().unwrap();
+            assert_eq!(page.total, "1");
+            assert_eq!(page.messages[0].message, "fixture message 129");
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("shader-filter-compute", cx);
+            window.click("shader-filter-apply", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                view.read(cx).shader_message_page.as_ref().unwrap().total,
+                "0"
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.shader_message_search
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                view.shader_message_draft_mask = u16::MAX;
+                view.shader_message_filter = renderdocx::shader_messages::Filter {
+                    stage_mask: u16::MAX,
+                    query: String::new(),
+                    language: Language::English,
+                };
+            });
+        })
+        .unwrap();
+        let original_texture_selection = cx.update(|cx| view.read(cx).texture_selection);
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.shader_message_page = Some(renderdocx::replay::ShaderMessagePage {
+                    event_id: 43,
+                    offset: "0".into(),
+                    total: "1".into(),
+                    messages: vec![renderdocx::replay::ShaderMessage {
+                        stage: 0,
+                        disassembly_line: -1,
+                        message: "vertex".into(),
+                        location: Some(serde_json::json!({"vertex":2,"instance":0,"view":0})),
+                    }],
+                });
+                view.selected_shader_message = Some(0);
+                view.tab = CaptureTab::ShaderMessages;
+                cx.notify();
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            reveal_details(window, "shader-message-goto", cx);
+            window.click("shader-message-goto", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let (original_shader_action, original_shader_pipeline) = cx.update(|cx| {
+            let view = view.read(cx);
+            (
+                view.snapshot.as_ref().unwrap().actions[view.selected.unwrap()].clone(),
+                view.pipeline.as_ref().unwrap().clone(),
+            )
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                assert!(view.tab == CaptureTab::Mesh);
+                assert_eq!(view.mesh.selection.stage, 1);
+                assert_eq!(view.mesh.highlighted_row, Some(2));
+                assert_eq!(view.mesh.draw.as_ref().unwrap().rows[0].row, 2);
+                assert_eq!(view.input_page.as_ref().unwrap().rows[0].row, 2);
+                assert_eq!(view.debug_vertex_selection, Some((2, 0, 2)));
+                let message = &mut view.shader_message_page.as_mut().unwrap().messages[0];
+                message.location = Some(serde_json::json!({"vertex":4,"instance":0,"view":0}));
+                let action = &mut view.snapshot.as_mut().unwrap().actions[view.selected.unwrap()];
+                action.flags |= 0x10000;
+                action.base_vertex = Some(2);
+                action.index_offset = Some(1);
+                let pipeline = view.pipeline.as_mut().unwrap();
+                let index = pipeline.index_buffer.as_mut().unwrap();
+                index.byte_stride = 1;
+                index.byte_offset = "0".into();
+                index.byte_size = "300".into();
+                pipeline.restart_enabled = Some(false);
+                view.tab = CaptureTab::ShaderMessages;
+                cx.notify();
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            reveal_details(window, "shader-message-goto", cx);
+            window.click("shader-message-goto", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                assert!(view.tab == CaptureTab::Mesh);
+                assert_eq!(view.mesh.highlighted_row, Some(1));
+                assert_eq!(
+                    view.input_page.as_ref().unwrap().rows[0].vertex_index,
+                    Some(4)
+                );
+                assert_eq!(view.debug_vertex_selection, Some((1, 0, 4)));
+                assert_eq!(
+                    view.shader_vertex_resolution
+                        .as_ref()
+                        .unwrap()
+                        .result
+                        .match_count,
+                    1
+                );
+                cx.notify();
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("vertex-input-tab", cx);
+        })
+        .unwrap();
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                assert!(view.tab == CaptureTab::VertexInput);
+                assert_eq!(
+                    view.input_page.as_ref().unwrap().rows[0].vertex_index,
+                    Some(4)
+                );
+                assert_eq!(view.debug_vertex_selection, Some((1, 0, 4)));
+                view.shader_message_page.as_mut().unwrap().messages[0].disassembly_line = 2;
+                view.tab = CaptureTab::ShaderMessages;
+                cx.notify();
+            })
+        });
+        for cached in [true, false] {
+            if !cached {
+                cx.update(|cx| {
+                    view.update(cx, |view, cx| {
+                        view.shader_vertex_resolution = None;
+                        cx.notify();
+                    })
+                });
+            }
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.render_frame(cx);
+                reveal_details(window, "shader-message-debug", cx);
+                window.click("shader-message-debug", cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.update(|cx| {
+                let workspace = view.read(cx);
+                let debug = workspace.debug_view.as_ref().expect("message debug view");
+                assert_eq!(
+                    debug.trace.inputs[0].name,
+                    "vertex=1,instance=0,index=4,view=0"
+                );
+                assert_eq!(debug.navigator.position, 1);
+                let jump = debug.message_jump.unwrap();
+                assert_eq!(jump.requested_line, 2);
+                assert_eq!(jump.breakpoint_line, Some(3));
+                assert_eq!(
+                    jump.reason,
+                    renderdocx::debug_navigation::StopReason::Breakpoint
+                );
+            });
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.render_frame(cx);
+                reveal_details(window, "shader-message-jump-result", cx);
+                assert!(window.find("shader-message-jump-result").visible());
+            })
+            .unwrap();
+        }
+        let original_api = cx.update(|cx| view.read(cx).snapshot.as_ref().unwrap().api);
+        cx.update(|cx| view.update(cx, |view, cx| {
+            view.debug_view = None;
+            view.snapshot.as_mut().unwrap().api = 3;
+            view.snapshot.as_mut().unwrap().actions[view.selected.unwrap()].dispatch_groups = Some([3, 1, 1]);
+            let message = &mut view.shader_message_page.as_mut().unwrap().messages[0];
+            message.stage = 6;
+            message.location = Some(serde_json::json!({"task_group":[1,0,0],"mesh_group":[u32::MAX,u32::MAX,u32::MAX],"thread":[0,0,0]}));
+            view.tab = CaptureTab::ShaderMessages;
+            cx.notify();
+        }));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            reveal_details(window, "shader-message-goto", cx);
+            window.click("shader-message-goto", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| view.update(cx, |view, cx| {
+            assert!(view.tab == CaptureTab::Mesh);
+            assert_eq!(view.mesh.selection.stage, 3);
+            assert_eq!(view.mesh.highlighted_row, Some(1));
+            assert_eq!(view.mesh.offset, 16);
+            let message = &mut view.shader_message_page.as_mut().unwrap().messages[0];
+            message.stage = 7;
+            message.location = Some(serde_json::json!({"task_group":[u32::MAX,u32::MAX,u32::MAX],"mesh_group":[2,0,0],"thread":[0,0,0]}));
+            view.tab = CaptureTab::ShaderMessages;
+            cx.notify();
+        }));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("shader-message-debug").is_some());
+            reveal_details(window, "shader-message-goto", cx);
+            window.click("shader-message-goto", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                assert!(view.tab == CaptureTab::Mesh);
+                assert_eq!(view.mesh.selection.stage, 4);
+                assert_eq!(
+                    view.mesh.filter,
+                    renderdocx::mesh_draw::MeshFilter::Meshlet(2)
+                );
+                assert_eq!(view.mesh.draw.as_ref().unwrap().rows[0].meshlet, Some(2));
+                let message = &mut view.shader_message_page.as_mut().unwrap().messages[0];
+                message.location = Some(
+                    serde_json::json!({"task_group":[0,0,0],"mesh_group":[2,0,0],"thread":[0,0,0]}),
+                );
+                view.tab = CaptureTab::ShaderMessages;
+                cx.notify();
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("shader-message-debug").is_none());
+            reveal_details(window, "shader-message-goto", cx);
+            window.click("shader-message-goto", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                assert!(view.tab == CaptureTab::ShaderMessages);
+                assert!(
+                    view.status
+                        .as_ref()
+                        .is_some_and(|status| status.contains("parent task group"))
+                );
+                view.snapshot.as_mut().unwrap().api = original_api;
+                cx.notify();
+            })
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.debug_view = None;
+                view.snapshot.as_mut().unwrap().actions[view.selected.unwrap()] =
+                    original_shader_action;
+                view.pipeline = Some(original_shader_pipeline);
+                let message = &mut view.shader_message_page.as_mut().unwrap().messages[0];
+                message.stage = 3;
+                message.location = Some(serde_json::json!({"primitive":0,"view":0}));
+                view.tab = CaptureTab::ShaderMessages;
+                cx.notify();
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            reveal_details(window, "shader-message-goto", cx);
+            window.click("shader-message-goto", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                assert!(view.tab == CaptureTab::Mesh);
+                assert_eq!(view.mesh.selection.stage, 2);
+                assert_eq!(view.mesh.highlighted_row, Some(0));
+                let message = &mut view.shader_message_page.as_mut().unwrap().messages[0];
+                message.stage = 4;
+                message.location =
+                    Some(serde_json::json!({"x":2,"y":3,"sample":1,"primitive":7,"view":1}));
+                view.pipeline.as_mut().unwrap().color_attachments = Some(vec![]);
+                view.pipeline.as_mut().unwrap().depth_attachment = None;
+                view.tab = CaptureTab::ShaderMessages;
+                cx.notify();
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            reveal_details(window, "shader-message-goto", cx);
+            window.click("shader-message-goto", cx);
+        })
+        .unwrap();
+        cx.update(|cx| view.update(cx, |view, cx| {
+            assert!(view.tab == CaptureTab::ShaderMessages);
+            assert!(view.status.is_some());
+            let attachment = serde_json::from_value(serde_json::json!({
+                "resource":{"bound":true,"resource_index":0,"name":"Color"},"view":{"bound":false,"resource_index":null,"name":""},
+                "type":0,"flags":0,"format":"R8G8B8A8_UNORM","format_component_type":2,"texture_type":0,
+                "first_mip":0,"mip_count":1,"first_slice":0,"slice_count":2,"min_lod_clamp":0.0,"swizzle":[0,1,2,3]
+            })).unwrap();
+            view.snapshot.as_mut().unwrap().textures[0].samples = 2;
+            view.pipeline.as_mut().unwrap().color_attachments = Some(vec![attachment]);
+            view.texture_selection = TextureSelection::default();
+            cx.notify();
+        }));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            reveal_details(window, "shader-message-goto", cx);
+            window.click("shader-message-goto", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                assert!(view.tab == CaptureTab::Textures);
+                assert_eq!(view.selected_texture, Some(0));
+                assert_eq!(view.texture_selection.slice, 1);
+                assert_eq!(view.texture_selection.sample, Some(1));
+                assert_eq!(view.pixel_x.read(cx).value().as_ref(), "2");
+                assert_eq!(view.pixel_y.read(cx).value().as_ref(), "3");
+                assert_eq!(view.pixel_debug_primitive.read(cx).value().as_ref(), "7");
+                assert_eq!(view.pixel_debug_view.read(cx).value().as_ref(), "1");
+                view.snapshot.as_mut().unwrap().textures[0].samples = 1;
+                view.texture_selection = original_texture_selection;
+                view.pixel = None;
+                view.pixel_context = None;
+                view.mesh = MeshView::default();
+                cx.notify();
+            })
+        });
+        cx.update(|cx| view.update(cx, |view, cx| view.select_replay_event(Some(0), 42, 42, cx)));
+        cx.run_until_parked();
+        *events.lock().unwrap() = events_before_shader_messages;
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.tab = CaptureTab::Events;
+                cx.notify();
+            })
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                let snapshot = view.snapshot.as_mut().unwrap();
+                snapshot.buffers[0].gpu_address = Some("4096".into());
+                snapshot.debug_messages = vec![renderdocx::replay::DebugMessage {
+                    event_id: 42,
+                    category: 1,
+                    severity: 0,
+                    source: 0,
+                    message_id: 1,
+                    description: "GPUAddress::4100::99".into(),
+                }];
+                view.selected_message = Some(0);
+                view.tab = CaptureTab::Messages;
+                view.refresh_messages();
+                cx.notify();
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let rendered = view.read(cx).render_message("GPUAddress::4100::99");
+            assert_eq!(rendered.text, "Fixture+4");
+            let target = window.find(("message-gpu-address", 0usize));
+            assert!(target.visible());
+            window.click(("message-gpu-address", 0usize), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| view.update(cx, |view, cx| {
+            assert!(view.tab == CaptureTab::Buffers);
+            assert_eq!(view.buffer_offset, 4);
+            assert_eq!(view.buffer_data.as_ref().unwrap()[0], 4);
+            assert!(view.buffer_format.is_none() && view.buffer_layout.is_none());
+            view.structure.page = Some(serde_json::from_value(serde_json::json!({
+                "event_id":42,"offset":"0","path":[],"children":[],
+                "node":{"name":"ptr","type_name":"GPUAddress","basic_type":13,"flags":0,"byte_size":"8","child_count":"0","value":"4100","custom_string":null,"resource_non_null":null,"resource_index":null}
+            })).unwrap());
+            view.tab = CaptureTab::Parameters;
+            cx.notify();
+        }));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            reveal_details(window, "structured-gpu-address", cx);
+            window.click("structured-gpu-address", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                assert!(view.tab == CaptureTab::Buffers);
+                assert_eq!(view.buffer_offset, 4);
+                assert_eq!(view.buffer_data.as_ref().unwrap()[0], 4);
+                view.snapshot.as_mut().unwrap().buffers[0].gpu_address = None;
+                view.snapshot.as_mut().unwrap().debug_messages.clear();
+                view.selected_message = None;
+                view.structure = StructureView::default();
+                view.buffer_offset = 0;
+                view.buffer_data = None;
+                view.tab = CaptureTab::Events;
+                cx.notify();
+            })
+        });
         cx.update(|cx| {
             view.update(cx, |view, cx| {
                 let attachment = serde_json::from_value(serde_json::json!({
@@ -19822,7 +24010,7 @@ mod ui_tests {
                     "view":{"bound":false,"resource_index":null,"name":""},
                     "type":0,"flags":0,"format":"R8G8B8A8_UNORM","format_component_type":2,"texture_type":0,
                     "first_mip":1,"mip_count":1,"first_slice":1,"slice_count":1,
-                    "min_lod_clamp":0.0,"swizzle":[0,1,2,3]
+                    "min_lod_clamp":0.0,"swizzle":[2,1,0,5]
                 }))
                 .unwrap();
                 view.pipeline.as_mut().unwrap().color_attachments = Some(vec![attachment]);
@@ -19831,6 +24019,13 @@ mod ui_tests {
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
+            assert!(
+                window
+                    .find(("pipeline-color-attachment", 0usize))
+                    .label()
+                    .unwrap()
+                    .contains("B G R 1")
+            );
             window.click(("pipeline-color-attachment", 0usize), cx);
         })
         .unwrap();
@@ -19840,6 +24035,89 @@ mod ui_tests {
             assert_eq!(view.read(cx).texture_selection.mip, 1);
             assert_eq!(view.read(cx).texture_selection.slice, 1);
             assert_eq!(view.read(cx).texture_selection.preview_type_cast, 2);
+            assert_eq!(view.read(cx).texture_selection.analysis_type_cast, 2);
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.descriptor_page = Some(DescriptorPage {
+                    event_id: 42,
+                    kind: "access".into(),
+                    store_index: None,
+                    offset: "0".into(),
+                    total: "1".into(),
+                    entries: vec![serde_json::json!({
+                        "location":{"name":"FixtureBinding"},
+                        "access":{"stage":4,"type":4,"binding":3,"array_element":0,"statically_unused":false},
+                        "sampler":{"type":3,"address":[0,1,4],"filter":[1,2,0,1],"compare":2,
+                            "min_lod_bits":0.0f32.to_bits(),"max_lod_bits":1.0f32.to_bits(),
+                            "mip_bias_bits":0.0f32.to_bits(),"max_anisotropy_bits":4.0f32.to_bits(),
+                            "border_type":4,"border_bits":[0,1,2,3]},
+                        "descriptor": {
+                            "type":4, "resource": 0, "resource_present":true, "format":"R8G8B8A8_UNORM",
+                            "byte_offset": "4", "byte_size": "12",
+                            "first_mip": 1, "num_mips":1, "first_slice": 1, "num_slices":1, "format_component_type": 2,
+                            "swizzle": [2, 1, 0, 5]
+                        }
+                    })],
+                });
+                cx.notify();
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("descriptors-tab", cx);
+            window.render_frame(cx);
+            assert!(
+                window
+                    .find(("descriptor-heading", 0usize))
+                    .label()
+                    .unwrap()
+                    .contains("FixtureBinding")
+            );
+            assert!(
+                window
+                    .find(("descriptor-sampler", 0usize))
+                    .label()
+                    .unwrap()
+                    .contains("Wrap / Mirror / ClampBorder")
+            );
+            assert!(window.try_find(("descriptor-raw", 0usize)).is_none());
+            window.click("descriptor-toggle-raw", cx);
+            window.render_frame(cx);
+            assert!(window.try_find(("descriptor-raw", 0usize)).is_some());
+            window.click("descriptor-toggle-raw", cx);
+            window.render_frame(cx);
+            assert!(window.try_find(("descriptor-raw", 0usize)).is_none());
+            assert!(
+                window
+                    .find(("descriptor-swizzle", 0usize))
+                    .label()
+                    .unwrap()
+                    .contains("B G R 1")
+            );
+            window.click(("descriptor-buffer", 0usize), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(view.read(cx).tab == CaptureTab::Buffers);
+            let range = view.read(cx).buffer_binding_range.unwrap();
+            assert_eq!((range.start, range.end), (4, 16));
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("descriptors-tab", cx);
+            window.render_frame(cx);
+            window.click(("descriptor-texture", 0usize), cx);
+        })
+        .unwrap();
+        cx.update(|cx| {
+            assert!(view.read(cx).tab == CaptureTab::Textures);
+            assert_eq!(
+                (
+                    view.read(cx).texture_selection.mip,
+                    view.read(cx).texture_selection.slice
+                ),
+                (1, 1)
+            );
             assert_eq!(view.read(cx).texture_selection.analysis_type_cast, 2);
         });
         cx.update_window(handle.into(), |_, window, cx| {
@@ -20984,7 +25262,10 @@ mod ui_tests {
         cx.update(|cx| {
             let shader = view.read(cx).shader_data.as_ref().expect("shader report");
             assert_eq!(shader.event_id, 42);
-            assert_eq!(shader.disassembly, "fixture disassembly");
+            assert_eq!(
+                shader.disassembly,
+                "fixture disassembly\nline two\nline three\nline four\n"
+            );
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
@@ -21619,6 +25900,32 @@ mod ui_tests {
                     .starts_with("Call(")
             );
         });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.apply_event_filter("$param(Topology: 4)".into(), cx);
+                assert!(view.event_filter_pending.is_some());
+                assert!(!view.event_tree.filter_error());
+                view.apply_event_filter(String::new(), cx);
+                view.settings.event_auto_format = true;
+                view.event_tree.clear_formatted_names();
+                let count = view.event_tree.visible.len();
+                view.format_viewport_events(0..count, cx);
+                assert!(view.event_name_worker);
+                // Simulate capture replacement and a new capture's active worker.
+                view.open_revision += 1;
+                view.event_name_worker = true;
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            view.update(cx, |view, _| {
+                assert!(
+                    view.event_name_worker,
+                    "stale worker cleared the new worker"
+                );
+                view.event_name_worker = false;
+            });
+        });
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| {
                 view.settings.event_auto_format = true;
@@ -21793,6 +26100,108 @@ mod ui_tests {
         cx.update(|cx| assert_eq!(view.read(cx).event_tree.visible, [0, 1, 2]));
         assert_eq!(*events.lock().unwrap(), vec![42, 77, 43, 43, 41, 41]);
 
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.annotations.bookmarks = Some((
+                    AnnotationSection {
+                        name: "bookmarks".into(),
+                        exists: false,
+                        version: "0".into(),
+                        hex: String::new(),
+                    },
+                    serde_json::json!({}),
+                ));
+                view.select_event(2, None, cx);
+            })
+        });
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("event-toggle-bookmark", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                assert_eq!(
+                    annotations::bookmarks(&view.annotations.bookmarks.as_ref().unwrap().1)
+                        .unwrap(),
+                    vec![(77, String::new())]
+                );
+                view.select_event(0, None, cx);
+            })
+        });
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("event-toggle-bookmark", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find(("event-bookmark", 0usize)).label(), Some("E77"));
+            assert_eq!(window.find(("event-bookmark", 1usize)).label(), Some("E42"));
+            view.update(cx, |view, cx| {
+                view.event_search.update(cx, |input, cx| {
+                    input.set_value("$event(EID=42)", window, cx)
+                });
+                view.apply_event_filter("$event(EID=42)".into(), cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click(("event-bookmark", 0usize), cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let state = view.read(cx);
+            assert_eq!(state.selected_event_id(), Some(42));
+            assert_eq!(
+                state.event_search.read(cx).value().as_ref(),
+                "$event(EID=42)"
+            );
+            assert!(state.status.is_some());
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("event-filter", cx);
+            window.press("ctrl-1", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).selected_event_id(), Some(42)));
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.event_search
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                view.apply_event_filter(String::new(), cx);
+            });
+            window.render_frame(cx);
+            window.click(0usize, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| window.press("ctrl-1", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).selected_event_id(), Some(77)));
+        cx.update_window(handle.into(), |_, window, cx| window.press("ctrl-2", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).selected_event_id(), Some(42)));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("event-toggle-bookmark", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                annotations::bookmarks(&view.read(cx).annotations.bookmarks.as_ref().unwrap().1)
+                    .unwrap(),
+                vec![(77, String::new())]
+            )
+        });
+
         cx.update_window(handle.into(), |_, window, cx| {
             window.click("resources-tab", cx);
             window.click("resource-filter", cx);
@@ -21835,6 +26244,13 @@ mod ui_tests {
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(view.read(cx).selected_resource, Some(0)));
         cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let y = window.find(("resource-usage", 1usize)).bounds().origin.y;
+            window.scroll(
+                "capture-details-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(300.) - y)),
+                cx,
+            );
             window.render_frame(cx);
             window.click(("resource-usage", 1usize), cx);
         })
@@ -21913,6 +26329,162 @@ mod ui_tests {
         cx.update(|cx| {
             assert!(view.read(cx).selected.is_none());
             assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 0);
+        });
+        // Mouse selection gives the event tree focus; keyboard navigation includes API rows.
+        cx.update_window(handle.into(), |_, window, cx| window.press("down", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).selected_event_id(), Some(41)));
+        cx.update_window(handle.into(), |_, window, cx| window.press("down", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).selected_event_id(), Some(42)));
+        cx.update_window(handle.into(), |_, window, cx| window.press("right", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).selected_event_id(), Some(43)));
+        cx.update_window(handle.into(), |_, window, cx| window.press("left", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).selected_event_id(), Some(42)));
+        cx.update_window(handle.into(), |_, window, cx| window.press("left", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert!(view.read(cx).event_tree.is_collapsed(0)));
+        cx.update_window(handle.into(), |_, window, cx| window.press("right", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert!(!view.read(cx).event_tree.is_collapsed(0)));
+        cx.update_window(handle.into(), |_, window, cx| window.press("home", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).selected_event_id(), Some(0)));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.press("down", cx);
+            window.press("down", cx);
+            window.press("down", cx);
+            assert_eq!(view.read(cx).requested_event, Some(41));
+            assert_eq!(view.read(cx).queued_event_key, Some(43));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let state = view.read(cx);
+            assert_eq!(state.selected_event_id(), Some(43));
+            assert_eq!(state.queued_event_key, None);
+            assert_eq!(state.requested_event, None);
+        });
+        cx.update_window(handle.into(), |_, window, cx| window.press("home", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).selected_event_id(), Some(0)));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.press("down", cx);
+            view.update(cx, |view, cx| {
+                view.timeline.start = 0;
+                view.timeline.end = 77;
+                // Include the action as a timeline leaf to exercise an API event
+                // immediately preceding its owning action.
+                view.timeline.model.actions.insert(0, (42, 0));
+                let bounds = Bounds {
+                    origin: gpui::point(px(0.), px(0.)),
+                    size: size(px(100.), px(20.)),
+                };
+                view.scrub_timeline(gpui::point(px(0.), px(0.)), bounds, window, cx);
+                assert_eq!(view.timeline.pending_scrub, Some(0));
+            });
+            window.press("down", cx);
+            assert_eq!(view.read(cx).timeline.pending_scrub, None);
+            assert_eq!(view.read(cx).queued_event_key, Some(43));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).selected_event_id(), Some(43)));
+        cx.update_window(handle.into(), |_, window, cx| window.press("home", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).selected_event_id(), Some(0)));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.press("down", cx);
+            window.press("end", cx);
+            view.update(cx, |view, cx| {
+                assert_eq!(view.queued_event_key, Some(77));
+                view.timeline.start = 0;
+                view.timeline.end = 77;
+                let bounds = Bounds {
+                    origin: gpui::point(px(0.), px(0.)),
+                    size: size(px(100.), px(20.)),
+                };
+                view.scrub_timeline(gpui::point(px(0.), px(0.)), bounds, window, cx);
+                assert_eq!(view.queued_event_key, None);
+                assert_eq!(view.timeline.pending_scrub, Some(0));
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).selected_event_id(), Some(42)));
+        cx.update_window(handle.into(), |_, window, cx| window.press("home", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            view.update(cx, |view, _| {
+                assert_eq!(view.selected_event_id(), Some(0));
+                assert_eq!(view.timeline.model.actions.remove(0), (42, 0));
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.press("down", cx);
+            window.press("end", cx);
+            assert_eq!(view.read(cx).queued_event_key, Some(77));
+            view.update(cx, |view, cx| {
+                view.event_tree.set_filter("$event(EID=42)");
+                cx.notify();
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                assert_eq!(view.selected_event_id(), Some(41));
+                assert_eq!(view.queued_event_key, None);
+                view.event_tree.set_filter("");
+                cx.notify();
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| window.press("home", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).selected_event_id(), Some(0)));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("event-filter", cx);
+            window.press("end", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).selected_event_id(), Some(0)));
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.event_tree.set_filter("$event(EID=77)");
+                cx.notify();
+            });
+            window.render_frame(cx);
+            window.click("capture-start", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| window.press("end", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(view.read(cx).selected_event_id(), Some(77)));
+        cx.update_window(handle.into(), |_, window, cx| window.press("home", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                assert_eq!(view.selected_event_id(), Some(0));
+                view.event_tree.set_filter("");
+                cx.notify();
+            });
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.click("event-step-next", cx)
@@ -22011,6 +26583,800 @@ mod ui_tests {
         })
         .unwrap();
         cx.update(|cx| assert!(view.read(cx).settings.event_columns.action));
+
+        // Optional real Vulkan printf capture: exercise actual message rows and handoffs.
+        #[cfg(windows)]
+        let printf_bridge = std::env::var_os("RENDERDOCX_TEST_PRINTF_BRIDGE");
+        #[cfg(windows)]
+        let printf_capture = std::env::var_os("RENDERDOCX_TEST_VULKAN_PRINTF_CAPTURE");
+        #[cfg(windows)]
+        assert_eq!(
+            printf_bridge.is_some(),
+            printf_capture.is_some(),
+            "configure both real Vulkan printf fixture paths together"
+        );
+        #[cfg(windows)]
+        if let (Some(bridge), Some(capture)) = (printf_bridge, printf_capture) {
+            let capture = PathBuf::from(capture);
+            cx.update(|cx| {
+                view.update(cx, |view, cx| {
+                    view.settings.replay_bridge = Some(PathBuf::from(bridge));
+                    view.shader_message_filter.stage_mask = u16::MAX;
+                    view.shader_message_filter.query.clear();
+                    view.open(capture.clone(), cx);
+                })
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                cx.run_until_parked();
+                if cx.update(|cx| {
+                    view.read(cx).capture.as_ref() == Some(&capture)
+                        && !view.read(cx).replay_pending
+                        && view.read(cx).pipeline.is_some()
+                }) {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "Vulkan capture open timed out: {:?}",
+                    cx.update(|cx| view.read(cx).status.clone())
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            for (flag, stage, expected) in [(4u32, 5u32, 5usize), (2u32, 4u32, 8usize)] {
+                let (index, event) = cx.update(|cx| {
+                    let snapshot = view.read(cx).snapshot.as_ref().unwrap();
+                    let index = snapshot
+                        .actions
+                        .iter()
+                        .position(|action| action.flags & flag != 0)
+                        .unwrap();
+                    (index, snapshot.actions[index].event_id)
+                });
+                cx.update(|cx| {
+                    view.update(cx, |view, cx| {
+                        view.select_replay_event(Some(index), event, event, cx)
+                    })
+                });
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        !view.read(cx).replay_pending
+                            && view
+                                .read(cx)
+                                .pipeline
+                                .as_ref()
+                                .is_some_and(|p| p.event_id == event)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "Vulkan event select timed out: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    window.click("shader-messages-tab", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        !view.read(cx).resource_pending
+                            && view
+                                .read(cx)
+                                .shader_message_page
+                                .as_ref()
+                                .is_some_and(|p| p.event_id == event)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "Vulkan shader messages timed out: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                let message = cx.update(|cx| {
+                    let page = view.read(cx).shader_message_page.as_ref().unwrap();
+                    assert_eq!(page.messages.len(), expected);
+                    assert_eq!(page.messages[0].stage, stage);
+                    page.messages[0].clone()
+                });
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    window.click(("shader-message", 0usize), cx);
+                })
+                .unwrap();
+                if stage == 4 {
+                    cx.update_window(handle.into(), |_, window, cx| {
+                        window.render_frame(cx);
+                        reveal_details(window, "shader-message-goto", cx);
+                        window.click("shader-message-goto", cx);
+                    })
+                    .unwrap();
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                    loop {
+                        cx.run_until_parked();
+                        if cx.update(|cx| {
+                            !view.read(cx).resource_pending
+                                && view.read(cx).tab == CaptureTab::Textures
+                        }) {
+                            break;
+                        }
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "Vulkan pixel handoff timed out: {:?}",
+                            cx.update(|cx| view.read(cx).status.clone())
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    cx.update(|cx| {
+                        assert_eq!(
+                            view.read(cx).pixel_x.read(cx).value().as_ref(),
+                            message.location.as_ref().unwrap()["x"]
+                                .as_u64()
+                                .unwrap()
+                                .to_string()
+                        );
+                        assert_eq!(
+                            view.read(cx).pixel_y.read(cx).value().as_ref(),
+                            message.location.as_ref().unwrap()["y"]
+                                .as_u64()
+                                .unwrap()
+                                .to_string()
+                        );
+                    });
+                    cx.update_window(handle.into(), |_, window, cx| {
+                        window.render_frame(cx);
+                        window.click("shader-messages-tab", cx);
+                    })
+                    .unwrap();
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    reveal_details(window, "shader-message-debug", cx);
+                    window.click("shader-message-debug", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        !view.read(cx).resource_pending && view.read(cx).debug_view.is_some()
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "Vulkan message debug timed out: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update(|cx| {
+                    let workspace = view.read(cx);
+                    let debug = workspace.debug_view.as_ref().unwrap();
+                    assert_eq!(debug.trace.stage, stage);
+                    assert_eq!(
+                        debug.message_jump.unwrap().requested_line,
+                        message.disassembly_line as u32
+                    );
+                    assert_eq!(
+                        debug.message_jump.unwrap().reason,
+                        renderdocx::debug_navigation::StopReason::Breakpoint
+                    );
+                    assert_eq!(
+                        debug
+                            .trace
+                            .instruction_info(
+                                debug.states[debug.navigator.position].next_instruction
+                            )
+                            .unwrap()
+                            .disassembly_line,
+                        message.disassembly_line as u32
+                    );
+                });
+            }
+        }
+
+        #[cfg(windows)]
+        let vertex_printf_bridge = std::env::var_os("RENDERDOCX_TEST_VERTEX_PRINTF_BRIDGE");
+        #[cfg(windows)]
+        let vertex_printf_capture = std::env::var_os("RENDERDOCX_TEST_VERTEX_PRINTF_CAPTURE");
+        #[cfg(windows)]
+        assert_eq!(
+            vertex_printf_bridge.is_some(),
+            vertex_printf_capture.is_some(),
+            "configure both real Vulkan vertex fixture paths together"
+        );
+        #[cfg(windows)]
+        if let (Some(bridge), Some(capture)) = (vertex_printf_bridge, vertex_printf_capture) {
+            let capture = PathBuf::from(capture);
+            cx.update(|cx| {
+                view.update(cx, |view, cx| {
+                    view.settings.replay_bridge = Some(PathBuf::from(bridge));
+                    view.shader_message_filter.stage_mask = u16::MAX;
+                    view.shader_message_filter.query.clear();
+                    view.open(capture.clone(), cx);
+                })
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                cx.run_until_parked();
+                if cx.update(|cx| {
+                    view.read(cx).capture.as_ref() == Some(&capture)
+                        && !view.read(cx).replay_pending
+                        && view.read(cx).pipeline.is_some()
+                }) {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "Vulkan vertex capture open timed out: {:?}",
+                    cx.update(|cx| view.read(cx).status.clone())
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            for indexed in [true, false] {
+                let (index, event) = cx.update(|cx| {
+                    let actions = &view.read(cx).snapshot.as_ref().unwrap().actions;
+                    let index = actions
+                        .iter()
+                        .position(|action| {
+                            action.flags & 2 != 0 && (action.flags & 0x10000 != 0) == indexed
+                        })
+                        .unwrap();
+                    (index, actions[index].event_id)
+                });
+                cx.update(|cx| {
+                    view.update(cx, |view, cx| {
+                        view.select_replay_event(Some(index), event, event, cx)
+                    })
+                });
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        !view.read(cx).replay_pending
+                            && view
+                                .read(cx)
+                                .pipeline
+                                .as_ref()
+                                .is_some_and(|p| p.event_id == event)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "Vulkan vertex event timed out: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    window.click("shader-messages-tab", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        !view.read(cx).resource_pending
+                            && view
+                                .read(cx)
+                                .shader_message_page
+                                .as_ref()
+                                .is_some_and(|p| p.event_id == event)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "Vulkan vertex messages timed out: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                let (message_index, line) = cx.update(|cx| {
+                    let page = view.read(cx).shader_message_page.as_ref().unwrap();
+                    let target = if indexed { 2 } else { 1 };
+                    let index = page
+                        .messages
+                        .iter()
+                        .position(|message| {
+                            message.stage == 0
+                                && message.location.as_ref().unwrap()["vertex"] == target
+                        })
+                        .unwrap();
+                    (index, page.messages[index].disassembly_line)
+                });
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    window.click(("shader-message", message_index), cx);
+                    window.render_frame(cx);
+                    reveal_details(window, "shader-message-goto", cx);
+                    window.click("shader-message-goto", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        !view.read(cx).resource_pending
+                            && view.read(cx).shader_vertex_resolution.is_some()
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "Vulkan vertex navigation timed out: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update(|cx| {
+                    let workspace = view.read(cx);
+                    assert!(workspace.tab == CaptureTab::Mesh, "{:?}", workspace.status);
+                    assert_eq!(workspace.mesh.highlighted_row, Some(1));
+                    assert_eq!(
+                        workspace.input_page.as_ref().unwrap().rows[0].vertex_index,
+                        Some(2)
+                    );
+                    assert_eq!(workspace.debug_vertex_selection, Some((1, 0, 2)));
+                    assert_eq!(
+                        workspace
+                            .shader_vertex_resolution
+                            .as_ref()
+                            .unwrap()
+                            .result
+                            .match_count,
+                        if indexed { 2 } else { 1 }
+                    );
+                });
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    window.click("shader-messages-tab", cx);
+                    window.render_frame(cx);
+                    reveal_details(window, "shader-message-debug", cx);
+                    window.click("shader-message-debug", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        !view.read(cx).resource_pending && view.read(cx).debug_view.is_some()
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "Vulkan vertex debug timed out: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update(|cx| {
+                    let workspace = view.read(cx);
+                    let debug = workspace.debug_view.as_ref().unwrap();
+                    assert!(matches!(
+                        debug.context,
+                        ShaderDebugContext::Vertex {
+                            vertex: 1,
+                            instance: 0,
+                            index: 2,
+                            view: 0
+                        }
+                    ));
+                    assert_eq!(
+                        debug.message_jump.unwrap().reason,
+                        renderdocx::debug_navigation::StopReason::Breakpoint
+                    );
+                    assert_eq!(
+                        debug
+                            .trace
+                            .instruction_info(
+                                debug.states[debug.navigator.position].next_instruction
+                            )
+                            .unwrap()
+                            .disassembly_line,
+                        line as u32
+                    );
+                    let position = debug
+                        .trace
+                        .source_variables
+                        .iter()
+                        .find(|mapping| mapping.name == "Position")
+                        .unwrap();
+                    let input = debug
+                        .trace
+                        .inputs
+                        .iter()
+                        .find(|input| input.name == position.variables[0].name)
+                        .unwrap();
+                    let expected = workspace.input_page.as_ref().unwrap().rows[0]
+                        .attributes
+                        .iter()
+                        .find(|attribute| attribute.name == "Position")
+                        .unwrap()
+                        .hex
+                        .as_ref()
+                        .unwrap();
+                    assert!(
+                        input.value_hex.starts_with(expected),
+                        "debug input does not match the selected vertex"
+                    );
+                });
+            }
+        }
+
+        #[cfg(windows)]
+        let geometry_printf_bridge = std::env::var_os("RENDERDOCX_TEST_GEOMETRY_PRINTF_BRIDGE");
+        #[cfg(windows)]
+        let geometry_printf_capture = std::env::var_os("RENDERDOCX_TEST_GEOMETRY_PRINTF_CAPTURE");
+        #[cfg(windows)]
+        assert_eq!(
+            geometry_printf_bridge.is_some(),
+            geometry_printf_capture.is_some(),
+            "configure both real Vulkan geometry fixture paths together"
+        );
+        #[cfg(windows)]
+        if let (Some(bridge), Some(capture)) = (geometry_printf_bridge, geometry_printf_capture) {
+            let capture = PathBuf::from(capture);
+            cx.update(|cx| {
+                view.update(cx, |view, cx| {
+                    view.settings.replay_bridge = Some(PathBuf::from(bridge));
+                    view.shader_message_filter.stage_mask = u16::MAX;
+                    view.shader_message_filter.query.clear();
+                    view.open(capture.clone(), cx);
+                })
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                cx.run_until_parked();
+                if cx.update(|cx| {
+                    view.read(cx).capture.as_ref() == Some(&capture)
+                        && !view.read(cx).replay_pending
+                        && view.read(cx).pipeline.is_some()
+                }) {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "Vulkan geometry capture open timed out: {:?}",
+                    cx.update(|cx| view.read(cx).status.clone())
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            let (index, event) = cx.update(|cx| {
+                let actions = &view.read(cx).snapshot.as_ref().unwrap().actions;
+                let index = actions
+                    .iter()
+                    .position(|action| action.flags & 2 != 0)
+                    .unwrap();
+                (index, actions[index].event_id)
+            });
+            cx.update(|cx| {
+                view.update(cx, |view, cx| {
+                    view.select_replay_event(Some(index), event, event, cx)
+                })
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                cx.run_until_parked();
+                if cx.update(|cx| {
+                    !view.read(cx).replay_pending
+                        && view
+                            .read(cx)
+                            .pipeline
+                            .as_ref()
+                            .is_some_and(|pipeline| pipeline.event_id == event)
+                }) {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "Vulkan geometry event timed out: {:?}",
+                    cx.update(|cx| view.read(cx).status.clone())
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.render_frame(cx);
+                window.click("shader-messages-tab", cx);
+            })
+            .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                cx.run_until_parked();
+                if cx.update(|cx| {
+                    !view.read(cx).resource_pending
+                        && view
+                            .read(cx)
+                            .shader_message_page
+                            .as_ref()
+                            .is_some_and(|page| page.event_id == event)
+                }) {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "Vulkan geometry messages timed out: {:?}",
+                    cx.update(|cx| view.read(cx).status.clone())
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            let message_index = cx.update(|cx| {
+                view.read(cx)
+                    .shader_message_page
+                    .as_ref()
+                    .unwrap()
+                    .messages
+                    .iter()
+                    .position(|message| {
+                        message.stage == 3 && message.location.as_ref().unwrap()["primitive"] == 1
+                    })
+                    .unwrap()
+            });
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.render_frame(cx);
+                window.click(("shader-message", message_index), cx);
+                window.render_frame(cx);
+                reveal_details(window, "shader-message-goto", cx);
+                window.click("shader-message-goto", cx);
+            })
+            .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                cx.run_until_parked();
+                if cx.update(|cx| {
+                    !view.read(cx).resource_pending
+                        && view.read(cx).tab == CaptureTab::Mesh
+                        && view.read(cx).mesh.info.is_some()
+                }) {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "Vulkan geometry navigation timed out: {:?}",
+                    cx.update(|cx| view.read(cx).status.clone())
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            cx.update(|cx| {
+                let mesh = &view.read(cx).mesh;
+                assert_eq!(mesh.selection.stage, 2);
+                assert_eq!(mesh.selection.instance, 0);
+                assert_eq!(mesh.highlighted_row, Some(3));
+                assert!(mesh.geometry_message_handoff);
+                assert_eq!(
+                    mesh.draw.as_ref().unwrap().rows[0].position.as_deref(),
+                    Some(&[-0.375, -0.5, 0.0, 1.0][..])
+                );
+            });
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.render_frame(cx);
+                reveal_details(window, "geometry-message-approximation", cx);
+                assert!(window.find("geometry-message-approximation").visible());
+            })
+            .unwrap();
+        }
+
+        #[cfg(windows)]
+        let mesh_printf_bridge = std::env::var_os("RENDERDOCX_TEST_MESH_PRINTF_BRIDGE");
+        #[cfg(windows)]
+        let mesh_printf_capture = std::env::var_os("RENDERDOCX_TEST_MESH_PRINTF_CAPTURE");
+        #[cfg(windows)]
+        assert_eq!(
+            mesh_printf_bridge.is_some(),
+            mesh_printf_capture.is_some(),
+            "configure both real Vulkan mesh fixture paths together"
+        );
+        #[cfg(windows)]
+        if let (Some(bridge), Some(capture)) = (mesh_printf_bridge, mesh_printf_capture) {
+            let capture = PathBuf::from(capture);
+            cx.update(|cx| {
+                view.update(cx, |view, cx| {
+                    view.settings.replay_bridge = Some(PathBuf::from(bridge));
+                    view.shader_message_filter.stage_mask = u16::MAX;
+                    view.shader_message_filter.query.clear();
+                    view.open(capture.clone(), cx);
+                })
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                cx.run_until_parked();
+                if cx.update(|cx| {
+                    view.read(cx).capture.as_ref() == Some(&capture)
+                        && !view.read(cx).replay_pending
+                        && view.read(cx).pipeline.is_some()
+                }) {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "Vulkan mesh capture open timed out: {:?}",
+                    cx.update(|cx| view.read(cx).status.clone())
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            // The second dispatch has a task shader; the first is direct mesh.
+            for task_dispatch in [true, false] {
+                let (index, event) = cx.update(|cx| {
+                    let actions = &view.read(cx).snapshot.as_ref().unwrap().actions;
+                    let (index, action) = actions
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, action)| action.flags & 8 != 0)
+                        .nth(if task_dispatch { 1 } else { 0 })
+                        .unwrap();
+                    (index, action.event_id)
+                });
+                cx.update(|cx| {
+                    view.update(cx, |view, cx| {
+                        view.select_replay_event(Some(index), event, event, cx)
+                    })
+                });
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        !view.read(cx).replay_pending
+                            && view
+                                .read(cx)
+                                .pipeline
+                                .as_ref()
+                                .is_some_and(|pipeline| pipeline.event_id == event)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "Vulkan mesh event timed out: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    window.click("shader-messages-tab", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        !view.read(cx).resource_pending
+                            && view
+                                .read(cx)
+                                .shader_message_page
+                                .as_ref()
+                                .is_some_and(|page| page.event_id == event)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "Vulkan mesh messages timed out: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                let message_index = cx.update(|cx| {
+                    view.read(cx)
+                        .shader_message_page
+                        .as_ref()
+                        .unwrap()
+                        .messages
+                        .iter()
+                        .position(|message| {
+                            message.message
+                                == if task_dispatch {
+                                    "rdx-task:0"
+                                } else {
+                                    "rdx-mesh:1"
+                                }
+                        })
+                        .unwrap()
+                });
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    window.click(("shader-message", message_index), cx);
+                    window.render_frame(cx);
+                    reveal_details(window, "shader-message-goto", cx);
+                    window.click("shader-message-goto", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        !view.read(cx).resource_pending
+                            && view.read(cx).tab == CaptureTab::Mesh
+                            && view.read(cx).mesh.info.is_some()
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "Vulkan mesh message navigation timed out: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update(|cx| {
+                    let mesh = &view.read(cx).mesh;
+                    if task_dispatch {
+                        assert_eq!(mesh.selection.stage, 3);
+                        assert_eq!(mesh.highlighted_row, Some(0));
+                    } else {
+                        assert_eq!(mesh.selection.stage, 4);
+                        assert_eq!(mesh.filter, renderdocx::mesh_draw::MeshFilter::Meshlet(1));
+                    }
+                });
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.render_frame(cx);
+                    window.click("shader-messages-tab", cx);
+                })
+                .unwrap();
+                if task_dispatch {
+                    let child = cx.update(|cx| {
+                        view.read(cx)
+                            .shader_message_page
+                            .as_ref()
+                            .unwrap()
+                            .messages
+                            .iter()
+                            .position(|message| message.message == "rdx-child:0")
+                            .unwrap()
+                    });
+                    cx.update_window(handle.into(), |_, window, cx| {
+                        window.render_frame(cx);
+                        window.click(("shader-message", child), cx);
+                        window.render_frame(cx);
+                        assert!(window.try_find("shader-message-debug").is_none());
+                        reveal_details(window, "mesh-message-debug-unavailable", cx);
+                        assert!(window.find("mesh-message-debug-unavailable").visible());
+                    })
+                    .unwrap();
+                } else {
+                    cx.update_window(handle.into(), |_, window, cx| {
+                        window.render_frame(cx);
+                        reveal_details(window, "shader-message-debug", cx);
+                        window.click("shader-message-debug", cx);
+                    })
+                    .unwrap();
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                    loop {
+                        cx.run_until_parked();
+                        if cx.update(|cx| {
+                            !view.read(cx).resource_pending && view.read(cx).debug_view.is_some()
+                        }) {
+                            break;
+                        }
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "Vulkan mesh message debugging timed out: {:?}",
+                            cx.update(|cx| view.read(cx).status.clone())
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    cx.update(|cx| {
+                        let debug = view.read(cx).debug_view.as_ref().unwrap();
+                        assert!(matches!(debug.context, ShaderDebugContext::Mesh(selection) if selection.group == [1,0,0] && selection.thread == [0,0,0]));
+                        assert_eq!(debug.message_jump.unwrap().reason, renderdocx::debug_navigation::StopReason::Breakpoint);
+                    });
+                }
+            }
+        }
 
         // When the local D3D11 fixtures are configured, repeat the interaction against
         // a real capture and replay session, not the recording transport above.
@@ -23840,6 +29206,10 @@ mod ui_tests {
                     assert!(
                         shader_debug::line_at(&debug.disassembly, info.disassembly_line).is_some()
                     );
+                    let mutable = debug.navigator.variables(&debug.states);
+                    let values = renderdocx::source_variables::resolve(&debug.trace, debug.states.first(), &mutable);
+                    let group = values.iter().find(|source| source.mapping.name == "group").unwrap();
+                    assert_eq!(group.components.iter().map(|value| value.value.as_deref()).collect::<Vec<_>>(), [Some("1"), Some("0"), Some("0")]);
                 });
                 cx.update_window(handle.into(), |_, window, cx| {
                     window.render_frame(cx);
@@ -23862,6 +29232,20 @@ mod ui_tests {
                     }
                     assert!(window.find("shader-debug-current-source").visible());
                     assert!(window.find("shader-debug-current-instruction").visible());
+                    let group_index = {
+                        let debug = view.read(cx).debug_view.as_ref().unwrap();
+                        let mutable = debug.navigator.variables(&debug.states);
+                        renderdocx::source_variables::resolve(&debug.trace, debug.states.first(), &mutable)
+                            .iter().position(|source| source.mapping.name == "group").unwrap()
+                    };
+                    for _ in 0..40 {
+                        let target = window.find(("shader-source-value", group_index));
+                        if target.visible() { break; }
+                        let viewport = window.find("capture-details-scroll").bounds();
+                        let delta = if target.bounds().origin.y < viewport.origin.y { 100.0 } else { -100.0 };
+                        window.scroll("capture-details-scroll", ScrollDelta::Pixels(point(px(0.), px(delta))), cx);
+                    }
+                    assert!(window.find(("shader-source-value", group_index)).visible());
                 })
                 .unwrap();
                 cx.update_window(handle.into(), |_, window, cx| {
@@ -23882,6 +29266,10 @@ mod ui_tests {
                         .instruction_info(debug.states[debug.navigator.position].next_instruction)
                         .unwrap();
                     assert_eq!(location.line_start, 7);
+                    let mutable = debug.navigator.variables(&debug.states);
+                    let values = renderdocx::source_variables::resolve(&debug.trace, debug.states.get(debug.navigator.position), &mutable);
+                    let value = values.iter().find(|source| source.mapping.name == "value").unwrap();
+                    assert_eq!(value.components[0].value.as_deref(), Some("153"));
                 });
                 cx.update_window(handle.into(), |_, window, cx| {
                     window.render_frame(cx);
