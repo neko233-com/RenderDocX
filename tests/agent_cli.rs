@@ -2521,6 +2521,18 @@ fn real_d3d11_nested_markers_resolve_and_replay_effective_events() {
     let opened = agent.send(&serde_json::json!({"command":"open","path":capture}).to_string());
     assert_eq!(opened["ok"], true, "{opened}");
     let actions = opened["data"]["capture"]["actions"].as_array().unwrap();
+    let rows =
+        agent.send(r#"{"command":"filter_events","expression":"","include_capture_start":true}"#);
+    assert_eq!(rows["data"]["events"]["items"][0]["action_label"], "0");
+    let outer = rows["data"]["events"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == "RenderDocX Outer")
+        .unwrap();
+    let first = outer["group_range"]["first_event"].as_u64().unwrap();
+    let last = outer["group_range"]["last_event"].as_u64().unwrap();
+    assert_eq!(outer["event_label"], format!("{first}-{last}"));
     let last_draw = actions
         .iter()
         .filter(|a| {

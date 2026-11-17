@@ -1233,7 +1233,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                             };
                             let total = tree.visible.len() + usize::from(include_start);
                             let items: Vec<Value> = (0..total).skip(offset).take(limit).map(|position| {
-                                if include_start && position == 0 { return json!({"action_index":null,"api_index":null,"event_id":0,"parent_action_index":null,"name":"Capture Start","direct_match":false,"always_visible":true,"capture_start":true,"duration_seconds":null,"annotation":null,"group_range":null,"has_children":false,"collapsed":false}); }
+                                if include_start && position == 0 { return json!({"action_index":null,"api_index":null,"event_id":0,"event_label":"0","action_label":"0","parent_action_index":null,"name":"Capture Start","direct_match":false,"always_visible":true,"capture_start":true,"duration_seconds":null,"annotation":null,"group_range":null,"has_children":false,"collapsed":false}); }
                                 let row = tree.visible[position - usize::from(include_start)];
                                 let (action_index, api_index) = match tree.row(row).expect("visible row") {
                                     EventRow::Action(action) => (action, None),
@@ -1244,7 +1244,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                                 let name = tree.display_name(row).unwrap_or("");
                                 json!({"action_index":action_index,"api_index":api_index,"event_id":event_id,"capture_start":false,
                                     "parent_action_index": if action.parent < 0 { None } else { Some(action.parent) },
-                                    "name":name,"direct_match":tree.directly_matches(row),"duration_seconds":tree.duration(event_id),"annotation":annotations.get(&event_id),
+                                    "name":name,"event_label":tree.event_label(row),"action_label":tree.action_label(row),"direct_match":tree.directly_matches(row),"duration_seconds":tree.duration(event_id),"annotation":annotations.get(&event_id),
                                     "group_range":tree.action_range(row),"has_children":tree.has_children(row),"collapsed":tree.is_collapsed(row)})
                             }).collect();
                             Ok(json!({"events":{"expression":expression,"show_api":show_api,"show_empty_regions":show_empty,"format_names":name_options.enabled,"annotation_key":annotation_key,"offset":offset.to_string(),

@@ -566,6 +566,20 @@ impl EventTree {
         }
     }
 
+    /// Action # column follows EventBrowser: API and marker rows have no number,
+    /// while groups show a range only when it spans more than one action.
+    pub fn action_label(&self, row: usize) -> Option<String> {
+        let EventRow::Action(index) = *self.rows.get(row)? else {
+            return None;
+        };
+        if let Some(range) = self.action_range(row) {
+            let end = range.last_action?;
+            return (range.first_action != end).then(|| format!("{}-{end}", range.first_action));
+        }
+        let action = self.actions.get(index)?;
+        (action.flags & (0x20 | 0x40 | 0x80) == 0).then(|| action.action_id.to_string())
+    }
+
     /// Export the filter-admitted tree, independent of interactive collapse state.
     pub fn export_rows(&self) -> Vec<ExportRow> {
         let mut seen_parents = std::collections::HashSet::new();
@@ -1008,6 +1022,45 @@ mod tests {
             name: String::new(),
             api_events: Vec::new(),
         }
+    }
+
+    #[test]
+    fn action_column_formats_groups_draws_markers_and_api_calls() {
+        let mut group = action(-1);
+        group.event_id = 10;
+        group.action_id = 1;
+        group.flags = 0x40;
+        let mut first = action(0);
+        first.event_id = 11;
+        first.action_id = 2;
+        first.flags = 2;
+        first.api_events.push(crate::replay::ApiEvent {
+            event_id: 9,
+            chunk_index: Some(0),
+            file_offset: "0".into(),
+            name: "Bind".into(),
+        });
+        let mut last = action(0);
+        last.event_id = 12;
+        last.action_id = 3;
+        last.flags = 2;
+        let mut marker = action(-1);
+        marker.event_id = 13;
+        marker.flags = 0x20;
+        let mut tree = EventTree::default();
+        tree.reset(&[group, first, last, marker]);
+        assert_eq!(tree.action_label(0).as_deref(), Some("1-3"));
+        assert_eq!(tree.action_label(1).as_deref(), Some("2"));
+        assert_eq!(tree.action_label(3), None);
+        assert_eq!(tree.action_label(tree.row_for_event(9).unwrap()), None);
+        let mut single_group = action(-1);
+        single_group.event_id = 20;
+        single_group.action_id = 4;
+        let mut only = action(0);
+        only.event_id = 21;
+        only.action_id = 4;
+        tree.reset(&[single_group, only]);
+        assert_eq!(tree.action_label(0), None);
     }
 
     #[test]

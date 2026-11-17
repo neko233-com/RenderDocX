@@ -7,6 +7,28 @@ use std::{
     process::Command,
 };
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct EventColumns {
+    pub name: bool,
+    pub event_id: bool,
+    pub action: bool,
+    pub duration: bool,
+    pub annotation: bool,
+}
+
+impl Default for EventColumns {
+    fn default() -> Self {
+        Self {
+            name: true,
+            event_id: true,
+            action: true,
+            duration: true,
+            annotation: true,
+        }
+    }
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Settings {
@@ -23,6 +45,7 @@ pub struct Settings {
     pub event_show_all_parameters: bool,
     pub event_use_custom_action_names: bool,
     pub event_auto_format: bool,
+    pub event_columns: EventColumns,
 }
 
 impl Default for Settings {
@@ -41,6 +64,7 @@ impl Default for Settings {
             event_show_all_parameters: false,
             event_use_custom_action_names: true,
             event_auto_format: true,
+            event_columns: EventColumns::default(),
         }
     }
 }
@@ -135,6 +159,13 @@ mod tests {
         assert!(!settings.event_show_all_parameters);
         assert!(settings.event_use_custom_action_names);
         assert!(settings.event_auto_format);
+        assert!(
+            settings.event_columns.name
+                && settings.event_columns.event_id
+                && settings.event_columns.action
+                && settings.event_columns.duration
+                && settings.event_columns.annotation
+        );
         let mut updated = settings;
         updated.texture_per_resource_settings = false;
         updated.texture_per_resource_flip_y = true;
@@ -143,6 +174,8 @@ mod tests {
         updated.event_show_all_parameters = true;
         updated.event_use_custom_action_names = false;
         updated.event_auto_format = false;
+        updated.event_columns.action = false;
+        updated.event_columns.annotation = false;
         let reloaded: Settings =
             serde_json::from_str(&serde_json::to_string(&updated).unwrap()).unwrap();
         assert!(!reloaded.texture_per_resource_settings);
@@ -152,5 +185,11 @@ mod tests {
         assert!(reloaded.event_show_all_parameters);
         assert!(!reloaded.event_use_custom_action_names);
         assert!(!reloaded.event_auto_format);
+        assert!(!reloaded.event_columns.action && !reloaded.event_columns.annotation);
+        assert!(
+            reloaded.event_columns.name
+                && reloaded.event_columns.event_id
+                && reloaded.event_columns.duration
+        );
     }
 }

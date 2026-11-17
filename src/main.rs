@@ -12953,13 +12953,20 @@ impl Workspace {
                                         .cursor_pointer()
                                         .bg(rgb(if selected { 0x304c7c } else { 0x192332 }))
                                         .hover(|row| row.bg(rgb(0x263950)))
-                                        .child("0")
-                                        .child(this.t(
-                                            "Capture Start",
-                                            "捕获开始",
-                                            "キャプチャ開始",
-                                            "캡처 시작",
-                                        ))
+                                        .when(this.settings.event_columns.event_id, |row| {
+                                            row.child("0")
+                                        })
+                                        .when(this.settings.event_columns.action, |row| {
+                                            row.child("0")
+                                        })
+                                        .when(this.settings.event_columns.name, |row| {
+                                            row.child(this.t(
+                                                "Capture Start",
+                                                "捕获开始",
+                                                "キャプチャ開始",
+                                                "캡처 시작",
+                                            ))
+                                        })
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.select_capture_start(cx)
                                         }))
@@ -13048,51 +13055,82 @@ impl Workspace {
                                             .items_center()
                                             .gap_3()
                                             .cursor_pointer()
-                                            .child(
-                                                div()
-                                                    .w(px(108.))
-                                                    .flex_none()
-                                                    .text_color(rgb(0x91a7c0))
-                                                    .child(
-                                                        this.event_tree
-                                                            .event_label(node)
-                                                            .unwrap_or_else(|| event.to_string()),
-                                                    ),
-                                            )
-                                            .child(div().overflow_hidden().child(name))
-                                            .when_some(
-                                                this.event_annotation_values.get(&event).cloned(),
-                                                |row, value| {
-                                                    row.child(
-                                                        div()
-                                                            .id(SharedString::from(format!(
-                                                                "event-annotation-{event}"
-                                                            )))
-                                                            .test_support()
-                                                            .text_sm()
-                                                            .text_color(rgb(0xb9dca8))
-                                                            .child(value),
-                                                    )
-                                                },
-                                            )
-                                            .when(this.event_tree.has_durations(), |row| {
+                                            .when(this.settings.event_columns.event_id, |row| {
                                                 row.child(
                                                     div()
-                                                        .text_sm()
-                                                        .text_color(rgb(0x9eacc0))
+                                                        .w(px(108.))
+                                                        .flex_none()
+                                                        .text_color(rgb(0x91a7c0))
                                                         .child(
                                                             this.event_tree
-                                                                .duration(event)
-                                                                .map(|seconds| {
-                                                                    format!(
-                                                                        "{:.3} ms",
-                                                                        seconds * 1000.0
-                                                                    )
-                                                                })
-                                                                .unwrap_or_else(|| "—".into()),
+                                                                .event_label(node)
+                                                                .unwrap_or_else(|| {
+                                                                    event.to_string()
+                                                                }),
                                                         ),
                                                 )
                                             })
+                                            .when(this.settings.event_columns.action, |row| {
+                                                row.child(
+                                                    div()
+                                                        .id(SharedString::from(format!(
+                                                            "event-action-{event}"
+                                                        )))
+                                                        .test_support()
+                                                        .w(px(76.))
+                                                        .flex_none()
+                                                        .text_color(rgb(0x91a7c0))
+                                                        .child(
+                                                            this.event_tree
+                                                                .action_label(node)
+                                                                .unwrap_or_default(),
+                                                        ),
+                                                )
+                                            })
+                                            .when(this.settings.event_columns.name, |row| {
+                                                row.child(div().overflow_hidden().child(name))
+                                            })
+                                            .when(this.settings.event_columns.annotation, |row| {
+                                                row.when_some(
+                                                    this.event_annotation_values
+                                                        .get(&event)
+                                                        .cloned(),
+                                                    |row, value| {
+                                                        row.child(
+                                                            div()
+                                                                .id(SharedString::from(format!(
+                                                                    "event-annotation-{event}"
+                                                                )))
+                                                                .test_support()
+                                                                .text_sm()
+                                                                .text_color(rgb(0xb9dca8))
+                                                                .child(value),
+                                                        )
+                                                    },
+                                                )
+                                            })
+                                            .when(
+                                                this.settings.event_columns.duration
+                                                    && this.event_tree.has_durations(),
+                                                |row| {
+                                                    row.child(
+                                                        div()
+                                                            .text_sm()
+                                                            .text_color(rgb(0x9eacc0))
+                                                            .child(
+                                                                this.event_tree
+                                                                    .duration(event)
+                                                                    .map(|seconds| {
+                                                                        format!(
+                                                                            "{:.3} ms",
+                                                                            seconds * 1000.0
+                                                                        )
+                                                                    })
+                                                                    .unwrap_or_else(|| "—".into()),
+                                                            ),
+                                                    )
+                                                },
+                                            )
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.select_event(index, api_index, cx)
                                             })),
@@ -17031,6 +17069,14 @@ impl Workspace {
                                         .child(button("event-path-go", self.t("Go", "跳转", "移動", "이동"), false, |this, cx| this.navigate_event_path(cx), cx))
                                         .child(button("event-path-cancel", self.t("Cancel", "取消", "キャンセル", "취소"), false, |this, cx| { this.event_path_editing = false; cx.notify(); }, cx))))
                             ))
+                            .when(self.tab == CaptureTab::Events, |view| view.child(div().id("event-column-settings").test_support().flex().flex_col().gap_2()
+                                .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t("Event columns", "事件列", "イベント列", "이벤트 열")))
+                                .child(div().flex().flex_wrap().gap_2()
+                                    .child(button("event-column-name", self.t("Name", "名称", "名前", "이름"), self.settings.event_columns.name, |this, cx| { this.settings.event_columns.name = !this.settings.event_columns.name; this.save(); cx.notify(); }, cx))
+                                    .child(button("event-column-eid", "EID", self.settings.event_columns.event_id, |this, cx| { this.settings.event_columns.event_id = !this.settings.event_columns.event_id; this.save(); cx.notify(); }, cx))
+                                    .child(button("event-column-action", self.t("Action #", "动作编号", "アクション番号", "동작 번호"), self.settings.event_columns.action, |this, cx| { this.settings.event_columns.action = !this.settings.event_columns.action; this.save(); cx.notify(); }, cx))
+                                    .child(button("event-column-duration", self.t("Duration", "耗时", "時間", "소요 시간"), self.settings.event_columns.duration, |this, cx| { this.settings.event_columns.duration = !this.settings.event_columns.duration; this.save(); cx.notify(); }, cx))
+                                    .child(button("event-column-annotation", self.t("Annotation", "注释", "注釈", "주석"), self.settings.event_columns.annotation, |this, cx| { this.settings.event_columns.annotation = !this.settings.event_columns.annotation; this.save(); cx.notify(); }, cx)))))
                             .when(self.tab == CaptureTab::Events, |view| view.child(div().flex().flex_wrap().gap_2()
                                 .child(button("event-auto-format", self.t("Automatic event names", "自动格式化事件名", "イベント名を自動整形", "이벤트 이름 자동 서식"), self.settings.event_auto_format, |this, cx| {
                                     this.settings.event_auto_format = !this.settings.event_auto_format;
@@ -21877,6 +21923,23 @@ mod ui_tests {
             assert_eq!(view.read(cx).selected_event_id(), Some(42));
             assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 43);
         });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, _| {
+                view.event_scroll
+                    .scroll_to_item(1, gpui::ScrollStrategy::Nearest)
+            });
+            window.render_frame(cx);
+            assert!(window.find("event-action-42").visible());
+            reveal_details(window, "event-column-action", cx);
+            window.click("event-column-action", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("event-action-42").is_none());
+            window.click("event-column-action", cx);
+            window.render_frame(cx);
+            assert!(window.find("event-action-42").visible());
+        })
+        .unwrap();
+        cx.update(|cx| assert!(view.read(cx).settings.event_columns.action));
 
         // When the local D3D11 fixtures are configured, repeat the interaction against
         // a real capture and replay session, not the recording transport above.
