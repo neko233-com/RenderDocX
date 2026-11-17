@@ -342,6 +342,10 @@ fn usage() -> Value {
     capabilities["serve_commands"]
         .as_array_mut()
         .expect("capabilities commands")
+        .push(json!("select_action"));
+    capabilities["serve_commands"]
+        .as_array_mut()
+        .expect("capabilities commands")
         .push(json!("debug_mesh"));
     capabilities["serve_commands"]
         .as_array_mut()
@@ -438,7 +442,9 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
     let mut opened: Option<(Session, Snapshot)> = None;
     let mut capture_name = String::new();
     let mut event_times: Option<std::collections::HashMap<u32, f64>> = None;
+    let mut action_ranges: Vec<Option<renderdocx::event_ranges::ActionRange>> = Vec::new();
     let mut selected_event: Option<u32> = None;
+    let mut selected_row_event: Option<u32> = None;
     let mut pipeline: Option<Pipeline> = None;
     let mut mesh_selection: Option<(u32, MeshSelection, MeshInfo)> = None;
     let mut pending_debug: Option<DebugTrace> = None;
@@ -909,6 +915,8 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                             let _ = session.close();
                         }
                         selected_event = None;
+                        selected_row_event = None;
+                        action_ranges.clear();
                         pipeline = None;
                         mesh_selection = None;
                     }
@@ -921,9 +929,11 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         Ok((session, snapshot)) => {
                             capture_name = path.to_owned();
                             event_times = None;
+                            action_ranges = renderdocx::event_ranges::calculate(&snapshot.actions);
                             let value = json!({"capture": &snapshot});
                             opened = Some((session, snapshot));
                             selected_event = None;
+                            selected_row_event = None;
                             pipeline = None;
                             mesh_selection = None;
                             Ok(value)
@@ -1039,7 +1049,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         (None, event) => {
                             let event = match event {
                                 Some(value) => value.as_u64().and_then(|n| u32::try_from(n).ok()),
-                                None => selected_event,
+                                None => selected_row_event,
                             };
                             match event {
                                 Some(0) => Some(None),
@@ -1062,7 +1072,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         Some(index) => {
                             let effective_event = index
                                 .map(|i| {
-                                    renderdocx::event_ranges::calculate(actions)[i]
+                                    action_ranges[i]
                                         .as_ref()
                                         .map_or(actions[i].event_id, |range| range.last_event)
                                 })
@@ -1081,7 +1091,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
             },
             "step_action" => {
                 let event = match request.get("event_id") {
-                    None => selected_event,
+                    None => selected_row_event,
                     Some(v) => v.as_u64().and_then(|n| u32::try_from(n).ok()),
                 };
                 let filter = match request.get("filter") {
@@ -1309,7 +1319,9 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     "no_event",
                     "Select an event before inspecting pipeline state".into(),
                 )),
-                (Some(_), Some(state)) => Ok(json!({"pipeline": state})),
+                (Some(_), Some(state)) => Ok(
+                    json!({"pipeline": state,"selected_event_id":selected_row_event,"effective_event_id":selected_event}),
+                ),
             },
             "callstack" => {
                 let event = request
@@ -1469,6 +1481,62 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     _ => Err(("invalid_arguments", "structure_buffer requires event_id, decimal-string path and offset, and a valid length".into())),
                 }
             }
+            "select_action" => match (&opened, request.get("event_id"), request.get("path")) {
+                (None, _, _) => Err(("no_capture", "No capture is open".into())),
+                (Some((session, snapshot)), event, path) => {
+                    let target = match (event, path) {
+                        (Some(value), None) => value
+                            .as_u64()
+                            .and_then(|n| u32::try_from(n).ok())
+                            .and_then(|event| {
+                                if event == 0 {
+                                    Some(None)
+                                } else {
+                                    snapshot
+                                        .actions
+                                        .iter()
+                                        .position(|action| action.event_id == event)
+                                        .map(Some)
+                                }
+                            }),
+                        (None, Some(Value::String(path))) => {
+                            renderdocx::event_path::resolve(&snapshot.actions, path)
+                        }
+                        _ => None,
+                    };
+                    if let Some(index) = target {
+                        let selected = index.map(|i| snapshot.actions[i].event_id).unwrap_or(0);
+                        let effective = index
+                            .map(|i| {
+                                action_ranges[i]
+                                    .as_ref()
+                                    .map_or(selected, |range| range.last_event)
+                            })
+                            .unwrap_or(0);
+                        let revision = session.next_revision();
+                        match session.select_pipeline(effective, revision) {
+                            Ok(Some(state)) => {
+                                selected_event = Some(effective);
+                                selected_row_event = Some(selected);
+                                mesh_selection = None;
+                                let value = json!({"action_index":index,"event_id":selected,"effective_event_id":effective,"pipeline":&state});
+                                pipeline = Some(state);
+                                Ok(value)
+                            }
+                            Ok(None) => Err((
+                                "replay_select_superseded",
+                                "Selection was superseded".into(),
+                            )),
+                            Err(message) => Err(("replay_select_failed", message)),
+                        }
+                    } else {
+                        Err((
+                            "invalid_arguments",
+                            "select_action requires a known action event_id or path".into(),
+                        ))
+                    }
+                }
+            },
             "select" => match (
                 &opened,
                 request
@@ -1486,6 +1554,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     match session.select_pipeline(event, revision) {
                         Ok(Some(state)) => {
                             selected_event = Some(event);
+                            selected_row_event = Some(event);
                             mesh_selection = None;
                             let value = json!({"event_id":event, "pipeline": &state});
                             pipeline = Some(state);
@@ -3342,8 +3411,10 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
             }
             "close" | "quit" => {
                 event_times = None;
+                action_ranges.clear();
                 capture_name.clear();
                 selected_event = None;
+                selected_row_event = None;
                 pipeline = None;
                 mesh_selection = None;
                 match opened.take() {
@@ -3367,7 +3438,7 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                     debug_timeline = None;
                 }
                 "debug_next" => debug_streamed = true,
-                "select" | "open" | "close" | "quit" | "debug_stop" => {
+                "select" | "select_action" | "open" | "close" | "quit" | "debug_stop" => {
                     pending_debug = None;
                     debug_timeline = None;
                     debug_streamed = false;

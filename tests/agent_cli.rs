@@ -42,6 +42,17 @@ fn texture_center_reports_capability_and_requires_capture() {
     );
     let result = agent.send(r#"{"command":"event_format","event_id":1}"#);
     assert_eq!(result["error"]["code"], "no_capture");
+    assert!(
+        capabilities["data"]["serve_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|command| command == "select_action")
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"select_action","event_id":0}"#)["error"]["code"],
+        "no_capture"
+    );
     agent.quit();
 }
 
@@ -2532,11 +2543,68 @@ fn real_d3d11_nested_markers_resolve_and_replay_effective_events() {
         let effective = result["data"]["effective_event_id"].as_u64().unwrap();
         assert_ne!(selected, effective);
         assert_eq!(effective, expected, "{result}");
-        let replay =
-            agent.send(&serde_json::json!({"command":"select","event_id":effective}).to_string());
+        let request = if path == "RenderDocX Outer" {
+            serde_json::json!({"command":"select_action","event_id":selected})
+        } else {
+            serde_json::json!({"command":"select_action","path":path})
+        };
+        let replay = agent.send(&request.to_string());
         assert_eq!(replay["ok"], true, "{replay}");
+        assert_eq!(replay["data"]["event_id"], selected);
+        assert_eq!(replay["data"]["effective_event_id"], effective);
         assert_eq!(replay["data"]["pipeline"]["event_id"], effective);
+        let state = agent.send(r#"{"command":"pipeline"}"#);
+        assert_eq!(state["data"]["selected_event_id"], selected);
+        assert_eq!(state["data"]["effective_event_id"], effective);
+        let current = agent.send(r#"{"command":"event_path"}"#);
+        assert_eq!(current["data"]["event_id"], selected);
+        let next = agent.send(r#"{"command":"step_action","direction":"next"}"#);
+        let action_index = result["data"]["action_index"].as_i64().unwrap();
+        let child = actions
+            .iter()
+            .find(|action| action["parent"].as_i64() == Some(action_index))
+            .unwrap();
+        assert_eq!(
+            next["data"]["action"]["event_id"], child["event_id"],
+            "{next}"
+        );
+        let invalid = agent.send(r#"{"command":"select_action","path":"missing"}"#);
+        assert_eq!(invalid["error"]["code"], "invalid_arguments");
+        let conflict = agent.send(
+            &serde_json::json!({"command":"select_action","event_id":selected,"path":path})
+                .to_string(),
+        );
+        assert_eq!(conflict["error"]["code"], "invalid_arguments");
+        assert_eq!(
+            agent.send(r#"{"command":"pipeline"}"#)["data"]["selected_event_id"],
+            selected
+        );
     }
+    let start = agent.send(r#"{"command":"select_action","event_id":0}"#);
+    assert_eq!(start["data"]["event_id"], 0);
+    assert_eq!(start["data"]["effective_event_id"], 0);
+    let exact =
+        agent.send(&serde_json::json!({"command":"select","event_id":last_draw}).to_string());
+    assert_eq!(exact["ok"], true);
+    assert_eq!(
+        agent.send(r#"{"command":"pipeline"}"#)["data"]["selected_event_id"],
+        last_draw
+    );
+    assert_eq!(agent.send(r#"{"command":"close"}"#)["ok"], true);
+    assert_eq!(
+        agent.send(&serde_json::json!({"command":"open","path":capture}).to_string())["ok"],
+        true
+    );
+    assert_eq!(
+        agent.send(r#"{"command":"pipeline"}"#)["error"]["code"],
+        "no_event"
+    );
+    let reopened = agent.send(r#"{"command":"select_action","path":"RenderDocX Outer"}"#);
+    assert_eq!(
+        reopened["data"]["effective_event_id"],
+        last_draw + 1,
+        "{reopened}"
+    );
     agent.quit();
 }
 
