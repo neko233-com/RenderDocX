@@ -3240,7 +3240,14 @@ impl Workspace {
                 annotations::bookmarks(&document)?;
                 Ok((section, document))
             });
-            Ok::<_, String>((session, snapshot, renames, edits, bookmarks))
+            // The flattened snapshot is in upstream preorder, so its last item is
+            // the last descendant of the last root action (CaptureContext::m_LastAction).
+            let initial = snapshot.actions.last().map(|action| {
+                let revision = session.next_revision();
+                let result = session.select_pipeline(action.event_id, revision);
+                (snapshot.actions.len() - 1, revision, result)
+            });
+            Ok::<_, String>((session, snapshot, renames, edits, bookmarks, initial))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -3249,7 +3256,7 @@ impl Workspace {
                     return;
                 }
                 match result {
-                    Ok((session, snapshot, renames, edits, bookmarks)) => {
+                    Ok((session, snapshot, renames, edits, bookmarks, initial)) => {
                         // Invalidate work started against the old session while this open was pending.
                         this.open_revision += 1;
                         this.capture = Some(capture);
@@ -3272,6 +3279,22 @@ impl Workspace {
                         this.poll_messages(session, this.message_generation, cx);
                         this.selected = None;
                         this.pipeline = None;
+                        let initial_error = match initial {
+                            Some((index, revision, Ok(Some(pipeline)))) => {
+                                this.selection_revision = revision;
+                                this.selected = Some(index);
+                                this.pipeline = Some(pipeline);
+                                if let Some(position) = this.event_tree.reveal_filtered(index) {
+                                    this.event_scroll.scroll_to_item(
+                                        position + 1,
+                                        gpui::ScrollStrategy::Nearest,
+                                    );
+                                }
+                                None
+                            }
+                            Some((_, _, Err(error))) => Some(error),
+                            _ => None,
+                        };
                         this.selected_texture = None;
                         this.texture_selection = TextureSelection::default();
                         this.texture_saved_selection.clear();
@@ -3354,6 +3377,21 @@ impl Workspace {
                                         )
                                     )
                                 });
+                        if let Some(error) = initial_error {
+                            let replay_error = format!(
+                                "{}: {error}",
+                                this.t(
+                                    "Replay failed",
+                                    "回放失败",
+                                    "リプレイに失敗しました",
+                                    "리플레이 실패"
+                                )
+                            );
+                            this.status = Some(match this.status.take() {
+                                Some(metadata_error) => format!("{metadata_error}; {replay_error}"),
+                                None => replay_error,
+                            });
+                        }
                     }
                     Err(error) => {
                         if replacing_remote {
@@ -21672,6 +21710,35 @@ mod ui_tests {
                     ..Settings::default()
                 };
                 let (real_session, real_snapshot) = Session::open(&settings, &capture).unwrap();
+                let initial_index = real_snapshot.actions.len() - 1;
+                let initial_event = real_snapshot.actions[initial_index].event_id;
+                cx.update(|cx| {
+                    view.update(cx, |view, cx| {
+                        view.settings.replay_bridge = settings.replay_bridge.clone();
+                        view.open(capture.clone(), cx);
+                    });
+                });
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| {
+                        let view = view.read(cx);
+                        view.capture.as_ref() == Some(&capture)
+                            && view.selected == Some(initial_index)
+                            && view
+                                .pipeline
+                                .as_ref()
+                                .is_some_and(|p| p.event_id == initial_event)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "initial capture replay timed out: {:?}",
+                        cx.update(|cx| view.read(cx).status.clone())
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
                 let vertex_resource = real_snapshot
                     .buffers
                     .iter()
@@ -21774,7 +21841,8 @@ mod ui_tests {
                 });
                 cx.update_window(handle.into(), |_, window, cx| {
                     view.update(cx, |view, _| {
-                        view.event_scroll.scroll_to_item(0, gpui::ScrollStrategy::Nearest);
+                        view.event_scroll
+                            .scroll_to_item(0, gpui::ScrollStrategy::Nearest);
                     });
                     window.render_frame(cx);
                     window.click("capture-start", cx);
@@ -21787,11 +21855,17 @@ mod ui_tests {
                         let view = view.read(cx);
                         !view.replay_pending
                             && view.selected.is_none()
-                            && view.pipeline.as_ref().is_some_and(|pipeline| pipeline.event_id == 0)
+                            && view
+                                .pipeline
+                                .as_ref()
+                                .is_some_and(|pipeline| pipeline.event_id == 0)
                     }) {
                         break;
                     }
-                    assert!(std::time::Instant::now() < deadline, "real capture start replay timed out");
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real capture start replay timed out"
+                    );
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
                 cx.update_window(handle.into(), |_, window, cx| {
