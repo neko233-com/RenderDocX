@@ -2975,6 +2975,14 @@ fn real_d3d11_capture_is_inspected_and_selected() {
             .contains("pShader="),
         "{shader_formatted}"
     );
+    let batch = agent.send(&serde_json::json!({"command":"event_format_batch","event_ids":[api_event_id,shader_api_id,u32::MAX],"show_parameter_names":true}).to_string());
+    assert_eq!(batch["ok"], true, "{batch}");
+    assert_eq!(batch["data"]["events"][0]["event_id"], api_event_id);
+    assert_eq!(batch["data"]["events"][0]["ok"], true);
+    assert_eq!(batch["data"]["events"][1]["ok"], true);
+    assert_eq!(batch["data"]["events"][2]["ok"], false);
+    let bad_batch = agent.send(r#"{"command":"event_format_batch","event_ids":[]}"#);
+    assert_eq!(bad_batch["error"]["code"], "invalid_arguments");
     let invalid = agent.send(&serde_json::json!({"command":"event_format","event_id":shader_api_id,"show_all_parameters":"yes"}).to_string());
     assert_eq!(invalid["error"]["code"], "invalid_arguments");
     let update_structure = agent

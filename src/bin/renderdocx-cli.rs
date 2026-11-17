@@ -216,6 +216,7 @@ fn usage() -> Value {
             json!("texture_center"),
             json!("texture_context"),
             json!("event_format"),
+            json!("event_format_batch"),
             json!("custom_shader_library_import_directory"),
             json!("custom_shader_library_list"),
             json!("custom_shader_library_get"),
@@ -1226,6 +1227,31 @@ fn serve(settings: Settings, input: impl BufRead, mut output: impl Write) -> io:
                         "invalid_arguments",
                         "event_annotation_find requires an event_id and 1–128 string keys".into(),
                     )),
+                }
+            }
+            "event_format_batch" => {
+                let ids = request
+                    .get("event_ids")
+                    .and_then(Value::as_array)
+                    .filter(|ids| !ids.is_empty() && ids.len() <= STRUCTURE_PAGE_LIMIT as usize)
+                    .and_then(|ids| {
+                        ids.iter()
+                            .map(|id| id.as_u64().and_then(|value| u32::try_from(value).ok()))
+                            .collect::<Option<Vec<_>>>()
+                    });
+                let all = request
+                    .get("show_all_parameters")
+                    .map_or(Some(false), Value::as_bool);
+                let names = request
+                    .get("show_parameter_names")
+                    .map_or(Some(false), Value::as_bool);
+                match (&opened, ids, all, names) {
+                    (None, _, _, _) => Err(("no_capture", "No capture is open".into())),
+                    (Some((session, snapshot)), Some(ids), Some(all), Some(names)) =>
+                        renderdocx::event_parameters::format_events(session, &ids, &snapshot.resources, settings.language, all, names, || false)
+                            .map(|events| json!({"events":events.into_iter().map(|(event_id, result)| match result { Ok(text) => json!({"event_id":event_id,"ok":true,"text":text}), Err(error) => json!({"event_id":event_id,"ok":false,"error":error}) }).collect::<Vec<_>>(),"show_all_parameters":all,"show_parameter_names":names}))
+                            .map_err(|error| ("replay_event_format_failed", error)),
+                    _ => Err(("invalid_arguments", "event_format_batch requires 1–128 event IDs and optional boolean formatting options".into())),
                 }
             }
             "event_format" => {

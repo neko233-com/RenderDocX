@@ -29,6 +29,7 @@ pub struct EventTree {
     parents: Vec<Option<usize>>,
     source_children: Vec<bool>,
     names: Vec<String>,
+    original_names: Vec<String>,
     lower_names: Vec<String>,
     marker_names: Vec<String>,
     filter: Filter,
@@ -98,6 +99,7 @@ impl EventTree {
             }
             self.order.push(action_index);
         }
+        self.original_names = self.names.clone();
         self.collapsed = vec![false; self.parents.len()];
         self.source_children = vec![false; self.parents.len()];
         for parent in self.parents.iter().flatten() {
@@ -112,6 +114,58 @@ impl EventTree {
 
     pub fn row(&self, index: usize) -> Option<EventRow> {
         self.rows.get(index).copied()
+    }
+
+    pub fn display_name(&self, row: usize) -> Option<&str> {
+        self.names.get(row).map(String::as_str)
+    }
+
+    fn format_target(&self, row: usize) -> Option<u32> {
+        let event = match self.rows.get(row)? {
+            EventRow::Api { action, event } => self.actions.get(*action)?.api_events.get(*event)?,
+            EventRow::Action(action) => {
+                let entry = self.actions.get(*action)?;
+                if entry.flags & (0x20 | 0x40) != 0
+                    && entry.flags & (0x10 | 0x200 | 0x2000 | 0x1000000) == 0
+                    && entry
+                        .marker_name
+                        .as_deref()
+                        .is_some_and(|name| !name.is_empty())
+                {
+                    return None;
+                }
+                entry
+                    .api_events
+                    .iter()
+                    .find(|event| event.event_id == entry.event_id)?
+            }
+        };
+        event.chunk_index.map(|_| event.event_id)
+    }
+
+    pub fn visible_format_targets(&self) -> Vec<u32> {
+        let mut seen = std::collections::HashSet::new();
+        self.visible
+            .iter()
+            .filter_map(|&row| self.format_target(row))
+            .filter(|event| seen.insert(*event))
+            .collect()
+    }
+
+    pub fn apply_formatted_names(&mut self, names: &std::collections::HashMap<u32, String>) {
+        for row in 0..self.rows.len() {
+            if let Some(name) = self.format_target(row).and_then(|id| names.get(&id)) {
+                self.names[row] = name.clone();
+                self.lower_names[row] = name.to_lowercase();
+            }
+        }
+        self.rebuild();
+    }
+
+    pub fn clear_formatted_names(&mut self) {
+        self.names.clone_from(&self.original_names);
+        self.lower_names = self.names.iter().map(|name| name.to_lowercase()).collect();
+        self.rebuild();
     }
 
     pub fn directly_matches(&self, index: usize) -> bool {
@@ -465,6 +519,80 @@ impl EventTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn formatted_names_follow_visibility_filter_and_marker_rules() {
+        use crate::replay::ApiEvent;
+        let mut draw = action(-1);
+        draw.event_id = 2;
+        draw.name = "draw".into();
+        draw.api_events = vec![
+            ApiEvent {
+                event_id: 1,
+                chunk_index: Some(0),
+                file_offset: "0".into(),
+                name: "Bind()".into(),
+            },
+            ApiEvent {
+                event_id: 2,
+                chunk_index: Some(1),
+                file_offset: "1".into(),
+                name: "Draw()".into(),
+            },
+        ];
+        let mut marker = action(-1);
+        marker.event_id = 3;
+        marker.flags = 0x40;
+        marker.name = "marker".into();
+        marker.marker_name = Some("marker".into());
+        marker.api_events = vec![ApiEvent {
+            event_id: 3,
+            chunk_index: Some(2),
+            file_offset: "2".into(),
+            name: "Marker()".into(),
+        }];
+        let mut tree = EventTree::default();
+        tree.reset(&[draw, marker]);
+        tree.set_show_api(true);
+        assert_eq!(tree.visible_format_targets(), [1, 2]);
+        tree.apply_formatted_names(
+            &[
+                (1, "Bind(42)".into()),
+                (2, "Draw(42)".into()),
+                (3, "ShouldNotReplace".into()),
+            ]
+            .into(),
+        );
+        assert_eq!(
+            tree.display_name(tree.row_for_event(1).unwrap()),
+            Some("Bind(42)")
+        );
+        assert_eq!(
+            tree.display_name(tree.row_for_event(2).unwrap()),
+            Some("Draw(42)")
+        );
+        assert_eq!(
+            tree.display_name(tree.row_for_event(3).unwrap()),
+            Some("marker")
+        );
+        assert_eq!(
+            tree.export_rows()
+                .iter()
+                .find(|row| row.event_id == 1)
+                .unwrap()
+                .name,
+            "Bind(42)"
+        );
+        tree.set_filter("42");
+        assert_eq!(tree.visible_format_targets(), [1, 2]);
+        tree.clear_formatted_names();
+        assert!(tree.visible.is_empty());
+        tree.set_filter("");
+        assert_eq!(
+            tree.display_name(tree.row_for_event(1).unwrap()),
+            Some("Bind()")
+        );
+    }
 
     #[test]
     fn empty_regions_and_filtered_subtree_expansion_follow_hierarchy() {

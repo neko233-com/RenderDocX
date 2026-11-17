@@ -39,6 +39,43 @@ pub fn format_event(
     )
 }
 
+/// Format multiple independent events with one resource-name snapshot.
+pub fn format_events(
+    session: &Session,
+    events: &[u32],
+    resources: &[ResourceInfo],
+    language: Language,
+    show_all_parameters: bool,
+    show_parameter_names: bool,
+    cancelled: impl Fn() -> bool,
+) -> Result<Vec<(u32, Result<String, String>)>, String> {
+    let context = ResourceContext {
+        resources,
+        language,
+        renames: session
+            .annotation_read("renames")
+            .and_then(|section| section.document()),
+    };
+    let mut results = Vec::with_capacity(events.len());
+    for &event in events {
+        if cancelled() {
+            return Err("Event formatting cancelled".into());
+        }
+        let mut read =
+            |path: &[u64], offset| session.structure(event, path, offset, STRUCTURE_PAGE_LIMIT);
+        results.push((
+            event,
+            format_event_with(
+                &mut read,
+                &context,
+                show_all_parameters,
+                show_parameter_names,
+            ),
+        ));
+    }
+    Ok(results)
+}
+
 fn format_event_with(
     read: &mut impl FnMut(&[u64], u64) -> Result<StructurePage, String>,
     context: &ResourceContext<'_>,

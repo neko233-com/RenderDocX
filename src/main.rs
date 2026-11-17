@@ -1263,6 +1263,7 @@ impl Workspace {
         let section = section.clone();
         self.resource_pending = true;
         if name == "renames" {
+            self.event_tree.clear_formatted_names();
             self.event_filter_names_pending = true;
             self.event_filter_revision
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1801,6 +1802,117 @@ impl Workspace {
         })
         .detach();
         cx.notify();
+    }
+
+    fn format_visible_events(&mut self, cx: &mut Context<Self>) {
+        use std::sync::atomic::Ordering;
+        if self.replay_pending || self.export_pending || self.resource_pending {
+            return;
+        }
+        let (Some(session), Some(snapshot)) = (self.session.clone(), self.snapshot.as_ref()) else {
+            return;
+        };
+        let events = self.event_tree.visible_format_targets();
+        if events.is_empty() {
+            self.status = Some(
+                self.t(
+                    "No visible API events to format.",
+                    "没有可格式化的可见 API 事件。",
+                    "整形できる表示中の API イベントはありません。",
+                    "서식을 지정할 표시된 API 이벤트가 없습니다.",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let resources = snapshot.resources.clone();
+        let language = self.settings.language;
+        let capture_revision = self.open_revision;
+        let filter_revision = self.event_filter_revision.load(Ordering::Relaxed);
+        let generation = self.event_filter_revision.clone();
+        self.resource_pending = true;
+        self.status = Some(
+            self.t(
+                "Formatting visible API events…",
+                "正在格式化可见 API 事件…",
+                "表示中の API イベントを整形中…",
+                "표시된 API 이벤트의 서식을 지정하는 중…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            renderdocx::event_parameters::format_events(
+                &session,
+                &events,
+                &resources,
+                language,
+                false,
+                false,
+                || generation.load(Ordering::Relaxed) != filter_revision,
+            )
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != capture_revision {
+                    return;
+                }
+                this.resource_pending = false;
+                if this.event_filter_revision.load(Ordering::Relaxed) != filter_revision
+                    || this.settings.language != language
+                {
+                    this.status = None;
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok(results) => {
+                        let mut names = std::collections::HashMap::new();
+                        let mut failed = 0usize;
+                        let mut first_error = None;
+                        for (event, value) in results {
+                            match value {
+                                Ok(name) => {
+                                    names.insert(event, name);
+                                }
+                                Err(error) => {
+                                    failed += 1;
+                                    if first_error.is_none() {
+                                        first_error = Some(format!("{event}: {error}"));
+                                    }
+                                }
+                            }
+                        }
+                        let done = names.len();
+                        this.event_tree.apply_formatted_names(&names);
+                        let mut status = format!(
+                            "{}: {done}, {}: {failed}",
+                            this.t("Formatted", "已格式化", "整形済み", "서식 지정 완료"),
+                            this.t("Failed", "失败", "失敗", "실패")
+                        );
+                        if let Some(error) = first_error {
+                            status.push_str(&format!(" · {error}"));
+                        }
+                        this.status = Some(status);
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "{}: {error}",
+                            this.t(
+                                "Could not format events",
+                                "无法格式化事件",
+                                "イベントを整形できません",
+                                "이벤트 서식 지정 실패"
+                            )
+                        ))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn discover_live(&mut self, cx: &mut Context<Self>) {
@@ -4419,6 +4531,7 @@ impl Workspace {
         };
         self.resource_pending = true;
         self.event_filter_names_pending = true;
+        self.event_tree.clear_formatted_names();
         self.event_filter_revision
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let key = self.event_annotation_key.read(cx).value().to_string();
@@ -12321,7 +12434,9 @@ impl Workspace {
                             {
                                 Some(api_index) => {
                                     let api = action.api_events.get(api_index)?;
-                                    let name = if api.name.is_empty() {
+                                    let display_name =
+                                        this.event_tree.display_name(node).unwrap_or(&api.name);
+                                    let name = if display_name.is_empty() {
                                         this.t(
                                             "Unnamed API event",
                                             "未命名 API 事件",
@@ -12330,7 +12445,7 @@ impl Workspace {
                                         )
                                         .to_owned()
                                     } else {
-                                        api.name.clone()
+                                        display_name.to_owned()
                                     };
                                     (
                                         api.event_id,
@@ -12341,7 +12456,14 @@ impl Workspace {
                                         .into(),
                                     )
                                 }
-                                None => (action.event_id, action.name.clone(), index.into()),
+                                None => (
+                                    action.event_id,
+                                    this.event_tree
+                                        .display_name(node)
+                                        .unwrap_or(&action.name)
+                                        .to_owned(),
+                                    index.into(),
+                                ),
                             };
                             let selected = this.selected == Some(index)
                                 && this
@@ -16349,6 +16471,7 @@ impl Workspace {
                             .p_4()
                             .child(detail_view)
                             .when(self.tab == CaptureTab::Events, |view| view.child(div().flex().flex_wrap().gap_2()
+                                .child(button("event-format-visible", self.t("Format visible events", "格式化可见事件", "表示イベントを整形", "표시된 이벤트 서식 지정"), false, |this, cx| this.format_visible_events(cx), cx))
                                 .child(button("event-expand-subtree", self.t("Expand subtree", "展开分组", "グループを展開", "그룹 펼치기"), false, |this, cx| this.set_event_expansion(false, cx), cx))
                                 .child(button("event-collapse-subtree", self.t("Collapse subtree", "折叠分组", "グループを折りたたむ", "그룹 접기"), false, |this, cx| this.set_event_expansion(true, cx), cx))
                                 .child(button("event-show-empty", self.t("Show empty regions", "显示空分组", "空の領域を表示", "빈 영역 표시"), self.event_tree.show_empty_regions(), |this, cx| { this.event_tree.set_show_empty_regions(!this.event_tree.show_empty_regions()); cx.notify(); }, cx)))),
@@ -17133,6 +17256,7 @@ impl Render for Workspace {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.settings.language = lang;
                             this.structure.formatted_event = None;
+                            this.event_tree.clear_formatted_names();
                             this.save();
                             let expression = this.event_search.read(cx).value().to_string();
                             this.apply_event_filter(expression, cx);
@@ -19022,12 +19146,7 @@ mod ui_tests {
             });
         });
         cx.update_window(handle.into(), |_, window, cx| {
-            window.render_frame(cx);
-            window.scroll(
-                "capture-details-scroll",
-                ScrollDelta::Pixels(point(px(0.), px(-600.))),
-                cx,
-            );
+            reveal_details(window, "pixel-x", cx);
             window.click("pixel-x", cx);
             window.press("ctrl-a", cx);
             window.input("3", cx);
@@ -20749,6 +20868,25 @@ mod ui_tests {
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 41));
         cx.update_window(handle.into(), |_, window, cx| {
+            reveal_details(window, "event-format-visible", cx);
+            window.click("event-format-visible", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let tree = &view.read(cx).event_tree;
+            let row = tree.row_for_event(41).unwrap();
+            assert!(
+                tree.display_name(row)
+                    .unwrap()
+                    .starts_with("Call(4, (300 bytes)")
+            );
+            view.update(cx, |view, cx| {
+                view.event_tree.clear_formatted_names();
+                cx.notify();
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
             window.click("event-filter", cx);
             window.input("iAsEt", cx);
         })
@@ -21136,6 +21274,33 @@ mod ui_tests {
                     );
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
+                cx.update_window(handle.into(), |_, window, cx| {
+                    reveal_details(window, "event-format-visible", cx);
+                    window.click("event-format-visible", cx);
+                })
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|cx| !view.read(cx).resource_pending) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real event batch formatting timed out"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                cx.update(|cx| {
+                    let tree = &view.read(cx).event_tree;
+                    let name = tree
+                        .display_name(tree.row_for_event(update_event).unwrap())
+                        .unwrap();
+                    assert!(
+                        name.contains("UpdateSubresource(") && !name.ends_with("()"),
+                        "{name}"
+                    );
+                });
                 cx.update_window(handle.into(), |_, window, cx| {
                     window.click("parameters-tab", cx)
                 })
