@@ -268,11 +268,70 @@ and a driver that exposes the RGP control interface (GetRGPControl).
 
 The AMD Radeon(TM) Graphics iGPU does not expose `GetRGPControl`; RGP generally
 needs a discrete Radeon with RGP-capable drivers. This is the same condition the
-upstream core reports (`RGP Capture is not supported on this API implementation`),
-so the code path is complete and the failure is hardware capability, not a
-missing feature. NVIDIA captures cannot be replayed on AMD (the core rejects
-cross-vendor replay), so a genuinely RGP-capable AMD GPU is required to produce
-a profile.
+upstream core reports (`RGP Capture is not supported on this API implementation`).
+NVIDIA captures cannot be replayed on AMD (the core rejects cross-vendor replay),
+so a genuinely RGP-capable AMD GPU is required to produce a profile.
+
+Verified hardware on this machine:
+
+```
+AMD Radeon(TM) Graphics   device_id 5056   (iGPU; only AMD device)
+NVIDIA GeForce RTX 5060   device_id 11525  (not AMD, cannot produce RGP)
+WARP Rasterizer           device_id 0
+```
+
+Exact command result from `renderdocx-cli serve` → `create_rgp_profile`:
+
+```json
+{"schema":"renderdocx.agent.v1","id":2,"ok":false,"error":{"code":"rgp_profile_failed","message":"RGP profile creation failed. AMD RGP requires an AMD GPU and a driver that exposes the RGP control interface (GetRGPControl)."}}
+```
+
+**Status: not achieved on this machine.** This is a hardware requirement, not a
+code gap; no `.rgp` file was produced.
+
+## Unity integration validation
+
+Unity 2022.3.51f1 is installed at
+`C:\Program Files\Unity\Hub\Editor\2022.3.51f1\Editor\Unity.exe`. Executed:
+
+```powershell
+& "C:\Program Files\PowerShell\7\pwsh.exe" -File scripts/test-unity.ps1 `
+  -Editor "C:\Program Files\Unity\Hub\Editor\2022.3.51f1\Editor\Unity.exe" `
+  -Project target/unity-test-project
+```
+
+Observed:
+
+```
+RENDERDOCX_PACKAGE_INSTALLED com.neko233.renderdocx
+RENDERDOCX_UNITY_SMOKE_PASSED
+```
+
+The smoke test verifies the installed UPM package, editor handoff
+(`CreateStartInfo`), stale capture/PID clearing, Unicode capture paths, Editor
+and Player connection menu methods, frame-capture menus, PID validation, and
+the Player connection window parser.
+
+Live Editor connection:
+
+```powershell
+& "C:\Program Files\PowerShell\7\pwsh.exe" -File scripts/test-unity-live.ps1 `
+  -Editor "...\Unity.exe" -Project target/unity-test-project `
+  -Agent target/release/renderdocx-cli.exe `
+  -Bridge target/renderdocx-runtime/renderdocx-replay.exe
+```
+
+Observed:
+
+```
+Unity live connection passed: PID 120612, Direct3D11, target 38920.
+Batch mode does not establish a presented-frame capture or replay.
+```
+
+**Still unverified:** Unity Player (standalone) build/presented-frame capture,
+other Unity versions, and all Tuanjie validation. `C:\Program Files\Tuanjie`
+only contains `Tuanjie AI`; no Tuanjie Editor/Hub is installed, so no Tuanjie
+project could be launched or captured.
 
 ## Reproduce
 
