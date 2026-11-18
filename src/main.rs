@@ -4497,7 +4497,20 @@ impl Workspace {
                     Ok(bytes) => {
                         let hex: String = bytes.iter().take(48).map(|b| format!("{b:02x} ")).collect();
                         let text: String = bytes.iter().take(48).map(|&b| if b.is_ascii_graphic() { b as char } else { '.' }).collect();
-                        format!("#{index} {} bytes: {hex}\n{text}", bytes.len())
+                        let mut detail = format!("#{index} {} bytes: {hex}\n{text}", bytes.len());
+                        // FrameCapture sections are a stream of binary structured chunks.
+                        if section.section_type == 1 {
+                            match renderdocx::structured_data::read_chunks(&bytes) {
+                                Ok(chunks) => {
+                                    let shown: Vec<String> = chunks.iter().take(8).map(|c| {
+                                        format!("chunk {} len={} flags={:x}", c.chunk_id, c.length, if c.has_callstack { 1 } else { 0 })
+                                    }).collect();
+                                    detail.push_str(&format!("\n{} chunks: {}", chunks.len(), shown.join(", ")));
+                                }
+                                Err(error) => detail.push_str(&format!("\nchunk parse: {error}")),
+                            }
+                        }
+                        detail
                     }
                     Err(error) => format!("#{index}: {error}"),
                 }

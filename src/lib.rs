@@ -57,6 +57,7 @@ pub mod timeline;
 pub mod vertex_input;
 pub mod viewer_settings;
 
+pub mod structured_data;
 pub mod suggest_remote;
 pub mod topology;
 pub mod texture_view;
