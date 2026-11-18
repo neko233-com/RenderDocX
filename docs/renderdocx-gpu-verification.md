@@ -137,8 +137,11 @@ The same test covers the per-field helpers (`pipeline_shader`,
 `GetChildren()`), a `Resource(7)` object, `ShaderReflection(4)` plus
 `PipelineState.GetShaderReflection(4)`, `ViewBuffer`,
 `ViewPixelHistory`, `ViewShaderMessages` viewer objects, `FrameDescription()`
-(frame number/annotations/capture time), `GetEventBrowser()` methods and a
-`ShaderVariable` built from the real mesh debug trace, `Get*Viewer()` handles, `ViewShader`/`EditShader` panel
+(frame number/annotations/capture time), `APIProperties()`, the empty
+`DescriptorStore(0)` path, `GetEventBrowser()` methods and filter state,
+texture-viewer state (`ViewTexture`/subresource/overlay/zoom/channels),
+buffer-viewer scroll state, `ShaderSignature` from the fragment reflection, and
+a `ShaderVariable` built from the real mesh debug trace, `Get*Viewer()` handles, `ViewShader`/`EditShader` panel
 requests, and a `DebugShader` mesh trace.
 Notes and bookmarks are written and
 read back through `SetNotes`/`GetNotes`/`SetBookmark`/`GetBookmarks`/

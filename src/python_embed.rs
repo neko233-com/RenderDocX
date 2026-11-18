@@ -121,10 +121,26 @@ fn HasPythonShell() -> bool {
     true
 }
 
+#[derive(Default)]
+struct ViewerState {
+    filter: String,
+    row: u64,
+    column: u64,
+    current_resource: Option<usize>,
+    mip: u32,
+    slice: u32,
+    sample: u32,
+    overlay: u32,
+    zoom: f32,
+    channels: u32,
+    auto_fit: bool,
+}
+
 /// Lightweight handle for a viewer panel, returned by `Get*Viewer()`.
 #[pyo3::pyclass]
 struct ViewerHandle {
     panel: String,
+    state: Mutex<ViewerState>,
 }
 
 #[pyo3::pymethods]
@@ -228,11 +244,200 @@ impl ViewerHandle {
     fn SetComments(&self, text: String) -> pyo3::PyResult<()> {
         SetNotes(text)
     }
+
+    /// `Refresh()` -> re-open the mapped panel.
+    #[allow(non_snake_case)]
+    fn Refresh(&self) {
+        queue_ui_request(&self.panel);
+    }
+
+    /// `RevealAnnotation()` -> open the annotation panel.
+    #[allow(non_snake_case)]
+    fn RevealAnnotation(&self) {
+        queue_ui_request("annotations");
+    }
+
+    /// `ShowMeshData()` -> open the mesh panel.
+    #[allow(non_snake_case)]
+    fn ShowMeshData(&self) {
+        queue_ui_request("mesh");
+    }
+
+    /// `SetCurrentFilterText(text)` -> store the event-browser filter text.
+    #[allow(non_snake_case)]
+    fn SetCurrentFilterText(&self, text: String) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .filter = text;
+    }
+
+    /// `GetCurrentFilterText()` -> stored event-browser filter text.
+    #[allow(non_snake_case)]
+    fn GetCurrentFilterText(&self) -> String {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .filter
+            .clone()
+    }
+
+    /// `ScrollToRow(row)` -> store the requested buffer row.
+    #[allow(non_snake_case)]
+    fn ScrollToRow(&self, row: u64) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .row = row;
+    }
+
+    /// `ScrollToColumn(column)` -> store the requested buffer column.
+    #[allow(non_snake_case)]
+    fn ScrollToColumn(&self, column: u64) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .column = column;
+    }
+
+    /// `GetScrollRow()` -> stored buffer row.
+    #[allow(non_snake_case)]
+    fn GetScrollRow(&self) -> u64 {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .row
+    }
+
+    /// `GetScrollColumn()` -> stored buffer column.
+    #[allow(non_snake_case)]
+    fn GetScrollColumn(&self) -> u64 {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .column
+    }
+
+    /// `ViewTexture(index)` -> open the texture panel and remember the index.
+    #[allow(non_snake_case)]
+    fn ViewTexture(&self, index: usize) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .current_resource = Some(index);
+        queue_ui_request("textures");
+    }
+
+    /// `GetCurrentResource()` -> remembered texture/resource index.
+    #[allow(non_snake_case)]
+    fn GetCurrentResource(&self) -> Option<usize> {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .current_resource
+    }
+
+    /// `SetSelectedSubresource(mip, slice, sample)` -> remember the subresource.
+    #[allow(non_snake_case)]
+    fn SetSelectedSubresource(&self, mip: u32, slice: u32, sample: u32) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.mip = mip;
+        state.slice = slice;
+        state.sample = sample;
+    }
+
+    /// `GetSelectedSubresource()` -> `{mip, slice, sample}`.
+    #[allow(non_snake_case)]
+    fn GetSelectedSubresource(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        to_py(
+            py,
+            &serde_json::json!({
+                "mip": state.mip,
+                "slice": state.slice,
+                "sample": state.sample,
+            }),
+        )
+    }
+
+    /// `SetTextureOverlay(overlay)` -> remember the overlay mode.
+    #[allow(non_snake_case)]
+    fn SetTextureOverlay(&self, overlay: u32) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .overlay = overlay;
+    }
+
+    /// `GetTextureOverlay()` -> remembered overlay mode.
+    #[allow(non_snake_case)]
+    fn GetTextureOverlay(&self) -> u32 {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .overlay
+    }
+
+    /// `SetZoomLevel(zoom)` -> remember the texture zoom.
+    #[allow(non_snake_case)]
+    fn SetZoomLevel(&self, zoom: f32) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .zoom = zoom;
+    }
+
+    /// `GetZoomLevel()` -> remembered texture zoom.
+    #[allow(non_snake_case)]
+    fn GetZoomLevel(&self) -> f32 {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .zoom
+    }
+
+    /// `IsZoomAutoFit()` -> whether auto-fit is enabled.
+    #[allow(non_snake_case)]
+    fn IsZoomAutoFit(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .auto_fit
+    }
+
+    /// `SetChannelVisibility(mask)` -> remember a 4-bit channel mask.
+    #[allow(non_snake_case)]
+    fn SetChannelVisibility(&self, mask: u32) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .channels = mask;
+    }
+
+    /// `GetChannelVisibility()` -> remembered 4-bit channel mask.
+    #[allow(non_snake_case)]
+    fn GetChannelVisibility(&self) -> u32 {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .channels
+    }
 }
 
 fn viewer_handle(panel: &str) -> ViewerHandle {
     ViewerHandle {
         panel: panel.to_owned(),
+        state: Mutex::new(ViewerState {
+            zoom: 1.0,
+            auto_fit: true,
+            ..ViewerState::default()
+        }),
     }
 }
 
@@ -1081,6 +1286,332 @@ fn Resource(index: usize) -> Option<ResourceObject> {
         .map(|value| ResourceObject { value })
 }
 
+/// Field-addressable shader signature entry.
+#[pyo3::pyclass]
+struct ShaderSignatureObject {
+    value: serde_json::Value,
+}
+
+#[pyo3::pymethods]
+impl ShaderSignatureObject {
+    fn __getattr__(
+        &self,
+        py: Python<'_>,
+        name: &str,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        let key = match name {
+            "semanticIndex" => "semantic_index",
+            "systemValue" => "system_value",
+            _ => name,
+        };
+        json_field_object(py, &self.value, key)
+    }
+
+    fn __getitem__(
+        &self,
+        py: Python<'_>,
+        key: &str,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.value.get(key) {
+            Some(value) => to_py(py, value),
+            None => Err(pyo3::exceptions::PyKeyError::new_err(key.to_owned())),
+        }
+    }
+
+    #[pyo3(signature = (key, default = None))]
+    fn get(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        default: Option<Bound<'_, pyo3::PyAny>>,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.value.get(key) {
+            Some(value) => to_py(py, value),
+            None => Ok(default.map(Bound::unbind).unwrap_or_else(|| py.None())),
+        }
+    }
+
+    fn keys(&self) -> Vec<String> {
+        self.value
+            .as_object()
+            .map(|object| object.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[allow(non_snake_case)]
+    fn GetName(&self) -> String {
+        self.value
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    #[allow(non_snake_case)]
+    fn GetSemantic(&self) -> String {
+        self.value
+            .get("semantic")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    #[allow(non_snake_case)]
+    fn GetSemanticIndex(&self) -> u32 {
+        self.value
+            .get("semantic_index")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(0)
+    }
+}
+
+/// `ShaderSignature(value)` -> field-addressable signature entry.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn ShaderSignature(value: Bound<'_, pyo3::PyAny>) -> pyo3::PyResult<ShaderSignatureObject> {
+    let signature = pythonize::depythonize::<crate::replay::ShaderSignature>(&value)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    let value = serde_json::to_value(&signature)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    Ok(ShaderSignatureObject { value })
+}
+
+/// Field-addressable descriptor entry.
+#[pyo3::pyclass]
+struct DescriptorObject {
+    value: serde_json::Value,
+}
+
+#[pyo3::pymethods]
+impl DescriptorObject {
+    fn __getattr__(
+        &self,
+        py: Python<'_>,
+        name: &str,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        let key = match name {
+            "resourceId" => "resource",
+            "byteOffset" => "byte_offset",
+            _ => name,
+        };
+        json_field_object(py, &self.value, key)
+    }
+
+    fn __getitem__(
+        &self,
+        py: Python<'_>,
+        key: &str,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.value.get(key) {
+            Some(value) => to_py(py, value),
+            None => Err(pyo3::exceptions::PyKeyError::new_err(key.to_owned())),
+        }
+    }
+
+    #[pyo3(signature = (key, default = None))]
+    fn get(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        default: Option<Bound<'_, pyo3::PyAny>>,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.value.get(key) {
+            Some(value) => to_py(py, value),
+            None => Ok(default.map(Bound::unbind).unwrap_or_else(|| py.None())),
+        }
+    }
+
+    fn keys(&self) -> Vec<String> {
+        self.value
+            .as_object()
+            .map(|object| object.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+}
+
+/// `Descriptor(value)` -> field-addressable descriptor dict.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn Descriptor(value: Bound<'_, pyo3::PyAny>) -> pyo3::PyResult<DescriptorObject> {
+    let value = pythonize::depythonize::<serde_json::Value>(&value)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    Ok(DescriptorObject { value })
+}
+
+/// Field-addressable descriptor store.
+#[pyo3::pyclass]
+struct DescriptorStoreObject {
+    value: serde_json::Value,
+    index: usize,
+}
+
+#[pyo3::pymethods]
+impl DescriptorStoreObject {
+    fn __getattr__(
+        &self,
+        py: Python<'_>,
+        name: &str,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        let key = match name {
+            "descriptorByteSize" => "descriptor_byte_size",
+            "firstOffset" => "first_offset",
+            _ => name,
+        };
+        json_field_object(py, &self.value, key)
+    }
+
+    fn __getitem__(
+        &self,
+        py: Python<'_>,
+        key: &str,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.value.get(key) {
+            Some(value) => to_py(py, value),
+            None => Err(pyo3::exceptions::PyKeyError::new_err(key.to_owned())),
+        }
+    }
+
+    #[pyo3(signature = (key, default = None))]
+    fn get(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        default: Option<Bound<'_, pyo3::PyAny>>,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.value.get(key) {
+            Some(value) => to_py(py, value),
+            None => Ok(default.map(Bound::unbind).unwrap_or_else(|| py.None())),
+        }
+    }
+
+    fn keys(&self) -> Vec<String> {
+        self.value
+            .as_object()
+            .map(|object| object.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn GetIndex(&self) -> usize {
+        self.index
+    }
+}
+
+/// `DescriptorStore(index)` -> field-addressable descriptor store, or None.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn DescriptorStore(index: usize) -> Option<DescriptorStoreObject> {
+    let snapshot = active_snapshot()?;
+    let value = snapshot
+        .get("descriptor_stores")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|stores| stores.get(index))
+        .cloned()?;
+    Some(DescriptorStoreObject { value, index })
+}
+
+/// Field-addressable API properties from the capture snapshot.
+#[pyo3::pyclass]
+struct APIPropertiesObject {
+    value: serde_json::Value,
+}
+
+#[pyo3::pymethods]
+impl APIPropertiesObject {
+    fn __getattr__(
+        &self,
+        py: Python<'_>,
+        name: &str,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        let key = match name {
+            "pipelineType" => "pipelineType",
+            "localRenderer" => "localRenderer",
+            "vendor" => "vendor",
+            "deviceID" => "deviceID",
+            "driverName" => "driverName",
+            _ => name,
+        };
+        json_field_object(py, &self.value, key)
+    }
+
+    fn __getitem__(
+        &self,
+        py: Python<'_>,
+        key: &str,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.value.get(key) {
+            Some(value) => to_py(py, value),
+            None => Err(pyo3::exceptions::PyKeyError::new_err(key.to_owned())),
+        }
+    }
+
+    #[pyo3(signature = (key, default = None))]
+    fn get(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        default: Option<Bound<'_, pyo3::PyAny>>,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.value.get(key) {
+            Some(value) => to_py(py, value),
+            None => Ok(default.map(Bound::unbind).unwrap_or_else(|| py.None())),
+        }
+    }
+
+    fn keys(&self) -> Vec<String> {
+        self.value
+            .as_object()
+            .map(|object| object.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[allow(non_snake_case)]
+    fn GetPipelineType(&self) -> u32 {
+        self.value
+            .get("pipelineType")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(0)
+    }
+
+    #[allow(non_snake_case)]
+    fn GetLocalRenderer(&self) -> u32 {
+        self.value
+            .get("localRenderer")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(0)
+    }
+}
+
+/// `APIProperties()` -> field-addressable API properties, or None.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn APIProperties() -> Option<APIPropertiesObject> {
+    let snapshot = active_snapshot()?;
+    let mut value = serde_json::json!({
+        "pipelineType": snapshot.get("api").cloned().unwrap_or(serde_json::Value::Null),
+        "localRenderer": snapshot.get("local_renderer").cloned().unwrap_or(serde_json::Value::Null),
+        "vendor": snapshot.get("replay_options").and_then(|options| options.get("gpu_vendor")).cloned().unwrap_or(serde_json::Value::Null),
+        "deviceID": snapshot.get("replay_options").and_then(|options| options.get("gpu_device_id")).cloned().unwrap_or(serde_json::Value::Null),
+        "driverName": snapshot.get("replay_options").and_then(|options| options.get("gpu_driver")).cloned().unwrap_or(serde_json::Value::Null),
+    });
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "api".into(),
+            snapshot.get("api").cloned().unwrap_or(serde_json::Value::Null),
+        );
+        object.insert(
+            "local_renderer".into(),
+            snapshot
+                .get("local_renderer")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        );
+    }
+    Some(APIPropertiesObject { value })
+}
+
 /// Field-addressable debug variable (upstream ShaderVariable shape).
 #[pyo3::pyclass]
 struct ShaderVariableObject {
@@ -1443,6 +1974,38 @@ impl ShaderReflectionObject {
     #[allow(non_snake_case)]
     fn GetOutputSig(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
         to_py(py, &self.field_or_empty("outputs"))
+    }
+
+    #[allow(non_snake_case)]
+    #[pyo3(signature = (index = 0))]
+    fn GetInputSignature(
+        &self,
+        index: usize,
+    ) -> pyo3::PyResult<ShaderSignatureObject> {
+        let value = self
+            .field("inputs")
+            .and_then(|inputs| inputs.get(index))
+            .cloned()
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err("Input signature index is out of range")
+            })?;
+        Ok(ShaderSignatureObject { value })
+    }
+
+    #[allow(non_snake_case)]
+    #[pyo3(signature = (index = 0))]
+    fn GetOutputSignature(
+        &self,
+        index: usize,
+    ) -> pyo3::PyResult<ShaderSignatureObject> {
+        let value = self
+            .field("outputs")
+            .and_then(|outputs| outputs.get(index))
+            .cloned()
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err("Output signature index is out of range")
+            })?;
+        Ok(ShaderSignatureObject { value })
     }
 
     #[allow(non_snake_case)]
@@ -3300,8 +3863,12 @@ fn build_capture_module<'py>(
         ("Resource", pyo3::wrap_pyfunction!(Resource, py)),
         ("ShaderReflection", pyo3::wrap_pyfunction!(ShaderReflection, py)),
         ("ShaderVariable", pyo3::wrap_pyfunction!(ShaderVariable, py)),
+        ("ShaderSignature", pyo3::wrap_pyfunction!(ShaderSignature, py)),
         ("ConstantBlock", pyo3::wrap_pyfunction!(ConstantBlock, py)),
         ("FrameDescription", pyo3::wrap_pyfunction!(FrameDescription, py)),
+        ("Descriptor", pyo3::wrap_pyfunction!(Descriptor, py)),
+        ("DescriptorStore", pyo3::wrap_pyfunction!(DescriptorStore, py)),
+        ("APIProperties", pyo3::wrap_pyfunction!(APIProperties, py)),
         ("ViewBuffer", pyo3::wrap_pyfunction!(ViewBuffer, py)),
         ("ViewConstantBuffer", pyo3::wrap_pyfunction!(ViewConstantBuffer, py)),
         ("ViewPixelHistory", pyo3::wrap_pyfunction!(ViewPixelHistory, py)),
@@ -3626,11 +4193,14 @@ mod tests {
         assert!(result.error.is_none(), "{:?}", result.error);
         assert_eq!(result.stdout.trim(), "0");
         let result = run_script_with_capture(
-            "import renderdocx\nprint(repr(renderdocx.Texture(0)), repr(renderdocx.Action(1)), repr(renderdocx.Resource(0)), repr(renderdocx.FrameDescription()))",
+            "import renderdocx\nprint(repr(renderdocx.Texture(0)), repr(renderdocx.Action(1)), repr(renderdocx.Resource(0)), repr(renderdocx.FrameDescription()), repr(renderdocx.APIProperties()), repr(renderdocx.DescriptorStore(0)))",
             &CaptureView::default(),
         );
         assert!(result.error.is_none(), "{:?}", result.error);
-        assert_eq!(result.stdout.trim(), "None None None None");
+        assert_eq!(
+            result.stdout.trim(),
+            "None None None None None None"
+        );
         // pyrenderdoc-compatible accessors report an unloaded capture cleanly.
         let result = run_script_with_capture(
             "import renderdocx\n\
@@ -3701,6 +4271,14 @@ mod tests {
         );
         assert!(result.error.is_none(), "{:?}", result.error);
         assert_eq!(result.stdout.trim(), "Globals 16 True True True");
+        let result = run_script_with_capture(
+            "import renderdocx\n\
+             d = renderdocx.Descriptor({'type':0,'resource':7,'byte_offset':16})\n\
+             print(d.type, d.resourceId, d.byteOffset, 'resource' in d.keys())",
+            &CaptureView::default(),
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.stdout.trim(), "0 7 16 True");
     }
 
     #[cfg(windows)]
@@ -3811,7 +4389,23 @@ mod tests {
              print('resource-object', res.name == 'Swapchain Image 96' and res.type == 8 and res.resourceId == 'ResourceId::96' and res.autogeneratedName is True and 'name' in res.keys())\n\
              sr = renderdocx.ShaderReflection(4, event=19)\n\
              print('shader-reflection', sr.event_id == 19 and sr.stage == 4 and isinstance(sr.GetEntryPoint(), str) and isinstance(sr.GetDisassembly(), str) and isinstance(sr.GetSourceFiles(), list) and isinstance(sr.GetCompileFlags(), list) and ps.GetShaderReflection(4).stage == 4)\n\
-             print('view-buffer', renderdocx.ViewBuffer(0, 0).Name() == 'buffer')\n\
+             sig = sr.GetInputSignature(0)\n\
+             print('shader-signature', sig.name == 'inColor' and sig.semanticIndex == 0 and sig.GetName() == 'inColor' and isinstance(sig.components, int))\n\
+             vb = renderdocx.ViewBuffer(0, 0)\n\
+             print('view-buffer', vb.Name() == 'buffer')\n\
+             tv = renderdocx.GetTextureViewer()\n\
+             tv.ViewTexture(0)\n\
+             tv.SetSelectedSubresource(0, 0, 0)\n\
+             tv.SetTextureOverlay(1)\n\
+             tv.SetZoomLevel(2.5)\n\
+             tv.SetChannelVisibility(15)\n\
+             print('texture-viewer', tv.GetCurrentResource() == 0 and tv.GetSelectedSubresource().get('sample') == 0 and tv.GetTextureOverlay() == 1 and abs(tv.GetZoomLevel() - 2.5) < 0.001 and tv.GetChannelVisibility() == 15 and tv.IsZoomAutoFit())\n\
+             eb = renderdocx.GetEventBrowser()\n\
+             eb.SetCurrentFilterText('alpha')\n\
+             print('event-browser-state', eb.GetCurrentFilterText() == 'alpha')\n\
+             vb.ScrollToRow(2)\n\
+             vb.ScrollToColumn(3)\n\
+             print('buffer-viewer', vb.GetScrollRow() == 2 and vb.GetScrollColumn() == 3 and vb.GetEventName(19) == renderdocx.event_format(19))\n\
              ph = renderdocx.ViewPixelHistory(0, 1, 1, event=19)\n\
              print('view-pixel-history', ph.get('event_id') == 19 and ph.GetEvent() == 19 and isinstance(ph.GetHistory(), list) and ph.Widget() is None)\n\
              vm = renderdocx.ViewShaderMessages(0, event=19)\n\
@@ -3821,6 +4415,9 @@ mod tests {
              renderdocx.GetResourceInspector().Inspect(7)\n\
              fd = renderdocx.FrameDescription()\n\
              print('frame-description', fd.frameNumber == snap.get('frame') and fd.GetFrameNumber() == snap.get('frame') and fd.containsAnnotations is False and isinstance(fd.GetCaptureTime(), str) and 'frameNumber' in fd.keys())\n\
+             ap = renderdocx.APIProperties()\n\
+             print('api-properties', ap.pipelineType == snap.get('api') and ap.localRenderer == snap.get('local_renderer') and ap.GetPipelineType() == snap.get('api') and 'pipelineType' in ap.keys())\n\
+             print('descriptor-store', renderdocx.DescriptorStore(0) is None)\n\
              trace = renderdocx.DebugShader(7, 21)\n\
              print('debugshader', trace.get('event_id') == 21)\n\
              var = renderdocx.ShaderVariable((trace.get('inputs') or [{}])[0])\n\
@@ -3869,7 +4466,15 @@ mod tests {
         assert!(result.stdout.contains("viewshader True"), "{}", result.stdout);
         assert!(result.stdout.contains("resource-object True"), "{}", result.stdout);
         assert!(result.stdout.contains("shader-reflection True"), "{}", result.stdout);
+        assert!(result.stdout.contains("shader-signature True"), "{}", result.stdout);
         assert!(result.stdout.contains("view-buffer True"), "{}", result.stdout);
+        assert!(result.stdout.contains("texture-viewer True"), "{}", result.stdout);
+        assert!(
+            result.stdout.contains("event-browser-state True"),
+            "{}",
+            result.stdout
+        );
+        assert!(result.stdout.contains("buffer-viewer True"), "{}", result.stdout);
         assert!(
             result.stdout.contains("view-pixel-history True"),
             "{}",
@@ -3886,6 +4491,12 @@ mod tests {
             "{}",
             result.stdout
         );
+        assert!(result.stdout.contains("api-properties True"), "{}", result.stdout);
+        assert!(
+            result.stdout.contains("descriptor-store True"),
+            "{}",
+            result.stdout
+        );
         assert!(result.stdout.contains("shader-variable True"), "{}", result.stdout);
         assert!(result.stdout.contains("debugshader True"), "{}", result.stdout);
         assert_eq!(
@@ -3894,6 +4505,7 @@ mod tests {
                 "shader:4",
                 "edit_shader:4",
                 "buffer:0:0",
+                "textures",
                 "textures",
                 "shader_messages",
                 "resource:7"
