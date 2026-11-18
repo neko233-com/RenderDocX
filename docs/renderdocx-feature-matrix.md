@@ -26,7 +26,7 @@
 | A11 | DescriptorViewer | 🟡 | `src/replay.rs` descriptors：分页/类型/范围/跳转；可变长度 store 枚举、完整呈现、跨 API 验证未完成 |
 | A12 | StatisticsViewer | 🟡 | `src/frame_statistics.rs`：概览/分类/直方图/本地化导出；概览与报告未复现全部上游格式细节，实机 GUI 验证未完成 |
 | A13 | PerformanceCounterViewer | 🟡 | README：GPU counter 选择/采样/分页（GUI+CLI）；驱动/厂商 counter 与完整上游 counter 工作流未完成 |
-| A14 | DebugMessageView（Errors and Warnings） | 🟡 | `src/debug_message_view.rs`：轮询/过滤/隐藏/跳转/复制；HTML/URL、多单元格选择、实机验证未完成 |
+| A14 | DebugMessageView（Errors and Warnings） | ✅ | `src/debug_message_view.rs` 过滤/隐藏/排序，`main.rs` 轮询/跳转/复制；消息描述经 `rich_message::render` 做 HTML/URL 富文本渲染（含 links/ranges 可点击）——经代码核验核心已完整。**边角差异**：上游表格多单元格选择未实现；真机消息流稳定性待验（不属未迁移） |
 | A15 | LogView（核心日志输出窗口） | ✅ | **已去除 C++ 桥接依赖**：`src/renderdoc_log.rs` 纯 Rust 定位并读取上游日志文件（`%TEMP%\RenderDoc\RenderDoc_*.log`，对齐 `win32_stringio.cpp::GetDefaultFiles`；`RENDERDOC_LOG_FILE` 可覆盖），2 项单测；`src/log_view.rs` 按上游正则语义解析各列；GUI 日志面板含过滤/刷新/关闭/级别着色，GPUI 测试通过。桥接 `log` 命令降级为回退。**有意差异**：内嵌面板而非顶层窗口 |
 | A16 | CommentView（捕获注释/书签） | ✅ | `src/annotations.rs`：notes/bookmarks 读取与显式保存，GUI+CLI，D3D11 覆盖 |
 | A17 | PythonShell | 🟡 | `src/python_shell.rs` 实现脚本执行层（外部 Python 子进程、`RENDERDOCX_PYTHON` 可配置、stdout/stderr 捕获与格式化，3 项单测含真实 Python 执行）；GUI 提供脚本控制台（表达式执行/多行脚本运行/输出/清除）。**未完成**：未嵌入 CPython 与 `pyrenderdoc` 绑定，脚本无法访问已打开捕获、无 REPL 状态/调试器附加/帮助浏览器/项目浏览器 |
@@ -107,14 +107,14 @@
 
 | 状态 | 行数 | 占比 |
 |---|---|---|
-| ✅ 已迁移 | 29 | 47.5% |
-| 🟡 部分迁移 | 27 | 44.3% |
+| ✅ 已迁移 | 30 | 49.2% |
+| 🟡 部分迁移 | 26 | 42.6% |
 | ❌ 未迁移 | 1 | 1.6% |
 | ⬜ 暂不迁移 | 4 | 6.6% |
 | **合计** | **61** | 100% |
 
-- **已迁移率 = 29/61 ≈ 47.5%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
-- 本批变更：C1（ReplayOptionsSelector）经复核 GPU 覆盖选择逻辑已完整实现，由 🟡 转为 ✅（仅多 GPU 实机回放待验）；此前 D3、B9、A17、A1、A7、B7、A5、B17、C5/C6、C4、B10、B18/B19/B20、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
+- **已迁移率 = 30/61 ≈ 49.2%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
+- 本批变更：A14（DebugMessageView）经复核 HTML/URL 富文本渲染已实现，由 🟡 转为 ✅（仅多单元格选择边角与真机消息流待验）；此前 C1、D3、B9、A17、A1、A7、B7、A5、B17、C5/C6、C4、B10、B18/B19/B20、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
 - 口径：分母来自 qrenderdoc 界面文件的完整枚举（A17+B20+C7+D17=61，可复核：`qrenderdoc/**/*.ui` 共 44 个窗口/对话框/控件 + D 节 17 个菜单功能项）；每行状态附证据，🟡 不折算为完成。
 - 状态为基于当前源码与 README/roadmap 记载的迁移程度评估；GPU/引擎实机验收状态另行报告，不在此表内。
 
