@@ -5705,6 +5705,22 @@ impl Workspace {
                         )
                     })
                     .collect(),
+                textures: snapshot
+                    .textures
+                    .iter()
+                    .take(512)
+                    .map(|texture| {
+                        (
+                            texture.name.clone(),
+                            texture.width,
+                            texture.height,
+                            texture.depth,
+                            texture.format_name.clone(),
+                            texture.mips,
+                            texture.samples,
+                        )
+                    })
+                    .collect(),
             })
             .unwrap_or_default();
         let task = cx.background_executor().spawn(async move {

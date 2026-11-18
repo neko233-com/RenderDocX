@@ -34,6 +34,8 @@ pub struct CaptureView {
     pub resource_names: Vec<String>,
     /// (event_id, name, depth, indices) for action queries.
     pub actions: Vec<(u32, String, usize, u32)>,
+    /// (name, width, height, depth, format, mips, samples) per texture.
+    pub textures: Vec<(String, u32, u32, u32, String, u32, u32)>,
 }
 
 impl CaptureView {
@@ -101,6 +103,11 @@ pub fn run_script_with_capture(code: &str, view: &CaptureView) -> EmbedOutput {
             .collect();
         if let Ok(actions) = PyList::new(py, action_tuples) {
             module.set_item("actions", actions).ok();
+        }
+        // Textures as (name, width, height, depth, format, mips, samples).
+        let texture_tuples: Vec<(String, u32, u32, u32, String, u32, u32)> = view.textures.clone();
+        if let Ok(textures) = PyList::new(py, texture_tuples) {
+            module.set_item("textures", textures).ok();
         }
         // Inject as a builtin module importable via `import renderdocx`.
         let modules = py.import("sys").and_then(|sys| sys.getattr("modules")).ok();
@@ -248,18 +255,20 @@ mod tests {
                 (10, "Clear".into(), 0, 0),
                 (11, "DrawIndexed".into(), 1, 300),
             ],
+            textures: vec![("MainColor".into(), 1920, 1080, 1, "R8G8B8A8".into(), 1, 1)],
         };
         assert_eq!(
             view.action(11).map(|action| action.1.as_str()),
             Some("DrawIndexed")
         );
         let result = run_script_with_capture(
-            "import renderdocx\nprint(renderdocx.frame, renderdocx.api_name, renderdocx.action_count, renderdocx.resource_names[0])\nprint([a for a in renderdocx.actions if a[0] == 11])",
+            "import renderdocx\nprint(renderdocx.frame, renderdocx.api_name, renderdocx.action_count, renderdocx.resource_names[0])\nprint([a for a in renderdocx.actions if a[0] == 11])\nprint(renderdocx.textures[0][0], renderdocx.textures[0][1], renderdocx.textures[0][2])",
             &view,
         );
         assert!(result.error.is_none(), "{:?}", result.error);
         assert!(result.stdout.contains("7 Vulkan 42 texA"));
         assert!(result.stdout.contains("DrawIndexed"));
+        assert!(result.stdout.contains("MainColor 1920 1080"));
     }
 
     #[test]
