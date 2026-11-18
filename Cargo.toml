@@ -30,6 +30,7 @@ lz4_flex = "0.14"
 pcre2 = "0.2"
 png = "0.18"
 pyo3 = { version = "0.30", features = ["auto-initialize"] }
+pythonize = "0.30"
 ureq = { version = "3", default-features = true }
 gpui-kit = { version = "=0.9.1", optional = true }
 rfd = { version = "0.15", optional = true }

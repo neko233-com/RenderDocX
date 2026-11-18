@@ -98,16 +98,17 @@ fn event_format(event: u32, show_all: bool, show_names: bool) -> pyo3::PyResult<
 #[pyo3::pyfunction]
 #[pyo3(signature = (event, store = None, offset = 0, limit = 128))]
 fn descriptors(
+    py: Python<'_>,
     event: u32,
     store: Option<usize>,
     offset: u64,
     limit: u32,
-) -> pyo3::PyResult<String> {
+) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
     let session = active_session()?;
-    session
+    let value = session
         .descriptors(event, store, offset, limit)
-        .and_then(|page| serde_json::to_string(&page).map_err(|error| error.to_string()))
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    to_py(py, &value)
 }
 
 /// `renderdocx.texture_statistics(event, texture_index=0, min=0.0, max=1.0)`
@@ -115,11 +116,12 @@ fn descriptors(
 #[pyo3::pyfunction]
 #[pyo3(signature = (event, texture_index = 0, min = 0.0, max = 1.0))]
 fn texture_statistics(
+    py: Python<'_>,
     event: u32,
     texture_index: usize,
     min: f32,
     max: f32,
-) -> pyo3::PyResult<String> {
+) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
     let session = active_session()?;
     let textures = active_textures();
     let texture = textures.get(texture_index).ok_or_else(|| {
@@ -130,7 +132,7 @@ fn texture_statistics(
         max,
         channels: [true, true, true, true],
     };
-    session
+    let value = session
         .texture_statistics(
             event,
             texture_index as u32,
@@ -138,8 +140,8 @@ fn texture_statistics(
             crate::replay::TextureSelection::default(),
             request,
         )
-        .and_then(|stats| serde_json::to_string(&stats).map_err(|error| error.to_string()))
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    to_py(py, &value)
 }
 
 /// `renderdocx.pixel_history(event, texture_index=0, x=0, y=0, offset=0, limit=128)`
@@ -147,19 +149,20 @@ fn texture_statistics(
 #[pyo3::pyfunction]
 #[pyo3(signature = (event, texture_index = 0, x = 0, y = 0, offset = 0, limit = 128))]
 fn pixel_history(
+    py: Python<'_>,
     event: u32,
     texture_index: usize,
     x: u32,
     y: u32,
     offset: u64,
     limit: u32,
-) -> pyo3::PyResult<String> {
+) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
     let session = active_session()?;
     let textures = active_textures();
     let texture = textures.get(texture_index).ok_or_else(|| {
         pyo3::exceptions::PyRuntimeError::new_err("Texture index is out of range in the bound snapshot")
     })?;
-    session
+    let value = session
         .pixel_history(
             event,
             texture_index as u32,
@@ -170,8 +173,8 @@ fn pixel_history(
             offset,
             limit,
         )
-        .and_then(|page| serde_json::to_string(&page).map_err(|error| error.to_string()))
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    to_py(py, &value)
 }
 
 /// Register (or clear) the replay session that Python helpers may query.
@@ -182,6 +185,14 @@ pub fn set_active_session(session: Option<crate::replay::Session>) {
     *guard = session;
 }
 
+/// Convert any serializable value into a native Python object (dict/list/scalar)
+/// so scripts can use attribute/index access instead of parsing JSON.
+fn to_py<T: serde::Serialize>(py: Python<'_>, value: &T) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    pythonize::pythonize(py, value)
+        .map(|bound| bound.unbind())
+        .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
+}
+
 fn active_session() -> Result<crate::replay::Session, pyo3::PyErr> {
     ACTIVE_SESSION
         .lock()
@@ -190,16 +201,15 @@ fn active_session() -> Result<crate::replay::Session, pyo3::PyErr> {
         .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No capture session is open"))
 }
 
-/// `renderdocx.pipeline(event)` -> JSON string of the event pipeline.
+/// `renderdocx.pipeline(event)` -> native Python object (dict/list) for the
+/// event pipeline, so scripts can use `p["shaders"][0]["stage"]` directly.
 #[pyo3::pyfunction]
-fn pipeline(event: u32) -> pyo3::PyResult<String> {
+fn pipeline(py: Python<'_>, event: u32) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
     let session = active_session()?;
-    session
+    let value = session
         .pipeline_for_event(event)
-        .and_then(|pipeline| {
-            serde_json::to_string(&pipeline).map_err(|error| error.to_string())
-        })
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    to_py(py, &value)
 }
 
 /// `renderdocx.buffer(index, offset, length)` -> hex string of raw buffer bytes.
@@ -217,67 +227,90 @@ fn buffer(index: u32, offset: u64, length: u32) -> pyo3::PyResult<String> {
 /// structured data.
 #[pyo3::pyfunction]
 #[pyo3(signature = (event, offset = 0, limit = 128))]
-fn structure(event: u32, offset: u64, limit: u32) -> pyo3::PyResult<String> {
+fn structure(
+    py: Python<'_>,
+    event: u32,
+    offset: u64,
+    limit: u32,
+) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
     let session = active_session()?;
-    session
+    let value = session
         .structure(event, &[], offset, limit)
-        .and_then(|page| serde_json::to_string(&page).map_err(|error| error.to_string()))
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    to_py(py, &value)
 }
 
 /// `renderdocx.capture_debug_messages()` -> JSON array of capture debug
 /// messages (the `debug_messages` name is the pre-fetched list on the module).
 #[pyo3::pyfunction]
-fn capture_debug_messages() -> pyo3::PyResult<String> {
+fn capture_debug_messages(py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
     let session = active_session()?;
-    session
+    let value = session
         .debug_messages()
-        .and_then(|messages| serde_json::to_string(&messages).map_err(|error| error.to_string()))
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    to_py(py, &value)
 }
 
 /// `renderdocx.shader_messages(event, offset=0, limit=128)` -> JSON page.
 #[pyo3::pyfunction]
 #[pyo3(signature = (event, offset = 0, limit = 128))]
-fn shader_messages(event: u32, offset: u64, limit: u32) -> pyo3::PyResult<String> {
+fn shader_messages(
+    py: Python<'_>,
+    event: u32,
+    offset: u64,
+    limit: u32,
+) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
     let session = active_session()?;
-    session
+    let value = session
         .shader_messages(event, offset, limit)
-        .and_then(|page| serde_json::to_string(&page).map_err(|error| error.to_string()))
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    to_py(py, &value)
 }
 
 /// `renderdocx.resource_usage(index, offset=0, limit=128)` -> JSON page.
 #[pyo3::pyfunction]
 #[pyo3(signature = (index, offset = 0, limit = 128))]
-fn resource_usage(index: u32, offset: u64, limit: u32) -> pyo3::PyResult<String> {
+fn resource_usage(
+    py: Python<'_>,
+    index: u32,
+    offset: u64,
+    limit: u32,
+) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
     let session = active_session()?;
-    session
+    let value = session
         .resource_usage(index, offset, limit)
-        .and_then(|page| serde_json::to_string(&page).map_err(|error| error.to_string()))
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    to_py(py, &value)
 }
 
 /// `renderdocx.shader(stage, target=None)` -> JSON shader report.
 #[pyo3::pyfunction]
 #[pyo3(signature = (stage, target = None))]
-fn shader(stage: u32, target: Option<u32>) -> pyo3::PyResult<String> {
+fn shader(
+    py: Python<'_>,
+    stage: u32,
+    target: Option<u32>,
+) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
     let session = active_session()?;
-    session
+    let value = session
         .shader(stage, target)
-        .and_then(|report| serde_json::to_string(&report).map_err(|error| error.to_string()))
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    to_py(py, &value)
 }
 
 /// `renderdocx.callstack(event, resolve=True)` -> JSON callstack.
 #[pyo3::pyfunction]
 #[pyo3(signature = (event, resolve = true))]
-fn callstack(event: u32, resolve: bool) -> pyo3::PyResult<String> {
+fn callstack(
+    py: Python<'_>,
+    event: u32,
+    resolve: bool,
+) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
     let session = active_session()?;
-    session
+    let value = session
         .callstack(event, resolve)
-        .and_then(|stack| serde_json::to_string(&stack).map_err(|error| error.to_string()))
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    to_py(py, &value)
 }
 
 
@@ -776,21 +809,21 @@ mod tests {
             crate::i18n::Language::English,
         );
         let result = run_script_with_capture(
-            "import renderdocx, json\n\
-             p = json.loads(renderdocx.pipeline(19))\n\
+            "import renderdocx\n\
+             p = renderdocx.pipeline(19)\n\
              print(p.get('event_id'))\n\
              print(len(renderdocx.buffer(0, 0, 16)))\n\
-             print(len(json.loads(renderdocx.structure(19))))\n\
-             print(len(json.loads(renderdocx.capture_debug_messages())))\n\
-             print(len(json.loads(renderdocx.shader_messages(19))))\n\
-             print(len(json.loads(renderdocx.resource_usage(0))))\n\
-             s = json.loads(renderdocx.pipeline(19)).get('shaders') or []\n\
-             print('shaders', len(s))\n\
-             print('stack', isinstance(json.loads(renderdocx.callstack(19)), dict))\n\
+             print(len(renderdocx.structure(19)))\n\
+             print(len(renderdocx.capture_debug_messages()))\n\
+             print(len(renderdocx.shader_messages(19)))\n\
+             print(len(renderdocx.resource_usage(0)))\n\
+             s = p.get('shaders') or []\n\
+             print('shaders', len(s), s[0].get('stage') if s else 'none')\n\
+             print('stack', isinstance(renderdocx.callstack(19), dict))\n\
              print('format', len(renderdocx.event_format(19)) > 0)\n\
-             print('descs', isinstance(json.loads(renderdocx.descriptors(19)), dict))\n\
-             print('pixels', isinstance(json.loads(renderdocx.pixel_history(19, 0, 1, 1)), dict))\n\
-             print('stats', isinstance(json.loads(renderdocx.texture_statistics(19, 0)), dict))",
+             print('descs', isinstance(renderdocx.descriptors(19), dict))\n\
+             print('pixels', isinstance(renderdocx.pixel_history(19, 0, 1, 1), dict))\n\
+             print('stats', isinstance(renderdocx.texture_statistics(19, 0), dict))",
             &CaptureView::default(),
         );
         set_active_session(None);

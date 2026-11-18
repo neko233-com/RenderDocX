@@ -5619,6 +5619,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pythonize"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81dc750465ccfd42f746835ba6d9001f9fb780249d7e6acdb4f76244000045b2"
+dependencies = [
+ "pyo3",
+ "serde",
+]
+
+[[package]]
 name = "qoi"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6038,6 +6048,7 @@ dependencies = [
  "pcre2",
  "png 0.18.1",
  "pyo3",
+ "pythonize",
  "rfd",
  "serde",
  "serde_json",
@@ -6522,7 +6533,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8050abb251097357e24aff63ba2c52a6309ecb7d23a5474023df960a02694d8"
 dependencies = [
  "annotate-snippets",
- "base64 0.22.1",
+ "base64 0.23.1",
  "encoding_rs_io",
  "granit-parser",
  "nohash-hasher",
