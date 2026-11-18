@@ -581,6 +581,44 @@ fn export_buffer(
     Ok(destination)
 }
 
+/// `renderdocx.debug_mesh(event, group=(0,0,0), thread=(0,0,0))` -> start a
+/// mesh-shader debug trace and return its first state.
+#[pyo3::pyfunction]
+#[pyo3(signature = (event, group = [0, 0, 0], thread = [0, 0, 0]))]
+fn debug_mesh(
+    py: Python<'_>,
+    event: u32,
+    group: [u32; 3],
+    thread: [u32; 3],
+) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    let session = active_session()?;
+    let event = resolve_draw_event(event);
+    select_event(&session, event)?;
+    let value = session
+        .debug_mesh(crate::replay::ComputeDebugSelection { group, thread })
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    to_py(py, &value)
+}
+
+/// `renderdocx.debug_next()` -> advance the active debug trace one step.
+#[pyo3::pyfunction]
+fn debug_next(py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    let session = active_session()?;
+    let value = session
+        .debug_next()
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    to_py(py, &value)
+}
+
+/// `renderdocx.debug_stop()` -> end the active debug trace.
+#[pyo3::pyfunction]
+fn debug_stop() -> pyo3::PyResult<()> {
+    let session = active_session()?;
+    session
+        .debug_stop()
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
 /// `renderdocx.export_texture(destination, index=0)` -> export a PNG of the
 /// texture. Existing files are never replaced (matching the GUI exporter).
 #[pyo3::pyfunction]
@@ -1308,6 +1346,9 @@ fn build_capture_module<'py>(
         ("UnregisterReplacement", pyo3::wrap_pyfunction!(UnregisterReplacement, py)),
         ("IsResourceReplaced", pyo3::wrap_pyfunction!(IsResourceReplaced, py)),
         ("GetResourceReplacement", pyo3::wrap_pyfunction!(GetResourceReplacement, py)),
+        ("debug_mesh", pyo3::wrap_pyfunction!(debug_mesh, py)),
+        ("debug_next", pyo3::wrap_pyfunction!(debug_next, py)),
+        ("debug_stop", pyo3::wrap_pyfunction!(debug_stop, py)),
     ] {
         if let Ok(function) = wrapped {
             dict.set_item(name, function).ok();
@@ -1584,6 +1625,9 @@ mod tests {
             "renderdocx.GetBookmarks()",
             "renderdocx.SetBookmark(1, 'x')",
             "renderdocx.RemoveBookmark(1)",
+            "renderdocx.debug_mesh(1)",
+            "renderdocx.debug_next()",
+            "renderdocx.debug_stop()",
         ] {
             let result = run_script_with_capture(
                 &format!("import renderdocx\n{call}"),
@@ -1716,6 +1760,10 @@ mod tests {
              renderdocx.UnregisterReplacement(7)\n\
              restored = renderdocx.pipeline(19).get('outputs') or [{}]\n\
              print('unreplace', restored[0].get('resource_index') == 7)\n\
+             trace = renderdocx.debug_mesh(21)\n\
+             print('debug', trace.get('event_id') == 21 and trace.get('stage') == 7)\n\
+             print('debugnext', isinstance(renderdocx.debug_next(), dict))\n\
+             renderdocx.debug_stop()\n\
              notes0 = renderdocx.GetNotes()\n\
              bookmarks0 = renderdocx.GetBookmarks()\n\
              renderdocx.SetNotes('renderdocx notes')\n\
@@ -1746,6 +1794,8 @@ mod tests {
         assert!(result.stdout.contains("compat True"), "{}", result.stdout);
         assert!(result.stdout.contains("replace True"), "{}", result.stdout);
         assert!(result.stdout.contains("unreplace True"), "{}", result.stdout);
+        assert!(result.stdout.contains("debug True"), "{}", result.stdout);
+        assert!(result.stdout.contains("debugnext True"), "{}", result.stdout);
         assert!(result.stdout.contains("notes True"), "{}", result.stdout);
         assert!(result.stdout.contains("bookmark True"), "{}", result.stdout);
         assert!(result.stdout.contains("unbookmark True"), "{}", result.stdout);

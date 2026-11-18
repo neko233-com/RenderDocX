@@ -129,7 +129,9 @@ It also exercises the pyrenderdoc-compatible CaptureContext surface:
 read back through `SetNotes`/`GetNotes`/`SetBookmark`/`GetBookmarks`/
 `RemoveBookmark`, then restored to their original values. Resource replacement
 is exercised through `RegisterReplacement(7, 8)`: `pipeline(19)` reports the
-replacement index, and `UnregisterReplacement(7)` restores the original.
+replacement index, and `UnregisterReplacement(7)` restores the original. Mesh
+shader debugging is exercised through `debug_mesh(21)`, `debug_next()` and
+`debug_stop()`; the returned trace reports event 21 and the mesh stage.
 `python_vertex_input_query_a_real_capture` opens a real Vertex capture and
 asserts `renderdocx.vertex_input()` returns input rows.
 
