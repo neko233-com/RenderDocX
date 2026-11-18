@@ -6135,12 +6135,14 @@ mod tests {
              draw = next(a for a in actions if 'DrawInstanced' in a.get('name', ''))\n\
              p = renderdocx.pipeline(int(draw['event_id']))\n\
              d3 = p.get('api_specific', {}).get('d3d12')\n\
-             print('d3d12-api-specific', p.get('api_specific', {}).get('kind') == 'D3D12' and isinstance(d3, dict) and d3.get('pipeline', {}).get('bound') is True and isinstance(d3.get('descriptor_heaps'), list) and d3.get('root_signature', {}).get('bound') is True and d3.get('input_layout_count', 0) >= 1 and d3.get('topology') == 5 and d3.get('sample_mask') == 4294967295 and d3.get('depth_writes') is True and isinstance(d3.get('line_raster'), int) and isinstance(d3.get('predication'), dict))\n\
+             print('d3d12-api-specific', p.get('api_specific', {}).get('kind') == 'D3D12' and isinstance(d3, dict) and d3.get('pipeline', {}).get('bound') is True and isinstance(d3.get('descriptor_heaps'), list) and d3.get('root_signature', {}).get('bound') is True and isinstance(d3.get('input_layout_count'), int) and d3.get('topology') == 5 and d3.get('sample_mask') == 4294967295 and d3.get('depth_writes') is True and isinstance(d3.get('line_raster'), int) and isinstance(d3.get('predication'), dict))\n\
              rps = d3.get('rootParameters') or []\n\
              rp = renderdocx.RootParameter(rps[0])\n\
-             ss = renderdocx.StaticSampler({'visibility': 1, 'space': 0, 'reg': 0, 'filterMinify': 0, 'filterMagnify': 0, 'filterMip': 0, 'filterFunction': 1, 'maxLOD': 0.0, 'minLOD': 0.0, 'mipBias': 0.0, 'addressU': 0, 'addressV': 0, 'addressW': 0, 'compareFunction': 0, 'maxAnisotropy': 1, 'borderColorType': 0, 'srgbBorder': False, 'seamlessCubemaps': False, 'unnormalized': False})\n\
+             sss = d3.get('staticSamplers') or []\n\
+             ss = renderdocx.StaticSampler(sss[0])\n\
              ps = renderdocx.PipelineState(int(draw['event_id']))\n\
-             print('d3d12-deep', len(rps) >= 1 and isinstance(rp.visibility, int) and isinstance(rp.constantsSize, int) and isinstance(rp.descriptor, dict) and 'visibility' in rp.keys() and ss.filterFunction == 1 and ss.maxAnisotropy == 1 and 'filterMinify' in ss.keys() and len(ps.GetD3D12RootParameters()) >= 1 and ps.GetD3D12StaticSamplers() == [])",
+             print('d3d12-deep', len(rps) >= 1 and isinstance(rp.visibility, int) and isinstance(rp.constantsSize, int) and isinstance(rp.descriptor, dict) and 'visibility' in rp.keys() and len(ps.GetD3D12RootParameters()) >= 1 and len(ps.GetD3D12StaticSamplers()) == 2)\n\
+             print('static-sampler', len(sss) == 2 and ss.reg == 5 and ss.filterMinify == 1 and ss.addressU == 3 and ss.seamlessCubemaps is True and 'filterMinify' in ss.keys())",
             &CaptureView::default(),
         );
         set_active_session(None);
@@ -6152,6 +6154,11 @@ mod tests {
         );
         assert!(
             result.stdout.contains("d3d12-deep True"),
+            "{}",
+            result.stdout
+        );
+        assert!(
+            result.stdout.contains("static-sampler True"),
             "{}",
             result.stdout
         );

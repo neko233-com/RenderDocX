@@ -54,7 +54,7 @@ try {
         command = 'target_launch'
         path = (Resolve-Path $Fixture).Path
         capture_directory = $OutDir
-        arguments = 'D3D12_CBuffer_Zoo --frame-count 100000'
+        arguments = 'D3D12_Reflection_Zoo --frame-count 100000'
     } | ConvertTo-Json -Compress
     $process.StandardInput.WriteLine($launch)
     $process.StandardInput.Flush()
