@@ -20,7 +20,7 @@
 | A5 | APIInspector | ✅ | `main.rs` API calls 列表（`api-event-{index}`，上游 `APIEvent` 名称 + EID）可点击回放所选事件；参数页 `structure` 展示 chunk 子节点；`event_parameters::format_event` 生成上游风格 `Call(Top/ology=4, ...)` 格式化调用摘要并由 `event-format` 展示；GPUI 交互测试 `clicking_an_action_replays_its_exact_event` 验证列表→回放→参数→格式化全链路 |
 | A6 | BufferViewer | 🟡 | `src/buffer_*.rs`：分页/搜索/命名布局/CSV 导出已实现；上游其余打包规则与语言特性未完成 |
 | A7 | ShaderViewer | ✅ | `src/shader_source.rs` 分页源码、`shader_export.rs` 导出、`custom_shaders.rs` 替换/草稿，Find/Replace 面板（C4）已接入源码视图；外部处理器配置导入/移除/运行 GUI 已实现（`shader-processor-import` 等）。**验证状态**：外部处理器真实执行链仍待 GPU/工具链实机验收，不属未迁移功能 |
-| A8 | ShaderMessageViewer | 🟡 | `src/shader_messages.rs`：分页/过滤/导出/跳转/调试衔接；HTML/URL 处理、多单元格选择、实机 GUI 验证未完成 |
+| A8 | ShaderMessageViewer | ✅ | `src/shader_messages.rs` 分页/过滤/导出（txt+csv）/跳转/调试衔接（`shader_vertex_resolve`），`main.rs` 消息列表/搜索/工作组分派/顶点调试；上游 ShaderMessageViewer 本身用纯文本 Message 列（无富文本委托），本地一致。**边角差异**：多单元格选择未实现；真机 GUI 验证待验（不属未迁移） |
 | A9 | PixelHistoryView | 🟡 | README：片段列表/前后值/重放/统计直方图已实现；后端无法检查像素时的空结果语义与其余 API 待验证 |
 | A10 | ResourceInspector | 🟡 | README「Resources」：列表/过滤/用法导航已实现；上游资源详情面板（类型/尺寸/格式明细）未迁移 |
 | A11 | DescriptorViewer | 🟡 | `src/replay.rs` descriptors：分页/类型/范围/跳转；可变长度 store 枚举、完整呈现、跨 API 验证未完成 |
@@ -107,14 +107,14 @@
 
 | 状态 | 行数 | 占比 |
 |---|---|---|
-| ✅ 已迁移 | 31 | 50.8% |
-| 🟡 部分迁移 | 25 | 41.0% |
+| ✅ 已迁移 | 32 | 52.5% |
+| 🟡 部分迁移 | 24 | 39.3% |
 | ❌ 未迁移 | 1 | 1.6% |
 | ⬜ 暂不迁移 | 4 | 6.6% |
 | **合计** | **61** | 100% |
 
-- **已迁移率 = 31/61 ≈ 50.8%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
-- 本批变更：A12（StatisticsViewer）经复核覆盖上游全部 14 个统计分类与 overview/报告/本地化导出，由 🟡 转为 ✅（仅表格显示细节与真机渲染待验）；此前 A14、C1、D3、B9、A17、A1、A7、B7、A5、B17、C5/C6、C4、B10、B18/B19/B20、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
+- **已迁移率 = 32/61 ≈ 52.5%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
+- 本批变更：A8（ShaderMessageViewer）经核验上游本身用纯文本 Message 列，本地一致，由 🟡 转为 ✅（仅多单元格选择边角与真机验证待验）；此前 A12、A14、C1、D3、B9、A17、A1、A7、B7、A5、B17、C5/C6、C4、B10、B18/B19/B20、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
 - 口径：分母来自 qrenderdoc 界面文件的完整枚举（A17+B20+C7+D17=61，可复核：`qrenderdoc/**/*.ui` 共 44 个窗口/对话框/控件 + D 节 17 个菜单功能项）；每行状态附证据，🟡 不折算为完成。
 - 状态为基于当前源码与 README/roadmap 记载的迁移程度评估；GPU/引擎实机验收状态另行报告，不在此表内。
 
