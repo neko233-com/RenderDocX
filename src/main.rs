@@ -5508,8 +5508,6 @@ impl Workspace {
     }
 
     fn open_suggest_remote(&mut self, cx: &mut Context<Self>) {
-        use renderdocx::suggest_remote::SuggestRemote;
-        let remote = !self.remote_target_url.read(cx).value().trim().is_empty();
         // Fill real driver/machine metadata from the inspected .rdc when
         // available (pure Rust parse), instead of placeholder text.
         let (driver, machine) = self
@@ -5518,10 +5516,22 @@ impl Workspace {
             .map(|(_, file)| {
                 (
                     file.header.driver_name.clone(),
-                    file.header.machine_ident.to_string(),
+                    renderdocx::suggest_remote::machine_ident_string(file.header.machine_ident),
                 )
             })
             .unwrap_or_else(|| ("RenderDoc".to_owned(), "this machine".to_owned()));
+        self.offer_suggest_remote(driver, machine, cx);
+    }
+
+    /// Show the suggest-remote dialog for already-known capture metadata.
+    fn offer_suggest_remote(
+        &mut self,
+        driver: String,
+        machine: String,
+        cx: &mut Context<Self>,
+    ) {
+        use renderdocx::suggest_remote::SuggestRemote;
+        let remote = !self.remote_target_url.read(cx).value().trim().is_empty();
         self.suggest_remote = Some(SuggestRemote::new(
             driver,
             machine,
@@ -6491,6 +6501,15 @@ impl Workspace {
             if let Some(previous) = previous_remote {
                 previous.close()?;
             }
+            // Header metadata for the upstream SuggestRemote OS-mask check.
+            let machine = if remote.is_none() {
+                std::fs::read(&path)
+                    .ok()
+                    .and_then(|data| renderdocx::rdc_file::RdcFile::parse(&data).ok())
+                    .map(|file| (file.header.machine_ident, file.header.driver_name))
+            } else {
+                None
+            };
             let (session, snapshot) = Session::open_remote(&settings, &path, remote.as_deref())?;
             let renames = session.annotation_read("renames").and_then(|section| {
                 let document = section.document()?;
@@ -6514,7 +6533,15 @@ impl Workspace {
                 let result = session.select_pipeline(action.event_id, revision);
                 (snapshot.actions.len() - 1, revision, result)
             });
-            Ok::<_, String>((session, snapshot, renames, edits, bookmarks, initial))
+            Ok::<_, String>((
+                session,
+                snapshot,
+                renames,
+                edits,
+                bookmarks,
+                initial,
+                machine,
+            ))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -6523,7 +6550,7 @@ impl Workspace {
                     return;
                 }
                 match result {
-                    Ok((session, snapshot, renames, edits, bookmarks, initial)) => {
+                    Ok((session, snapshot, renames, edits, bookmarks, initial, machine)) => {
                         // Invalidate work started against the old session while this open was pending.
                         this.open_revision += 1;
                         this.event_name_worker = false;
@@ -6668,6 +6695,21 @@ impl Workspace {
                                 Some(metadata_error) => format!("{metadata_error}; {replay_error}"),
                                 None => replay_error,
                             });
+                        }
+                        // Upstream `CaptureFile::LocalReplaySupport` suggests
+                        // remote replay when the capture's OS mask differs.
+                        if let Some((machine_ident, driver)) = machine {
+                            if renderdocx::suggest_remote::should_suggest(
+                                machine_ident,
+                                renderdocx::suggest_remote::local_machine_ident(),
+                                this.settings.always_replay_locally,
+                            ) {
+                                this.offer_suggest_remote(
+                                    driver,
+                                    renderdocx::suggest_remote::machine_ident_string(machine_ident),
+                                    cx,
+                                );
+                            }
                         }
                     }
                     Err(error) => {
