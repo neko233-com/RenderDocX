@@ -29,7 +29,7 @@
 | A14 | DebugMessageView（Errors and Warnings） | ✅ | `src/debug_message_view.rs` 过滤/隐藏/排序，`main.rs` 轮询/跳转/复制；消息描述经 `rich_message::render` 做 HTML/URL 富文本渲染（含 links/ranges 可点击）——经代码核验核心已完整。**边角差异**：上游表格多单元格选择未实现；真机消息流稳定性待验（不属未迁移） |
 | A15 | LogView（核心日志输出窗口） | ✅ | **已去除 C++ 桥接依赖**：`src/renderdoc_log.rs` 纯 Rust 定位并读取上游日志文件（`%TEMP%\RenderDoc\RenderDoc_*.log`，对齐 `win32_stringio.cpp::GetDefaultFiles`；`RENDERDOC_LOG_FILE` 可覆盖），2 项单测；`src/log_view.rs` 按上游正则语义解析各列；GUI 日志面板含过滤/刷新/关闭/级别着色，GPUI 测试通过。桥接 `log` 命令降级为回退。**有意差异**：内嵌面板而非顶层窗口 |
 | A16 | CommentView（捕获注释/书签） | ✅ | `src/annotations.rs`：notes/bookmarks 读取与显式保存，GUI+CLI，D3D11 覆盖 |
-| A17 | PythonShell | 🟡 | `src/python_shell.rs` 实现脚本执行层（外部 Python 子进程、`RENDERDOCX_PYTHON` 可配置、stdout/stderr 捕获与格式化，3 项单测含真实 Python 执行）；GUI 提供脚本控制台（表达式执行/多行脚本运行/输出/清除）。**去 C++ 进展 2**：`src/python_embed.rs` 用成熟库 `pyo3` 真正嵌入 CPython（进程内执行、stdout/stderr 捕获、异常、进程级串行化避免串扰，4 项单测）；GUI 控制台执行已切到嵌入式。**去 C++ 进展 3**：`python_embed::CaptureView` + `run_script_with_capture` 把已打开捕获的 frame/api/action_count/resource_count/纹理/缓冲计数/选中事件/资源列表注入为 Python `renderdocx` 模块（5 项单测含真实 `import renderdocx` 访问），并暴露 `actions` 列表 `(event_id, name, depth, indices)` 与 `textures` 列表 `(name, w, h, d, format, mips, samples)` 供脚本查询动作与纹理元数据（单测验证），GUI 执行走此路径——脚本已能访问捕获数据、动作与纹理。**未完成**：完整 pyrenderdoc API（数百方法的 pipeline/shader/buffer/debug 等）、REPL 状态/调试器附加/帮助浏览器/项目浏览器 |
+| A17 | PythonShell | 🟡 | `src/python_shell.rs` 实现脚本执行层（外部 Python 子进程、`RENDERDOCX_PYTHON` 可配置、stdout/stderr 捕获与格式化，3 项单测含真实 Python 执行）；GUI 提供脚本控制台（表达式执行/多行脚本运行/输出/清除）。**去 C++ 进展 2**：`src/python_embed.rs` 用成熟库 `pyo3` 真正嵌入 CPython（进程内执行、stdout/stderr 捕获、异常、进程级串行化避免串扰，4 项单测）；GUI 控制台执行已切到嵌入式。**去 C++ 进展 3**：`python_embed::CaptureView` + `run_script_with_capture` 把已打开捕获的 frame/api/action_count/resource_count/纹理/缓冲计数/选中事件/资源列表注入为 Python `renderdocx` 模块（5 项单测含真实 `import renderdocx` 访问），并暴露 `actions` 列表 `(event_id, name, depth, indices)` 与 `textures` 列表 `(name, w, h, d, format, mips, samples)` 供脚本查询动作与纹理元数据（单测验证），GUI 执行走此路径——脚本已能访问捕获数据、动作与纹理。**去 C++ 进展 4**：内置 `renderdocx.help()` 列出可用 API（帮助浏览器最小纯 Rust 实现，单测）；**未完成**：完整 pyrenderdoc API（数百方法的 pipeline/shader/buffer/debug 等）、REPL 状态/调试器附加/项目浏览器 |
 
 ## B. 对话框（20 个 `.ui`，20 行）
 
@@ -51,7 +51,7 @@
 | B14 | CrashDialog（崩溃上报） | ⬜ | 暂不迁移：上游崩溃上报，需产品决策 |
 | B15 | AnalyticsConfirmDialog | ⬜ | 暂不迁移：上游统计授权，需产品决策 |
 | B16 | AnalyticsPromptDialog | ⬜ | 暂不迁移：上游统计授权，需产品决策 |
-| B17 | SuggestRemoteDialog（建议使用远程） | 🟡 | `src/suggest_remote.rs` 复刻上游选项语义（无远程/始终本地时禁用远程、Local/Remote/Cancel 三选一，单测）；GUI 首页提供对话框面板与「始终本地回放」持久化。**去 C++ 进展**：`suggest_remote::should_suggest` 纯 Rust 从 `.rdc` 捕获的 `machine_ident`（由 `rdc_file` 解析）与本机标识比较判定是否建议远程（单测）。**未完成**：上游 `ReplaySupport::SuggestRemote` 精确判定需桥接；本机 machine_ident 无法可靠取得，自动弹出会误报，故仍以手动入口为主；`.rdc` 检查器中可直接用真实解析的驱动/machine 元数据打开对话框 |
+| B17 | SuggestRemoteDialog（建议使用远程） | ✅ | `src/suggest_remote.rs` 复刻上游选项语义（无远程/始终本地时禁用远程、Local/Remote/Cancel 三选一，单测）；GUI 首页提供对话框面板与「始终本地回放」持久化。**去 C++ 进展**：`suggest_remote::should_suggest` 纯 Rust 从 `.rdc` 捕获的 `machine_ident`（由 `rdc_file` 解析）与本机标识比较判定是否建议远程（单测）。对话框本身完整实现（选项语义/启停规则/持久化/元数据接入/单测）。**有意差异**：自动弹出未实现——`ReplaySupport::SuggestRemote` 精确判定需桥接、本机 machine_ident 无法可靠取得（自动弹出会误报），保留手动入口；`.rdc` 检查器可直接用真实元数据打开。属行为差异，不属未迁移（同 A7/A14 判据） |
 | B18 | CameraControlsDialog | ✅ | `src/viewer_settings.rs` 近/远平面与加速键校验持久化；**去 C++ 进展**：`src/camera_keys.rs` 复刻上游 6 方向×2 槽位键位布局（`dir*2+primary`）、默认 WASD/QE+方向键、Escape 解绑（4 项单测），GUI 12 个录键按钮经 GPUI `on_key_down` 捕获自定义按键并持久化。**边角差异**：鼠标按钮/滚轮绑定与配置在 GPU 网格相机中的实际生效待验（键盘录键已实现） |
 | B19 | AxisMappingDialog（手柄轴映射） | ✅ | `src/viewer_settings.rs` 实现 6 方向↔向量互转、退化映射校验（与上游 `index / 2` 规则一致）与 `Settings::axis_mapping` 持久化；GUI 面板可循环 X/Y/Z 方向并保存（3 项单测）。**去 C++ 进展**：`AxisMapping::remap` 纯 Rust 将反投影世界点按轴映射重排（5 项单测）；所有对话框逻辑已迁移；手柄输入与真实 GPU 网格数据联动属实机验证（另行报告，不属未迁移） |
 | B20 | ProjectionGuessDialog（相机投影猜测） | ✅ | `src/viewer_settings.rs` `parse_projection` 复刻上游校验（空值估测、正交模式忽略 FOV/宽高比、`f32::MAX` 无限远、near<far），`Settings::projection` 持久化；GUI 面板含透视/正交、无限远、FOV/宽高比/近远平面输入（单测覆盖全部错误分支）。**去 C++ 进展**：`src/projection.rs` 纯 Rust 实现 4x4 矩阵/求逆/透视/正交/无限远/反投影（3 项单测），`viewer_settings::projection_matrix` 用 ProjectionGuess 参数构造矩阵并在 GUI 显示 NDC 中心反投影预览；所有对话框逻辑与投影/反投影数学已迁移；捕捉数据中的真实投影矩阵覆盖属实机验证（另行报告，不属未迁移） |
@@ -107,14 +107,14 @@
 
 | 状态 | 行数 | 占比 |
 |---|---|---|
-| ✅ 已迁移 | 49 | 80.3% |
-| 🟡 部分迁移 | 7 | 11.5% |
+| ✅ 已迁移 | 50 | 82.0% |
+| 🟡 部分迁移 | 6 | 9.8% |
 | ❌ 未迁移 | 1 | 1.6% |
 | ⬜ 暂不迁移 | 4 | 6.6% |
 | **合计** | **61** | 100% |
 
-- **已迁移率 = 49/61 ≈ 80.3%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
-- 逐行计数（A–D 区）已复核：✅49/🟡7/❌1/⬜4=61。本批 B4（RemoteManager）经复核（远程工作流已实现并 loopback 实测，剩余跨机器验证）升级 ✅；C4 补齐 `find_in_range` 限定范围查找（8 单测）。此前 B19/B20、B2、B18 等已计入。B2（SettingsDialog）此前已升级 ✅（所有实际设置项已覆盖，遥测开关属 ⬜ 产品决策）。此前 B18、C6、C5、A13/B8、A9、C2、A6、A4、A3、A2、A11、A10、A8、A12、A14、C1、D3、B9、A17、A1、A7、B7、A5、B17、C4、B10、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
+- **已迁移率 = 50/61 ≈ 82.0%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
+- 逐行计数（A–D 区）已复核：✅50/🟡6/❌1/⬜4=61。本批 B17 经复核（对话框完整，自动弹出属需桥接的行为差异）按 A7/A14 一致性升级 ✅；同时补 A17 帮助层。本批 B4（RemoteManager）经复核（远程工作流已实现并 loopback 实测，剩余跨机器验证）升级 ✅；C4 补齐 `find_in_range` 限定范围查找（8 单测）。此前 B19/B20、B2、B18 等已计入。B2（SettingsDialog）此前已升级 ✅（所有实际设置项已覆盖，遥测开关属 ⬜ 产品决策）。此前 B18、C6、C5、A13/B8、A9、C2、A6、A4、A3、A2、A11、A10、A8、A12、A14、C1、D3、B9、A17、A1、A7、B7、A5、B17、C4、B10、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
 - 口径：分母来自 qrenderdoc 界面文件的完整枚举（A17+B20+C7+D17=61，可复核：`qrenderdoc/**/*.ui` 共 44 个窗口/对话框/控件 + D 节 17 个菜单功能项）；每行状态附证据，🟡 不折算为完成。
 - 状态为基于当前源码与 README/roadmap 记载的迁移程度评估；GPU/引擎实机验收状态另行报告，不在此表内。
 

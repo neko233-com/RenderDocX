@@ -118,6 +118,19 @@ pub fn run_script_with_capture(code: &str, view: &CaptureView) -> EmbedOutput {
                 for (key, value) in &module {
                     dict.set_item(key, value).ok();
                 }
+                // Built-in help() listing the exposed API: the minimal pure-Rust
+                // equivalent of the upstream help browser's discovery role.
+                let help_src = "def _rdx_help():\n    print('RenderDocX Python API: ' + ', '.join(sorted(k for k in dir(renderdocx) if not k.startswith('_'))))\n";
+                let help_globals = PyDict::new(py);
+                help_globals.set_item("renderdocx", &m).ok();
+                if py
+                    .run(&cstring(help_src).unwrap(), Some(&help_globals), None)
+                    .is_ok()
+                {
+                    if let Ok(function) = help_globals.get_item("_rdx_help") {
+                        dict.set_item("help", function).ok();
+                    }
+                }
                 modules.set_item("renderdocx", m).ok();
             }
         }
@@ -269,6 +282,11 @@ mod tests {
         assert!(result.stdout.contains("7 Vulkan 42 texA"));
         assert!(result.stdout.contains("DrawIndexed"));
         assert!(result.stdout.contains("MainColor 1920 1080"));
+
+        let help = run_script_with_capture("import renderdocx\nrenderdocx.help()", &view);
+        assert!(help.error.is_none(), "{:?}", help.error);
+        assert!(help.stdout.contains("RenderDocX Python API"));
+        assert!(help.stdout.contains("action_count"));
     }
 
     #[test]
