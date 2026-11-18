@@ -4868,6 +4868,61 @@ impl Workspace {
         .detach();
     }
 
+    /// Generate a fresh AMD RGP profile through the replay core
+    /// (`IReplayController::CreateRGPProfile`), then reveal the produced file.
+    fn create_rgp_profile(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            self.status = Some(
+                self.t("Open a capture first to create an RGP profile.", "请先打开捕获再生成 RGP profile。")
+                    .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        if self.replay_pending {
+            return;
+        }
+        self.replay_pending = true;
+        self.status = Some(self.t("Creating RGP profile…", "正在生成 RGP profile…").to_owned());
+        cx.notify();
+        let task = cx
+            .background_executor()
+            .spawn(async move { session.create_rgp_profile() });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.replay_pending = false;
+                this.status = Some(match result {
+                    Ok(profile) => {
+                        if let Ok(bytes) = std::fs::read(&profile.path) {
+                            // Copy into the config dir so it survives temp cleanup,
+                            // then hand it to the default RGP handler.
+                            if let Some(dir) = Settings::config_dir() {
+                                let target = dir.join("renderdoc_generated.rgp");
+                                if std::fs::write(&target, &bytes).is_ok() {
+                                    let _ = std::process::Command::new("explorer")
+                                        .arg(&target)
+                                        .spawn();
+                                }
+                            }
+                        }
+                        format!(
+                            "{} {} ({} bytes)",
+                            this.t("RGP profile created:", "RGP profile 已生成："),
+                            profile.path,
+                            profile.size
+                        )
+                    }
+                    Err(error) => {
+                        format!("{}: {error}", this.t("Could not create RGP profile", "无法生成 RGP profile"))
+                    }
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Backup file recording the registry state from before the global hook.
     fn global_hook_backup_path() -> Option<std::path::PathBuf> {
         Settings::config_dir().map(|dir| dir.join("global_hook_backup.json"))
@@ -21864,6 +21919,7 @@ impl Render for Workspace {
                         )))
                         .child(button("rdc-suggest-remote", self.t("Suggest remote replay for this capture", "建议对此捕获使用远程回放"), false, |this, cx| this.open_suggest_remote(cx), cx))
                         .child(button("rdc-extract-rgp", self.t("Extract RGP profile…", "提取 RGP profile…"), false, |this, cx| this.extract_rgp_profile(cx), cx))
+                        .child(button("create-rgp-profile", self.t("Create RGP profile (AMD)…", "生成 RGP profile（AMD）…"), false, |this, cx| this.create_rgp_profile(cx), cx))
                         .child(div().id("rdc-sections").test_support().flex().flex_col().gap_0().max_h(px(160.)).overflow_hidden()
                             .children(file.sections.iter().enumerate().map(|(index, section)| {
                                 div().id(("rdc-section", index)).test_support().cursor_pointer().text_sm().child(format!(

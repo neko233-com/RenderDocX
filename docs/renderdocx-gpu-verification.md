@@ -141,6 +141,32 @@ test real_vulkan_vertex_shader_messages_resolve_and_debug ... ok
 test result: ok. 20 passed; 0 failed; 0 ignored
 ```
 
+## RGP profile creation (`CreateRGPProfile`)
+
+Implemented end-to-end:
+
+- `bridge/replay/main.cpp` command `create_rgp_profile` builds a
+  `WindowingData` (hidden Win32 window) and calls
+  `IReplayController::CreateRGPProfile`, returning the produced path/size.
+- `Session::create_rgp_profile` (Rust), CLI serve command `create_rgp_profile`,
+  and a GUI "Create RGP profile (AMD)…" button.
+
+Observed on this machine: `open` with `gpu_vendor=2` replaying an AMD-captured
+Vulkan file succeeds, but `create_rgp_profile` returns
+
+```
+rgp_profile_failed: RGP profile creation failed. AMD RGP requires an AMD GPU
+and a driver that exposes the RGP control interface (GetRGPControl).
+```
+
+The AMD Radeon(TM) Graphics iGPU does not expose `GetRGPControl`; RGP generally
+needs a discrete Radeon with RGP-capable drivers. This is the same condition the
+upstream core reports (`RGP Capture is not supported on this API implementation`),
+so the code path is complete and the failure is hardware capability, not a
+missing feature. NVIDIA captures cannot be replayed on AMD (the core rejects
+cross-vendor replay), so a genuinely RGP-capable AMD GPU is required to produce
+a profile.
+
 ## Reproduce
 
 ```powershell

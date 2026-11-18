@@ -110,6 +110,14 @@ pub struct RecompressResult {
     pub size: u64,
 }
 
+/// A freshly generated AMD RGP profile written by the replay core.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RgpProfileResult {
+    pub path: String,
+    #[serde(default)]
+    pub size: u64,
+}
+
 /// A page of direct children in RenderDoc's structured capture data.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StructurePage {
@@ -1650,6 +1658,10 @@ enum Reply {
     DebugStopped,
     Dependencies(CaptureDependencies),
     DependenciesSaved,
+    RgpProfile {
+        path: String,
+        size: u64,
+    },
     Gpus {
         gpus: Vec<crate::live::ReplayGpu>,
     },
@@ -2231,6 +2243,9 @@ trait Transport: Send {
     fn recompress(&mut self, _destination: &Path) -> Result<RecompressResult, String> {
         Err("Capture recompression is not supported by this transport".into())
     }
+    fn create_rgp_profile(&mut self) -> Result<RgpProfileResult, String> {
+        Err("RGP profile creation is not supported by this transport".into())
+    }
     fn structure(
         &mut self,
         _event: u32,
@@ -2500,6 +2515,21 @@ impl Transport for Process {
             Reply::Recompress(result) => Ok(result),
             Reply::Error { message } => Err(message),
             _ => Err("Unexpected recompress response".into()),
+        }
+    }
+
+    fn create_rgp_profile(&mut self) -> Result<RgpProfileResult, String> {
+        if self.capture_stamp.is_none() {
+            return Err("Capture changed since it was opened".into());
+        }
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(input, "create_rgp_profile")
+            .and_then(|_| input.flush())
+            .map_err(|error| error.to_string())?;
+        match self.read()? {
+            Reply::RgpProfile { path, size } => Ok(RgpProfileResult { path, size }),
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected RGP profile response".into()),
         }
     }
 
@@ -4955,6 +4985,17 @@ impl Session {
             .lock()
             .map_err(|error| error.to_string())?
             .recompress(destination)
+    }
+
+    /// Generate a fresh AMD RGP profile from the open capture
+    /// (`IReplayController::CreateRGPProfile`). Requires an AMD GPU/driver that
+    /// exposes the RGP control interface; otherwise the core reports that RGP
+    /// capture is unsupported.
+    pub fn create_rgp_profile(&self) -> Result<RgpProfileResult, String> {
+        self.process
+            .lock()
+            .map_err(|error| error.to_string())?
+            .create_rgp_profile()
     }
 
     pub fn structure(

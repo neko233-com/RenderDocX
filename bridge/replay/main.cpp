@@ -1230,6 +1230,41 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
       std::cout << "]}" << std::endl;
       continue;
     }
+    if(command == "create_rgp_profile")
+    {
+      // Upstream ReplayController::CreateRGPProfile needs a real windowing
+      // system for its ReplayOutput. Use a hidden 1x1 window on Windows.
+      WindowingData window = {};
+#ifdef _WIN32
+      HWND hwnd = CreateWindowExW(0, L"STATIC", L"RenderDocX RGP", 0, 0, 0, 1, 1, NULL, NULL,
+                                  GetModuleHandleW(NULL), NULL);
+      window.system = WindowingSystem::Win32;
+      window.win32.window = hwnd;
+#else
+      window.system = WindowingSystem::Headless;
+      window.headless.width = 1;
+      window.headless.height = 1;
+#endif
+      rdcstr path = replay.controller->CreateRGPProfile(window);
+#ifdef _WIN32
+      if(hwnd)
+        DestroyWindow(hwnd);
+#endif
+      if(path.empty())
+      {
+        error("RGP profile creation failed. AMD RGP requires an AMD GPU and a driver "
+              "that exposes the RGP control interface (GetRGPControl).");
+        continue;
+      }
+      uint64_t size = 0;
+      std::ifstream file(path.c_str(), std::ios::binary | std::ios::ate);
+      if(file)
+        size = uint64_t(file.tellg());
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"rgp_profile\",\"path\":";
+      json_string(path.c_str(), path.size());
+      std::cout << ",\"size\":" << size << "}" << std::endl;
+      continue;
+    }
     if(command == "dependencies" || command.compare(0, 18, "dependencies_save ") == 0)
     {
       const bool saving = command != "dependencies";
