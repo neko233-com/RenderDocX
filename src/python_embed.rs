@@ -300,6 +300,171 @@ fn revert_shader_edit(
     to_py(py, &value)
 }
 
+/// Field-addressable pipeline wrapper mirroring the useful parts of upstream
+/// `PipeState` without changing the existing dict-returning `pipeline()` API.
+#[pyo3::pyclass]
+struct PipelineObject {
+    value: serde_json::Value,
+}
+
+impl PipelineObject {
+    fn field(&self, key: &str) -> Option<&serde_json::Value> {
+        self.value.get(key)
+    }
+
+    fn field_or_empty(&self, key: &str) -> serde_json::Value {
+        self.field(key).cloned().unwrap_or(serde_json::Value::Null)
+    }
+}
+
+#[pyo3::pymethods]
+impl PipelineObject {
+    #[getter]
+    fn event_id(&self) -> u32 {
+        self.field("event_id")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(0)
+    }
+
+    #[getter]
+    fn available(&self) -> bool {
+        self.field("available")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    #[allow(non_snake_case)]
+    fn GetEventId(&self) -> u32 {
+        self.event_id()
+    }
+
+    #[allow(non_snake_case)]
+    fn GetShader(
+        &self,
+        py: Python<'_>,
+        stage: u32,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        let shader = self
+            .field("shaders")
+            .and_then(|shaders| shaders.get(stage as usize))
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err("Invalid shader stage")
+            })?;
+        to_py(py, shader)
+    }
+
+    #[allow(non_snake_case)]
+    fn GetOutputs(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        to_py(py, &self.field_or_empty("outputs"))
+    }
+
+    #[allow(non_snake_case)]
+    fn GetColorAttachments(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        to_py(py, &self.field_or_empty("color_attachments"))
+    }
+
+    #[allow(non_snake_case)]
+    fn GetDepthAttachment(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        to_py(py, &self.field_or_empty("depth_attachment"))
+    }
+
+    #[allow(non_snake_case)]
+    fn GetIBuffer(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        to_py(py, &self.field_or_empty("index_buffer"))
+    }
+
+    #[allow(non_snake_case)]
+    fn GetVBuffers(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        to_py(py, &self.field_or_empty("vertex_buffers"))
+    }
+
+    #[allow(non_snake_case)]
+    fn GetVertexInputs(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        to_py(py, &self.field_or_empty("vertex_inputs"))
+    }
+
+    #[allow(non_snake_case)]
+    fn GetViewports(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        to_py(py, &self.field_or_empty("viewports"))
+    }
+
+    #[allow(non_snake_case)]
+    fn GetScissors(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        to_py(py, &self.field_or_empty("scissors"))
+    }
+
+    #[allow(non_snake_case)]
+    fn GetFixedState(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        to_py(py, &self.field_or_empty("fixed_state"))
+    }
+
+    #[pyo3(signature = (key, default = None))]
+    fn get(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        default: Option<Bound<'_, pyo3::PyAny>>,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.value.get(key) {
+            Some(value) => to_py(py, value),
+            None => Ok(default.map(Bound::unbind).unwrap_or_else(|| py.None())),
+        }
+    }
+
+    fn keys(&self) -> Vec<String> {
+        self.value
+            .as_object()
+            .map(|object| object.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn __getitem__(
+        &self,
+        py: Python<'_>,
+        key: &str,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.value.get(key) {
+            Some(value) => to_py(py, value),
+            None => Err(pyo3::exceptions::PyKeyError::new_err(key.to_owned())),
+        }
+    }
+}
+
+/// `PipelineState(event=None)` -> field-addressable pipeline object. Supports
+/// `.event_id`, `.available`, `.GetShader(stage)`, `.GetOutputs()`,
+/// `.GetColorAttachments()`, `.GetDepthAttachment()`, `.GetIBuffer()`,
+/// `.GetVBuffers()`, `.GetVertexInputs()`, `.GetViewports()`, `.GetScissors()`,
+/// `.GetFixedState()`, `[...]`, `.get()` and `.keys()`.
+#[pyo3::pyfunction]
+#[pyo3(signature = (event = None))]
+#[allow(non_snake_case)]
+fn PipelineState(
+    event: Option<u32>,
+) -> pyo3::PyResult<PipelineObject> {
+    let session = active_session()?;
+    let event = match event {
+        Some(event) => event,
+        None => {
+            let current = active_event();
+            if current == 0 {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "No event is selected",
+                ));
+            }
+            current
+        }
+    };
+    let value = session
+        .pipeline_for_event(event)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    set_active_event(Some(event));
+    let mut document = serde_json::to_value(&value)
+        .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+    apply_replacements(&mut document);
+    Ok(PipelineObject { value: document })
+}
+
 /// `pipeline_shader(event, stage)` -> the bound shader entry for a stage.
 #[pyo3::pyfunction]
 #[allow(non_snake_case)]
@@ -616,7 +781,7 @@ fn CurRootActions(py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
 /// `CurPipelineState()` -> pipeline for the current event.
 #[pyo3::pyfunction]
 #[allow(non_snake_case)]
-fn CurPipelineState(py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+fn CurPipelineState() -> pyo3::PyResult<PipelineObject> {
     let event = active_event();
     if event == 0 {
         return Err(pyo3::exceptions::PyRuntimeError::new_err(
@@ -631,7 +796,7 @@ fn CurPipelineState(py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
         pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
     })?;
     apply_replacements(&mut document);
-    to_py(py, &document)
+    Ok(PipelineObject { value: document })
 }
 
 /// `GetAction(event)` -> action containing the event, or None.
@@ -727,8 +892,8 @@ struct ReplayController;
 #[pyo3::pymethods]
 impl ReplayController {
     #[allow(non_snake_case)]
-    fn GetPipelineState(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
-        CurPipelineState(py)
+    fn GetPipelineState(&self) -> pyo3::PyResult<PipelineObject> {
+        CurPipelineState()
     }
 
     #[allow(non_snake_case)]
@@ -1985,6 +2150,7 @@ fn build_capture_module<'py>(
         ("DebugShader", pyo3::wrap_pyfunction!(DebugShader, py)),
         ("apply_shader_edit", pyo3::wrap_pyfunction!(apply_shader_edit, py)),
         ("revert_shader_edit", pyo3::wrap_pyfunction!(revert_shader_edit, py)),
+        ("PipelineState", pyo3::wrap_pyfunction!(PipelineState, py)),
         ("pipeline_shader", pyo3::wrap_pyfunction!(pipeline_shader, py)),
         ("pipeline_output", pyo3::wrap_pyfunction!(pipeline_output, py)),
         ("pipeline_color_attachment", pyo3::wrap_pyfunction!(pipeline_color_attachment, py)),
@@ -2279,6 +2445,7 @@ mod tests {
             "renderdocx.debug_stop()",
             "renderdocx.Replay().GetPipelineState()",
             "renderdocx.Replay().SetFrameEvent(1)",
+            "renderdocx.PipelineState()",
             "renderdocx.pipeline_shader(1, 0)",
             "renderdocx.pipeline_output(1)",
             "renderdocx.pipeline_color_attachment(1)",
@@ -2446,6 +2613,8 @@ mod tests {
              controller = renderdocx.Replay()\n\
              controller.SetFrameEvent(19)\n\
              print('replay', controller.GetPipelineState().get('event_id') == 19 and len(controller.GetTextures()) == 2 and len(controller.GetBuffers()) == 1 and len(controller.GetResources()) > 0 and controller.GetFrameInfo() is not None and isinstance(controller.GetAPIProperties(), dict))\n\
+             ps = renderdocx.PipelineState(19)\n\
+             print('pipeline-object', ps.event_id == 19 and ps.available and ps.GetEventId() == 19 and ps.GetShader(4).get('bound') and len(ps.GetOutputs()) == 2 and ps['event_id'] == 19 and ps.get('event_id') == 19 and ps.GetColorAttachments()[0].get('resource', {}).get('resource_index') == 7 and 'event_id' in ps.keys())\n\
              renderdocx.RegisterReplacement(7, 8)\n\
              replaced = renderdocx.pipeline(19).get('outputs') or [{}]\n\
              print('replace', replaced[0].get('resource_index') == 8)\n\
@@ -2493,6 +2662,7 @@ mod tests {
         assert!(result.stdout.contains("render True"), "{}", result.stdout);
         assert!(result.stdout.contains("compat True"), "{}", result.stdout);
         assert!(result.stdout.contains("replay True"), "{}", result.stdout);
+        assert!(result.stdout.contains("pipeline-object True"), "{}", result.stdout);
         assert!(result.stdout.contains("replace True"), "{}", result.stdout);
         assert!(result.stdout.contains("unreplace True"), "{}", result.stdout);
         assert!(result.stdout.contains("debug True"), "{}", result.stdout);
