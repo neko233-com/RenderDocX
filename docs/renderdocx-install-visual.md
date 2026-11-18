@@ -24,7 +24,8 @@ SHA-256 of the output. Contents: `renderdocx.exe`, `renderdocx-cli.exe`, the
 README and the feature-matrix/roadmap documents, plus Start-menu shortcuts.
 
 Verified in this checkout with WiX 5.0.2: a `0.1.0.0` x64 MSI was produced from
-the release binaries (≈10 MB, SHA-256 3E21EF0C…). Its contents were verified
+the release binaries (11.14 MB, SHA-256
+`2BFBA2483EF494B883C50E7FC35C5D65F8292C2631F05D2227FE4D81E4C86585`). Its contents were verified
 non-interactively with an administrative install
 (`msiexec /a RenderDocX-0.1.0-x64.msi /qn TARGETDIR=<dir>`), which exited 0 and
 extracted exactly: `PFiles64/RenderDocX/renderdocx.exe` (34.7 MB),
@@ -37,21 +38,22 @@ extracted exactly: `PFiles64/RenderDocX/renderdocx.exe` (34.7 MB),
 ```
 msiexec /i exit code: 0
 Installed executable: C:\Users\<user>\AppData\Local\Programs\RenderDocX\renderdocx.exe
-Captured installed app 1056x799 -> target/visual/msi-installed-app.png
+Captured installed app 1582x1196 -> target/visual/msi-installed-app.png
 msiexec /x exit code: 0
 Uninstall removed payload: True
 ```
 
-The installed binary's real window was captured at 1056×799 through UI
-Automation + BitBlt, and uninstall removed the payload. Logs are written to
-`target/visual/msi-install.log` / `msi-uninstall.log`.
+The installed binary's real window was captured at 1582×1196 through UI
+Automation + BitBlt (the screenshot shows the Chinese workspace UI and the
+embedded-CPython extension description), and uninstall removed the payload.
+Logs are written to `target/visual/msi-install.log` / `msi-uninstall.log`.
 
 ## Visual verification
 
 Two complementary mechanisms are provided:
 
 1. **Element-tree assertions (headless-friendly).** `cargo test --features
-   ui-tests` runs 12 GPUI tests that drive the real `Workspace` and assert
+   ui-tests` runs 13 GPUI tests that drive the real `Workspace` and assert
    element visibility and interaction (`window.find("...").visible()`),
    covering the log panel, config editor, texture preview, histogram, shader
    source/debug views, event tree and more. These are machine-readable visual

@@ -22022,8 +22022,8 @@ impl Render for Workspace {
             .child(div().flex().flex_col().gap_1()
                 .child(self.t("Extensions", "扩展"))
                 .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
-                    "UI extensions discovered from extension.json manifests. Script execution uses the external Python path.",
-                    "从 extension.json 清单发现的 UI 扩展。脚本执行使用外部 Python 路径。",
+                    "UI extensions discovered from extension.json manifests. Script execution uses the embedded CPython interpreter.",
+                    "从 extension.json 清单发现的 UI 扩展。脚本执行使用嵌入式 CPython 解释器。",
                 )))
                 .child(Button::new("extensions-refresh")
                     .label(self.t("Refresh extensions", "刷新扩展")).secondary()

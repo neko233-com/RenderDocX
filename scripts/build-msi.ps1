@@ -30,7 +30,14 @@ $targetDir = Join-Path $repo "target/$Configuration"
 if (-not $SkipBuild) {
   Write-Host "Building RenderDocX ($Configuration)..."
   Push-Location $repo
-  try { cargo build --bins --configuration $Configuration } finally { Pop-Location }
+  try {
+    if ($Configuration -eq 'release') {
+      cargo build --bins --release
+    } else {
+      cargo build --bins
+    }
+    if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }
+  } finally { Pop-Location }
 }
 
 foreach ($exe in @('renderdocx.exe', 'renderdocx-cli.exe')) {
