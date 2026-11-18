@@ -4550,7 +4550,16 @@ impl Workspace {
                             match renderdocx::structured_data::read_chunks(&bytes) {
                                 Ok(chunks) => {
                                     let shown: Vec<String> = chunks.iter().take(8).map(|c| {
-                                        format!("chunk {} len={} flags={:x}", c.chunk_id, c.length, if c.has_callstack { 1 } else { 0 })
+                                        let mut label = format!("chunk {} len={} flags={:x}", c.chunk_id, c.length, if c.has_callstack { 1 } else { 0 });
+                                        // Probe whether this chunk payload is self-describing.
+                                        let end = c.payload_offset.saturating_add(c.length as usize).min(bytes.len());
+                                        if c.payload_offset < end {
+                                            let mut cursor = renderdocx::structured_data::BinaryCursor::new(&bytes[c.payload_offset..end]);
+                                            if let Ok(object) = renderdocx::structured_data::read_sd_object(&mut cursor, 0) {
+                                                label.push_str(&format!(" → object '{}' type '{}'", object.name, object.object_type.name));
+                                            }
+                                        }
+                                        label
                                     }).collect();
                                     detail.push_str(&format!("\n{} chunks: {}", chunks.len(), shown.join(", ")));
                                 }

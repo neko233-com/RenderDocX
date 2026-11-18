@@ -10,7 +10,7 @@
 
 A typed-value layer translated from `DoSerialise(SDObject&)` (`serialiser.cpp:774`) adds `SdType`/`SdObject` and `read_sd_object`, reading self-describing object trees (name, type, data, recursive children) with depth/child-count guards plus `SDBasic` category constants and `basic_as_u32`. This is the wire format the replay bridge uses to transfer structured data. 2 additional unit tests round-trip a small object tree and reject pathological child counts.
 
-The `.rdc` inspector exposes this as a tool: paste hex bytes of an SDObject wire payload and the GUI expands the parsed object tree with the pure-Rust reader.
+The `.rdc` inspector exposes this as a tool: paste hex bytes of an SDObject wire payload and the GUI expands the parsed object tree with the pure-Rust reader. When inspecting FrameCapture sections it also probes each chunk payload with `read_sd_object`, showing the object name/type when the payload is self-describing (silently skipping typed C++ struct payloads).
 
 Boundary: the self-describing `SDObject` wire format is now readable, but section *payloads* are serialized against per-chunk C++ struct layouts (no embedded type info) and require the replay core's registered deserializers; the D3D11/GL/Vulkan replay engines likewise remain the C++ core. Upstream's serialise layer alone is ~186 KB of C++, and crates.io has no Rust `.rdc` replay library, so replacing the full replay core remains a separate large engineering effort rather than an incremental migration.
 
