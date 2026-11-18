@@ -31544,5 +31544,32 @@ mod ui_tests {
                 });
             }
         }
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.python_input.update(cx, |input, cx| {
+                    input.set_value("print(2468)", window, cx)
+                });
+                view.execute_python_input(cx);
+            });
+        })
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            if cx.update(|cx| {
+                view.read(cx)
+                    .python_output
+                    .iter()
+                    .any(|line| line.contains("2468"))
+            }) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Python console did not return output"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 }

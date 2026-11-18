@@ -152,6 +152,12 @@ struct ViewerState {
     current_step: u32,
     watches: Vec<String>,
     errors: String,
+    script_text: String,
+    output_filter: Option<String>,
+    extension_output_filter: Option<String>,
+    show_output: bool,
+    show_repl: bool,
+    show_help: bool,
 }
 
 /// Lightweight handle for a viewer panel, returned by `Get*Viewer()`.
@@ -719,6 +725,23 @@ impl ViewerHandle {
     }
 
     #[allow(non_snake_case)]
+    fn GetCurrentBreakpoint(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        let guard = ACTIVE_DEBUG_TIMELINE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let timeline = guard.as_ref().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("Collect a shader debug trace first")
+        })?;
+        let mut navigator = crate::debug_navigation::DebugNavigator::default();
+        navigator.position = timeline.position;
+        navigator.breakpoints = timeline.breakpoints.clone();
+        match navigator.current_breakpoint(&timeline.trace, &timeline.states, false) {
+            Some(breakpoint) => to_py(py, &breakpoint),
+            None => Ok(py.None()),
+        }
+    }
+
+    #[allow(non_snake_case)]
     fn AddWatch(&self, name: String) {
         self.state
             .lock()
@@ -789,6 +812,130 @@ impl ViewerHandle {
             .unwrap_or_else(|error| error.into_inner())
             .errors
             .clone()
+    }
+
+    #[allow(non_snake_case)]
+    fn GetScriptText(&self) -> String {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .script_text
+            .clone()
+    }
+
+    #[allow(non_snake_case)]
+    fn SetScriptText(&self, text: String) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .script_text = text;
+    }
+
+    #[allow(non_snake_case)]
+    fn LoadScriptFromFilename(&self, path: String) -> pyo3::PyResult<()> {
+        let text = std::fs::read_to_string(&path)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .script_text = text;
+        Ok(())
+    }
+
+    #[allow(non_snake_case)]
+    fn CreateNewScriptEditor(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .script_text
+            .clear();
+    }
+
+    #[allow(non_snake_case)]
+    fn RunScript(&self, py: Python<'_>, code: String) -> pyo3::PyResult<()> {
+        let globals = REPL_GLOBALS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(|globals| globals.bind(py).clone())
+            .unwrap_or_else(|| PyDict::new(py));
+        py.run(
+            &cstring(&code).map_err(pyo3::exceptions::PyValueError::new_err)?,
+            Some(&globals),
+            None,
+        )
+        .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(format_py_error(py, &error)))
+    }
+
+    #[allow(non_snake_case)]
+    fn SetScriptOutputFilter(&self, filter: String) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .output_filter = Some(filter);
+    }
+
+    #[allow(non_snake_case)]
+    fn SetExtensionOutputFilter(&self, filter: String) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .extension_output_filter = Some(filter);
+    }
+
+    #[allow(non_snake_case)]
+    fn RemoveOutputFilter(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.output_filter = None;
+        state.extension_output_filter = None;
+    }
+
+    #[allow(non_snake_case)]
+    fn GetOutputFilter(&self) -> Option<String> {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .output_filter
+            .clone()
+    }
+
+    #[allow(non_snake_case)]
+    fn GetExtensionOutputFilter(&self) -> Option<String> {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .extension_output_filter
+            .clone()
+    }
+
+    #[allow(non_snake_case)]
+    fn ShowOutput(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .show_output = true;
+        queue_ui_request("python");
+    }
+
+    #[allow(non_snake_case)]
+    fn ShowREPL(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .show_repl = true;
+        queue_ui_request("python");
+    }
+
+    #[allow(non_snake_case)]
+    fn ShowHelp(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .show_help = true;
+        queue_ui_request("python");
     }
 }
 
@@ -5385,7 +5532,32 @@ mod tests {
         );
         assert!(result.error.is_none(), "{:?}", result.error);
         assert_eq!(result.stdout.trim(), "samp 1 samp True");
-        assert!(GetPythonShell().AttachDebugger().is_err());
+        let shell = GetPythonShell();
+        assert!(shell.AttachDebugger().is_err());
+        shell.SetScriptText("print(7)".to_owned());
+        assert_eq!(shell.GetScriptText(), "print(7)");
+        shell.SetScriptOutputFilter("alpha".to_owned());
+        assert_eq!(shell.GetOutputFilter().as_deref(), Some("alpha"));
+        shell.SetExtensionOutputFilter("beta".to_owned());
+        assert_eq!(shell.GetExtensionOutputFilter().as_deref(), Some("beta"));
+        shell.RemoveOutputFilter();
+        assert_eq!(shell.GetOutputFilter(), None);
+        let script_dir = tempfile::tempdir().unwrap();
+        let script = script_dir.path().join("extension.py");
+        std::fs::write(&script, "print(9)\n").unwrap();
+        shell
+            .LoadScriptFromFilename(script.display().to_string())
+            .unwrap();
+        assert_eq!(shell.GetScriptText(), "print(9)\n");
+        let result = run_script_with_capture(
+            "import renderdocx\n\
+             shell = renderdocx.GetPythonShell()\n\
+             shell.SetScriptText('print(31415)')\n\
+             shell.RunScript(shell.GetScriptText())",
+            &CaptureView::default(),
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(result.stdout.contains("31415"), "{}", result.stdout);
     }
 
     #[cfg(windows)]
@@ -5564,6 +5736,8 @@ mod tests {
              print('shader-breakpoint', line is not None and len(sh.GetBreakpoints()) == 1 and isinstance(renderdocx.debug_timeline(), dict))\n\
              run = sh.RunForward()\n\
              print('shader-run', isinstance(run, dict) and run.get('reason') in ('breakpoint', 'boundary', 'step', 'event', 'source') and isinstance(run.get('position'), int))\n\
+             cb = sh.GetCurrentBreakpoint()\n\
+             print('shader-current-breakpoint', (run.get('reason') != 'breakpoint') or isinstance(cb, dict))\n\
              notes0 = renderdocx.GetNotes()\n\
              bookmarks0 = renderdocx.GetBookmarks()\n\
              renderdocx.SetNotes('renderdocx notes')\n\
@@ -5659,6 +5833,11 @@ mod tests {
             result.stdout
         );
         assert!(result.stdout.contains("shader-run True"), "{}", result.stdout);
+        assert!(
+            result.stdout.contains("shader-current-breakpoint True"),
+            "{}",
+            result.stdout
+        );
         assert!(result.stdout.contains("debugshader True"), "{}", result.stdout);
         assert_eq!(
             take_ui_requests(),
