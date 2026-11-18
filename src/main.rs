@@ -913,6 +913,8 @@ struct Workspace {
     message_generation: u64,
     shader_message_page: Option<renderdocx::replay::ShaderMessagePage>,
     selected_shader_message: Option<usize>,
+    selected_shader_messages: std::collections::BTreeSet<usize>,
+    shader_message_selection_anchor: Option<usize>,
     pending_shader_messages_event: Option<u32>,
     shader_vertex_resolution: Option<ShaderVertexResolution>,
     shader_vertex_lookup_pending: bool,
@@ -1971,6 +1973,8 @@ impl Workspace {
                     Ok(page) => {
                         this.shader_message_page = Some(page);
                         this.selected_shader_message = None;
+                        this.selected_shader_messages.clear();
+                        this.shader_message_selection_anchor = None;
                         this.pending_shader_messages_event = None;
                         this.shader_vertex_resolution = None;
                         this.shader_vertex_lookup_pending = false;
@@ -2016,6 +2020,8 @@ impl Workspace {
         };
         self.shader_message_page = None;
         self.selected_shader_message = None;
+        self.selected_shader_messages.clear();
+        self.shader_message_selection_anchor = None;
         self.shader_vertex_resolution = None;
         self.read_shader_messages(0, cx);
     }
@@ -6635,6 +6641,8 @@ impl Workspace {
                         this.show_hidden_messages = false;
                         this.shader_message_page = None;
                         this.selected_shader_message = None;
+                        this.selected_shader_messages.clear();
+                        this.shader_message_selection_anchor = None;
                         this.pending_shader_messages_event = None;
                         this.shader_vertex_resolution = None;
                         this.shader_vertex_lookup_pending = false;
@@ -7065,6 +7073,8 @@ impl Workspace {
         self.debug_view = None;
         self.shader_message_page = None;
         self.selected_shader_message = None;
+        self.selected_shader_messages.clear();
+        self.shader_message_selection_anchor = None;
         self.shader_vertex_resolution = None;
         self.descriptor_page = None;
         let open_revision = self.open_revision;
@@ -8337,6 +8347,8 @@ impl Workspace {
                         this.pipeline = Some(edit.pipeline);
                         this.shader_message_page = None;
                         this.selected_shader_message = None;
+                        this.selected_shader_messages.clear();
+                        this.shader_message_selection_anchor = None;
                         this.shader_vertex_resolution = None;
                         this.shader_report_stale = true;
                         this.mesh = MeshView::default();
@@ -15633,18 +15645,31 @@ impl Workspace {
                                     .px_3()
                                     .overflow_hidden()
                                     .cursor_pointer()
-                                    .bg(rgb(if this.selected_shader_message == Some(index) {
+                                    .bg(rgb(if this.selected_shader_messages.contains(&index)
+                                        || this.selected_shader_message == Some(index)
+                                    {
                                         0x304c7c
                                     } else {
                                         0x192332
                                     }))
                                     .child(label)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                    .on_click(cx.listener(move |this, click: &gpui::ClickEvent, _, cx| {
                                         if !this.shader_vertex_lookup_pending {
                                             if this.selected_shader_message != Some(index) {
                                                 this.shader_vertex_resolution = None;
                                             }
-                                            this.selected_shader_message = Some(index);
+                                            let modifiers = match click {
+                                                gpui::ClickEvent::Mouse(mouse) => mouse.down.modifiers,
+                                                _ => gpui::Modifiers::default(),
+                                            };
+                                            renderdocx::debug_message_view::apply_selection(
+                                                &mut this.selected_shader_messages,
+                                                &mut this.shader_message_selection_anchor,
+                                                &mut this.selected_shader_message,
+                                                index,
+                                                modifiers.control,
+                                                modifiers.shift,
+                                            );
                                             cx.notify();
                                         }
                                     })),
@@ -20549,6 +20574,8 @@ impl Workspace {
                             this.show_hidden_messages = false;
                             this.shader_message_page = None;
                             this.selected_shader_message = None;
+                        this.selected_shader_messages.clear();
+                        this.shader_message_selection_anchor = None;
                             this.pending_shader_messages_event = None;
                             this.shader_vertex_resolution = None;
                             this.shader_vertex_lookup_pending = false;
@@ -22910,6 +22937,8 @@ fn main() {
                         message_generation: 0,
                         shader_message_page: None,
                         selected_shader_message: None,
+                        selected_shader_messages: Default::default(),
+                        shader_message_selection_anchor: None,
                         pending_shader_messages_event: None,
                         shader_vertex_resolution: None,
                         shader_vertex_lookup_pending: false,
@@ -23793,6 +23822,8 @@ mod ui_tests {
                         message_generation: 0,
                         shader_message_page: None,
                         selected_shader_message: None,
+                        selected_shader_messages: Default::default(),
+                        shader_message_selection_anchor: None,
                         pending_shader_messages_event: None,
                         shader_vertex_resolution: None,
                         shader_vertex_lookup_pending: false,
@@ -24616,6 +24647,8 @@ mod ui_tests {
                         message_generation: 0,
                         shader_message_page: None,
                         selected_shader_message: None,
+                        selected_shader_messages: Default::default(),
+                        shader_message_selection_anchor: None,
                         pending_shader_messages_event: None,
                         shader_vertex_resolution: None,
                         shader_vertex_lookup_pending: false,
