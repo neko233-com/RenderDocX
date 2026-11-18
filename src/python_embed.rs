@@ -16,6 +16,132 @@ static REPL_GLOBALS: Mutex<Option<pyo3::Py<PyDict>>> = Mutex::new(None);
 // Replay session exposed to script helpers such as renderdocx.pipeline(event).
 static ACTIVE_SESSION: Mutex<Option<crate::replay::Session>> = Mutex::new(None);
 
+// Snapshot pieces needed by event formatting and texture queries. Snapshot
+// itself is not Clone, so only the small vectors are copied.
+static ACTIVE_RESOURCES: Mutex<Option<Vec<crate::replay::ResourceInfo>>> = Mutex::new(None);
+static ACTIVE_BUFFERS: Mutex<Option<Vec<crate::replay::Buffer>>> = Mutex::new(None);
+static ACTIVE_TEXTURES: Mutex<Option<Vec<crate::replay::Texture>>> = Mutex::new(None);
+static ACTIVE_LANGUAGE: Mutex<crate::i18n::Language> = Mutex::new(crate::i18n::Language::English);
+
+/// Bind formatting context (resources/buffers/textures/language) for scripts.
+pub fn set_active_format_context(
+    resources: Vec<crate::replay::ResourceInfo>,
+    buffers: Vec<crate::replay::Buffer>,
+    textures: Vec<crate::replay::Texture>,
+    language: crate::i18n::Language,
+) {
+    *ACTIVE_RESOURCES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(resources);
+    *ACTIVE_BUFFERS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(buffers);
+    *ACTIVE_TEXTURES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(textures);
+    *ACTIVE_LANGUAGE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = language;
+}
+
+fn active_resources() -> Vec<crate::replay::ResourceInfo> {
+    ACTIVE_RESOURCES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+        .unwrap_or_default()
+}
+
+fn active_buffers() -> Vec<crate::replay::Buffer> {
+    ACTIVE_BUFFERS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+        .unwrap_or_default()
+}
+
+fn active_textures() -> Vec<crate::replay::Texture> {
+    ACTIVE_TEXTURES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+        .unwrap_or_default()
+}
+
+fn active_language() -> crate::i18n::Language {
+    *ACTIVE_LANGUAGE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
+/// `renderdocx.event_format(event, show_all=False, show_names=False)` -> the
+/// formatted event name/parameter text (uses the bound snapshot context).
+#[pyo3::pyfunction]
+#[pyo3(signature = (event, show_all = false, show_names = false))]
+fn event_format(event: u32, show_all: bool, show_names: bool) -> pyo3::PyResult<String> {
+    let session = active_session()?;
+    let resources = active_resources();
+    let buffers = active_buffers();
+    crate::event_parameters::format_event(
+        &session,
+        event,
+        &resources,
+        &buffers,
+        active_language(),
+        show_all,
+        show_names,
+    )
+    .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
+/// `renderdocx.descriptors(event, store=None, offset=0, limit=128)` -> JSON page.
+#[pyo3::pyfunction]
+#[pyo3(signature = (event, store = None, offset = 0, limit = 128))]
+fn descriptors(
+    event: u32,
+    store: Option<usize>,
+    offset: u64,
+    limit: u32,
+) -> pyo3::PyResult<String> {
+    let session = active_session()?;
+    session
+        .descriptors(event, store, offset, limit)
+        .and_then(|page| serde_json::to_string(&page).map_err(|error| error.to_string()))
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
+/// `renderdocx.pixel_history(event, texture_index=0, x=0, y=0, offset=0, limit=128)`
+/// -> JSON page for a texture from the bound snapshot.
+#[pyo3::pyfunction]
+#[pyo3(signature = (event, texture_index = 0, x = 0, y = 0, offset = 0, limit = 128))]
+fn pixel_history(
+    event: u32,
+    texture_index: usize,
+    x: u32,
+    y: u32,
+    offset: u64,
+    limit: u32,
+) -> pyo3::PyResult<String> {
+    let session = active_session()?;
+    let textures = active_textures();
+    let texture = textures.get(texture_index).ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("Texture index is out of range in the bound snapshot")
+    })?;
+    session
+        .pixel_history(
+            event,
+            texture_index as u32,
+            texture,
+            crate::replay::TextureSelection::default(),
+            x,
+            y,
+            offset,
+            limit,
+        )
+        .and_then(|page| serde_json::to_string(&page).map_err(|error| error.to_string()))
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
 /// Register (or clear) the replay session that Python helpers may query.
 pub fn set_active_session(session: Option<crate::replay::Session>) {
     let mut guard = ACTIVE_SESSION
@@ -316,6 +442,9 @@ fn build_capture_module<'py>(
         ("resource_usage", pyo3::wrap_pyfunction!(resource_usage, py)),
         ("shader", pyo3::wrap_pyfunction!(shader, py)),
         ("callstack", pyo3::wrap_pyfunction!(callstack, py)),
+        ("event_format", pyo3::wrap_pyfunction!(event_format, py)),
+        ("descriptors", pyo3::wrap_pyfunction!(descriptors, py)),
+        ("pixel_history", pyo3::wrap_pyfunction!(pixel_history, py)),
     ] {
         if let Ok(function) = wrapped {
             dict.set_item(name, function).ok();
@@ -604,9 +733,15 @@ mod tests {
         );
         let mut settings = Settings::default();
         settings.replay_bridge = Some(bridge);
-        let (session, _snapshot) =
+        let (session, snapshot) =
             crate::replay::Session::open(&settings, &capture).expect("open capture");
         set_active_session(Some(session));
+        set_active_format_context(
+            snapshot.resources.clone(),
+            snapshot.buffers.clone(),
+            snapshot.textures.clone(),
+            crate::i18n::Language::English,
+        );
         let result = run_script_with_capture(
             "import renderdocx, json\n\
              p = json.loads(renderdocx.pipeline(19))\n\
@@ -618,7 +753,10 @@ mod tests {
              print(len(json.loads(renderdocx.resource_usage(0))))\n\
              s = json.loads(renderdocx.pipeline(19)).get('shaders') or []\n\
              print('shaders', len(s))\n\
-             print('stack', isinstance(json.loads(renderdocx.callstack(19)), dict))",
+             print('stack', isinstance(json.loads(renderdocx.callstack(19)), dict))\n\
+             print('format', len(renderdocx.event_format(19)) > 0)\n\
+             print('descs', isinstance(json.loads(renderdocx.descriptors(19)), dict))\n\
+             print('pixels', isinstance(json.loads(renderdocx.pixel_history(19, 0, 1, 1)), dict))",
             &CaptureView::default(),
         );
         set_active_session(None);

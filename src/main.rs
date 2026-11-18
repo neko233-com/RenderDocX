@@ -4735,7 +4735,7 @@ impl Workspace {
             let function = if enabling { "register" } else { "unregister" }.to_owned();
             let extension_name = name.clone();
             let view = self.python_capture_view();
-            renderdocx::python_embed::set_active_session(self.session.clone());
+            self.bind_python_context();
             let task = cx.background_executor().spawn(async move {
                 let view = if enabling { Some(&view) } else { None };
                 renderdocx::python_embed::call_extension(&dir, &function, "1.48", view)
@@ -6064,6 +6064,19 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Bind the open session and its formatting context for Python helpers.
+    fn bind_python_context(&self) {
+        renderdocx::python_embed::set_active_session(self.session.clone());
+        if let Some(snapshot) = &self.snapshot {
+            renderdocx::python_embed::set_active_format_context(
+                snapshot.resources.clone(),
+                snapshot.buffers.clone(),
+                snapshot.textures.clone(),
+                self.settings.language,
+            );
+        }
+    }
+
     /// Read-only capture summary exposed to embedded Python scripts and
     /// extension lifecycle calls as `renderdocx` / `pyrenderdoc`.
     fn python_capture_view(&self) -> renderdocx::python_embed::CaptureView {
@@ -6185,7 +6198,7 @@ impl Workspace {
         cx.notify();
         // Expose the open capture to scripts as the `renderdocx` module.
         let view = self.python_capture_view();
-        renderdocx::python_embed::set_active_session(self.session.clone());
+        self.bind_python_context();
         let task = cx.background_executor().spawn(async move {
             renderdocx::python_embed::run_script_with_capture(&code, &view)
         });
