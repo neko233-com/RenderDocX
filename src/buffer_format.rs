@@ -81,8 +81,7 @@ impl ScalarFormat {
             Self::I32 => i32::from_le_bytes(b.try_into().unwrap()).to_string(),
             Self::U64 => u64::from_le_bytes(b.try_into().unwrap()).to_string(),
             Self::I64 => i64::from_le_bytes(b.try_into().unwrap()).to_string(),
-            Self::F16 => half::f16::from_bits(u16::from_le_bytes(b.try_into().unwrap()))
-                .to_f32()
+            Self::F16 => crate::half_convert::from_half(u16::from_le_bytes(b.try_into().unwrap()))
                 .to_string(),
             Self::F32 => f32::from_le_bytes(b.try_into().unwrap()).to_string(),
             Self::F64 => f64::from_le_bytes(b.try_into().unwrap()).to_string(),

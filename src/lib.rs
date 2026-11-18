@@ -24,6 +24,7 @@ pub mod event_tree;
 pub mod find_replace;
 pub mod frame_statistics;
 pub mod gpu_address;
+pub mod half_convert;
 pub mod i18n;
 pub mod live;
 pub mod log_view;
