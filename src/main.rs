@@ -6109,6 +6109,14 @@ impl Workspace {
                 return;
             }
         }
+        if let Some(resource) = request.strip_prefix("resource:") {
+            if let Ok(index) = resource.parse::<usize>() {
+                self.selected_resource = Some(index);
+                self.tab = CaptureTab::Resources;
+                cx.notify();
+                return;
+            }
+        }
         if let Some(buffer) = request.strip_prefix("buffer:") {
             let mut parts = buffer.split(':');
             if let (Some(index), Some(offset)) = (parts.next(), parts.next()) {
