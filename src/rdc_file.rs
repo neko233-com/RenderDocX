@@ -202,8 +202,8 @@ impl RdcFile {
 
     /// Read and decode a section's payload. Plain sections return their bytes
     /// directly; Zstd-compressed sections are decompressed with the mature
-    /// `zstd` crate. LZ4 uses RenderDoc's own chunked framing (not the standard
-    /// frame format) and is reported as unsupported here rather than guessed.
+    /// `zstd` crate. LZ4-chunked sections are decoded with `lz4_flex`'s block
+    /// decoder, translating the custom framing from `lz4io.cpp`.
     pub fn section_payload(&self, section: &SectionInfo) -> Result<Vec<u8>, String> {
         let start = section.data_offset;
         let end = start
@@ -217,7 +217,7 @@ impl RdcFile {
             zstd::stream::decode_all(raw)
                 .map_err(|error| format!("Zstd decompression failed: {error}"))?
         } else if section.flags & FLAG_LZ4 != 0 {
-            return Err("LZ4-chunked section decompression is not implemented".to_owned());
+            decompress_lz4_chunks(raw, section.uncompressed_length as usize)?
         } else {
             raw.to_vec()
         };
@@ -230,6 +230,56 @@ impl RdcFile {
         }
         Ok(decoded)
     }
+}
+
+/// Decompress RenderDoc's LZ4 section framing (translated from `lz4io.cpp`):
+/// a stream of chunks, each prefixed with an `int32` compressed size, followed
+/// by that many bytes of LZ4 block data. Each block is decoded with the
+/// previous block as an external dictionary, mirroring the 64 KB history
+/// window that `LZ4_decompress_safe_continue` maintains upstream.
+fn decompress_lz4_chunks(raw: &[u8], expected: usize) -> Result<Vec<u8>, String> {
+    const LZ4_BLOCK_SIZE: usize = 1024 * 1024;
+    const MAX_COMPRESSED: usize = LZ4_BLOCK_SIZE + LZ4_BLOCK_SIZE / 255 + 16;
+    let mut cursor = 0usize;
+    let mut output: Vec<u8> = Vec::with_capacity(expected);
+    let mut dictionary: Vec<u8> = Vec::new();
+    while cursor < raw.len() {
+        if cursor + 4 > raw.len() {
+            return Err("truncated LZ4 chunk size".to_owned());
+        }
+        let size = i32::from_le_bytes(raw[cursor..cursor + 4].try_into().unwrap());
+        cursor += 4;
+        if size < 0 || size as usize > MAX_COMPRESSED {
+            return Err(format!("invalid LZ4 compressed block size: {size}"));
+        }
+        let size = size as usize;
+        if cursor + size > raw.len() {
+            return Err("truncated LZ4 chunk data".to_owned());
+        }
+        let block = &raw[cursor..cursor + size];
+        cursor += size;
+        let mut buffer = vec![0u8; LZ4_BLOCK_SIZE];
+        let written = lz4_flex::block::decompress_into_with_dict(block, &mut buffer, &dictionary)
+            .map_err(|error| format!("LZ4 decompression failed: {error}"))?;
+        if written > expected.saturating_sub(output.len()) {
+            return Err("LZ4 output exceeds expected section size".to_owned());
+        }
+        // Keep the tail as the dictionary for the next block (64 KB history).
+        dictionary = buffer[..written].to_vec();
+        if dictionary.len() > 64 * 1024 {
+            let start = dictionary.len() - 64 * 1024;
+            dictionary.drain(..start);
+        }
+        output.extend_from_slice(&buffer[..written]);
+    }
+    if output.len() != expected {
+        return Err(format!(
+            "LZ4 decompressed length {} != expected {}",
+            output.len(),
+            expected
+        ));
+    }
+    Ok(output)
 }
 
 fn read_ascii_line(r: &mut Reader<'_>) -> Result<String, String> {
@@ -388,6 +438,30 @@ mod tests {
             parsed.section_payload(compressed).unwrap(),
             compressed_source
         );
+    }
+
+    #[test]
+    fn decodes_lz4_chunked_section() {
+        let source: &[u8] = b"LZ4 chunked section payload, repeated repeated repeated";
+        let mut scratch = vec![0u8; source.len() + 64];
+        let written = lz4_flex::block::compress_into(source, &mut scratch).unwrap();
+        let mut framed = Vec::new();
+        framed.extend_from_slice(&(written as i32).to_le_bytes());
+        framed.extend_from_slice(&scratch[..written]);
+
+        let sections = vec![SectionInfo {
+            section_type: 3,
+            compressed_length: framed.len() as u64,
+            uncompressed_length: source.len() as u64,
+            version: 0,
+            flags: FLAG_LZ4,
+            name: "lz4".to_owned(),
+            data_offset: 0,
+        }];
+        let bytes = build_rdc(0x102, &sections, &[&framed]);
+        let parsed = RdcFile::parse(&bytes).unwrap();
+        let section = parsed.section(3).unwrap();
+        assert_eq!(parsed.section_payload(section).unwrap(), source);
     }
 
     #[test]
