@@ -125,7 +125,9 @@ It also exercises the pyrenderdoc-compatible CaptureContext surface:
 `CurEvent`, `CurSelectedEvent`, `CurAction`, `CurSelectedAction`,
 `CurRootActions`, `CurPipelineState`, `GetAction`, `GetTextures`, `GetBuffers`,
 `GetResources`, `FrameInfo`, `APIProps`, `IsCaptureLoaded`,
-`GetCaptureFilename` and `DebugMessages`.
+`GetCaptureFilename` and `DebugMessages`. Notes and bookmarks are written and
+read back through `SetNotes`/`GetNotes`/`SetBookmark`/`GetBookmarks`/
+`RemoveBookmark`, then restored to their original values.
 `python_vertex_input_query_a_real_capture` opens a real Vertex capture and
 asserts `renderdocx.vertex_input()` returns input rows.
 

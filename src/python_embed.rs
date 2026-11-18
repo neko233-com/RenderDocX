@@ -231,6 +231,103 @@ fn DebugMessages(py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
     to_py(py, &value)
 }
 
+/// `GetNotes()` -> capture comments string from the Notes section.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn GetNotes() -> pyo3::PyResult<String> {
+    let session = active_session()?;
+    let document = session
+        .annotation_read("notes")
+        .and_then(|section| section.document())
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    Ok(document
+        .get("comments")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned())
+}
+
+/// `SetNotes(text)` -> replace capture comments in the Notes section.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn SetNotes(text: String) -> pyo3::PyResult<()> {
+    let session = active_session()?;
+    let section = session
+        .annotation_read("notes")
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let document = section
+        .document()
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        .and_then(|document| {
+            crate::annotations::set_comment(&document, &text)
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        })?;
+    session
+        .annotation_write(&section, &document)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    Ok(())
+}
+
+/// `GetBookmarks()` -> list of `{eventId, text}` bookmarks.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn GetBookmarks(py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    let session = active_session()?;
+    let document = session
+        .annotation_read("bookmarks")
+        .and_then(|section| section.document())
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let bookmarks = crate::annotations::bookmarks(&document)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let list: Vec<serde_json::Value> = bookmarks
+        .into_iter()
+        .map(|(event, text)| serde_json::json!({"eventId": event, "text": text}))
+        .collect();
+    to_py(py, &list)
+}
+
+/// `SetBookmark(event, text)` -> add or update an event bookmark.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn SetBookmark(event: u32, text: String) -> pyo3::PyResult<()> {
+    let session = active_session()?;
+    let section = session
+        .annotation_read("bookmarks")
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let document = section
+        .document()
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        .and_then(|document| {
+            crate::annotations::set_bookmark(&document, event, Some(&text))
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        })?;
+    session
+        .annotation_write(&section, &document)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    Ok(())
+}
+
+/// `RemoveBookmark(event)` -> remove the bookmark on an event, if present.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn RemoveBookmark(event: u32) -> pyo3::PyResult<()> {
+    let session = active_session()?;
+    let section = session
+        .annotation_read("bookmarks")
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let document = section
+        .document()
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        .and_then(|document| {
+            crate::annotations::set_bookmark(&document, event, None)
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        })?;
+    session
+        .annotation_write(&section, &document)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    Ok(())
+}
+
 /// `renderdocx.snapshot()` -> the full capture snapshot as a native Python
 /// object (frame info, counters, actions, resources, textures, buffers...).
 #[pyo3::pyfunction]
@@ -1101,6 +1198,11 @@ fn build_capture_module<'py>(
         ("IsCaptureLoaded", pyo3::wrap_pyfunction!(IsCaptureLoaded, py)),
         ("GetCaptureFilename", pyo3::wrap_pyfunction!(GetCaptureFilename, py)),
         ("DebugMessages", pyo3::wrap_pyfunction!(DebugMessages, py)),
+        ("GetNotes", pyo3::wrap_pyfunction!(GetNotes, py)),
+        ("SetNotes", pyo3::wrap_pyfunction!(SetNotes, py)),
+        ("GetBookmarks", pyo3::wrap_pyfunction!(GetBookmarks, py)),
+        ("SetBookmark", pyo3::wrap_pyfunction!(SetBookmark, py)),
+        ("RemoveBookmark", pyo3::wrap_pyfunction!(RemoveBookmark, py)),
     ] {
         if let Ok(function) = wrapped {
             dict.set_item(name, function).ok();
@@ -1372,6 +1474,11 @@ mod tests {
             "renderdocx.mesh_read(1)",
             "renderdocx.export_buffer('buf.bin')",
             "renderdocx.snapshot()",
+            "renderdocx.GetNotes()",
+            "renderdocx.SetNotes('x')",
+            "renderdocx.GetBookmarks()",
+            "renderdocx.SetBookmark(1, 'x')",
+            "renderdocx.RemoveBookmark(1)",
         ] {
             let result = run_script_with_capture(
                 &format!("import renderdocx\n{call}"),
@@ -1480,7 +1587,17 @@ mod tests {
                  and renderdocx.GetCaptureFilename().endswith('.rdc')\n\
                  and isinstance(renderdocx.DebugMessages(), list)\n\
              )\n\
-             print('compat', compat)",
+             print('compat', compat)\n\
+             notes0 = renderdocx.GetNotes()\n\
+             bookmarks0 = renderdocx.GetBookmarks()\n\
+             renderdocx.SetNotes('renderdocx notes')\n\
+             print('notes', renderdocx.GetNotes() == 'renderdocx notes')\n\
+             renderdocx.SetBookmark(19, 'script bookmark')\n\
+             print('bookmark', any(b.get('eventId') == 19 and b.get('text') == 'script bookmark' for b in renderdocx.GetBookmarks()))\n\
+             renderdocx.RemoveBookmark(19)\n\
+             print('unbookmark', all(b.get('eventId') != 19 for b in renderdocx.GetBookmarks()))\n\
+             renderdocx.SetNotes(notes0)\n\
+             [renderdocx.SetBookmark(int(b['eventId']), b['text']) for b in bookmarks0]",
             &CaptureView::default(),
         );
         set_active_session(None);
@@ -1499,6 +1616,9 @@ mod tests {
         assert!(result.stdout.contains("bufexport True"), "{}", result.stdout);
         assert!(result.stdout.contains("render True"), "{}", result.stdout);
         assert!(result.stdout.contains("compat True"), "{}", result.stdout);
+        assert!(result.stdout.contains("notes True"), "{}", result.stdout);
+        assert!(result.stdout.contains("bookmark True"), "{}", result.stdout);
+        assert!(result.stdout.contains("unbookmark True"), "{}", result.stdout);
     }
 
     #[cfg(windows)]
