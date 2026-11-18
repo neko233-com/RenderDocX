@@ -245,6 +245,61 @@ fn DebugShader(
     }
 }
 
+/// `apply_shader_edit(event, stage, encoding, entry, source, flags=None)` ->
+/// build a target shader and replace the bound one in replay, mirroring the
+/// GUI/CLI shader-apply flow.
+#[pyo3::pyfunction]
+#[pyo3(signature = (event, stage, encoding, entry, source, flags = None))]
+#[allow(non_snake_case)]
+fn apply_shader_edit(
+    py: Python<'_>,
+    event: u32,
+    stage: u32,
+    encoding: u32,
+    entry: String,
+    source: String,
+    flags: Option<Bound<'_, pyo3::PyAny>>,
+) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    if entry.is_empty() || entry.contains('\0') || source.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "Shader entry point and source must be nonempty",
+        ));
+    }
+    let session = active_session()?;
+    let flags = flags
+        .map(|flags| {
+            pythonize::depythonize::<Vec<crate::replay::ShaderCompileFlag>>(&flags)
+                .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
+        })
+        .transpose()?;
+    let value = session
+        .shader_edit_with_flags(
+            event,
+            stage,
+            Some((encoding, &entry, source.as_bytes())),
+            flags.as_deref(),
+        )
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    set_active_event(Some(event));
+    to_py(py, &value)
+}
+
+/// `revert_shader_edit(event, stage)` -> remove the replacement for a shader.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn revert_shader_edit(
+    py: Python<'_>,
+    event: u32,
+    stage: u32,
+) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    let session = active_session()?;
+    let value = session
+        .shader_edit(event, stage, None)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    set_active_event(Some(event));
+    to_py(py, &value)
+}
+
 /// `pipeline_shader(event, stage)` -> the bound shader entry for a stage.
 #[pyo3::pyfunction]
 #[allow(non_snake_case)]
@@ -1928,6 +1983,8 @@ fn build_capture_module<'py>(
         ("ViewShader", pyo3::wrap_pyfunction!(ViewShader, py)),
         ("EditShader", pyo3::wrap_pyfunction!(EditShader, py)),
         ("DebugShader", pyo3::wrap_pyfunction!(DebugShader, py)),
+        ("apply_shader_edit", pyo3::wrap_pyfunction!(apply_shader_edit, py)),
+        ("revert_shader_edit", pyo3::wrap_pyfunction!(revert_shader_edit, py)),
         ("pipeline_shader", pyo3::wrap_pyfunction!(pipeline_shader, py)),
         ("pipeline_output", pyo3::wrap_pyfunction!(pipeline_output, py)),
         ("pipeline_color_attachment", pyo3::wrap_pyfunction!(pipeline_color_attachment, py)),
@@ -2226,6 +2283,8 @@ mod tests {
             "renderdocx.pipeline_output(1)",
             "renderdocx.pipeline_color_attachment(1)",
             "renderdocx.DebugShader(7, 1)",
+            "renderdocx.apply_shader_edit(1, 4, 2, 'main', 'x')",
+            "renderdocx.revert_shader_edit(1, 4)",
         ] {
             let result = run_script_with_capture(
                 &format!("import renderdocx\n{call}"),
@@ -2486,13 +2545,24 @@ mod tests {
              row = rows[0]\n\
              trace = renderdocx.debug_vertex(page['event_id'], row['row'], 0, row.get('vertex_index') or row['row'], 0)\n\
              print('debug-vertex', trace.get('event_id') == page.get('event_id'))\n\
-             renderdocx.debug_stop()",
+             renderdocx.debug_stop()\n\
+             source = '#version 450 core\\nlayout(location = 0) out vec4 Color;\\nvoid main() { Color = vec4(1.0, 0.0, 0.0, 1.0); }\\n'\n\
+             edit = renderdocx.apply_shader_edit(page['event_id'], 4, 2, 'main', source)\n\
+             print('shader-edit', edit.get('applied') == True)\n\
+             revert = renderdocx.revert_shader_edit(page['event_id'], 4)\n\
+             print('shader-revert', revert.get('applied') == False)",
             &CaptureView::default(),
         );
         set_active_session(None);
         assert!(result.error.is_none(), "{:?}", result.error);
         assert!(
             result.stdout.contains("debug-vertex True"),
+            "{}",
+            result.stdout
+        );
+        assert!(result.stdout.contains("shader-edit True"), "{}", result.stdout);
+        assert!(
+            result.stdout.contains("shader-revert True"),
             "{}",
             result.stdout
         );

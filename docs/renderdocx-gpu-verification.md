@@ -139,7 +139,8 @@ read back through `SetNotes`/`GetNotes`/`SetBookmark`/`GetBookmarks`/
 is exercised through `RegisterReplacement(7, 8)`: `pipeline(19)` reports the
 replacement index, and `UnregisterReplacement(7)` restores the original. Mesh
 vertex debugging is exercised through `debug_vertex(...)`/`debug_stop()` on the
-Vertex capture. A third test uses the upstream VK_Shader_Printf capture and its
+Vertex capture, followed by `apply_shader_edit(...)` (GLSL fragment replacement
+returns `applied: true`) and `revert_shader_edit(...)` (`applied: false`). A third test uses the upstream VK_Shader_Printf capture and its
 shader messages to run `debug_compute(...)` for the dispatch and
 `debug_pixel(...)` for the draw, asserting both traces report the selected
 event. Mesh debugging is exercised through `debug_mesh(21)`, `debug_next()` and
