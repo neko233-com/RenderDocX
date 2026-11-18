@@ -17579,7 +17579,11 @@ impl Workspace {
                         "{format_label}: {} · {stride_label}: {}",
                         info.format_name, info.vertex_stride
                     ))
-                    .child(format!("{topology_label}: {}", info.topology))
+                    .child(format!(
+                        "{topology_label}: {} ({})",
+                        renderdocx::api_enums::topology::name(info.topology),
+                        info.topology
+                    ))
                     .child(format!(
                         "{}: {}",
                         if self.mesh.kind == MeshBufferKind::Draw {

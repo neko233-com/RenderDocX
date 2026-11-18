@@ -57,6 +57,63 @@ pub mod gpu_vendor {
     }
 }
 
+/// Topology enum values / names from `replay_enums.h`, used by the mesh and
+/// pipeline views. Numeric values match `enum class Topology : uint32_t`.
+pub mod topology {
+    pub const UNKNOWN: u32 = 0;
+    pub const POINT_LIST: u32 = 1;
+    pub const LINE_LIST: u32 = 2;
+    pub const LINE_STRIP: u32 = 3;
+    pub const LINE_LOOP: u32 = 4;
+    pub const TRIANGLE_LIST: u32 = 5;
+    pub const TRIANGLE_STRIP: u32 = 6;
+    pub const TRIANGLE_FAN: u32 = 7;
+    pub const LINE_LIST_ADJ: u32 = 8;
+    pub const LINE_STRIP_ADJ: u32 = 9;
+    pub const TRIANGLE_LIST_ADJ: u32 = 10;
+    pub const TRIANGLE_STRIP_ADJ: u32 = 11;
+    pub const PATCH_LIST: u32 = 12;
+
+    pub fn name(topology: u32) -> &'static str {
+        match topology {
+            UNKNOWN => "Unknown",
+            POINT_LIST => "PointList",
+            LINE_LIST => "LineList",
+            LINE_STRIP => "LineStrip",
+            LINE_LOOP => "LineLoop",
+            TRIANGLE_LIST => "TriList",
+            TRIANGLE_STRIP => "TriStrip",
+            TRIANGLE_FAN => "TriFan",
+            LINE_LIST_ADJ => "LineList_Adj",
+            LINE_STRIP_ADJ => "LineStrip_Adj",
+            TRIANGLE_LIST_ADJ => "TriList_Adj",
+            TRIANGLE_STRIP_ADJ => "TriStrip_Adj",
+            PATCH_LIST..=43 => "PatchList",
+            _ => "Unknown",
+        }
+    }
+}
+
+/// LogType enum values / names from `replay_enums.h`.
+pub mod log_type {
+    pub const DEBUG: u32 = 0;
+    pub const COMMENT: u32 = 1;
+    pub const WARNING: u32 = 2;
+    pub const ERROR: u32 = 3;
+    pub const FATAL: u32 = 4;
+
+    pub fn name(log_type: u32) -> &'static str {
+        match log_type {
+            DEBUG => "Debug",
+            COMMENT => "Comment",
+            WARNING => "Warning",
+            ERROR => "Error",
+            FATAL => "Fatal",
+            _ => "Unknown",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,6 +127,17 @@ mod tests {
         assert!(graphics_api::is_d3d(graphics_api::D3D12));
         assert!(!graphics_api::is_d3d(graphics_api::OPENGL));
         assert!(!graphics_api::is_d3d(graphics_api::VULKAN));
+    }
+
+    #[test]
+    fn topology_and_log_type_names() {
+        assert_eq!(topology::name(topology::TRIANGLE_LIST), "TriList");
+        assert_eq!(topology::name(topology::POINT_LIST), "PointList");
+        assert_eq!(topology::name(20), "PatchList");
+        assert_eq!(topology::name(999), "Unknown");
+        assert_eq!(log_type::name(log_type::WARNING), "Warning");
+        assert_eq!(log_type::name(log_type::FATAL), "Fatal");
+        assert_eq!(log_type::name(999), "Unknown");
     }
 
     #[test]
