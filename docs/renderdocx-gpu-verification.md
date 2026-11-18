@@ -109,8 +109,37 @@ test incompatible_core_is_rejected_before_capture_open ... ok
 
 ## Full ignored-test result: 20/20 pass
 
-With the toolchain, fixtures, captures and mismatch bridge built as above, all
-20 `#[ignore]` tests in `tests/agent_cli.rs` pass on this machine.
+One command runs every ignored test with all environment variables wired:
+
+```powershell
+pwsh -File scripts/verify-all-real-tests.ps1
+```
+
+Observed output (49.99 s):
+
+```
+test incompatible_core_is_rejected_before_capture_open ... ok
+test native_target_launch_triggers_capture_and_disconnects_without_stopping_target ... ok
+test real_core_reports_missing_capture_as_an_error ... ok
+test real_d3d11_capture_is_inspected_and_selected ... ok
+test real_d3d11_mesh_draw_order ... ok
+test real_d3d11_nested_markers_resolve_and_replay_effective_events ... ok
+test real_d3d11_shader_messages_page_is_empty ... ok
+test real_d3d11_source_variable_values_follow_debug_navigation ... ok
+test real_dependency_exports_preserve_original_locally_and_remotely ... ok
+test real_opengl_vertex_inputs_include_generic_and_normalized_values ... ok
+test real_remote_replay_loopback ... ok
+test real_remote_target_launch_and_capture_loopback ... ok
+test real_vulkan_geometry_shader_messages_show_approximate_output ... ok
+test real_vulkan_mesh_printf_core_survives_and_initializes_locations ... ok
+test real_vulkan_mesh_shader_debug_trace ... ok
+test real_vulkan_shader_messages_and_debug_handoff ... ok
+test real_vulkan_target_launch_uses_packaged_layer ... ok
+test real_vulkan_task_and_mesh_shader_messages ... ok
+test real_vulkan_task_message_sanitizes_older_core ... ok
+test real_vulkan_vertex_shader_messages_resolve_and_debug ... ok
+test result: ok. 20 passed; 0 failed; 0 ignored
+```
 
 ## Reproduce
 
