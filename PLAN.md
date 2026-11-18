@@ -25,8 +25,8 @@ P0 分母已建立：[docs/renderdocx-feature-matrix.md](docs/renderdocx-feature
 - **去 C++**：GUI 侧全部由 Rust/GPUI 实现；`.rdc` 容器、三种压缩（plain/Zstd/LZ4）、chunk framing、自描述 SDObject 树、SectionType/GraphicsAPI/GPUVendor/Topology/LogType/FileType 枚举、扩展缩略图 PNG 解码均为纯 Rust。捕获 DLL 注入（远程线程）、全局钩子（注册表 AppInit_DLLs）、RGP profile 提取亦为纯 Rust。脚本执行/扩展生命周期/捕获数据访问使用 `pyo3` 嵌入式 CPython。
 - **打包与验证**：自有 WiX v5 MSI（`scripts/build-msi.ps1`）；真实 per-user 静默安装 → 运行 → 截图 → 卸载验证（`scripts/verify-msi.ps1`）；原生 UIA+Win32 桌面操控验证（`scripts/desktop-drive.ps1`，已实测主题切换与 46.27% 像素差异）。证据见 [docs/renderdocx-visual-coverage.md](docs/renderdocx-visual-coverage.md) 与 [docs/renderdocx-install-visual.md](docs/renderdocx-install-visual.md)。
 - **真实 GPU 验收已执行**：本地构建 RenderDoc core Release（commit `5a3c53f`）+ 桥接 + fixtures（RTX 5060 / AMD Radeon），**11 个真实用例通过**：core 加载、D3D11 进程捕获/触发/复制、remote loopback×2、D3D11 捕获检查与事件选择、mesh draw order、嵌套 marker、shader message 分页、源码变量调试导航、OpenGL 顶点输入、dependency 导出。详见 [docs/renderdocx-gpu-verification.md](docs/renderdocx-gpu-verification.md)。
-- **去 C++ 环境已补齐**：下载 Khronos glslang 16.6.0 作为 shader 编译器，构建 Mesh/Vertex/Geometry/ShaderPrintf 四个 Vulkan fixture 并用 `scripts/make-vulkan-capture.ps1` 生成捕获；**Vulkan 用例 7/8 通过**（仅 `real_vulkan_shader_messages_and_debug_handoff` 需要上游预录的 `VK_Shader_Printf` 捕获，自录运行的 draw 无 fragment printf）。`scripts/build-mismatch-bridge.ps1` 构建故意不匹配的 bridge，`incompatible_core_is_rejected_before_capture_open` 通过。
-- **仍未执行的外部验收**：`CreateRGPProfile`（现场生成 RGP profile）需要 AMD RGP 工具链；`OpenRGPProfile` 已纯 Rust 实现。
+- **去 C++ 环境已补齐，ignored 用例 20/20 全部通过**：下载 Khronos glslang 16.6.0 作为 shader 编译器，构建 Mesh/Vertex/Geometry/ShaderPrintf 四个 Vulkan fixture 并用 `scripts/make-vulkan-capture.ps1` 生成捕获，`scripts/run-vulkan-tests.ps1` 跑通 **8/8 Vulkan 用例**（`VK_Shader_Printf` 必须用默认 400×300 窗口，其 printf 仅在 fragcoord 200–202/150–152 触发）；`scripts/build-mismatch-bridge.ps1` 构建故意不匹配的 bridge，mismatch 用例通过。连同 11 个 D3D11/OpenGL/remote/dependency 用例，共 20/20。
+- **仍未执行的外部验收**：`CreateRGPProfile`（在捕获中现场生成 RGP profile）需要 AMD RGP 工具链；`OpenRGPProfile` 已纯 Rust 实现。
 
 进度百分比以矩阵逐行计数为准；未经验证的实机项目单独报告，不并入迁移率。
 

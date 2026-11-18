@@ -81,7 +81,7 @@ Captures were generated with `scripts/make-vulkan-capture.ps1`
 (target_launch → wait presenting → trigger 1 frame → target_copy).
 
 `scripts/run-vulkan-tests.ps1` sets all `RENDERDOCX_TEST_VULKAN_*` variables.
-Result: **7 of 8 Vulkan tests pass**
+Result: **8 of 8 Vulkan tests pass**
 
 | Test | Result |
 |---|---|
@@ -92,7 +92,12 @@ Result: **7 of 8 Vulkan tests pass**
 | real_vulkan_task_and_mesh_shader_messages | ok |
 | real_vulkan_task_message_sanitizes_older_core | ok |
 | real_vulkan_mesh_printf_core_survives_and_initializes_locations | ok |
-| real_vulkan_shader_messages_and_debug_handoff | **fails**: the self-recorded `VK_Shader_Printf` capture returns 0 fragment printf messages for the selected draw (expected 8). The test documents that it expects an upstream pre-recorded `VK_Shader_Printf` capture; the printf layout of a freshly captured run does not match. |
+| real_vulkan_shader_messages_and_debug_handoff | ok |
+
+Note on `VK_Shader_Printf`: its fragment printf only fires at
+`gl_FragCoord` x 200–202 / y 150–152, so the capture must use the demo's
+default window (400×300) or larger. A 128×128 capture silently yields zero
+messages and the test fails; capturing with the default size makes it pass.
 
 A deliberately mismatched bridge is built with
 `scripts/build-mismatch-bridge.ps1` (real core library, fake core commit). It
@@ -102,10 +107,24 @@ makes `incompatible_core_is_rejected_before_capture_open` pass:
 test incompatible_core_is_rejected_before_capture_open ... ok
 ```
 
-## Not executed (environment dependency, not code failure)
+## Full ignored-test result: 20/20 pass
 
-| Test(s) | Missing input |
-|---|---|
-| real_vulkan_shader_messages_and_debug_handoff | An upstream `VK_Shader_Printf` capture whose selected draw contains the expected 8 fragment printf messages; the locally captured run has 0. Building the demo and the bridge is not the gap. |
+With the toolchain, fixtures, captures and mismatch bridge built as above, all
+20 `#[ignore]` tests in `tests/agent_cli.rs` pass on this machine.
 
-All other previously-listed Vulkan gaps are now closed by the toolchain above.
+## Reproduce
+
+```powershell
+& "C:\Program Files\PowerShell\7\pwsh.exe" -File scripts/build-replay-bridge.ps1 -CoreConfiguration Release -WithFixtures
+pwsh -File scripts/run-real-gpu-tests.ps1
+# Vulkan toolchain (glslang is downloaded to target/tools/glslang)
+$env:PATH = "$PWD/target/tools/glslang/bin;$env:PATH"
+& "C:\Program Files\PowerShell\7\pwsh.exe" -File scripts/build-vulkan-vertex-fixture.ps1 -Fixture Mesh -OutputDirectory target/vulkan-mesh-fixture
+& "C:\Program Files\PowerShell\7\pwsh.exe" -File scripts/build-vulkan-vertex-fixture.ps1 -Fixture Vertex -OutputDirectory target/vulkan-vertex-fixture
+& "C:\Program Files\PowerShell\7\pwsh.exe" -File scripts/build-vulkan-vertex-fixture.ps1 -Fixture Geometry -OutputDirectory target/vulkan-geometry-fixture
+& "C:\Program Files\PowerShell\7\pwsh.exe" -File scripts/build-vulkan-vertex-fixture.ps1 -Fixture ShaderPrintf -OutputDirectory target/vulkan-shader-printf
+pwsh -File scripts/make-vulkan-capture.ps1 -Demo target/vulkan-shader-printf/demos_x64.exe -DemoArguments "VK_Shader_Printf"
+pwsh -File scripts/run-vulkan-tests.ps1
+& "C:\Program Files\PowerShell\7\pwsh.exe" -File scripts/build-mismatch-bridge.ps1
+# then set RENDERDOCX_TEST_MISMATCH_BRIDGE and run incompatible_core_is_rejected_before_capture_open
+```
