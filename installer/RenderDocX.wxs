@@ -20,7 +20,9 @@
 
     <!-- Standard directories (WiX v5) -->
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="RenderDocX" />
+      <Directory Id="INSTALLFOLDER" Name="RenderDocX">
+        <Directory Id="PythonSiteDir" Name="python-site" />
+      </Directory>
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder">
       <Directory Id="ApplicationProgramsFolder" Name="RenderDocX" />
@@ -33,6 +35,8 @@
       <Component Id="CliExe" Guid="*" Directory="INSTALLFOLDER">
         <File Id="CliExeFile" Source="$(var.BinDir)\renderdocx-cli.exe" KeyPath="yes" />
       </Component>
+      <!-- Vendored debugpy for the embedded CPython debugger attach path. -->
+      <Files Include="$(var.BinDir)\python-site\**" Directory="PythonSiteDir" />
     </ComponentGroup>
 
     <ComponentGroup Id="Documentation">

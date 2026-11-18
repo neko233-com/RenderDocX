@@ -9,11 +9,17 @@
 use pyo3::{prelude::*, types::PyDict, Python};
 use std::{
     ffi::CString,
+    path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering},
         Mutex,
     },
 };
+
+// debugpy in-process adapter state, mirroring PythonContext::LaunchDebugger.
+static DEBUGPY_LISTENING: AtomicBool = AtomicBool::new(false);
+static DEBUGPY_ENABLED: AtomicBool = AtomicBool::new(false);
+static DEBUGPY_PORT: AtomicU16 = AtomicU16::new(5678);
 
 // CPython's interpreter and sys.stdout redirection are process-global; serialize
 // all embedded calls so concurrent scripts cannot clobber each other's capture.
@@ -622,10 +628,29 @@ impl ViewerHandle {
     }
 
     #[allow(non_snake_case)]
-    fn AttachDebugger(&self) -> pyo3::PyResult<()> {
-        Err(pyo3::exceptions::PyRuntimeError::new_err(
-            "debugpy is not available in this build",
-        ))
+    #[pyo3(signature = (extension_name = String::new(), port = 5678))]
+    fn AttachDebugger(
+        &self,
+        py: Python<'_>,
+        extension_name: String,
+        port: u16,
+    ) -> pyo3::PyResult<()> {
+        attach_debugger(py, &extension_name, port)
+    }
+
+    #[allow(non_snake_case)]
+    fn IsDebuggerListening(&self) -> bool {
+        DEBUGPY_LISTENING.load(Ordering::SeqCst)
+    }
+
+    #[allow(non_snake_case)]
+    fn GetDebuggerPort(&self) -> u16 {
+        DEBUGPY_PORT.load(Ordering::SeqCst)
+    }
+
+    #[allow(non_snake_case)]
+    fn IsDebuggerConnected(&self, py: Python<'_>) -> bool {
+        is_debugger_connected(py)
     }
 
     #[allow(non_snake_case)]
@@ -937,6 +962,153 @@ impl ViewerHandle {
             .show_help = true;
         queue_ui_request("python");
     }
+}
+
+/// Candidate locations for a vendored `debugpy` package. The installed app
+/// ships `python-site` next to the executable; development and test builds use
+/// the repository's `target/python-site`, and `RENDERDOCX_PYTHON_SITE` always
+/// wins.
+fn debugpy_search_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(path) = std::env::var_os("RENDERDOCX_PYTHON_SITE") {
+        paths.push(PathBuf::from(path));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            paths.push(dir.join("python-site"));
+            if let Some(parent) = dir.parent() {
+                paths.push(parent.join("python-site"));
+            }
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        paths.push(cwd.join("target/python-site"));
+    }
+    paths.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/python-site"));
+    paths
+}
+
+fn debugpy_site() -> Option<PathBuf> {
+    debugpy_search_paths()
+        .into_iter()
+        .find(|path| path.join("debugpy").is_dir())
+}
+
+fn debugpy_unavailable() -> pyo3::PyErr {
+    pyo3::exceptions::PyRuntimeError::new_err(
+        "debugpy is not installed; place it in RENDERDOCX_PYTHON_SITE or <exe>/python-site",
+    )
+}
+
+/// Make a vendored debugpy importable, without requiring it for normal use.
+fn ensure_debugpy(py: Python<'_>) -> pyo3::PyResult<()> {
+    if py.import("debugpy").is_ok() {
+        return Ok(());
+    }
+    let Some(site) = debugpy_site() else {
+        return Err(debugpy_unavailable());
+    };
+    let sys_path = py.import("sys")?.getattr("path")?;
+    let text = site.to_string_lossy();
+    // Insert at the front so a vendored copy wins over unrelated installations.
+    sys_path.call_method1("insert", (0, text.as_ref()))?;
+    py.import("debugpy").map(|_| ()).map_err(|_| debugpy_unavailable())
+}
+
+fn write_debugger_configs(directory: &Path) -> std::io::Result<PathBuf> {
+    let vscode = directory.join(".vscode");
+    std::fs::create_dir_all(&vscode)?;
+    let launch = vscode.join("launch.json");
+    if !launch.exists() {
+        std::fs::write(
+            &launch,
+            r#"{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: Remote Attach",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": { "host": "localhost", "port": 5678 }
+        }
+    ]
+}
+"#,
+        )?;
+    }
+    let tasks = vscode.join("tasks.json");
+    if !tasks.exists() {
+        std::fs::write(
+            &tasks,
+            r#"{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "attach on startup",
+            "command": "${command:workbench.action.debug.start}",
+            "runOptions": {
+                "runOn": "folderOpen"
+            }
+        }
+    ]
+}
+"#,
+        )?;
+    }
+    Ok(vscode)
+}
+
+fn is_debugger_connected(py: Python<'_>) -> bool {
+    if !DEBUGPY_LISTENING.load(Ordering::SeqCst) {
+        return false;
+    }
+    py.import("debugpy")
+        .and_then(|debugpy| debugpy.call_method0("is_client_connected"))
+        .and_then(|value| value.is_truthy())
+        .unwrap_or(false)
+}
+
+/// Start the in-process debugpy adapter (once) and optionally write VS Code
+/// attach configuration into an extension directory, matching upstream
+/// `PythonContext::LaunchDebugger`.
+fn attach_debugger(
+    py: Python<'_>,
+    extension_name: &str,
+    port: u16,
+) -> pyo3::PyResult<()> {
+    ensure_debugpy(py)?;
+    DEBUGPY_PORT.store(port, Ordering::SeqCst);
+    if !DEBUGPY_LISTENING.load(Ordering::SeqCst) {
+        let code = format!(
+            r#"import debugpy, threading
+debugpy.configure(subProcess=False)
+try:
+    debugpy.listen(('127.0.0.1', {port}), in_process_debug_adapter=True)
+except RuntimeError:
+    # Already listening in this interpreter (an earlier attach).
+    pass
+threading.Thread(target=debugpy.wait_for_client, daemon=True).start()
+debugpy.trace_this_thread(True)
+"#
+        );
+        py.run(
+            &cstring(&code).map_err(pyo3::exceptions::PyValueError::new_err)?,
+            None,
+            None,
+        )
+        .map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format_py_error(py, &error))
+        })?;
+        DEBUGPY_LISTENING.store(true, Ordering::SeqCst);
+        DEBUGPY_ENABLED.store(true, Ordering::SeqCst);
+    }
+    if !extension_name.is_empty() {
+        let directory = PathBuf::from(extension_name);
+        if directory.is_dir() {
+            let _ = write_debugger_configs(&directory);
+        }
+    }
+    Ok(())
 }
 
 fn viewer_handle(panel: &str) -> ViewerHandle {
@@ -4911,6 +5083,15 @@ pub fn run_script_with_capture(code: &str, view: &CaptureView) -> EmbedOutput {
             }
         };
         register_capture_module(py, &module).ok();
+        if DEBUGPY_ENABLED.load(Ordering::SeqCst) {
+            // The adapter traces per-thread; console scripts run on executor
+            // threads, so enable tracing on whichever thread executes them.
+            let _ = py.run(
+                &cstring("import debugpy\ndebugpy.trace_this_thread(True)\n").unwrap(),
+                None,
+                None,
+            );
+        }
         if let Err(error) = py.run(&cstring(CAPTURE_SETUP).unwrap(), Some(&globals), None) {
             result.error = Some(format!("capture setup failed: {error}"));
             return result;
@@ -5533,7 +5714,7 @@ mod tests {
         assert!(result.error.is_none(), "{:?}", result.error);
         assert_eq!(result.stdout.trim(), "samp 1 samp True");
         let shell = GetPythonShell();
-        assert!(shell.AttachDebugger().is_err());
+        assert_eq!(shell.GetDebuggerPort(), 5678);
         shell.SetScriptText("print(7)".to_owned());
         assert_eq!(shell.GetScriptText(), "print(7)");
         shell.SetScriptOutputFilter("alpha".to_owned());
@@ -6162,6 +6343,97 @@ mod tests {
             "{}",
             result.stdout
         );
+    }
+
+    #[test]
+    fn debugger_configs_are_created_without_overwriting() {
+        let dir = tempfile::tempdir().unwrap();
+        let vscode = write_debugger_configs(dir.path()).unwrap();
+        let launch = vscode.join("launch.json");
+        let tasks = vscode.join("tasks.json");
+        assert!(launch.is_file());
+        assert!(tasks.is_file());
+        let launch_text = std::fs::read_to_string(&launch).unwrap();
+        assert!(launch_text.contains("\"request\": \"attach\""));
+        assert!(launch_text.contains("\"port\": 5678"));
+        std::fs::write(&launch, "custom").unwrap();
+        write_debugger_configs(dir.path()).unwrap();
+        assert_eq!(std::fs::read_to_string(&launch).unwrap(), "custom");
+    }
+
+    #[test]
+    fn debugpy_site_resolution_finds_vendored_copy() {
+        for candidate in debugpy_search_paths() {
+            assert!(candidate.is_absolute());
+        }
+        if let Some(site) = debugpy_site() {
+            assert!(site.join("debugpy").is_dir());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires debugpy in target/python-site"]
+    fn python_debugpy_attach_speaks_dap() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::time::Duration;
+
+        let port = 5691u16;
+        let result = run_script_with_capture(
+            &format!(
+                "import renderdocx\n\
+                 shell = renderdocx.GetPythonShell()\n\
+                 shell.AttachDebugger('', {port})\n\
+                 print('listening', shell.IsDebuggerListening(), shell.GetDebuggerPort())"
+            ),
+            &CaptureView::default(),
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(
+            result.stdout.contains(&format!("listening True {port}")),
+            "{}",
+            result.stdout
+        );
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect to debugpy");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let body = r#"{"seq":1,"type":"request","command":"initialize","arguments":{"adapterID":"debugpy"}}"#;
+        write!(stream, "Content-Length: {}\r\n\r\n{}", body.len(), body).unwrap();
+        let mut response = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut chunk = [0u8; 8192];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(count) => response.extend_from_slice(&chunk[..count]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(error) => panic!("read DAP initialize response: {error}"),
+            }
+            let text = String::from_utf8_lossy(&response);
+            if let Some((_, payload)) = text.split_once("\r\n\r\n") {
+                if payload.contains("\"command\": \"initialize\"") {
+                    break;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no DAP initialize response: {text}"
+            );
+        }
+        let text = String::from_utf8_lossy(&response);
+        assert!(text.contains("\"command\": \"initialize\""), "{text}");
+        assert!(text.contains("\"success\": true"), "{text}");
+        let connected = run_script_with_capture(
+            "import renderdocx\nprint(renderdocx.GetPythonShell().IsDebuggerConnected())",
+            &CaptureView::default(),
+        );
+        assert!(connected.error.is_none(), "{:?}", connected.error);
     }
 
     #[test]

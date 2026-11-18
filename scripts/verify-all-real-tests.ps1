@@ -1,6 +1,6 @@
 #requires -Version 7.0
 <#
-  Run every `#[ignore]` real test (20 agent_cli + 6 lib) against locally built
+  Run every `#[ignore]` real test (20 agent_cli + 7 lib) against locally built
   RenderDoc core, bridge, fixtures, Vulkan toolchain, captures and mismatch
   bridge.
 
@@ -25,6 +25,16 @@ function LatestCapture([string]$subdir) {
 }
 
 $env:RENDERDOCX_TEST_BRIDGE = $Bridge
+
+# The embedded CPython needs a vendored debugpy for the debugger-attach test.
+$pythonSite = Join-Path $repo 'target/python-site'
+if (-not (Test-Path -LiteralPath (Join-Path $pythonSite 'debugpy') -PathType Container)) {
+  Write-Host 'Installing debugpy into target/python-site ...'
+  python -m pip install --disable-pip-version-check --target $pythonSite debugpy
+  if ($LASTEXITCODE -ne 0) { throw 'Could not install debugpy for the embedded Python test.' }
+}
+$env:RENDERDOCX_PYTHON_SITE = $pythonSite
+
 foreach ($pair in @(
     @('RENDERDOCX_TEST_LIVE_FIXTURE', 'target/replay-bridge/Release/renderdocx-d3d11-live-fixture.exe'),
     @('RENDERDOCX_TEST_FIXTURE', 'target/replay-bridge/Release/renderdocx-d3d11-fixture.exe'),

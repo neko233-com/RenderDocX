@@ -45,6 +45,15 @@ foreach ($exe in @('renderdocx.exe', 'renderdocx-cli.exe')) {
   if (-not (Test-Path -LiteralPath $path)) { throw "Build artifact missing: $path" }
 }
 
+# Vendor debugpy beside the executable so the embedded CPython can attach a
+# debugger on machines without a global debugpy install.
+$pythonSite = Join-Path $targetDir 'python-site'
+if (-not (Test-Path -LiteralPath (Join-Path $pythonSite 'debugpy') -PathType Container)) {
+  Write-Host "Installing debugpy into $pythonSite ..."
+  python -m pip install --disable-pip-version-check --target $pythonSite debugpy
+  if ($LASTEXITCODE -ne 0) { throw 'Could not install debugpy for the packaged MSI.' }
+}
+
 $outDir = Join-Path $repo 'target/msi'
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $msi = Join-Path $outDir "RenderDocX-$semver-x64.msi"

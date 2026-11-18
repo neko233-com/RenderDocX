@@ -107,7 +107,7 @@ makes `incompatible_core_is_rejected_before_capture_open` pass:
 test incompatible_core_is_rejected_before_capture_open ... ok
 ```
 
-## Full ignored-test result: 20/20 + 6 lib tests pass
+## Full ignored-test result: 20/20 + 7 lib tests pass
 
 One command runs every ignored test with all environment variables wired:
 
@@ -115,7 +115,7 @@ One command runs every ignored test with all environment variables wired:
 pwsh -File scripts/verify-all-real-tests.ps1
 ```
 
-It also runs six lib-level ignored tests. `python_pipeline_and_buffer_query_a_real_capture`
+It also runs seven lib-level ignored tests. `python_pipeline_and_buffer_query_a_real_capture`
 opens a real Mesh capture through the bridge and asserts pipeline, buffer hex,
 structure data, debug/shader messages, resource usage, callstack, event
 formatting, descriptors, pixel history, texture statistics/min-max/fit range,
@@ -183,7 +183,14 @@ objects and asserts their fields.
 `scripts/verify-all-real-tests.ps1` builds the D3D12 fixture/CLI and generates
 all three captures before running the tests.
 
-Observed output (20 agent_cli + 6 lib tests):
+`python_debugpy_attach_speaks_dap` starts the in-process debugpy adapter on
+port 5691, connects over TCP, sends a DAP `initialize` request and asserts the
+adapter answers `success: true`; it also checks `IsDebuggerListening`,
+`GetDebuggerPort` and `IsDebuggerConnected`. The verify script installs
+debugpy into `target/python-site` first, and the MSI ships the same
+`python-site` beside the executable.
+
+Observed output (20 agent_cli + 7 lib tests):
 
 ```
 test incompatible_core_is_rejected_before_capture_open ... ok
@@ -208,12 +215,13 @@ test real_vulkan_task_message_sanitizes_older_core ... ok
 test real_vulkan_vertex_shader_messages_resolve_and_debug ... ok
 test result: ok. 20 passed; 0 failed; 0 ignored
 test python_constant_block_query_a_real_capture ... ok
+test python_debugpy_attach_speaks_dap ... ok
 test python_d3d12_api_specific_state_a_real_capture ... ok
 test python_opengl_api_specific_state_a_real_capture ... ok
 test python_pipeline_and_buffer_query_a_real_capture ... ok
 test python_shader_printf_debug_a_real_capture ... ok
 test python_vertex_input_query_a_real_capture ... ok
-test result: ok. 6 passed; 0 failed; 0 ignored
+test result: ok. 7 passed; 0 failed; 0 ignored
 ```
 
 ## GPU native replay loop

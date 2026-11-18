@@ -98,6 +98,8 @@ if (-not $exe) {
   Write-Output "Install succeeded but renderdocx.exe was not found in the usual locations."
 } else {
   Write-Output "Installed executable: $exe"
+  $installedDebugpy = Join-Path (Split-Path -Parent $exe) 'python-site\debugpy\__init__.py'
+  Write-Output ("Bundled debugpy installed: {0}" -f (Test-Path -LiteralPath $installedDebugpy))
   $proc = Start-Process -FilePath $exe -PassThru
   try {
     $condition = New-Object System.Windows.Automation.PropertyCondition(
@@ -125,5 +127,9 @@ Write-Host "Uninstalling ..."
 $code = Uninstall-Msi $Msi $uninstallLog
 Write-Host "msiexec /x exit code: $code"
 $stillThere = Find-InstalledExe
-Write-Output ("Uninstall removed payload: {0}" -f (-not $stillThere))
+$debugpyStillThere = $false
+if ($exe) {
+  $debugpyStillThere = Test-Path -LiteralPath (Join-Path (Split-Path -Parent $exe) 'python-site\debugpy\__init__.py')
+}
+Write-Output ("Uninstall removed payload: {0}" -f (-not $stillThere -and -not $debugpyStillThere))
 if ($code -ne 0) { exit 1 }
