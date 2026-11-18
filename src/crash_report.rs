@@ -32,6 +32,41 @@ pub fn default_log_path() -> Option<PathBuf> {
     crate::backend::Settings::config_dir().map(|dir| dir.join("crash.log"))
 }
 
+/// Environment summary included with a manually shared crash report: the
+/// upstream crash reporter sends this automatically, RenderDocX keeps it local.
+pub fn system_summary() -> String {
+    format!(
+        "RenderDocX {} · {} {} · locale {}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        std::env::var("LANG").unwrap_or_else(|_| "auto".to_owned()),
+    )
+}
+
+/// Render all recorded crashes plus the system summary as shareable text.
+pub fn full_report(path: &Path) -> String {
+    let mut out = String::new();
+    out.push_str(&system_summary());
+    out.push('\n');
+    for report in read_reports(path) {
+        out.push_str(&format!(
+            "\n[{}] {}\n  at {}\n",
+            report.timestamp,
+            report.message,
+            report.location.unwrap_or_else(|| "unknown".to_owned())
+        ));
+        if let Some(backtrace) = report.backtrace {
+            for line in backtrace.lines().take(40) {
+                out.push_str("  ");
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
 /// Install a panic hook that records crashes to `path` and then runs the
 /// previous hook (so the normal panic output is preserved).
 pub fn install_panic_hook(path: PathBuf) {
@@ -138,6 +173,17 @@ mod tests {
         assert_eq!(reports.len(), 2);
         assert_eq!(reports[0].message, "boom");
         assert_eq!(reports[1].timestamp, 200);
+    }
+
+    #[test]
+    fn full_report_contains_summary_and_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crash.log");
+        append_report(&path, &sample(42, "boom"));
+        let text = full_report(&path);
+        assert!(text.contains("RenderDocX"));
+        assert!(text.contains("boom"));
+        assert!(text.contains("42"));
     }
 
     #[test]

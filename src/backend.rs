@@ -87,6 +87,8 @@ pub struct Settings {
     pub theme: String,
     /// Analytics consent: "unset" | "granted" | "denied" (local counter only).
     pub analytics_consent: String,
+    /// Check GitHub releases for updates at startup (read-only, no download).
+    pub auto_check_updates: bool,
     pub always_replay_locally: bool,
 }
 
@@ -124,6 +126,7 @@ impl Default for Settings {
             camera_keys: KeyBindings::default(),
             theme: "dark".to_owned(),
             analytics_consent: "unset".to_owned(),
+            auto_check_updates: true,
             always_replay_locally: false,
         }
     }

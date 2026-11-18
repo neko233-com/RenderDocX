@@ -22005,7 +22005,27 @@ impl Render for Workspace {
                     .child(button("crash-refresh", self.t("Crash reports", "崩溃报告"), false, |this, cx| this.refresh_crash_reports(cx), cx))
                     .child(button("crash-clear", self.t("Clear crash reports", "清除崩溃报告"), false, |this, cx| this.clear_crash_reports(cx), cx))
                     .child(button("crash-folder", self.t("Open config folder", "打开配置目录"), false, |this, cx| this.open_crash_folder(cx), cx))
+                    .child(button("crash-copy", self.t("Copy full report", "复制完整报告"), false, |this, cx| {
+                        if let Some(path) = renderdocx::crash_report::default_log_path() {
+                            let text = renderdocx::crash_report::full_report(&path);
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                            this.status = Some(this.t("Crash report copied.", "崩溃报告已复制。").to_owned());
+                        }
+                        cx.notify();
+                    }, cx))
                     .child(button("update-check", self.t("Check for updates", "检查更新"), false, |this, cx| this.check_for_updates(cx), cx))
+                    .child(Button::new("auto-update-toggle")
+                        .label(format!(
+                            "{}: {}",
+                            self.t("Check at startup", "启动时检查"),
+                            if self.settings.auto_check_updates { self.t("on", "开") } else { self.t("off", "关") }
+                        ))
+                        .secondary()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.settings.auto_check_updates = !this.settings.auto_check_updates;
+                            this.save();
+                            cx.notify();
+                        })))
                     .child(Button::new("analytics-toggle")
                         .label(format!("{}: {}", self.t("Analytics consent", "统计授权"),
                             renderdocx::analytics::Consent::parse(&self.settings.analytics_consent).as_str()))
@@ -22906,6 +22926,12 @@ fn main() {
                         sd_hex_input,
                     });
                     Workspace::install_close_guard(window, cx, &entity);
+                    // Automatic update check at startup (read-only, no download).
+                    entity.update(cx, |view, cx| {
+                        if view.settings.auto_check_updates {
+                            view.check_for_updates(cx);
+                        }
+                    });
                     if let Some(path) = initial_capture {
                         entity.update(cx, |view, cx| view.open(path, cx));
                     }

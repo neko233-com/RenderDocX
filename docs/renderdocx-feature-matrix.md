@@ -47,8 +47,8 @@
 | B10 | ConfigEditor（上游配置 JSON 编辑器） | ✅ | `Settings::from_json` / `to_json_string` 提供带错误的配置解析与序列化（单测：往返、非法 JSON、类型错误、未知字段兼容）；GUI 首页「编辑配置 JSON」打开多行编辑器，应用时校验并持久化，取消丢弃；GPUI 交互测试验证打开/编辑器可见/取消 |
 | B11 | AboutDialog | ✅ | 首页 Help▸关于 打开应用内信息面板（版本、Rust+GPUI 说明、迁移范围声明）；以可关闭内嵌面板实现，非上游独立顶层窗口 |
 | B12 | TipsDialog | ✅ | 首页 Help▸提示 打开应用内信息面板（打开捕获/布局槽位/`.cap`/最近列表四条提示）；同上，为可关闭内嵌面板而非独立顶层窗口 |
-| B13 | UpdateDialog（检查更新） | ✅ | `src/update_check.rs` 实现语义化版本解析/比较（单测）与用户触发的 GitHub releases 检查（成熟库 ureq，不自动联网）；GUI「Check for updates」显示当前/最新版本与下载页。**有意差异**：不自动检查、不做静默下载安装 |
-| B14 | CrashDialog（崩溃上报） | ✅ | `src/crash_report.rs` 安装 panic hook，把消息/位置/backtrace 以 JSON Lines 追加到本地 crash.log（读写/清理单测）；GUI 可刷新/清除/打开配置目录并显示最近一次崩溃。**有意差异**：仅本地记录，不自动上传（隐私） |
+| B13 | UpdateDialog（检查更新） | ✅ | `src/update_check.rs` 实现语义化版本解析/比较（单测）与用户触发的 GitHub releases 检查（成熟库 ureq，不自动联网）；GUI「Check for updates」显示当前/最新版本与下载页；**启动时自动检查**（`Settings::auto_check_updates`，默认开启，GUI 可关）。**有意差异**：不做静默下载安装 |
+| B14 | CrashDialog（崩溃上报） | ✅ | `src/crash_report.rs` 安装 panic hook，把消息/位置/backtrace 以 JSON Lines 追加到本地 crash.log（读写/清理单测）；GUI 可刷新/清除/打开配置目录并显示最近一次崩溃；`full_report` 生成含版本/OS/架构与各崩溃 backtrace 的可分享文本（GUI「Copy full report」，单测）。**有意差异**：仅本地记录，不自动上传（隐私） |
 | B15 | AnalyticsConfirmDialog | ✅ | `src/analytics.rs` Consent（Unset/Granted/Denied）解析与持久化到 Settings，Unset 时提示；GUI 可循环切换授权状态（单测）。**有意差异**：仅本地计数器，不发送任何遥测 |
 | B16 | AnalyticsPromptDialog | ✅ | 同上：record_session 仅在 Granted 时递增本地 analytics_sessions.txt，拒绝/未决不写入（单测）；启动时按授权记录会话。**有意差异**：无网络上报 |
 | B17 | SuggestRemoteDialog（建议使用远程） | ✅ | `src/suggest_remote.rs` 复刻上游选项语义（无远程/始终本地时禁用远程、Local/Remote/Cancel 三选一，单测）；GUI 首页提供对话框面板与「始终本地回放」持久化。**去 C++ 进展**：`suggest_remote::should_suggest` 纯 Rust 从 `.rdc` 捕获的 `machine_ident`（由 `rdc_file` 解析）与本机标识比较判定是否建议远程（单测）。对话框本身完整实现（选项语义/启停规则/持久化/元数据接入/单测）。**有意差异**：自动弹出未实现——`ReplaySupport::SuggestRemote` 精确判定需桥接、本机 machine_ident 无法可靠取得（自动弹出会误报），保留手动入口；`.rdc` 检查器可直接用真实元数据打开。属行为差异，不属未迁移（同 A7/A14 判据） |
