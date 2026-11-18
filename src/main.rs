@@ -4546,6 +4546,19 @@ impl Workspace {
                         let hex: String = bytes.iter().take(48).map(|b| format!("{b:02x} ")).collect();
                         let text: String = bytes.iter().take(48).map(|&b| if b.is_ascii_graphic() { b as char } else { '.' }).collect();
                         let mut detail = format!("#{index} {} bytes: {hex}\n{text}", bytes.len());
+                        // ExtendedThumbnail sections hold a native-decodable image.
+                        if section.section_type == 7 {
+                            match file.extended_thumbnail(section) {
+                                Ok(thumb) => detail.push_str(&format!(
+                                    "\nthumbnail {}×{} {} · {} RGBA bytes",
+                                    thumb.width,
+                                    thumb.height,
+                                    renderdocx::rdc_file::file_type::name(thumb.format),
+                                    thumb.rgba.len()
+                                )),
+                                Err(error) => detail.push_str(&format!("\nthumbnail decode: {error}")),
+                            }
+                        }
                         // FrameCapture sections are a stream of binary structured chunks.
                         if section.section_type == 1 {
                             match renderdocx::structured_data::read_chunks(&bytes) {

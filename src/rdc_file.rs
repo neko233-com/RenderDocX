@@ -11,6 +11,42 @@
 //! All byte offsets/endianness mirror the upstream struct layout (little-endian,
 //! tightly packed/unaligned).
 
+/// `FileType` enum values from `renderdoc/api/replay/replay_enums.h`
+/// (image formats used by the ExtendedThumbnail section).
+pub mod file_type {
+    pub const DDS: u32 = 0;
+    pub const PNG: u32 = 1;
+    pub const JPG: u32 = 2;
+    pub const BMP: u32 = 3;
+    pub const TGA: u32 = 4;
+    pub const HDR: u32 = 5;
+    pub const EXR: u32 = 6;
+    pub const RAW: u32 = 7;
+
+    pub fn name(file_type: u32) -> &'static str {
+        match file_type {
+            DDS => "DDS",
+            PNG => "PNG",
+            JPG => "JPG",
+            BMP => "BMP",
+            TGA => "TGA",
+            HDR => "HDR",
+            EXR => "EXR",
+            RAW => "Raw",
+            _ => "Unknown",
+        }
+    }
+}
+
+/// Decoded extended thumbnail image (RGBA8 pixels).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtendedThumbnail {
+    pub width: u32,
+    pub height: u32,
+    pub format: u32,
+    pub rgba: Vec<u8>,
+}
+
 /// `SectionType` enum values from `renderdoc/api/replay/replay_enums.h`.
 pub mod section_type {
     pub const UNKNOWN: u32 = 0;
@@ -238,6 +274,40 @@ impl RdcFile {
             .find(|section| section.section_type == section_type)
     }
 
+    /// Decode an ExtendedThumbnail section payload: `ExtThumbnailHeader`
+    /// (u16 width, u16 height, u32 len, u32 format) followed by `len` image
+    /// bytes (translated from `rdcfile.cpp:714`). PNG payloads are decoded to
+    /// RGBA8 natively via the `png` crate; other formats return their bytes
+    /// unparsed with the declared format.
+    pub fn extended_thumbnail(&self, section: &SectionInfo) -> Result<ExtendedThumbnail, String> {
+        if section.section_type != 7 {
+            return Err("section is not ExtendedThumbnail".to_owned());
+        }
+        let payload = self.section_payload(section)?;
+        if payload.len() < 12 {
+            return Err("truncated ExtThumbnailHeader".to_owned());
+        }
+        let width = u16::from_le_bytes(payload[0..2].try_into().unwrap()) as u32;
+        let height = u16::from_le_bytes(payload[2..4].try_into().unwrap()) as u32;
+        let len = u32::from_le_bytes(payload[4..8].try_into().unwrap()) as usize;
+        let format = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+        if 12 + len > payload.len() {
+            return Err("thumbnail data exceeds section".to_owned());
+        }
+        let image = &payload[12..12 + len];
+        let rgba = if format == file_type::PNG {
+            decode_png_rgba(image)?
+        } else {
+            Vec::new()
+        };
+        Ok(ExtendedThumbnail {
+            width,
+            height,
+            format,
+            rgba,
+        })
+    }
+
     /// Read and decode a section's payload. Plain sections return their bytes
     /// directly; Zstd-compressed sections are decompressed with the mature
     /// `zstd` crate. LZ4-chunked sections are decoded with `lz4_flex`'s block
@@ -267,6 +337,41 @@ impl RdcFile {
             ));
         }
         Ok(decoded)
+    }
+}
+
+/// Decode a PNG byte slice into RGBA8 pixels using the mature `png` crate.
+fn decode_png_rgba(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = decoder
+        .read_info()
+        .map_err(|error| format!("PNG decode failed: {error}"))?;
+    let buffer_size = reader
+        .output_buffer_size()
+        .ok_or("PNG output buffer size unavailable")?;
+    let mut output = vec![0u8; buffer_size];
+    let info = reader
+        .next_frame(&mut output)
+        .map_err(|error| format!("PNG frame decode failed: {error}"))?;
+    let pixels = &output[..info.buffer_size()];
+    // Convert to RGBA8 if the source used a different color type.
+    let color = info.color_type;
+    let bytes_per_pixel = color.samples();
+    if color == png::ColorType::Rgba {
+        Ok(pixels.to_vec())
+    } else {
+        let mut rgba_out = Vec::with_capacity(info.width as usize * info.height as usize * 4);
+        for pixel in pixels.chunks(bytes_per_pixel) {
+            let (r, g, b, a) = match color {
+                png::ColorType::Rgb => (pixel[0], pixel[1], pixel[2], 255),
+                png::ColorType::Grayscale => (pixel[0], pixel[0], pixel[0], 255),
+                png::ColorType::GrayscaleAlpha => (pixel[0], pixel[0], pixel[0], pixel[1]),
+                _ => (0, 0, 0, 255),
+            };
+            rgba_out.extend_from_slice(&[r, g, b, a]);
+        }
+        Ok(rgba_out)
     }
 }
 
@@ -500,6 +605,44 @@ mod tests {
         let parsed = RdcFile::parse(&bytes).unwrap();
         let section = parsed.section(3).unwrap();
         assert_eq!(parsed.section_payload(section).unwrap(), source);
+    }
+
+    #[test]
+    fn decodes_extended_thumbnail_png() {
+        // Build a 1x1 RGBA PNG with the mature png crate.
+        let mut png_bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png_bytes, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[255, 0, 0, 255]).unwrap();
+        }
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1u16.to_le_bytes()); // width
+        payload.extend_from_slice(&1u16.to_le_bytes()); // height
+        payload.extend_from_slice(&(png_bytes.len() as u32).to_le_bytes());
+        payload.extend_from_slice(&file_type::PNG.to_le_bytes());
+        payload.extend_from_slice(&png_bytes);
+
+        let sections = vec![SectionInfo {
+            section_type: 7,
+            compressed_length: payload.len() as u64,
+            uncompressed_length: payload.len() as u64,
+            version: 0,
+            flags: 0,
+            name: "thumbnail".to_owned(),
+            data_offset: 0,
+        }];
+        let bytes = build_rdc(0x102, &sections, &[&payload]);
+        let parsed = RdcFile::parse(&bytes).unwrap();
+        let thumb = parsed
+            .extended_thumbnail(parsed.section(7).unwrap())
+            .unwrap();
+        assert_eq!(thumb.width, 1);
+        assert_eq!(thumb.height, 1);
+        assert_eq!(thumb.format, file_type::PNG);
+        assert_eq!(thumb.rgba, vec![255, 0, 0, 255]);
     }
 
     #[test]
