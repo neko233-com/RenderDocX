@@ -39,6 +39,88 @@ static ACTIVE_SNAPSHOT: Mutex<Option<serde_json::Value>> = Mutex::new(None);
 // Last event selected or queried by a helper; backs CurEvent()/CurAction().
 static ACTIVE_EVENT: AtomicU32 = AtomicU32::new(0);
 static ACTIVE_CAPTURE_PATH: Mutex<Option<String>> = Mutex::new(None);
+// UI panel requests queued by script Show* calls; the GUI drains them after a
+// script finishes (scripts run on a background executor).
+static UI_REQUESTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Drain queued `Show*` requests for the GUI to apply.
+pub fn take_ui_requests() -> Vec<String> {
+    std::mem::take(
+        &mut *UI_REQUESTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+    )
+}
+
+fn queue_ui_request(panel: &str) {
+    UI_REQUESTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .push(panel.to_owned());
+}
+
+macro_rules! viewer_accessors {
+    ($(($show:ident, $has:ident, $panel:literal, $doc:literal)),* $(,)?) => {
+        $(
+            #[doc = $doc]
+            #[pyo3::pyfunction]
+            #[allow(non_snake_case)]
+            fn $show() {
+                queue_ui_request($panel);
+            }
+
+            #[doc = concat!("`", stringify!($has), "()` -> whether the panel exists.")]
+            #[pyo3::pyfunction]
+            #[allow(non_snake_case)]
+            fn $has() -> bool {
+                true
+            }
+        )*
+    };
+}
+
+viewer_accessors!(
+    (ShowEventBrowser, HasEventBrowser, "events", "`ShowEventBrowser()` -> open the event browser."),
+    (ShowAPIInspector, HasAPIInspector, "parameters", "`ShowAPIInspector()` -> open the API call inspector."),
+    (ShowTextureViewer, HasTextureViewer, "textures", "`ShowTextureViewer()` -> open the texture viewer."),
+    (ShowPipelineViewer, HasPipelineViewer, "parameters", "`ShowPipelineViewer()` -> open the pipeline state view."),
+    (ShowMeshPreview, HasMeshPreview, "mesh", "`ShowMeshPreview()` -> open the mesh preview."),
+    (ShowResourceInspector, HasResourceInspector, "resources", "`ShowResourceInspector()` -> open the resource inspector."),
+    (ShowDebugMessageView, HasDebugMessageView, "messages", "`ShowDebugMessageView()` -> open the debug messages view."),
+    (ShowAnnotationViewer, HasAnnotationViewer, "annotations", "`ShowAnnotationViewer()` -> open notes/bookmarks."),
+    (ShowPerformanceCounterViewer, HasPerformanceCounterViewer, "counters", "`ShowPerformanceCounterViewer()` -> open performance counters."),
+    (ShowStatisticsViewer, HasStatisticsViewer, "statistics", "`ShowStatisticsViewer()` -> open frame statistics."),
+    (ShowTimelineBar, HasTimelineBar, "events", "`ShowTimelineBar()` -> open the event timeline."),
+);
+
+/// `ShowDiagnosticLogView()` -> open the renderdoc log panel.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn ShowDiagnosticLogView() {
+    queue_ui_request("log");
+}
+
+/// `HasDiagnosticLogView()` -> the log panel is always available.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn HasDiagnosticLogView() -> bool {
+    true
+}
+
+/// `ShowPythonShell()` -> the Python console is part of the workspace.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn ShowPythonShell() {
+    queue_ui_request("python");
+}
+
+/// `HasPythonShell()` -> the embedded CPython console is available.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn HasPythonShell() -> bool {
+    true
+}
+
 // pyrenderdoc-style resource replacement map (original index -> replacement).
 static REPLACEMENTS: Mutex<Option<std::collections::HashMap<u32, u32>>> = Mutex::new(None);
 
@@ -1543,6 +1625,32 @@ fn build_capture_module<'py>(
         ("debug_next", pyo3::wrap_pyfunction!(debug_next, py)),
         ("debug_stop", pyo3::wrap_pyfunction!(debug_stop, py)),
         ("Replay", pyo3::wrap_pyfunction!(Replay, py)),
+        ("ShowEventBrowser", pyo3::wrap_pyfunction!(ShowEventBrowser, py)),
+        ("HasEventBrowser", pyo3::wrap_pyfunction!(HasEventBrowser, py)),
+        ("ShowAPIInspector", pyo3::wrap_pyfunction!(ShowAPIInspector, py)),
+        ("HasAPIInspector", pyo3::wrap_pyfunction!(HasAPIInspector, py)),
+        ("ShowTextureViewer", pyo3::wrap_pyfunction!(ShowTextureViewer, py)),
+        ("HasTextureViewer", pyo3::wrap_pyfunction!(HasTextureViewer, py)),
+        ("ShowPipelineViewer", pyo3::wrap_pyfunction!(ShowPipelineViewer, py)),
+        ("HasPipelineViewer", pyo3::wrap_pyfunction!(HasPipelineViewer, py)),
+        ("ShowMeshPreview", pyo3::wrap_pyfunction!(ShowMeshPreview, py)),
+        ("HasMeshPreview", pyo3::wrap_pyfunction!(HasMeshPreview, py)),
+        ("ShowResourceInspector", pyo3::wrap_pyfunction!(ShowResourceInspector, py)),
+        ("HasResourceInspector", pyo3::wrap_pyfunction!(HasResourceInspector, py)),
+        ("ShowDebugMessageView", pyo3::wrap_pyfunction!(ShowDebugMessageView, py)),
+        ("HasDebugMessageView", pyo3::wrap_pyfunction!(HasDebugMessageView, py)),
+        ("ShowAnnotationViewer", pyo3::wrap_pyfunction!(ShowAnnotationViewer, py)),
+        ("HasAnnotationViewer", pyo3::wrap_pyfunction!(HasAnnotationViewer, py)),
+        ("ShowPerformanceCounterViewer", pyo3::wrap_pyfunction!(ShowPerformanceCounterViewer, py)),
+        ("HasPerformanceCounterViewer", pyo3::wrap_pyfunction!(HasPerformanceCounterViewer, py)),
+        ("ShowStatisticsViewer", pyo3::wrap_pyfunction!(ShowStatisticsViewer, py)),
+        ("HasStatisticsViewer", pyo3::wrap_pyfunction!(HasStatisticsViewer, py)),
+        ("ShowTimelineBar", pyo3::wrap_pyfunction!(ShowTimelineBar, py)),
+        ("HasTimelineBar", pyo3::wrap_pyfunction!(HasTimelineBar, py)),
+        ("ShowDiagnosticLogView", pyo3::wrap_pyfunction!(ShowDiagnosticLogView, py)),
+        ("HasDiagnosticLogView", pyo3::wrap_pyfunction!(HasDiagnosticLogView, py)),
+        ("ShowPythonShell", pyo3::wrap_pyfunction!(ShowPythonShell, py)),
+        ("HasPythonShell", pyo3::wrap_pyfunction!(HasPythonShell, py)),
     ] {
         if let Ok(function) = wrapped {
             dict.set_item(name, function).ok();
@@ -1872,6 +1980,18 @@ mod tests {
         UnregisterReplacement(1).unwrap();
         assert!(!IsResourceReplaced(1));
         assert_eq!(GetResourceReplacement(1), None);
+        // Show* calls queue panel switches for the GUI to drain.
+        take_ui_requests();
+        let result = run_script_with_capture(
+            "import renderdocx\n\
+             renderdocx.ShowTextureViewer()\n\
+             renderdocx.ShowMeshPreview()\n\
+             print(renderdocx.HasTextureViewer(), renderdocx.HasMeshPreview(), renderdocx.HasPythonShell())",
+            &CaptureView::default(),
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.stdout.trim(), "True True True");
+        assert_eq!(take_ui_requests(), vec!["textures", "mesh"]);
     }
 
     #[cfg(windows)]

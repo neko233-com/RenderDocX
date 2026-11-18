@@ -6097,6 +6097,29 @@ impl Workspace {
         }
     }
 
+    /// Apply panel requests queued by script `Show*` calls after a script run.
+    fn apply_python_ui_request(&mut self, request: &str, cx: &mut Context<Self>) {
+        match request {
+            "events" => self.tab = CaptureTab::Events,
+            "parameters" => self.tab = CaptureTab::Parameters,
+            "textures" => self.tab = CaptureTab::Textures,
+            "mesh" => self.tab = CaptureTab::Mesh,
+            "resources" => self.tab = CaptureTab::Resources,
+            "messages" => self.tab = CaptureTab::Messages,
+            "annotations" => self.tab = CaptureTab::Annotations,
+            "counters" => self.tab = CaptureTab::Counters,
+            "statistics" => self.tab = CaptureTab::Statistics,
+            "log" => {
+                self.open_log(cx);
+                return;
+            }
+            // The Python console is part of the workspace; no tab switch needed.
+            "python" => return,
+            _ => return,
+        }
+        cx.notify();
+    }
+
     /// Read-only capture summary exposed to embedded Python scripts and
     /// extension lifecycle calls as `renderdocx` / `pyrenderdoc`.
     fn python_capture_view(&self) -> renderdocx::python_embed::CaptureView {
@@ -6234,6 +6257,9 @@ impl Workspace {
                 }
                 if let Some(error) = output.error {
                     this.python_output.push(format!("! {error}"));
+                }
+                for request in renderdocx::python_embed::take_ui_requests() {
+                    this.apply_python_ui_request(&request, cx);
                 }
                 cx.notify();
             });
