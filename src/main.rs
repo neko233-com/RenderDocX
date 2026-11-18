@@ -1052,6 +1052,7 @@ struct Workspace {
     injected_pids: Vec<u32>,
     recording_key: Option<usize>,
     viewer_focus: gpui::FocusHandle,
+    rdc_inspect: Option<(PathBuf, Vec<renderdocx::rdc_file::SectionInfo>)>,
 }
 
 impl Workspace {
@@ -4484,6 +4485,35 @@ impl Workspace {
         } else {
             self.save();
             self.status = Some(format!("{} {}", self.t("Added remote host", "已添加远程主机"), host.display_name()));
+        }
+        cx.notify();
+    }
+
+    /// Inspect a .rdc container natively (no bridge, no C++): parse header and
+    /// section table with the pure-Rust reader translated from rdcfile.cpp.
+    fn inspect_rdc_file(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("RenderDoc capture", &["rdc"])
+            .pick_file()
+        else {
+            return;
+        };
+        match std::fs::read(&path) {
+            Ok(bytes) => match renderdocx::rdc_file::RdcFile::parse(&bytes) {
+                Ok(file) => {
+                    self.rdc_inspect = Some((path, file.sections));
+                    self.status = None;
+                }
+                Err(error) => {
+                    self.status = Some(format!(
+                        "{}: {error}",
+                        self.t("Could not parse .rdc file", "无法解析 .rdc 文件")
+                    ));
+                }
+            },
+            Err(error) => {
+                self.status = Some(format!("{}: {error}", self.t("Could not read file", "无法读取文件")));
+            }
         }
         cx.notify();
     }
@@ -21224,6 +21254,25 @@ impl Render for Workspace {
                 }))
             )
             .child(div().flex().flex_col().gap_1()
+                .child(self.t("Capture file inspector (native .rdc reader)", "捕获文件检查器（原生 .rdc 读取）"))
+                .child(button("inspect-rdc", self.t("Inspect .rdc…", "检查 .rdc…"), false, |this, cx| this.inspect_rdc_file(cx), cx))
+                .when_some(self.rdc_inspect.as_ref(), |view, (path, sections)| {
+                    view.child(div().text_sm().text_color(rgb(0x91a7c0)).child(path.display().to_string()))
+                        .child(div().id("rdc-sections").test_support().flex().flex_col().gap_0().max_h(px(160.)).overflow_hidden()
+                            .children(sections.iter().enumerate().map(|(index, section)| {
+                                div().id(("rdc-section", index)).test_support().text_sm().child(format!(
+                                    "#{index} type={} ver={} flags={:#x} {}/{} bytes {}",
+                                    section.section_type,
+                                    section.version,
+                                    section.flags,
+                                    section.compressed_length,
+                                    section.uncompressed_length,
+                                    section.name,
+                                ))
+                            })))
+                })
+            )
+            .child(div().flex().flex_col().gap_1()
                 .child(self.t("Configuration", "配置"))
                 .child(Button::new("config-editor-open")
                     .label(self.t("Edit configuration JSON", "编辑配置 JSON"))
@@ -22032,6 +22081,7 @@ fn main() {
                         injected_pids: Vec::new(),
                         recording_key: None,
                         viewer_focus: cx.focus_handle(),
+                        rdc_inspect: None,
                     });
                     Workspace::install_close_guard(window, cx, &entity);
                     if let Some(path) = initial_capture {
@@ -22897,6 +22947,7 @@ mod ui_tests {
                         injected_pids: Vec::new(),
                         recording_key: None,
                         viewer_focus: cx.focus_handle(),
+                        rdc_inspect: None,
                     })
                 },
             )
@@ -23675,6 +23726,7 @@ mod ui_tests {
                         injected_pids: Vec::new(),
                         recording_key: None,
                         viewer_focus: cx.focus_handle(),
+                        rdc_inspect: None,
                     })
                 },
             )
