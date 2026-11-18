@@ -4416,6 +4416,37 @@ impl Workspace {
     }
 
     /// Discover UI extensions by parsing extension.json manifests natively.
+    /// Native detail line for a resource: dimensions/format for textures, and
+    /// byte length for buffers, matched by the bridge's resource_index.
+    fn resource_detail(&self, index: usize) -> Option<String> {
+        let snapshot = self.snapshot.as_ref()?;
+        if let Some(texture) = snapshot
+            .textures
+            .iter()
+            .find(|texture| texture.resource_index == Some(index))
+        {
+            return Some(format!(
+                "{}×{}×{} · {} mips · {} slices · {} samples · {} · {} bytes",
+                texture.width,
+                texture.height,
+                texture.depth,
+                texture.mips,
+                texture.array_size,
+                texture.samples,
+                texture.format_name,
+                texture.bytes
+            ));
+        }
+        if let Some(buffer) = snapshot
+            .buffers
+            .iter()
+            .find(|buffer| buffer.resource_index == Some(index))
+        {
+            return Some(format!("{} bytes", buffer.length));
+        }
+        None
+    }
+
     fn add_remote_host(&mut self, cx: &mut Context<Self>) {
         let hostname = self.remote_target_url.read(cx).value().trim().to_string();
         let host = renderdocx::remote_hosts::RemoteHost::new(hostname);
@@ -16909,6 +16940,9 @@ impl Workspace {
                             self.annotations.renames.as_ref().map(|(_, doc)| doc)
                         )
                     ))
+                    .when_some(self.resource_detail(index), |detail_view, detail| {
+                        detail_view.child(div().text_sm().text_color(rgb(0x9eacc0)).child(detail))
+                    })
                     .child(
                         if resource
                             .rename_key
