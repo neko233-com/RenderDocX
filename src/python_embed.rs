@@ -496,6 +496,35 @@ mod tests {
         assert!(result.error.is_some(), "buffer must fail without a session");
     }
 
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires RENDERDOCX_TEST_BRIDGE and RENDERDOCX_TEST_VULKAN_MESH_CAPTURE"]
+    fn python_pipeline_and_buffer_query_a_real_capture() {
+        use crate::backend::Settings;
+        use std::path::PathBuf;
+
+        let bridge = PathBuf::from(
+            std::env::var("RENDERDOCX_TEST_BRIDGE").expect("set RENDERDOCX_TEST_BRIDGE"),
+        );
+        let capture = PathBuf::from(
+            std::env::var("RENDERDOCX_TEST_VULKAN_MESH_CAPTURE")
+                .expect("set RENDERDOCX_TEST_VULKAN_MESH_CAPTURE"),
+        );
+        let mut settings = Settings::default();
+        settings.replay_bridge = Some(bridge);
+        let (session, _snapshot) =
+            crate::replay::Session::open(&settings, &capture).expect("open capture");
+        set_active_session(Some(session));
+        let result = run_script_with_capture(
+            "import renderdocx, json\np = json.loads(renderdocx.pipeline(19))\nprint(p.get('event_id'))\nprint(len(renderdocx.buffer(0, 0, 16)))",
+            &CaptureView::default(),
+        );
+        set_active_session(None);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(result.stdout.contains("19"), "{}", result.stdout);
+        assert!(result.stdout.trim().lines().last().is_some_and(|line| line == "32"));
+    }
+
     #[test]
     fn rejects_nul_bytes() {
         assert!(cstring("a\0b").is_err());

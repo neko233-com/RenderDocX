@@ -58,6 +58,9 @@ Write-Host "vulkan fonts: mesh=$mesh vertex=$vertex geometry=$geometry meshPrint
 Push-Location $repo
 try {
   cargo test --features ui-tests --test agent_cli -- --ignored --test-threads=1
+  # Lib-level ignored test for embedded-Python dynamic queries. The other two
+  # ignored lib tests are subprocess fixtures and must not be run directly.
+  cargo test --features ui-tests --lib python_embed::tests::python_pipeline_and_buffer_query_a_real_capture -- --ignored --exact
 } finally {
   Pop-Location
 }
