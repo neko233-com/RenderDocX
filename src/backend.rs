@@ -1,5 +1,6 @@
 use crate::{
     i18n::Language,
+    remote_hosts::RemoteHost,
     viewer_settings::{AxisMapping, CameraControls, ProjectionGuess},
 };
 use directories::ProjectDirs;
@@ -58,6 +59,8 @@ pub struct Settings {
     pub renderdoc_core: Option<PathBuf>,
     /// Manifest names of extensions the user has enabled.
     pub enabled_extensions: Vec<String>,
+    /// Remote server bookmarks (upstream RemoteHost schema).
+    pub remote_hosts: Vec<RemoteHost>,
     pub replay_options: crate::replay::ReplayOptions,
     pub shader_processors: Vec<crate::shader_processor::NamedShaderProcessor>,
     pub texture_per_resource_settings: bool,
@@ -89,6 +92,7 @@ impl Default for Settings {
             replay_bridge: None,
             renderdoc_core: None,
             enabled_extensions: Vec::new(),
+            remote_hosts: Vec::new(),
             replay_options: Default::default(),
             shader_processors: Vec::new(),
             texture_per_resource_settings: true,
@@ -372,5 +376,9 @@ mod tests {
         assert!(Settings::from_json("{\"future_option\":true}").is_ok());
         assert!(!Settings::from_json("{}").unwrap().always_replay_locally);
         assert!(Settings::from_json("{\"always_replay_locally\":true}").unwrap().always_replay_locally);
+        let mut with_host = Settings::default();
+        with_host.remote_hosts.push(super::RemoteHost::new("host:39070"));
+        let reloaded = Settings::from_json(&with_host.to_json_string()).unwrap();
+        assert_eq!(reloaded.remote_hosts, with_host.remote_hosts);
     }
 }

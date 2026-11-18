@@ -4416,6 +4416,21 @@ impl Workspace {
     }
 
     /// Discover UI extensions by parsing extension.json manifests natively.
+    fn add_remote_host(&mut self, cx: &mut Context<Self>) {
+        let hostname = self.remote_target_url.read(cx).value().trim().to_string();
+        let host = renderdocx::remote_hosts::RemoteHost::new(hostname);
+        if !renderdocx::remote_hosts::upsert(&mut self.settings.remote_hosts, host.clone()) {
+            self.status = Some(
+                self.t("Invalid remote host address.", "远程主机地址无效。")
+                    .to_owned(),
+            );
+        } else {
+            self.save();
+            self.status = Some(format!("{} {}", self.t("Added remote host", "已添加远程主机"), host.display_name()));
+        }
+        cx.notify();
+    }
+
     fn refresh_extensions(&mut self, cx: &mut Context<Self>) {
         let result = Settings::config_dir()
             .map(|dir| renderdocx::extensions::discover(&renderdocx::extensions::default_extension_root(&dir)));
@@ -20939,7 +20954,25 @@ impl Render for Workspace {
                         this.launch_executable = Some(PathBuf::from(&app));
                         this.launch_live_with_remote(PathBuf::from(app), Some(url), cx);
                     }
-                }, cx)))
+                }, cx))
+                .child(button("save-remote-host", self.t("Save as bookmark", "保存为书签"), false, |this, cx| this.add_remote_host(cx), cx)))
+            .when(!self.settings.remote_hosts.is_empty(), |view| {
+                view.child(div().flex().flex_wrap().gap_1()
+                    .children(self.settings.remote_hosts.iter().enumerate().map(|(index, host)| {
+                        let hostname = host.hostname.clone();
+                        div()
+                            .id(("remote-host", index))
+                            .test_support()
+                            .cursor_pointer()
+                            .text_sm()
+                            .px_2().py_1().rounded_md().bg(rgb(0x252f40))
+                            .child(host.display_name().to_owned())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.status = Some(format!("{}: {hostname}", this.t("Remote host", "远程主机")));
+                                cx.notify();
+                            }))
+                    })))
+            })
             .child(div().flex().flex_col().gap_1()
                 .child(self.t("Recent captures", "最近的捕获"))
                 .child(div().flex().flex_wrap().gap_1()

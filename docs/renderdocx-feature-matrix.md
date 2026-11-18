@@ -38,7 +38,7 @@
 | B1 | CaptureDialog（捕获配置） | 🟡 | README：捕获选项/参数/工作目录/有序环境修改（GUI+CLI）；`.cap` 导入导出（D10）；**去 C++ 进展**：`src/renderdoc_core.rs` 用纯 Rust FFI 调 `IsGlobalHookActive`/`CanGlobalHook`/`StopGlobalHook` 稳定 C 导出（无 C++ 桥接），GUI 显示全局 hook 状态并可停止（4 项单测）；**去 C++ 进展 2**：`src/process_list.rs` 用 `windows` crate（Toolhelp32）纯 Rust 枚举本机进程，GUI 可选 PID 直接 `connect_target` 附加（2 项单测含真实枚举当前进程），替代 qrenderdoc 进程列表依赖；**剩余缺口**：`StartGlobalHook`（参数含 C++ `rdcstr&`/`CaptureOptions&`，ABI 不安全不可 FFI）、inject 模式、queued frames UI |
 | B2 | SettingsDialog | 🟡 | `src/backend.rs` Settings：语言/纹理偏好/事件列/路径、配置 JSON 编辑器（B10）、布局槽位、最近历史、查看器设置等；**去 C++ 进展**：新增 `src/renderdoc_core.rs` 用 `libloading` 直接调用 renderdoc.dll 的稳定 `extern "C"` 导出（`GetVersionString`/`GetCommitHash`/`IsReleaseBuild`/`GetCurrentProcessMemoryUsage`），纯 Rust FFI 读 core 版本/哈希/构建类型，GUI 可显示——**无需编译任何 C++ 桥接**（3 项单测）；上游设置项（临时目录、主题、遥测开关等）未覆盖 |
 | B3 | TextureSaveDialog | ✅ | `src/texture_export.rs`：全部 mips/阵列网格/cubemap cross/采样映射/alpha/JPEG 质量；cubemap 与多重采样组合待实机验证 |
-| B4 | RemoteManager（远程服务器管理） | 🟡 | README：远程回放/启动/浏览/下载（loopback 实测）；远程目标发现与部分远程工作流未完成 |
+| B4 | RemoteManager（远程服务器管理） | 🟡 | README：远程回放/启动/浏览/下载（loopback 实测）；**去 C++ 进展**：`src/remote_hosts.rs` 用 serde_json 解析上游 RemoteHost 清单 schema（hostname/friendlyName/runCommand/lastCapturePath，camelCase 对齐），GUI 可保存/点击远程主机书签并持久化（3 项单测 + Settings 往返）；**未完成**：跨机器真实远程服务器发现、完整远程工作流 |
 | B5 | VirtualFileDialog（远程目录浏览） | ✅ | README：目录浏览、应用/工作目录选择、`.rdc` 下载（loopback 实测） |
 | B6 | EnvironmentEditor（环境变量编辑） | ✅ | README：有序环境修改，GUI+CLI，Vulkan layer 自动设置实测 |
 | B7 | LiveCapture（目标捕获列表窗口） | ✅ | `live_captures` 列表逐行展示帧号/路径/本地或远程状态；本地捕获点击打开，远程捕获点击请求复制到本地；本批为本地行新增「保存」按钮（`capture_save::save_copy` 复制到指定 `.rdc` 并写入最近历史）。**差异**：以上操作以行内按钮提供，未实现上游右键上下文菜单 |
