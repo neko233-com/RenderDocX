@@ -1052,7 +1052,7 @@ struct Workspace {
     injected_pids: Vec<u32>,
     recording_key: Option<usize>,
     viewer_focus: gpui::FocusHandle,
-    rdc_inspect: Option<(PathBuf, Vec<renderdocx::rdc_file::SectionInfo>)>,
+    rdc_inspect: Option<(PathBuf, renderdocx::rdc_file::RdcFile)>,
 }
 
 impl Workspace {
@@ -4489,6 +4489,26 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Decode one section's payload natively and show a short hex/text preview.
+    fn preview_rdc_section(&mut self, index: usize, cx: &mut Context<Self>) {
+        let preview = self.rdc_inspect.as_ref().and_then(|(_, file)| {
+            file.sections.get(index).map(|section| {
+                match file.section_payload(section) {
+                    Ok(bytes) => {
+                        let hex: String = bytes.iter().take(48).map(|b| format!("{b:02x} ")).collect();
+                        let text: String = bytes.iter().take(48).map(|&b| if b.is_ascii_graphic() { b as char } else { '.' }).collect();
+                        format!("#{index} {} bytes: {hex}\n{text}", bytes.len())
+                    }
+                    Err(error) => format!("#{index}: {error}"),
+                }
+            })
+        });
+        if let Some(text) = preview {
+            self.status = Some(text);
+        }
+        cx.notify();
+    }
+
     /// Inspect a .rdc container natively (no bridge, no C++): parse header and
     /// section table with the pure-Rust reader translated from rdcfile.cpp.
     fn inspect_rdc_file(&mut self, cx: &mut Context<Self>) {
@@ -4501,7 +4521,7 @@ impl Workspace {
         match std::fs::read(&path) {
             Ok(bytes) => match renderdocx::rdc_file::RdcFile::parse(&bytes) {
                 Ok(file) => {
-                    self.rdc_inspect = Some((path, file.sections));
+                    self.rdc_inspect = Some((path, file));
                     self.status = None;
                 }
                 Err(error) => {
@@ -21256,11 +21276,11 @@ impl Render for Workspace {
             .child(div().flex().flex_col().gap_1()
                 .child(self.t("Capture file inspector (native .rdc reader)", "捕获文件检查器（原生 .rdc 读取）"))
                 .child(button("inspect-rdc", self.t("Inspect .rdc…", "检查 .rdc…"), false, |this, cx| this.inspect_rdc_file(cx), cx))
-                .when_some(self.rdc_inspect.as_ref(), |view, (path, sections)| {
+                .when_some(self.rdc_inspect.as_ref(), |view, (path, file)| {
                     view.child(div().text_sm().text_color(rgb(0x91a7c0)).child(path.display().to_string()))
                         .child(div().id("rdc-sections").test_support().flex().flex_col().gap_0().max_h(px(160.)).overflow_hidden()
-                            .children(sections.iter().enumerate().map(|(index, section)| {
-                                div().id(("rdc-section", index)).test_support().text_sm().child(format!(
+                            .children(file.sections.iter().enumerate().map(|(index, section)| {
+                                div().id(("rdc-section", index)).test_support().cursor_pointer().text_sm().child(format!(
                                     "#{index} type={} ver={} flags={:#x} {}/{} bytes {}",
                                     section.section_type,
                                     section.version,
@@ -21268,7 +21288,7 @@ impl Render for Workspace {
                                     section.compressed_length,
                                     section.uncompressed_length,
                                     section.name,
-                                ))
+                                )).on_click(cx.listener(move |this, _, _, cx| this.preview_rdc_section(index, cx)))
                             })))
                 })
             )

@@ -49,6 +49,8 @@ pub struct SectionInfo {
 pub struct RdcFile {
     pub header: RdcHeader,
     pub sections: Vec<SectionInfo>,
+    /// Raw file bytes, retained so section payloads can be decoded on demand.
+    data: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -187,6 +189,7 @@ impl RdcFile {
                 time_freq,
             },
             sections,
+            data: data.to_vec(),
         })
     }
 
@@ -195,6 +198,37 @@ impl RdcFile {
         self.sections
             .iter()
             .find(|section| section.section_type == section_type)
+    }
+
+    /// Read and decode a section's payload. Plain sections return their bytes
+    /// directly; Zstd-compressed sections are decompressed with the mature
+    /// `zstd` crate. LZ4 uses RenderDoc's own chunked framing (not the standard
+    /// frame format) and is reported as unsupported here rather than guessed.
+    pub fn section_payload(&self, section: &SectionInfo) -> Result<Vec<u8>, String> {
+        let start = section.data_offset;
+        let end = start
+            .checked_add(section.compressed_length as usize)
+            .ok_or("section length overflow")?;
+        if end > self.data.len() {
+            return Err("section payload exceeds file".to_owned());
+        }
+        let raw = &self.data[start..end];
+        let decoded = if section.flags & FLAG_ZSTD != 0 {
+            zstd::stream::decode_all(raw)
+                .map_err(|error| format!("Zstd decompression failed: {error}"))?
+        } else if section.flags & FLAG_LZ4 != 0 {
+            return Err("LZ4-chunked section decompression is not implemented".to_owned());
+        } else {
+            raw.to_vec()
+        };
+        if decoded.len() != section.uncompressed_length as usize {
+            return Err(format!(
+                "decompressed section length {} != expected {}",
+                decoded.len(),
+                section.uncompressed_length
+            ));
+        }
+        Ok(decoded)
     }
 }
 
@@ -316,6 +350,44 @@ mod tests {
         assert_eq!(section.name, "extra");
         assert_eq!(section.flags, FLAG_ASCII);
         assert_eq!(section.compressed_length, 5);
+    }
+
+    #[test]
+    fn decodes_plain_and_zstd_section_payloads() {
+        let plain_payload: &[u8] = b"plain section contents";
+        let compressed_source: &[u8] = b"this will be zstd compressed";
+        let zstd_payload = zstd::stream::encode_all(compressed_source, 0).unwrap();
+
+        let sections = vec![
+            SectionInfo {
+                section_type: 1,
+                compressed_length: plain_payload.len() as u64,
+                uncompressed_length: plain_payload.len() as u64,
+                version: 0,
+                flags: 0,
+                name: "plain".to_owned(),
+                data_offset: 0,
+            },
+            SectionInfo {
+                section_type: 2,
+                compressed_length: zstd_payload.len() as u64,
+                uncompressed_length: compressed_source.len() as u64,
+                version: 0,
+                flags: FLAG_ZSTD,
+                name: "compressed".to_owned(),
+                data_offset: 0,
+            },
+        ];
+        let bytes = build_rdc(0x102, &sections, &[plain_payload, &zstd_payload]);
+        let parsed = RdcFile::parse(&bytes).unwrap();
+
+        let plain = parsed.section(1).unwrap();
+        assert_eq!(parsed.section_payload(plain).unwrap(), plain_payload);
+        let compressed = parsed.section(2).unwrap();
+        assert_eq!(
+            parsed.section_payload(compressed).unwrap(),
+            compressed_source
+        );
     }
 
     #[test]
