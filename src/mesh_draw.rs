@@ -317,10 +317,9 @@ where
                 return None;
             }
             let index = if attr.per_primitive {
-                if info.primitive_vertices == 0 {
-                    return None;
-                }
-                u64::from(row.row / info.primitive_vertices)
+                // Native computation removes reliance on the C++ bridge field.
+                let per_primitive = crate::topology::mesh_primitive_vertices(info)?;
+                u64::from(row.row / per_primitive)
             } else {
                 u64::from(row.vertex?)
             };

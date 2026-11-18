@@ -51,6 +51,7 @@ pub mod vertex_input;
 pub mod viewer_settings;
 
 pub mod suggest_remote;
+pub mod topology;
 pub mod texture_view;
 pub mod thumbnail_strip;
 
