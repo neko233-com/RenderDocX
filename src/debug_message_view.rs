@@ -52,6 +52,44 @@ pub fn sort_indices(
     });
 }
 
+/// Apply a table click with standard single/ctrl/shift selection semantics.
+pub fn apply_selection(
+    selected: &mut BTreeSet<usize>,
+    anchor: &mut Option<usize>,
+    primary: &mut Option<usize>,
+    index: usize,
+    control: bool,
+    shift: bool,
+) {
+    if shift {
+        if let Some(anchor) = *anchor {
+            let (start, end) = if anchor <= index {
+                (anchor, index)
+            } else {
+                (index, anchor)
+            };
+            selected.clear();
+            selected.extend(start..=end);
+        } else {
+            selected.clear();
+            selected.insert(index);
+            *anchor = Some(index);
+        }
+        *primary = Some(index);
+    } else if control {
+        if !selected.remove(&index) {
+            selected.insert(index);
+        }
+        *primary = Some(index);
+        *anchor = Some(index);
+    } else {
+        selected.clear();
+        selected.insert(index);
+        *primary = Some(index);
+        *anchor = Some(index);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,6 +134,24 @@ mod tests {
         let mut indices = vec![0, 1, 2];
         sort_indices(&mut indices, &messages, SortKey::Event, true);
         assert_eq!(indices, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn multi_selection_supports_ctrl_shift_and_single_click() {
+        let mut selected = BTreeSet::new();
+        let mut anchor = None;
+        let mut primary = None;
+        apply_selection(&mut selected, &mut anchor, &mut primary, 2, false, false);
+        assert_eq!(selected, BTreeSet::from([2]));
+        assert_eq!(primary, Some(2));
+        apply_selection(&mut selected, &mut anchor, &mut primary, 5, true, false);
+        assert_eq!(selected, BTreeSet::from([2, 5]));
+        apply_selection(&mut selected, &mut anchor, &mut primary, 3, false, true);
+        assert_eq!(selected, BTreeSet::from([3, 4, 5]));
+        apply_selection(&mut selected, &mut anchor, &mut primary, 5, true, false);
+        assert_eq!(selected, BTreeSet::from([3, 4]));
+        apply_selection(&mut selected, &mut anchor, &mut primary, 1, false, false);
+        assert_eq!(selected, BTreeSet::from([1]));
     }
 
     #[test]

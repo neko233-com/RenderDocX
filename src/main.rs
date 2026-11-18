@@ -1013,6 +1013,8 @@ struct Workspace {
     compute_thread: Entity<InputState>,
     selected_resource: Option<usize>,
     selected_message: Option<usize>,
+    selected_messages: std::collections::BTreeSet<usize>,
+    message_selection_anchor: Option<usize>,
     selected_counters: std::collections::BTreeSet<u32>,
     counter_page: Option<CounterPage>,
     descriptor_store: Option<usize>,
@@ -6688,6 +6690,8 @@ impl Workspace {
                         this.debug_view = None;
                         this.selected_resource = None;
                         this.selected_message = None;
+                        this.selected_messages.clear();
+                        this.message_selection_anchor = None;
                         this.selected_counters.clear();
                         this.counter_page = None;
                         this.descriptor_store = None;
@@ -15684,13 +15688,26 @@ impl Workspace {
                                     .cursor_pointer()
                                     .text_color(rgb(if hidden { 0x98a1af } else { 0xe2e8f0 }))
                                     .child(text)
-                                    .bg(rgb(if this.selected_message == Some(index) {
+                                    .bg(rgb(if this.selected_messages.contains(&index)
+                                        || this.selected_message == Some(index)
+                                    {
                                         0x304c7c
                                     } else {
                                         0x192332
                                     }))
                                     .on_click(cx.listener(move |this, click: &gpui::ClickEvent, window, cx| {
-                                        this.selected_message = Some(index);
+                                        let modifiers = match click {
+                                            gpui::ClickEvent::Mouse(mouse) => mouse.down.modifiers,
+                                            _ => gpui::Modifiers::default(),
+                                        };
+                                        renderdocx::debug_message_view::apply_selection(
+                                            &mut this.selected_messages,
+                                            &mut this.message_selection_anchor,
+                                            &mut this.selected_message,
+                                            index,
+                                            modifiers.control,
+                                            modifiers.shift,
+                                        );
                                         if event != 0 && matches!(click, gpui::ClickEvent::Mouse(mouse) if mouse.up.click_count == 2) {
                                             this.jump_to_usage(event, window, cx);
                                         }
@@ -20536,6 +20553,8 @@ impl Workspace {
                             this.shader_vertex_resolution = None;
                             this.shader_vertex_lookup_pending = false;
                             this.selected_message = None;
+                        this.selected_messages.clear();
+                        this.message_selection_anchor = None;
                             this.event_tree.reset(&[]);
                             this.capture = None;
                             this.selected = None;
@@ -20932,6 +20951,8 @@ impl Workspace {
                                                         snapshot.debug_messages.clear();
                                                     }
                                                     this.selected_message = None;
+                        this.selected_messages.clear();
+                        this.message_selection_anchor = None;
                                                     this.refresh_messages();
                                                     cx.notify();
                                                 } else {
@@ -23015,6 +23036,8 @@ fn main() {
                         compute_thread,
                         selected_resource: None,
                         selected_message: None,
+                        selected_messages: Default::default(),
+                        message_selection_anchor: None,
                         selected_counters: Default::default(),
                         counter_page: None,
                         descriptor_store: None,
@@ -23896,6 +23919,8 @@ mod ui_tests {
                         compute_thread,
                         selected_resource: None,
                         selected_message: None,
+                        selected_messages: Default::default(),
+                        message_selection_anchor: None,
                         selected_counters: Default::default(),
                         counter_page: None,
                         descriptor_store: None,
@@ -24717,6 +24742,8 @@ mod ui_tests {
                         compute_thread,
                         selected_resource: None,
                         selected_message: None,
+                        selected_messages: Default::default(),
+                        message_selection_anchor: None,
                         selected_counters: Default::default(),
                         counter_page: None,
                         descriptor_store: None,
