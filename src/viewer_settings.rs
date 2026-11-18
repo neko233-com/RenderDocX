@@ -136,6 +136,25 @@ impl AxisMapping {
     pub fn vectors(self) -> (FloatVector, FloatVector, FloatVector) {
         (self.x.vector(), self.y.vector(), self.z.vector())
     }
+
+    /// Apply the axis mapping to an unprojected world point, producing the
+    /// remapped coordinate used by the mesh viewer. Pure component selection.
+    pub fn remap(self, point: [f32; 3]) -> [f32; 3] {
+        // Choose the source component by which axis family each direction maps to.
+        let source = |direction: AxisDirection, p: [f32; 3]| match direction {
+            AxisDirection::Right => p[0],
+            AxisDirection::Left => -p[0],
+            AxisDirection::Up => p[1],
+            AxisDirection::Down => -p[1],
+            AxisDirection::IntoScreen => p[2],
+            AxisDirection::OutOfScreen => -p[2],
+        };
+        [
+            source(self.x, point),
+            source(self.y, point),
+            source(self.z, point),
+        ]
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -271,6 +290,31 @@ impl CameraControls {
     }
 }
 
+/// Build the unprojection projection matrix from the user's ProjectionGuess
+/// parameters (aspect 0 means estimate 1.0, near/far 0 means estimate defaults).
+pub fn projection_matrix(params: &ProjectionGuess) -> Option<crate::projection::Mat4> {
+    let aspect = if params.aspect > 0.0 {
+        params.aspect
+    } else {
+        1.0
+    };
+    let near = if params.near_plane > 0.0 {
+        params.near_plane
+    } else {
+        0.1
+    };
+    let far = if params.far_plane > 0.0 && params.far_plane.is_finite() {
+        params.far_plane
+    } else {
+        100.0
+    };
+    if params.orthographic {
+        crate::projection::orthographic(aspect * 2.0, 2.0, near, far)
+    } else {
+        crate::projection::perspective(params.fov, aspect, near, far)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CameraError {
     InvalidPlanes,
@@ -365,6 +409,36 @@ mod tests {
             parse_projection(false, 90.0, "", "2", "1", false),
             Err(ProjectionError::NearAfterFar)
         );
+    }
+
+    #[test]
+    fn axis_mapping_remaps_unprojected_point() {
+        let identity = AxisMapping::default(); // x=Right, y=Up, z=IntoScreen
+        assert_eq!(identity.remap([1.0, 2.0, 3.0]), [1.0, 2.0, 3.0]);
+        let flipped = AxisMapping {
+            x: AxisDirection::Left,
+            y: AxisDirection::Down,
+            z: AxisDirection::OutOfScreen,
+        };
+        assert_eq!(flipped.remap([1.0, 2.0, 3.0]), [-1.0, -2.0, -3.0]);
+    }
+
+    #[test]
+    fn projection_matrix_from_guess_is_invertible() {
+        let params = ProjectionGuess {
+            orthographic: false,
+            fov: 75.0,
+            aspect: 16.0 / 9.0,
+            near_plane: 0.0,
+            far_plane: 0.0,
+        };
+        let matrix = projection_matrix(&params).unwrap();
+        assert!(matrix.inverse().is_some());
+        let ortho = ProjectionGuess {
+            orthographic: true,
+            ..params
+        };
+        assert!(projection_matrix(&ortho).unwrap().inverse().is_some());
     }
 
     #[test]

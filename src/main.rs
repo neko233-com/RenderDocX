@@ -5144,6 +5144,17 @@ impl Workspace {
                     .child(Input::new(&self.proj_near).id("viewer-near").aria_label(self.t("Near plane", "近平面")).w(px(80.)))
                     .child(Input::new(&self.proj_far).id("viewer-far").aria_label(self.t("Far plane", "远平面")).w(px(100.)))
                     .into_any_element());
+                let unproject_preview = renderdocx::viewer_settings::projection_matrix(&self.settings.projection)
+                    .and_then(|matrix| matrix.inverse())
+                    .map(|inv| renderdocx::projection::unproject([0.0, 0.0, 0.5], inv));
+                children.push(div().text_sm().text_color(rgb(0x91a7c0)).child(match unproject_preview {
+                    Some(point) => format!(
+                        "{}: ({:.2}, {:.2}, {:.2})",
+                        self.t("Unproject center", "反投影中心"),
+                        point[0], point[1], point[2]
+                    ),
+                    None => self.t("Invalid projection parameters", "投影参数无效").to_owned(),
+                }).into_any_element());
             }
             ViewerDialog::Camera => {
                 children.push(div().text_sm().text_color(rgb(0x82aaff)).child(self.t("Camera controls", "相机控制")).into_any_element());
