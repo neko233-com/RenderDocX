@@ -127,7 +127,9 @@ It also exercises the pyrenderdoc-compatible CaptureContext surface:
 `GetResources`, `FrameInfo`, `APIProps`, `IsCaptureLoaded`,
 `GetCaptureFilename` and `DebugMessages`. Notes and bookmarks are written and
 read back through `SetNotes`/`GetNotes`/`SetBookmark`/`GetBookmarks`/
-`RemoveBookmark`, then restored to their original values.
+`RemoveBookmark`, then restored to their original values. Resource replacement
+is exercised through `RegisterReplacement(7, 8)`: `pipeline(19)` reports the
+replacement index, and `UnregisterReplacement(7)` restores the original.
 `python_vertex_input_query_a_real_capture` opens a real Vertex capture and
 asserts `renderdocx.vertex_input()` returns input rows.
 

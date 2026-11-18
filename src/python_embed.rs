@@ -39,6 +39,92 @@ static ACTIVE_SNAPSHOT: Mutex<Option<serde_json::Value>> = Mutex::new(None);
 // Last event selected or queried by a helper; backs CurEvent()/CurAction().
 static ACTIVE_EVENT: AtomicU32 = AtomicU32::new(0);
 static ACTIVE_CAPTURE_PATH: Mutex<Option<String>> = Mutex::new(None);
+// pyrenderdoc-style resource replacement map (original index -> replacement).
+static REPLACEMENTS: Mutex<Option<std::collections::HashMap<u32, u32>>> = Mutex::new(None);
+
+fn replacement_map() -> std::collections::HashMap<u32, u32> {
+    REPLACEMENTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+        .unwrap_or_default()
+}
+
+/// Rewrite `resource_index` fields so script-visible pipeline bindings reflect
+/// registered replacements, matching qrenderdoc's display substitution.
+fn apply_replacements(value: &mut serde_json::Value) {
+    let replacements = replacement_map();
+    if replacements.is_empty() {
+        return;
+    }
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(index) = object
+                .get("resource_index")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|index| u32::try_from(index).ok())
+            {
+                if let Some(replacement) = replacements.get(&index) {
+                    object.insert(
+                        "resource_index".into(),
+                        serde_json::Value::from(*replacement),
+                    );
+                }
+            }
+            for value in object.values_mut() {
+                apply_replacements(value);
+            }
+        }
+        serde_json::Value::Array(array) => {
+            for value in array {
+                apply_replacements(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `RegisterReplacement(original, replacement)` -> map a resource index to a
+/// replacement resource for script-visible pipeline bindings.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn RegisterReplacement(original: u32, replacement: u32) -> pyo3::PyResult<()> {
+    let mut guard = REPLACEMENTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    guard
+        .get_or_insert_with(std::collections::HashMap::new)
+        .insert(original, replacement);
+    Ok(())
+}
+
+/// `UnregisterReplacement(original)` -> drop a resource replacement.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn UnregisterReplacement(original: u32) -> pyo3::PyResult<()> {
+    if let Some(map) = REPLACEMENTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_mut()
+    {
+        map.remove(&original);
+    }
+    Ok(())
+}
+
+/// `IsResourceReplaced(original)` -> whether a replacement is registered.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn IsResourceReplaced(original: u32) -> bool {
+    replacement_map().contains_key(&original)
+}
+
+/// `GetResourceReplacement(original)` -> replacement index, or None.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn GetResourceReplacement(original: u32) -> Option<u32> {
+    replacement_map().get(&original).copied()
+}
 
 /// Bind the serialized snapshot document for `renderdocx.snapshot()`.
 pub fn set_active_snapshot(snapshot: serde_json::Value) {
@@ -143,7 +229,11 @@ fn CurPipelineState(py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
     let value = session
         .pipeline_for_event(event)
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-    to_py(py, &value)
+    let mut document = serde_json::to_value(&value).map_err(|error| {
+        pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+    })?;
+    apply_replacements(&mut document);
+    to_py(py, &document)
 }
 
 /// `GetAction(event)` -> action containing the event, or None.
@@ -731,7 +821,11 @@ fn descriptors(
     let value = session
         .descriptors(event, store, offset, limit)
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-    to_py(py, &value)
+    let mut document = serde_json::to_value(&value).map_err(|error| {
+        pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+    })?;
+    apply_replacements(&mut document);
+    to_py(py, &document)
 }
 
 /// `renderdocx.texture_statistics(event, texture_index=0, min=0.0, max=1.0)`
@@ -830,6 +924,9 @@ pub fn set_active_session(session: Option<crate::replay::Session>) {
         *ACTIVE_CAPTURE_PATH
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = None;
+        *REPLACEMENTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
         ACTIVE_EVENT.store(0, Ordering::SeqCst);
     }
 }
@@ -869,7 +966,11 @@ fn pipeline(py: Python<'_>, event: u32) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>>
         .pipeline_for_event(event)
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
     set_active_event(Some(event));
-    to_py(py, &value)
+    let mut document = serde_json::to_value(&value).map_err(|error| {
+        pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+    })?;
+    apply_replacements(&mut document);
+    to_py(py, &document)
 }
 
 /// `renderdocx.buffer(index, offset, length)` -> hex string of raw buffer bytes.
@@ -1203,6 +1304,10 @@ fn build_capture_module<'py>(
         ("GetBookmarks", pyo3::wrap_pyfunction!(GetBookmarks, py)),
         ("SetBookmark", pyo3::wrap_pyfunction!(SetBookmark, py)),
         ("RemoveBookmark", pyo3::wrap_pyfunction!(RemoveBookmark, py)),
+        ("RegisterReplacement", pyo3::wrap_pyfunction!(RegisterReplacement, py)),
+        ("UnregisterReplacement", pyo3::wrap_pyfunction!(UnregisterReplacement, py)),
+        ("IsResourceReplaced", pyo3::wrap_pyfunction!(IsResourceReplaced, py)),
+        ("GetResourceReplacement", pyo3::wrap_pyfunction!(GetResourceReplacement, py)),
     ] {
         if let Ok(function) = wrapped {
             dict.set_item(name, function).ok();
@@ -1503,10 +1608,27 @@ mod tests {
             &CaptureView::default(),
         );
         assert!(result.error.is_none(), "{:?}", result.error);
-        assert_eq!(
-            result.stdout.trim(),
-            "0 False 0 0 None None None"
+        assert_eq!(result.stdout.trim(), "0 False 0 0 None None None");
+        // Resource replacement map mirrors pyrenderdoc's RegisterReplacement.
+        let result = run_script_with_capture(
+            "import renderdocx\n\
+             renderdocx.RegisterReplacement(1, 2)\n\
+             print(renderdocx.IsResourceReplaced(1), renderdocx.GetResourceReplacement(1))\n\
+             renderdocx.UnregisterReplacement(1)\n\
+             print(renderdocx.IsResourceReplaced(1), renderdocx.GetResourceReplacement(1))",
+            &CaptureView::default(),
         );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.stdout.trim(), "True 2\nFalse None");
+        RegisterReplacement(1, 2).unwrap();
+        let mut pipeline =
+            serde_json::json!({"outputs":[{"resource_index":1},{"resource_index":3}]});
+        apply_replacements(&mut pipeline);
+        assert_eq!(pipeline["outputs"][0]["resource_index"], 2);
+        assert_eq!(pipeline["outputs"][1]["resource_index"], 3);
+        UnregisterReplacement(1).unwrap();
+        assert!(!IsResourceReplaced(1));
+        assert_eq!(GetResourceReplacement(1), None);
     }
 
     #[cfg(windows)]
@@ -1588,6 +1710,12 @@ mod tests {
                  and isinstance(renderdocx.DebugMessages(), list)\n\
              )\n\
              print('compat', compat)\n\
+             renderdocx.RegisterReplacement(7, 8)\n\
+             replaced = renderdocx.pipeline(19).get('outputs') or [{}]\n\
+             print('replace', replaced[0].get('resource_index') == 8)\n\
+             renderdocx.UnregisterReplacement(7)\n\
+             restored = renderdocx.pipeline(19).get('outputs') or [{}]\n\
+             print('unreplace', restored[0].get('resource_index') == 7)\n\
              notes0 = renderdocx.GetNotes()\n\
              bookmarks0 = renderdocx.GetBookmarks()\n\
              renderdocx.SetNotes('renderdocx notes')\n\
@@ -1616,6 +1744,8 @@ mod tests {
         assert!(result.stdout.contains("bufexport True"), "{}", result.stdout);
         assert!(result.stdout.contains("render True"), "{}", result.stdout);
         assert!(result.stdout.contains("compat True"), "{}", result.stdout);
+        assert!(result.stdout.contains("replace True"), "{}", result.stdout);
+        assert!(result.stdout.contains("unreplace True"), "{}", result.stdout);
         assert!(result.stdout.contains("notes True"), "{}", result.stdout);
         assert!(result.stdout.contains("bookmark True"), "{}", result.stdout);
         assert!(result.stdout.contains("unbookmark True"), "{}", result.stdout);
