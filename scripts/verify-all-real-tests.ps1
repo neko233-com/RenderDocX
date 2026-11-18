@@ -1,6 +1,6 @@
 #requires -Version 7.0
 <#
-  Run every `#[ignore]` real test (20 agent_cli + 3 lib) against locally built
+  Run every `#[ignore]` real test (20 agent_cli + 4 lib) against locally built
   RenderDoc core, bridge, fixtures, Vulkan toolchain, captures and mismatch
   bridge.
 
@@ -53,6 +53,22 @@ if ($vertex) {
 if ($geometry) { $env:RENDERDOCX_TEST_GEOMETRY_PRINTF_CAPTURE = $geometry }
 if ($meshPrintf) { $env:RENDERDOCX_TEST_MESH_PRINTF_CAPTURE = $meshPrintf }
 if ($shaderPrintf) { $env:RENDERDOCX_TEST_VULKAN_PRINTF_CAPTURE = $shaderPrintf }
+
+# Generate a D3D11 capture with a real constant buffer for the Python
+# ConstantBlock/ShaderConstant test.
+$constFixture = Join-Path $repo 'target/replay-bridge/Release/renderdocx-d3d11-fixture.exe'
+$constCore = Join-Path $repo 'target/renderdocx-runtime/renderdoc.dll'
+if ((Test-Path -LiteralPath $constFixture) -and (Test-Path -LiteralPath $constCore)) {
+  $constDir = Join-Path $repo ("target/renderdocx-fixtures/const-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+  New-Item -ItemType Directory -Force -Path $constDir | Out-Null
+  $prefix = Join-Path $constDir 'frame'
+  $process = Start-Process -FilePath $constFixture -ArgumentList @((Resolve-Path $constCore).Path, $prefix) -WindowStyle Hidden -PassThru -Wait
+  if ($process.ExitCode -eq 0) {
+    $constCapture = Get-ChildItem $constDir -Filter *.rdc -File |
+      Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+    if ($constCapture) { $env:RENDERDOCX_TEST_D3D11_CONSTANT_CAPTURE = $constCapture }
+  }
+}
 
 Write-Host "bridge=$($env:RENDERDOCX_TEST_BRIDGE)"
 Write-Host "vulkan fonts: mesh=$mesh vertex=$vertex geometry=$geometry meshPrintf=$meshPrintf shaderPrintf=$shaderPrintf"

@@ -134,6 +134,21 @@ struct ViewerState {
     zoom: f32,
     channels: u32,
     auto_fit: bool,
+    use_custom_action_names: bool,
+    show_parameter_names: bool,
+    show_all_parameters: bool,
+    empty_regions_visible: bool,
+    duration_column: bool,
+    annotation_column: bool,
+    highlighted_annotation: String,
+    current_instance: u32,
+    current_view: u32,
+    preview_stage: u32,
+    picked: Option<(u32, u32)>,
+    histogram_min: f32,
+    histogram_max: f32,
+    highlighted_resource: Option<usize>,
+    highlighted_history: Option<usize>,
 }
 
 /// Lightweight handle for a viewer panel, returned by `Get*Viewer()`.
@@ -428,6 +443,186 @@ impl ViewerHandle {
             .unwrap_or_else(|error| error.into_inner())
             .channels
     }
+
+    #[allow(non_snake_case)]
+    fn SetUseCustomActionNames(&self, enabled: bool) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .use_custom_action_names = enabled;
+    }
+
+    #[allow(non_snake_case)]
+    fn SetShowParameterNames(&self, enabled: bool) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .show_parameter_names = enabled;
+    }
+
+    #[allow(non_snake_case)]
+    fn SetShowAllParameters(&self, enabled: bool) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .show_all_parameters = enabled;
+    }
+
+    #[allow(non_snake_case)]
+    fn SetEmptyRegionsVisible(&self, enabled: bool) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .empty_regions_visible = enabled;
+    }
+
+    #[allow(non_snake_case)]
+    fn SetDurationColumnVisible(&self, enabled: bool) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .duration_column = enabled;
+    }
+
+    #[allow(non_snake_case)]
+    fn SetAnnotationColumnVisible(&self, enabled: bool) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .annotation_column = enabled;
+    }
+
+    #[allow(non_snake_case)]
+    fn UpdateDurationColumn(&self) {}
+
+    #[allow(non_snake_case)]
+    fn SetHighlightedAnnotation(&self, text: String) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .highlighted_annotation = text;
+    }
+
+    #[allow(non_snake_case)]
+    fn GetHighlightedAnnotation(&self) -> String {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .highlighted_annotation
+            .clone()
+    }
+
+    #[allow(non_snake_case)]
+    fn SetCurrentInstance(&self, instance: u32) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .current_instance = instance;
+    }
+
+    #[allow(non_snake_case)]
+    fn SetCurrentView(&self, view: u32) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .current_view = view;
+    }
+
+    #[allow(non_snake_case)]
+    fn SetPreviewStage(&self, stage: u32) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .preview_stage = stage;
+    }
+
+    #[allow(non_snake_case)]
+    fn GotoLocation(&self, x: u32, y: u32) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .picked = Some((x, y));
+    }
+
+    #[allow(non_snake_case)]
+    fn GetPickedLocation(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        to_py(
+            py,
+            &match state.picked {
+                Some((x, y)) => serde_json::json!({"x": x, "y": y}),
+                None => serde_json::Value::Null,
+            },
+        )
+    }
+
+    #[allow(non_snake_case)]
+    fn SetHistogramRange(&self, min: f32, max: f32) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.histogram_min = min;
+        state.histogram_max = max;
+    }
+
+    #[allow(non_snake_case)]
+    fn GetHistogramRange(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        to_py(
+            py,
+            &serde_json::json!({"min": state.histogram_min, "max": state.histogram_max}),
+        )
+    }
+
+    #[allow(non_snake_case)]
+    fn ViewFollowedResource(&self) {
+        queue_ui_request("textures");
+    }
+
+    #[allow(non_snake_case)]
+    fn CurrentResource(&self) -> Option<usize> {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .current_resource
+    }
+
+    #[allow(non_snake_case)]
+    fn HighlightResourceUsage(&self, index: usize) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .highlighted_resource = Some(index);
+        queue_ui_request("events");
+    }
+
+    #[allow(non_snake_case)]
+    fn HighlightHistory(&self, index: usize) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .highlighted_history = Some(index);
+        queue_ui_request("events");
+    }
+
+    #[allow(non_snake_case)]
+    fn AttachDebugger(&self) -> pyo3::PyResult<()> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "debugpy is not available in this build",
+        ))
+    }
+
+    #[allow(non_snake_case)]
+    fn CheckUnsavedChanges(&self) -> bool {
+        false
+    }
 }
 
 fn viewer_handle(panel: &str) -> ViewerHandle {
@@ -436,6 +631,9 @@ fn viewer_handle(panel: &str) -> ViewerHandle {
         state: Mutex::new(ViewerState {
             zoom: 1.0,
             auto_fit: true,
+            duration_column: true,
+            annotation_column: true,
+            histogram_max: 1.0,
             ..ViewerState::default()
         }),
     }
@@ -552,6 +750,16 @@ impl PixelHistoryViewObject {
     fn Show(&self) {
         queue_ui_request("textures");
     }
+
+    #[allow(non_snake_case)]
+    fn SetHistory(&mut self, value: Bound<'_, pyo3::PyAny>) -> pyo3::PyResult<()> {
+        self.value = pythonize::depythonize::<serde_json::Value>(&value)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+        Ok(())
+    }
+
+    #[allow(non_snake_case)]
+    fn SetFailedDebug(&self) {}
 
     #[pyo3(signature = (key, default = None))]
     fn get(
@@ -1274,6 +1482,14 @@ impl ResourceObject {
             .map(|object| object.keys().cloned().collect())
             .unwrap_or_default()
     }
+
+    #[allow(non_snake_case)]
+    fn GetResourceId(&self) -> Option<ResourceIdObject> {
+        self.value
+            .get("rename_key")
+            .and_then(serde_json::Value::as_str)
+            .map(|id| ResourceIdObject { id: id.to_owned() })
+    }
 }
 
 /// `Resource(index)` -> field-addressable resource description, or None.
@@ -1767,6 +1983,22 @@ impl ConstantBlockObject {
     fn GetVariables(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
         to_py(py, &self.value.get("variables").cloned().unwrap_or_default())
     }
+
+    #[allow(non_snake_case)]
+    #[pyo3(signature = (index = 0))]
+    fn GetVariable(&self, index: usize) -> pyo3::PyResult<ShaderConstantObject> {
+        let value = self
+            .value
+            .get("variables")
+            .and_then(|variables| variables.get(index))
+            .cloned()
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(
+                    "Constant block variable index is out of range",
+                )
+            })?;
+        Ok(ShaderConstantObject { value })
+    }
 }
 
 /// `ConstantBlock(value)` -> field-addressable constant block from a
@@ -1779,6 +2011,204 @@ fn ConstantBlock(value: Bound<'_, pyo3::PyAny>) -> pyo3::PyResult<ConstantBlockO
     let value = serde_json::to_value(&block)
         .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
     Ok(ConstantBlockObject { value })
+}
+
+/// Field-addressable reflected sampler.
+#[pyo3::pyclass]
+struct SamplerDescriptorObject {
+    value: serde_json::Value,
+}
+
+#[pyo3::pymethods]
+impl SamplerDescriptorObject {
+    fn __getattr__(
+        &self,
+        py: Python<'_>,
+        name: &str,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        let key = match name {
+            "arraySize" => "array_size",
+            _ => name,
+        };
+        json_field_object(py, &self.value, key)
+    }
+
+    fn __getitem__(
+        &self,
+        py: Python<'_>,
+        key: &str,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.value.get(key) {
+            Some(value) => to_py(py, value),
+            None => Err(pyo3::exceptions::PyKeyError::new_err(key.to_owned())),
+        }
+    }
+
+    #[pyo3(signature = (key, default = None))]
+    fn get(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        default: Option<Bound<'_, pyo3::PyAny>>,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.value.get(key) {
+            Some(value) => to_py(py, value),
+            None => Ok(default.map(Bound::unbind).unwrap_or_else(|| py.None())),
+        }
+    }
+
+    fn keys(&self) -> Vec<String> {
+        self.value
+            .as_object()
+            .map(|object| object.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[allow(non_snake_case)]
+    fn GetName(&self) -> String {
+        self.value
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    }
+}
+
+/// `SamplerDescriptor(value)` -> field-addressable reflected sampler.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn SamplerDescriptor(
+    value: Bound<'_, pyo3::PyAny>,
+) -> pyo3::PyResult<SamplerDescriptorObject> {
+    let sampler = pythonize::depythonize::<crate::replay::ReflectedSampler>(&value)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    let value = serde_json::to_value(&sampler)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    Ok(SamplerDescriptorObject { value })
+}
+
+/// Field-addressable reflected shader constant.
+#[pyo3::pyclass]
+struct ShaderConstantObject {
+    value: serde_json::Value,
+}
+
+#[pyo3::pymethods]
+impl ShaderConstantObject {
+    fn __getattr__(
+        &self,
+        py: Python<'_>,
+        name: &str,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        let key = match name {
+            "byteOffset" => "byte_offset",
+            "bitOffset" => "bit_offset",
+            "bitSize" => "bit_size",
+            "defaultValue" => "default_value",
+            _ => name,
+        };
+        json_field_object(py, &self.value, key)
+    }
+
+    fn __getitem__(
+        &self,
+        py: Python<'_>,
+        key: &str,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.value.get(key) {
+            Some(value) => to_py(py, value),
+            None => Err(pyo3::exceptions::PyKeyError::new_err(key.to_owned())),
+        }
+    }
+
+    #[pyo3(signature = (key, default = None))]
+    fn get(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        default: Option<Bound<'_, pyo3::PyAny>>,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.value.get(key) {
+            Some(value) => to_py(py, value),
+            None => Ok(default.map(Bound::unbind).unwrap_or_else(|| py.None())),
+        }
+    }
+
+    fn keys(&self) -> Vec<String> {
+        self.value
+            .as_object()
+            .map(|object| object.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[allow(non_snake_case)]
+    fn GetName(&self) -> String {
+        self.value
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    #[allow(non_snake_case)]
+    fn GetDefaultValue(&self) -> String {
+        self.value
+            .get("default_value")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    }
+}
+
+/// `ShaderConstant(value)` -> field-addressable reflected constant.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn ShaderConstant(
+    value: Bound<'_, pyo3::PyAny>,
+) -> pyo3::PyResult<ShaderConstantObject> {
+    let constant = pythonize::depythonize::<crate::replay::ReflectedConstant>(&value)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    let value = serde_json::to_value(&constant)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    Ok(ShaderConstantObject { value })
+}
+
+/// Opaque resource identifier with string form, matching pyrenderdoc's use of
+/// `ResourceId` for rename keys and lookup.
+#[pyo3::pyclass]
+#[derive(Clone, PartialEq, Eq)]
+struct ResourceIdObject {
+    id: String,
+}
+
+#[pyo3::pymethods]
+impl ResourceIdObject {
+    #[getter]
+    fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    fn __str__(&self) -> String {
+        self.id.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("ResourceId('{}')", self.id)
+    }
+
+    fn __hash__(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.id.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+/// `ResourceId(value)` -> opaque resource identifier from a rename key.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn ResourceId(value: String) -> ResourceIdObject {
+    ResourceIdObject { id: value }
 }
 
 /// Field-addressable frame description (snapshot frame + FrameInfo fields).
@@ -2026,6 +2456,19 @@ impl ShaderReflectionObject {
     #[allow(non_snake_case)]
     fn GetSamplers(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
         to_py(py, &self.field_or_empty("sampler_details"))
+    }
+
+    #[allow(non_snake_case)]
+    #[pyo3(signature = (index = 0))]
+    fn GetSampler(&self, index: usize) -> pyo3::PyResult<SamplerDescriptorObject> {
+        let value = self
+            .field("sampler_details")
+            .and_then(|samplers| samplers.get(index))
+            .cloned()
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err("Sampler index is out of range")
+            })?;
+        Ok(SamplerDescriptorObject { value })
     }
 
     #[allow(non_snake_case)]
@@ -3865,10 +4308,13 @@ fn build_capture_module<'py>(
         ("ShaderVariable", pyo3::wrap_pyfunction!(ShaderVariable, py)),
         ("ShaderSignature", pyo3::wrap_pyfunction!(ShaderSignature, py)),
         ("ConstantBlock", pyo3::wrap_pyfunction!(ConstantBlock, py)),
+        ("ShaderConstant", pyo3::wrap_pyfunction!(ShaderConstant, py)),
+        ("SamplerDescriptor", pyo3::wrap_pyfunction!(SamplerDescriptor, py)),
         ("FrameDescription", pyo3::wrap_pyfunction!(FrameDescription, py)),
         ("Descriptor", pyo3::wrap_pyfunction!(Descriptor, py)),
         ("DescriptorStore", pyo3::wrap_pyfunction!(DescriptorStore, py)),
         ("APIProperties", pyo3::wrap_pyfunction!(APIProperties, py)),
+        ("ResourceId", pyo3::wrap_pyfunction!(ResourceId, py)),
         ("ViewBuffer", pyo3::wrap_pyfunction!(ViewBuffer, py)),
         ("ViewConstantBuffer", pyo3::wrap_pyfunction!(ViewConstantBuffer, py)),
         ("ViewPixelHistory", pyo3::wrap_pyfunction!(ViewPixelHistory, py)),
@@ -4279,6 +4725,15 @@ mod tests {
         );
         assert!(result.error.is_none(), "{:?}", result.error);
         assert_eq!(result.stdout.trim(), "0 7 16 True");
+        let result = run_script_with_capture(
+            "import renderdocx\n\
+             sd = renderdocx.SamplerDescriptor({'name':'samp','bind':0,'space':0,'array_size':1})\n\
+             print(sd.name, sd.arraySize, sd.GetName(), 'array_size' in sd.keys())",
+            &CaptureView::default(),
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.stdout.trim(), "samp 1 samp True");
+        assert!(GetPythonShell().AttachDebugger().is_err());
     }
 
     #[cfg(windows)]
@@ -4387,6 +4842,8 @@ mod tests {
              print('viewshader', renderdocx.ViewShader(4).Name() == 'shader:4' and renderdocx.EditShader(4).Name() == 'edit_shader:4')\n\
              res = renderdocx.Resource(7)\n\
              print('resource-object', res.name == 'Swapchain Image 96' and res.type == 8 and res.resourceId == 'ResourceId::96' and res.autogeneratedName is True and 'name' in res.keys())\n\
+             rid = res.GetResourceId()\n\
+             print('resource-id', str(rid) == 'ResourceId::96' and rid.id == 'ResourceId::96')\n\
              sr = renderdocx.ShaderReflection(4, event=19)\n\
              print('shader-reflection', sr.event_id == 19 and sr.stage == 4 and isinstance(sr.GetEntryPoint(), str) and isinstance(sr.GetDisassembly(), str) and isinstance(sr.GetSourceFiles(), list) and isinstance(sr.GetCompileFlags(), list) and ps.GetShaderReflection(4).stage == 4)\n\
              sig = sr.GetInputSignature(0)\n\
@@ -4400,13 +4857,27 @@ mod tests {
              tv.SetZoomLevel(2.5)\n\
              tv.SetChannelVisibility(15)\n\
              print('texture-viewer', tv.GetCurrentResource() == 0 and tv.GetSelectedSubresource().get('sample') == 0 and tv.GetTextureOverlay() == 1 and abs(tv.GetZoomLevel() - 2.5) < 0.001 and tv.GetChannelVisibility() == 15 and tv.IsZoomAutoFit())\n\
+             tv.SetHistogramRange(0.1, 2.0)\n\
+             tv.GotoLocation(3, 4)\n\
+             print('texture-viewer-extra', abs(tv.GetHistogramRange().get('min') - 0.1) < 0.001 and tv.GetPickedLocation().get('x') == 3 and tv.GetPickedLocation().get('y') == 4 and tv.CurrentResource() == 0)\n\
              eb = renderdocx.GetEventBrowser()\n\
              eb.SetCurrentFilterText('alpha')\n\
              print('event-browser-state', eb.GetCurrentFilterText() == 'alpha')\n\
+             eb.SetUseCustomActionNames(True)\n\
+             eb.SetShowParameterNames(True)\n\
+             eb.SetShowAllParameters(True)\n\
+             eb.SetEmptyRegionsVisible(True)\n\
+             eb.SetDurationColumnVisible(False)\n\
+             eb.SetAnnotationColumnVisible(False)\n\
+             eb.UpdateDurationColumn()\n\
+             eb.SetHighlightedAnnotation('hi')\n\
+             print('event-browser-extra', eb.GetHighlightedAnnotation() == 'hi')\n\
              vb.ScrollToRow(2)\n\
              vb.ScrollToColumn(3)\n\
              print('buffer-viewer', vb.GetScrollRow() == 2 and vb.GetScrollColumn() == 3 and vb.GetEventName(19) == renderdocx.event_format(19))\n\
              ph = renderdocx.ViewPixelHistory(0, 1, 1, event=19)\n\
+             ph.SetHistory({'event_id': 19, 'entries': []})\n\
+             ph.SetFailedDebug()\n\
              print('view-pixel-history', ph.get('event_id') == 19 and ph.GetEvent() == 19 and isinstance(ph.GetHistory(), list) and ph.Widget() is None)\n\
              vm = renderdocx.ViewShaderMessages(0, event=19)\n\
              print('view-shader-messages', vm.get('event_id') == 19 and vm.GetEvent() == 19 and isinstance(vm.GetShaderMessages(), list) and vm.IsOutOfDate() is False and vm.Widget() is None)\n\
@@ -4465,12 +4936,23 @@ mod tests {
         assert!(result.stdout.contains("viewers True"), "{}", result.stdout);
         assert!(result.stdout.contains("viewshader True"), "{}", result.stdout);
         assert!(result.stdout.contains("resource-object True"), "{}", result.stdout);
+        assert!(result.stdout.contains("resource-id True"), "{}", result.stdout);
         assert!(result.stdout.contains("shader-reflection True"), "{}", result.stdout);
         assert!(result.stdout.contains("shader-signature True"), "{}", result.stdout);
         assert!(result.stdout.contains("view-buffer True"), "{}", result.stdout);
         assert!(result.stdout.contains("texture-viewer True"), "{}", result.stdout);
         assert!(
+            result.stdout.contains("texture-viewer-extra True"),
+            "{}",
+            result.stdout
+        );
+        assert!(
             result.stdout.contains("event-browser-state True"),
+            "{}",
+            result.stdout
+        );
+        assert!(
+            result.stdout.contains("event-browser-extra True"),
             "{}",
             result.stdout
         );
@@ -4637,6 +5119,65 @@ mod tests {
         );
         assert!(
             result.stdout.contains("debug-pixel True"),
+            "{}",
+            result.stdout
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires RENDERDOCX_TEST_BRIDGE and RENDERDOCX_TEST_D3D11_CONSTANT_CAPTURE"]
+    fn python_constant_block_query_a_real_capture() {
+        use crate::backend::Settings;
+        use std::path::PathBuf;
+
+        let bridge = PathBuf::from(
+            std::env::var("RENDERDOCX_TEST_BRIDGE").expect("set RENDERDOCX_TEST_BRIDGE"),
+        );
+        let capture = PathBuf::from(
+            std::env::var("RENDERDOCX_TEST_D3D11_CONSTANT_CAPTURE")
+                .expect("set RENDERDOCX_TEST_D3D11_CONSTANT_CAPTURE"),
+        );
+        let mut settings = Settings::default();
+        settings.replay_bridge = Some(bridge);
+        let (session, snapshot) =
+            crate::replay::Session::open(&settings, &capture).expect("open capture");
+        set_active_session(Some(session));
+        set_active_format_context(
+            snapshot.resources.clone(),
+            snapshot.buffers.clone(),
+            snapshot.textures.clone(),
+            crate::i18n::Language::English,
+        );
+        set_active_actions(snapshot.actions.clone());
+        set_active_snapshot(serde_json::to_value(&snapshot).expect("serialize snapshot"));
+        let result = run_script_with_capture(
+            "import renderdocx\n\
+             actions = renderdocx.capture_actions()\n\
+             dispatch = next(a for a in actions if a.get('flags', 0) & 4)\n\
+             sr = renderdocx.ShaderReflection(5, event=int(dispatch['event_id']))\n\
+             blocks = sr.GetConstantBlocks()\n\
+             block = renderdocx.ConstantBlock(blocks[0])\n\
+             var = block.GetVariable(0)\n\
+             print('constant-block', len(blocks) >= 1 and block.name == 'Params' and block.byteSize == 16 and block.bufferBacked is True)\n\
+             print('shader-constant', var.name == 'seed' and var.byteOffset == 0 and isinstance(var.defaultValue, str) and var.GetName() == 'seed')\n\
+             print('sampler-list', len(sr.GetSamplers()) == 0)",
+            &CaptureView::default(),
+        );
+        set_active_session(None);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(
+            result.stdout.contains("constant-block True"),
+            "{}",
+            result.stdout
+        );
+        assert!(
+            result.stdout.contains("shader-constant True"),
+            "{}",
+            result.stdout
+        );
+        assert!(
+            result.stdout.contains("sampler-list True"),
             "{}",
             result.stdout
         );
