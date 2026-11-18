@@ -6006,6 +6006,30 @@ impl Workspace {
                         )
                     })
                     .collect(),
+                buffers: snapshot
+                    .buffers
+                    .iter()
+                    .take(512)
+                    .map(|buffer| (buffer.name.clone(), buffer.length.clone()))
+                    .collect(),
+                debug_messages: snapshot
+                    .debug_messages
+                    .iter()
+                    .take(256)
+                    .map(|message| {
+                        (
+                            message.event_id,
+                            format!("{}/{}", message.source, message.category),
+                            message.description.clone(),
+                        )
+                    })
+                    .collect(),
+                counters: snapshot
+                    .counters
+                    .iter()
+                    .take(256)
+                    .map(|counter| (counter.name.clone(), counter.category.clone()))
+                    .collect(),
             })
             .unwrap_or_default()
     }

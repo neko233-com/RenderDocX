@@ -40,6 +40,12 @@ pub struct CaptureView {
     pub actions: Vec<(u32, String, usize, u32)>,
     /// (name, width, height, depth, format, mips, samples) per texture.
     pub textures: Vec<(String, u32, u32, u32, String, u32, u32)>,
+    /// (name, length) per buffer.
+    pub buffers: Vec<(String, String)>,
+    /// (event_id, source, description) per debug message.
+    pub debug_messages: Vec<(u32, String, String)>,
+    /// (name, category) per GPU performance counter.
+    pub counters: Vec<(String, String)>,
 }
 
 impl CaptureView {
@@ -160,6 +166,17 @@ fn build_capture_module<'py>(
     // Textures as (name, width, height, depth, format, mips, samples).
     if let Ok(textures) = PyList::new(py, view.textures.clone()) {
         dict.set_item("textures", textures).ok();
+    }
+    // Buffers as (name, length) and counters as (name, category).
+    if let Ok(buffers) = PyList::new(py, view.buffers.clone()) {
+        dict.set_item("buffers", buffers).ok();
+    }
+    if let Ok(counters) = PyList::new(py, view.counters.clone()) {
+        dict.set_item("counters", counters).ok();
+    }
+    // Debug messages as (event_id, source, description).
+    if let Ok(messages) = PyList::new(py, view.debug_messages.clone()) {
+        dict.set_item("debug_messages", messages).ok();
     }
     // Built-in help() listing the exposed API: the minimal pure-Rust
     // equivalent of the upstream help browser's discovery role.
@@ -339,19 +356,25 @@ mod tests {
                 (11, "DrawIndexed".into(), 1, 300),
             ],
             textures: vec![("MainColor".into(), 1920, 1080, 1, "R8G8B8A8".into(), 1, 1)],
+            buffers: vec![("VertexBuffer".into(), "4096".into())],
+            debug_messages: vec![(11, "API".into(), "sample warning".into())],
+            counters: vec![("Draw Calls".into(), "Drawcall".into())],
         };
         assert_eq!(
             view.action(11).map(|action| action.1.as_str()),
             Some("DrawIndexed")
         );
         let result = run_script_with_capture(
-            "import renderdocx\nprint(renderdocx.frame, renderdocx.api_name, renderdocx.action_count, renderdocx.resource_names[0])\nprint([a for a in renderdocx.actions if a[0] == 11])\nprint(renderdocx.textures[0][0], renderdocx.textures[0][1], renderdocx.textures[0][2])",
+            "import renderdocx\nprint(renderdocx.frame, renderdocx.api_name, renderdocx.action_count, renderdocx.resource_names[0])\nprint([a for a in renderdocx.actions if a[0] == 11])\nprint(renderdocx.textures[0][0], renderdocx.textures[0][1], renderdocx.textures[0][2])\nprint(renderdocx.buffers[0][0], renderdocx.buffers[0][1])\nprint(renderdocx.debug_messages[0][0], renderdocx.debug_messages[0][2])\nprint(renderdocx.counters[0][0], renderdocx.counters[0][1])",
             &view,
         );
         assert!(result.error.is_none(), "{:?}", result.error);
         assert!(result.stdout.contains("7 Vulkan 42 texA"));
         assert!(result.stdout.contains("DrawIndexed"));
         assert!(result.stdout.contains("MainColor 1920 1080"));
+        assert!(result.stdout.contains("VertexBuffer 4096"));
+        assert!(result.stdout.contains("11 sample warning"));
+        assert!(result.stdout.contains("Draw Calls Drawcall"));
 
         let help = run_script_with_capture("import renderdocx\nrenderdocx.help()", &view);
         assert!(help.error.is_none(), "{:?}", help.error);
