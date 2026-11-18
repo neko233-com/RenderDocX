@@ -27624,6 +27624,39 @@ mod ui_tests {
         .unwrap();
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(view.read(cx).pipeline.as_ref().unwrap().event_id, 41));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click_with_modifiers(
+                "event-eid-43",
+                gpui::Modifiers {
+                    control: true,
+                    ..Default::default()
+                },
+                cx,
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let state = view.read(cx);
+            assert!(state.selected_events.contains(&41));
+            assert!(state.selected_events.contains(&43));
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("event-api-0-0", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                view.read(cx)
+                    .selected_events
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                vec![41]
+            );
+        });
         cx.update(|cx| {
             view.update(cx, |view, cx| {
                 view.settings.event_auto_format = true;
@@ -27843,7 +27876,10 @@ mod ui_tests {
         .unwrap();
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(view.read(cx).event_tree.visible, [0, 1, 2]));
-        assert_eq!(*events.lock().unwrap(), vec![42, 77, 43, 43, 41, 41]);
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![42, 77, 43, 43, 41, 41, 43, 41]
+        );
 
         cx.update(|cx| {
             view.update(cx, |view, cx| {

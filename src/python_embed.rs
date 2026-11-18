@@ -629,6 +629,13 @@ impl ViewerHandle {
 
     #[allow(non_snake_case)]
     fn CurrentStep(&self) -> u32 {
+        if let Some(timeline) = ACTIVE_DEBUG_TIMELINE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+        {
+            return u32::try_from(timeline.position).unwrap_or(u32::MAX);
+        }
         self.state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -637,10 +644,78 @@ impl ViewerHandle {
 
     #[allow(non_snake_case)]
     fn SetCurrentStep(&self, step: u32) {
+        {
+            let mut guard = ACTIVE_DEBUG_TIMELINE
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(timeline) = guard.as_mut() {
+                timeline.position = usize::try_from(step).unwrap_or(usize::MAX);
+            }
+        }
         self.state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .current_step = step;
+    }
+
+    #[allow(non_snake_case)]
+    #[pyo3(signature = (line, enabled = true))]
+    fn ToggleBreakpointOnDisassemblyLine(
+        &self,
+        line: u32,
+        enabled: bool,
+    ) -> pyo3::PyResult<()> {
+        toggle_timeline_breakpoint(
+            crate::debug_navigation::Breakpoint::Disassembly { line },
+            enabled,
+        )
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+    }
+
+    #[allow(non_snake_case)]
+    #[pyo3(signature = (instruction, enabled = true))]
+    fn ToggleBreakpointOnInstruction(
+        &self,
+        instruction: u32,
+        enabled: bool,
+    ) -> pyo3::PyResult<()> {
+        let line = {
+            let guard = ACTIVE_DEBUG_TIMELINE
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let timeline = guard.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "Collect a shader debug trace first",
+                )
+            })?;
+            timeline
+                .trace
+                .instructions
+                .iter()
+                .find(|info| info.instruction == instruction)
+                .map(|info| info.disassembly_line)
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "No source mapping for this instruction",
+                    )
+                })?
+        };
+        toggle_timeline_breakpoint(
+            crate::debug_navigation::Breakpoint::Disassembly { line },
+            enabled,
+        )
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+    }
+
+    #[allow(non_snake_case)]
+    fn GetBreakpoints(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        let guard = ACTIVE_DEBUG_TIMELINE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let timeline = guard.as_ref().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("Collect a shader debug trace first")
+        })?;
+        to_py(py, &timeline.breakpoints)
     }
 
     #[allow(non_snake_case)]
@@ -663,6 +738,24 @@ impl ViewerHandle {
 
     #[allow(non_snake_case)]
     fn RunForward(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        let mut guard = ACTIVE_DEBUG_TIMELINE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(timeline) = guard.as_mut() {
+            let reason = with_navigator(timeline, |navigator, trace, states| {
+                navigator.run(trace, states, true, 0)
+            });
+            let document = serde_json::json!({
+                "event_id": timeline.trace.event_id,
+                "stage": timeline.trace.stage,
+                "position": timeline.position,
+                "total": timeline.states.len(),
+                "reason": reason,
+                "breakpoints": timeline.breakpoints,
+            });
+            return to_py(py, &document);
+        }
+        drop(guard);
         debug_next(py)
     }
 
@@ -3133,6 +3226,155 @@ fn resource_info(py: Python<'_>, index: usize) -> pyo3::PyResult<pyo3::Py<pyo3::
     }
 }
 
+// Collected shader debug timeline for breakpoint/step navigation. The
+// navigator is recreated around each operation because its variable cache uses
+// RefCell and is not Send.
+static ACTIVE_DEBUG_TRACE: Mutex<Option<crate::replay::DebugTrace>> = Mutex::new(None);
+static ACTIVE_DEBUG_TIMELINE: Mutex<Option<PythonDebugTimeline>> = Mutex::new(None);
+
+struct PythonDebugTimeline {
+    trace: crate::replay::DebugTrace,
+    states: Vec<crate::replay::DebugState>,
+    position: usize,
+    breakpoints: std::collections::BTreeSet<crate::debug_navigation::Breakpoint>,
+}
+
+fn with_navigator<T>(
+    timeline: &mut PythonDebugTimeline,
+    action: impl FnOnce(&mut crate::debug_navigation::DebugNavigator, &crate::replay::DebugTrace, &[crate::replay::DebugState]) -> T,
+) -> T {
+    let mut navigator = crate::debug_navigation::DebugNavigator::default();
+    navigator.position = timeline.position;
+    navigator.breakpoints = timeline.breakpoints.clone();
+    let result = action(&mut navigator, &timeline.trace, &timeline.states);
+    timeline.position = navigator.position;
+    timeline.breakpoints = navigator.breakpoints.clone();
+    result
+}
+
+/// `debug_collect()` -> collect the remaining states of the active debug trace
+/// and keep a local timeline for breakpoints and `RunForward`.
+#[pyo3::pyfunction]
+fn debug_collect(py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    let session = active_session()?;
+    let trace = ACTIVE_DEBUG_TRACE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+        .ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("Start a shader debug trace first")
+        })?;
+    let mut states = Vec::new();
+    loop {
+        let batch = session
+            .debug_next()
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        if batch.event_id != trace.event_id {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "Debug states belong to a different event",
+            ));
+        }
+        states.extend(batch.states);
+        if batch.finished {
+            break;
+        }
+    }
+    session
+        .debug_stop()
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let response = serde_json::json!({
+        "event_id": trace.event_id,
+        "stage": trace.stage,
+        "total": states.len(),
+        "breakpoints": [],
+    });
+    *ACTIVE_DEBUG_TIMELINE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(PythonDebugTimeline {
+        trace,
+        states,
+        position: 0,
+        breakpoints: Default::default(),
+    });
+    to_py(py, &response)
+}
+
+/// `debug_timeline()` -> current debug timeline position/breakpoints.
+#[pyo3::pyfunction]
+fn debug_timeline(py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    let guard = ACTIVE_DEBUG_TIMELINE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let timeline = guard.as_ref().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("Collect a shader debug trace first")
+    })?;
+    to_py(
+        py,
+        &serde_json::json!({
+            "event_id": timeline.trace.event_id,
+            "stage": timeline.trace.stage,
+            "position": timeline.position,
+            "total": timeline.states.len(),
+            "breakpoints": timeline.breakpoints,
+        }),
+    )
+}
+
+fn toggle_timeline_breakpoint(
+    breakpoint: crate::debug_navigation::Breakpoint,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut guard = ACTIVE_DEBUG_TIMELINE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let timeline = guard
+        .as_mut()
+        .ok_or_else(|| "Collect a shader debug trace first".to_owned())?;
+    with_navigator(timeline, |navigator, trace, _| {
+        navigator.set_breakpoint(trace, breakpoint, enabled)
+    })
+    .map_err(str::to_owned)
+}
+
+/// `debug_set_breakpoint(kind, line, enabled=True)` -> set/clear a disassembly
+/// or source breakpoint on the collected timeline.
+#[pyo3::pyfunction]
+#[pyo3(signature = (kind, line, enabled = true, file_index = 0))]
+fn debug_set_breakpoint(
+    py: Python<'_>,
+    kind: String,
+    line: u32,
+    enabled: bool,
+    file_index: i32,
+) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    let breakpoint = match kind.as_str() {
+        "disassembly" => crate::debug_navigation::Breakpoint::Disassembly { line },
+        "source" => crate::debug_navigation::Breakpoint::Source { file_index, line },
+        _ => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Breakpoint kind must be disassembly or source",
+            ))
+        }
+    };
+    let mut guard = ACTIVE_DEBUG_TIMELINE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let timeline = guard.as_mut().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("Collect a shader debug trace first")
+    })?;
+    with_navigator(timeline, |navigator, trace, _| {
+        navigator.set_breakpoint(trace, breakpoint, enabled)
+    })
+    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    to_py(
+        py,
+        &serde_json::json!({
+            "position": timeline.position,
+            "breakpoints": timeline.breakpoints,
+        }),
+    )
+}
+
 // pyrenderdoc-style resource replacement map (original index -> replacement).
 static REPLACEMENTS: Mutex<Option<std::collections::HashMap<u32, u32>>> = Mutex::new(None);
 
@@ -3798,6 +4040,15 @@ fn export_buffer(
     Ok(destination)
 }
 
+fn remember_debug_trace(trace: &crate::replay::DebugTrace) {
+    *ACTIVE_DEBUG_TRACE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(trace.clone());
+    *ACTIVE_DEBUG_TIMELINE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = None;
+}
+
 /// `renderdocx.debug_vertex(event, vertex, instance=0, index=None, view=0)` ->
 /// start a vertex-shader debug trace. `index` defaults to `vertex`.
 #[pyo3::pyfunction]
@@ -3816,6 +4067,7 @@ fn debug_vertex(
     let value = session
         .debug_vertex(vertex, instance, index.unwrap_or(vertex), view)
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    remember_debug_trace(&value);
     to_py(py, &value)
 }
 
@@ -3844,6 +4096,7 @@ fn debug_pixel(
             view,
         })
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    remember_debug_trace(&value);
     to_py(py, &value)
 }
 
@@ -3862,6 +4115,7 @@ fn debug_compute(
     let value = session
         .debug_compute(crate::replay::ComputeDebugSelection { group, thread })
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    remember_debug_trace(&value);
     to_py(py, &value)
 }
 
@@ -3881,6 +4135,7 @@ fn debug_mesh(
     let value = session
         .debug_mesh(crate::replay::ComputeDebugSelection { group, thread })
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    remember_debug_trace(&value);
     to_py(py, &value)
 }
 
@@ -3900,7 +4155,14 @@ fn debug_stop() -> pyo3::PyResult<()> {
     let session = active_session()?;
     session
         .debug_stop()
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    *ACTIVE_DEBUG_TRACE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = None;
+    *ACTIVE_DEBUG_TIMELINE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = None;
+    Ok(())
 }
 
 /// `renderdocx.export_texture(destination, index=0)` -> export a PNG of the
@@ -4636,6 +4898,9 @@ fn build_capture_module<'py>(
         ("debug_mesh", pyo3::wrap_pyfunction!(debug_mesh, py)),
         ("debug_next", pyo3::wrap_pyfunction!(debug_next, py)),
         ("debug_stop", pyo3::wrap_pyfunction!(debug_stop, py)),
+        ("debug_collect", pyo3::wrap_pyfunction!(debug_collect, py)),
+        ("debug_timeline", pyo3::wrap_pyfunction!(debug_timeline, py)),
+        ("debug_set_breakpoint", pyo3::wrap_pyfunction!(debug_set_breakpoint, py)),
         ("Replay", pyo3::wrap_pyfunction!(Replay, py)),
         ("ShowEventBrowser", pyo3::wrap_pyfunction!(ShowEventBrowser, py)),
         ("HasEventBrowser", pyo3::wrap_pyfunction!(HasEventBrowser, py)),
@@ -5292,7 +5557,13 @@ mod tests {
              print('debugshader', trace.get('event_id') == 21)\n\
              var = renderdocx.ShaderVariable((trace.get('inputs') or [{}])[0])\n\
              print('shader-variable', isinstance(var.name, str) and var.GetName() == var.name and isinstance(var.GetMembers(), list) and isinstance(var.GetValue(), str))\n\
-             renderdocx.debug_stop()\n\
+             renderdocx.debug_collect()\n\
+             sh = renderdocx.ViewShader(7)\n\
+             line = next((i.get('disassembly_line') for i in (trace.get('instructions') or []) if i.get('disassembly_line', 0) > 0), None)\n\
+             sh.ToggleBreakpointOnDisassemblyLine(line, True)\n\
+             print('shader-breakpoint', line is not None and len(sh.GetBreakpoints()) == 1 and isinstance(renderdocx.debug_timeline(), dict))\n\
+             run = sh.RunForward()\n\
+             print('shader-run', isinstance(run, dict) and run.get('reason') in ('breakpoint', 'boundary', 'step', 'event', 'source') and isinstance(run.get('position'), int))\n\
              notes0 = renderdocx.GetNotes()\n\
              bookmarks0 = renderdocx.GetBookmarks()\n\
              renderdocx.SetNotes('renderdocx notes')\n\
@@ -5382,6 +5653,12 @@ mod tests {
             result.stdout
         );
         assert!(result.stdout.contains("shader-variable True"), "{}", result.stdout);
+        assert!(
+            result.stdout.contains("shader-breakpoint True"),
+            "{}",
+            result.stdout
+        );
+        assert!(result.stdout.contains("shader-run True"), "{}", result.stdout);
         assert!(result.stdout.contains("debugshader True"), "{}", result.stdout);
         assert_eq!(
             take_ui_requests(),
@@ -5392,7 +5669,8 @@ mod tests {
                 "textures",
                 "textures",
                 "shader_messages",
-                "resource:7"
+                "resource:7",
+                "shader:7"
             ]
         );
         assert!(result.stdout.contains("notes True"), "{}", result.stdout);
