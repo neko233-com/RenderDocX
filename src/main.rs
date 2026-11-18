@@ -21,7 +21,7 @@ use renderdocx::{
     i18n::Language,
     live::{
         CaptureOptions, EnvOperation, EnvSeparator, EnvironmentModification, LaunchConfiguration,
-        LiveSession, capture_directory, capture_notice, enumerate_target, parse_target_pid,
+        LiveSession, capture_notice, enumerate_target, parse_target_pid,
     },
     replay::{
         AnnotationSection, COUNTER_PAGE_LIMIT, ComputeDebugSelection, CounterPage,
@@ -3922,8 +3922,9 @@ impl Workspace {
         );
         cx.notify();
         let request_url = url.clone();
+        let capture_override = self.settings.capture_directory.clone();
         let task = cx.background_executor().spawn(async move {
-            let directory = capture_directory()?;
+            let directory = renderdocx::live::capture_directory_for(capture_override.as_deref())?;
             match active_session {
                 Some(session) => session.remote_download(&path, size, &directory),
                 None => renderdocx::live::download_remote_capture(
@@ -4049,7 +4050,7 @@ impl Workspace {
                 let app = path.to_str().ok_or("Invalid remote application path")?;
                 LiveSession::launch_remote(&settings, &url, app, &config)
             } else {
-                let directory = capture_directory()?;
+                let directory = renderdocx::live::capture_directory_for(settings.capture_directory.as_deref())?;
                 LiveSession::launch(&settings, &path, &directory, &config)
             }
         });
@@ -21174,6 +21175,29 @@ impl Render for Workspace {
                     .label(self.t("Edit configuration JSON", "编辑配置 JSON"))
                     .secondary()
                     .on_click(cx.listener(|this, _, window, cx| this.open_config_editor(window, cx))))
+                .child(div().flex().flex_wrap().gap_2()
+                    .child(Button::new("capture-dir-pick")
+                        .label(format!("{}: {}", self.t("Capture directory", "捕获目录"),
+                            self.settings.capture_directory.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| self.t("default", "默认").to_owned())))
+                        .secondary()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                this.settings.capture_directory = Some(path);
+                                this.save();
+                                cx.notify();
+                            }
+                        })))
+                    .child(Button::new("save-dir-pick")
+                        .label(format!("{}: {}", self.t("Default save directory", "默认保存目录"),
+                            self.settings.default_save_directory.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| self.t("default", "默认").to_owned())))
+                        .secondary()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                this.settings.default_save_directory = Some(path);
+                                this.save();
+                                cx.notify();
+                            }
+                        }))))
                 .when(self.show_config_editor, |view| view.child(
                     div().flex().flex_col().gap_2()
                         .child(div().id("config-editor").test_support().w_full().h(px(240.)).child(

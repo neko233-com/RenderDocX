@@ -890,10 +890,18 @@ impl LiveSession {
 }
 
 pub fn capture_directory() -> Result<PathBuf, String> {
-    let root = directories::ProjectDirs::from("com", "neko233", "RenderDocX")
-        .ok_or("No application data directory")?
-        .data_local_dir()
-        .join("captures");
+    capture_directory_for(None)
+}
+
+/// Resolve the capture directory, honouring a user override from Settings.
+pub fn capture_directory_for(override_dir: Option<&Path>) -> Result<PathBuf, String> {
+    let root = match override_dir {
+        Some(path) => path.to_path_buf(),
+        None => directories::ProjectDirs::from("com", "neko233", "RenderDocX")
+            .ok_or("No application data directory")?
+            .data_local_dir()
+            .join("captures"),
+    };
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
     Ok(root)
 }

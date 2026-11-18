@@ -59,6 +59,10 @@ pub struct Settings {
     pub renderdoc_core: Option<PathBuf>,
     /// Manifest names of extensions the user has enabled.
     pub enabled_extensions: Vec<String>,
+    /// Override for the directory where new captures are stored.
+    pub capture_directory: Option<PathBuf>,
+    /// Default directory offered when saving captures.
+    pub default_save_directory: Option<PathBuf>,
     /// Remote server bookmarks (upstream RemoteHost schema).
     pub remote_hosts: Vec<RemoteHost>,
     pub replay_options: crate::replay::ReplayOptions,
@@ -92,6 +96,8 @@ impl Default for Settings {
             replay_bridge: None,
             renderdoc_core: None,
             enabled_extensions: Vec::new(),
+            capture_directory: None,
+            default_save_directory: None,
             remote_hosts: Vec::new(),
             replay_options: Default::default(),
             shader_processors: Vec::new(),
@@ -380,5 +386,10 @@ mod tests {
         with_host.remote_hosts.push(super::RemoteHost::new("host:39070"));
         let reloaded = Settings::from_json(&with_host.to_json_string()).unwrap();
         assert_eq!(reloaded.remote_hosts, with_host.remote_hosts);
+        with_host.capture_directory = Some(PathBuf::from("C:/caps"));
+        with_host.default_save_directory = Some(PathBuf::from("C:/saves"));
+        let reloaded = Settings::from_json(&with_host.to_json_string()).unwrap();
+        assert_eq!(reloaded.capture_directory, with_host.capture_directory);
+        assert_eq!(reloaded.default_save_directory, with_host.default_save_directory);
     }
 }
