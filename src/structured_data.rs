@@ -77,6 +77,24 @@ impl<'a> BinaryCursor<'a> {
         Ok(f64::from_le_bytes(self.take(8)?.try_into().unwrap()))
     }
 
+    /// RenderDoc `Serialiser` aligns byte buffers to 64-byte chunk alignment
+    /// before reading (`m_Read->AlignTo<ChunkAlignment>()`, ChunkAlignment=64).
+    pub fn align_to(&mut self, alignment: usize) {
+        if alignment == 0 {
+            return;
+        }
+        let remainder = self.pos % alignment;
+        if remainder != 0 {
+            self.pos += alignment - remainder;
+        }
+    }
+
+    /// Read a raw byte buffer, applying upstream's 64-byte alignment first.
+    pub fn byte_buffer(&mut self, count: usize) -> Result<&'a [u8], String> {
+        self.align_to(64);
+        self.take(count)
+    }
+
     /// RenderDoc `rdcstr`: int32 length (-1 = null), then `len` raw bytes.
     pub fn string(&mut self) -> Result<Option<String>, String> {
         let len = self.i32()?;
@@ -228,6 +246,19 @@ mod tests {
         assert!((cursor.f32().unwrap() - 1.5).abs() < 1e-6);
         assert_eq!(cursor.string().unwrap().as_deref(), Some("test"));
         assert_eq!(cursor.string().unwrap(), None);
+    }
+
+    #[test]
+    fn byte_buffer_applies_64_byte_alignment() {
+        // Start at pos=1; a byte buffer must skip to offset 64.
+        let mut data = vec![0u8; 70];
+        data[64] = 0xAB;
+        data[65] = 0xCD;
+        let mut cursor = BinaryCursor::new(&data);
+        cursor.u8().unwrap(); // pos = 1
+        let buffer = cursor.byte_buffer(2).unwrap();
+        assert_eq!(buffer, &[0xAB, 0xCD]);
+        assert_eq!(cursor.pos, 66);
     }
 
     #[test]
