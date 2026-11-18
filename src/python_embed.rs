@@ -2,8 +2,18 @@
 //! external-process Python path for interactive scripting and UI-extension
 //! lifecycle calls. This is Rust-native orchestration; no C++ bridge involved.
 
+// pyrenderdoc-compatible accessor names intentionally mirror upstream
+// (CurEvent, CurAction, GetTextures, ...).
+#![allow(non_snake_case)]
+
 use pyo3::{prelude::*, types::PyDict, Python};
-use std::{ffi::CString, sync::Mutex};
+use std::{
+    ffi::CString,
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Mutex,
+    },
+};
 
 // CPython's interpreter and sys.stdout redirection are process-global; serialize
 // all embedded calls so concurrent scripts cannot clobber each other's capture.
@@ -26,6 +36,9 @@ static ACTIVE_LANGUAGE: Mutex<crate::i18n::Language> = Mutex::new(crate::i18n::L
 // Complete snapshot document for renderdocx.snapshot(). Serialized once when a
 // capture is bound so scripts can read any field without extra bindings.
 static ACTIVE_SNAPSHOT: Mutex<Option<serde_json::Value>> = Mutex::new(None);
+// Last event selected or queried by a helper; backs CurEvent()/CurAction().
+static ACTIVE_EVENT: AtomicU32 = AtomicU32::new(0);
+static ACTIVE_CAPTURE_PATH: Mutex<Option<String>> = Mutex::new(None);
 
 /// Bind the serialized snapshot document for `renderdocx.snapshot()`.
 pub fn set_active_snapshot(snapshot: serde_json::Value) {
@@ -39,6 +52,183 @@ fn active_snapshot() -> Option<serde_json::Value> {
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .clone()
+}
+
+/// Record the event that `CurEvent()` and `CurAction()` should report.
+pub fn set_active_event(event: Option<u32>) {
+    ACTIVE_EVENT.store(event.unwrap_or(0), Ordering::SeqCst);
+}
+
+fn active_event() -> u32 {
+    ACTIVE_EVENT.load(Ordering::SeqCst)
+}
+
+/// Record the capture filename exposed by `GetCaptureFilename()`.
+pub fn set_active_capture(path: Option<String>) {
+    *ACTIVE_CAPTURE_PATH
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = path;
+}
+
+fn find_action_for_event(event: u32) -> Option<crate::replay::Action> {
+    let actions = active_actions();
+    actions
+        .iter()
+        .find(|action| action.event_id == event)
+        .or_else(|| {
+            actions.iter().find(|action| {
+                action
+                    .api_events
+                    .iter()
+                    .any(|api_event| api_event.event_id == event)
+            })
+        })
+        .cloned()
+}
+
+// --- pyrenderdoc CaptureContext compatibility surface -------------------
+// These use the same names and shapes as the upstream wrapper where the
+// underlying data exists in RenderDocX's generic replay model.
+
+/// `CurEvent()` -> last event selected or queried (0 when none).
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn CurEvent() -> u32 {
+    active_event()
+}
+
+/// `CurSelectedEvent()` -> same as `CurEvent()` in RenderDocX's single-event
+/// model.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn CurSelectedEvent() -> u32 {
+    active_event()
+}
+
+/// `CurAction()` -> action containing the current event, or None.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn CurAction(py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    match find_action_for_event(active_event()) {
+        Some(action) => to_py(py, &action),
+        None => Ok(py.None()),
+    }
+}
+
+/// `CurSelectedAction()` -> same as `CurAction()`.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn CurSelectedAction(py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    CurAction(py)
+}
+
+/// `CurRootActions()` -> bound root action list.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn CurRootActions(py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    to_py(py, &active_actions())
+}
+
+/// `CurPipelineState()` -> pipeline for the current event.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn CurPipelineState(py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    let event = active_event();
+    if event == 0 {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "No event is selected",
+        ));
+    }
+    let session = active_session()?;
+    let value = session
+        .pipeline_for_event(event)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    to_py(py, &value)
+}
+
+/// `GetAction(event)` -> action containing the event, or None.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn GetAction(py: Python<'_>, event: u32) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    match find_action_for_event(event) {
+        Some(action) => to_py(py, &action),
+        None => Ok(py.None()),
+    }
+}
+
+/// `GetResources()` -> bound resource list.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn GetResources(py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    to_py(py, &active_resources())
+}
+
+/// `GetTextures()` -> bound texture list with full descriptions.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn GetTextures(py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    to_py(py, &active_textures())
+}
+
+/// `GetBuffers()` -> bound buffer list with full descriptions.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn GetBuffers(py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    to_py(py, &active_buffers())
+}
+
+/// `FrameInfo()` -> captured frame info object, or None.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn FrameInfo(py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    match active_snapshot().and_then(|snapshot| snapshot.get("frame_info").cloned()) {
+        Some(value) if !value.is_null() => to_py(py, &value),
+        _ => Ok(py.None()),
+    }
+}
+
+/// `APIProps()` -> API and replay properties, or None.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn APIProps(py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    let Some(snapshot) = active_snapshot() else {
+        return Ok(py.None());
+    };
+    let value = serde_json::json!({
+        "api": snapshot.get("api").cloned().unwrap_or(serde_json::Value::Null),
+        "local_renderer": snapshot.get("local_renderer").cloned().unwrap_or(serde_json::Value::Null),
+        "replay_options": snapshot.get("replay_options").cloned().unwrap_or(serde_json::Value::Null),
+    });
+    to_py(py, &value)
+}
+
+/// `IsCaptureLoaded()` -> whether a replay session is bound.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn IsCaptureLoaded() -> bool {
+    active_session().is_ok()
+}
+
+/// `GetCaptureFilename()` -> bound capture path (empty when none).
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn GetCaptureFilename() -> String {
+    ACTIVE_CAPTURE_PATH
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+        .unwrap_or_default()
+}
+
+/// `DebugMessages()` -> capture debug messages from the replay controller.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn DebugMessages(py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    let session = active_session()?;
+    let value = session
+        .debug_messages()
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    to_py(py, &value)
 }
 
 /// `renderdocx.snapshot()` -> the full capture snapshot as a native Python
@@ -362,6 +552,7 @@ fn mesh(py: Python<'_>, event: u32, stage: u32) -> pyo3::PyResult<pyo3::Py<pyo3:
     session
         .pipeline_for_event(event)
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    set_active_event(Some(event));
     let value = session
         .mesh(event, selection)
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
@@ -394,6 +585,7 @@ fn vertex_input(
     let pipeline = session
         .pipeline_for_event(action.event_id)
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    set_active_event(Some(action.event_id));
     let buffers = active_buffers();
     let value = session
         .vertex_input_page(action, &pipeline, &buffers, instance, offset, limit)
@@ -538,6 +730,10 @@ pub fn set_active_session(session: Option<crate::replay::Session>) {
         *ACTIVE_SNAPSHOT
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = None;
+        *ACTIVE_CAPTURE_PATH
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        ACTIVE_EVENT.store(0, Ordering::SeqCst);
     }
 }
 
@@ -563,7 +759,7 @@ fn active_session() -> Result<crate::replay::Session, pyo3::PyErr> {
 fn select_event(session: &crate::replay::Session, event: u32) -> pyo3::PyResult<()> {
     session
         .pipeline_for_event(event)
-        .map(|_| ())
+        .map(|_| set_active_event(Some(event)))
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }
 
@@ -575,6 +771,7 @@ fn pipeline(py: Python<'_>, event: u32) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>>
     let value = session
         .pipeline_for_event(event)
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    set_active_event(Some(event));
     to_py(py, &value)
 }
 
@@ -889,6 +1086,21 @@ fn build_capture_module<'py>(
         ("export_buffer", pyo3::wrap_pyfunction!(export_buffer, py)),
         ("snapshot", pyo3::wrap_pyfunction!(snapshot, py)),
         ("capture_actions", pyo3::wrap_pyfunction!(capture_actions, py)),
+        ("CurEvent", pyo3::wrap_pyfunction!(CurEvent, py)),
+        ("CurSelectedEvent", pyo3::wrap_pyfunction!(CurSelectedEvent, py)),
+        ("CurAction", pyo3::wrap_pyfunction!(CurAction, py)),
+        ("CurSelectedAction", pyo3::wrap_pyfunction!(CurSelectedAction, py)),
+        ("CurRootActions", pyo3::wrap_pyfunction!(CurRootActions, py)),
+        ("CurPipelineState", pyo3::wrap_pyfunction!(CurPipelineState, py)),
+        ("GetAction", pyo3::wrap_pyfunction!(GetAction, py)),
+        ("GetResources", pyo3::wrap_pyfunction!(GetResources, py)),
+        ("GetTextures", pyo3::wrap_pyfunction!(GetTextures, py)),
+        ("GetBuffers", pyo3::wrap_pyfunction!(GetBuffers, py)),
+        ("FrameInfo", pyo3::wrap_pyfunction!(FrameInfo, py)),
+        ("APIProps", pyo3::wrap_pyfunction!(APIProps, py)),
+        ("IsCaptureLoaded", pyo3::wrap_pyfunction!(IsCaptureLoaded, py)),
+        ("GetCaptureFilename", pyo3::wrap_pyfunction!(GetCaptureFilename, py)),
+        ("DebugMessages", pyo3::wrap_pyfunction!(DebugMessages, py)),
     ] {
         if let Ok(function) = wrapped {
             dict.set_item(name, function).ok();
@@ -1174,6 +1386,20 @@ mod tests {
         );
         assert!(result.error.is_none(), "{:?}", result.error);
         assert_eq!(result.stdout.trim(), "0");
+        // pyrenderdoc-compatible accessors report an unloaded capture cleanly.
+        let result = run_script_with_capture(
+            "import renderdocx\n\
+             print(renderdocx.CurEvent(), renderdocx.IsCaptureLoaded(),\n\
+                   len(renderdocx.GetTextures()), len(renderdocx.GetResources()),\n\
+                   repr(renderdocx.CurAction()), repr(renderdocx.FrameInfo()),\n\
+                   repr(renderdocx.APIProps()), renderdocx.GetCaptureFilename())",
+            &CaptureView::default(),
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(
+            result.stdout.trim(),
+            "0 False 0 0 None None None"
+        );
     }
 
     #[cfg(windows)]
@@ -1195,6 +1421,7 @@ mod tests {
         let (session, snapshot) =
             crate::replay::Session::open(&settings, &capture).expect("open capture");
         set_active_session(Some(session));
+        set_active_capture(Some(capture.display().to_string()));
         set_active_format_context(
             snapshot.resources.clone(),
             snapshot.buffers.clone(),
@@ -1235,7 +1462,25 @@ mod tests {
              buf = os.path.join(d, 'buf.bin')\n\
              print('bufexport', renderdocx.export_buffer(buf, 0) == buf and os.path.getsize(buf) > 0)\n\
              rp = os.path.join(d, 'render.png')\n\
-             print('render', renderdocx.render_texture(rp, 0, 32, 32) == rp and os.path.getsize(rp) > 0)",
+             print('render', renderdocx.render_texture(rp, 0, 32, 32) == rp and os.path.getsize(rp) > 0)\n\
+             renderdocx.pipeline(19)\n\
+             compat = (\n\
+                 renderdocx.CurEvent() == 19\n\
+                 and renderdocx.CurSelectedEvent() == 19\n\
+                 and renderdocx.CurPipelineState().get('event_id') == 19\n\
+                 and isinstance(renderdocx.CurAction(), dict)\n\
+                 and isinstance(renderdocx.CurSelectedAction(), dict)\n\
+                 and isinstance(renderdocx.CurRootActions(), list)\n\
+                 and isinstance(renderdocx.GetAction(19), dict)\n\
+                 and isinstance(renderdocx.GetTextures(), list)\n\
+                 and isinstance(renderdocx.GetBuffers(), list)\n\
+                 and isinstance(renderdocx.GetResources(), list)\n\
+                 and isinstance(renderdocx.APIProps(), dict)\n\
+                 and renderdocx.IsCaptureLoaded()\n\
+                 and renderdocx.GetCaptureFilename().endswith('.rdc')\n\
+                 and isinstance(renderdocx.DebugMessages(), list)\n\
+             )\n\
+             print('compat', compat)",
             &CaptureView::default(),
         );
         set_active_session(None);
@@ -1253,6 +1498,7 @@ mod tests {
         assert!(result.stdout.contains("meshread True"), "{}", result.stdout);
         assert!(result.stdout.contains("bufexport True"), "{}", result.stdout);
         assert!(result.stdout.contains("render True"), "{}", result.stdout);
+        assert!(result.stdout.contains("compat True"), "{}", result.stdout);
     }
 
     #[cfg(windows)]

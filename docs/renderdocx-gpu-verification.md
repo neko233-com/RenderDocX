@@ -121,6 +121,11 @@ structure data, debug/shader messages, resource usage, callstack, event
 formatting, descriptors, pixel history, texture statistics/min-max/fit range,
 texture preview/context/export PNGs, raw buffer export, mesh output and mesh
 vertex reads, plus the full `snapshot()` document and `capture_actions()` list.
+It also exercises the pyrenderdoc-compatible CaptureContext surface:
+`CurEvent`, `CurSelectedEvent`, `CurAction`, `CurSelectedAction`,
+`CurRootActions`, `CurPipelineState`, `GetAction`, `GetTextures`, `GetBuffers`,
+`GetResources`, `FrameInfo`, `APIProps`, `IsCaptureLoaded`,
+`GetCaptureFilename` and `DebugMessages`.
 `python_vertex_input_query_a_real_capture` opens a real Vertex capture and
 asserts `renderdocx.vertex_input()` returns input rows.
 

@@ -6067,6 +6067,12 @@ impl Workspace {
     /// Bind the open session and its formatting context for Python helpers.
     fn bind_python_context(&self) {
         renderdocx::python_embed::set_active_session(self.session.clone());
+        renderdocx::python_embed::set_active_event(self.selected_event_id);
+        renderdocx::python_embed::set_active_capture(
+            self.capture
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
+        );
         if let Some(snapshot) = &self.snapshot {
             renderdocx::python_embed::set_active_format_context(
                 snapshot.resources.clone(),
