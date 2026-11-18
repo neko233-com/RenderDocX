@@ -1037,6 +1037,7 @@ struct Workspace {
     shader_find: Entity<InputState>,
     shader_replace: Entity<InputState>,
     thumbnail_history: Vec<renderdocx::thumbnail_strip::ThumbnailEntry>,
+    thumbnail_dir: Option<tempfile::TempDir>,
     suggest_remote: Option<renderdocx::suggest_remote::SuggestRemote>,
     python_input: Entity<InputState>,
     python_script: Entity<TextareaState>,
@@ -12107,6 +12108,15 @@ impl Workspace {
                 }
                 match result {
                     Ok(preview) => {
+                        // Cache a real thumbnail image for the strip (pure Rust copy).
+                        if let Some(entry) = this.thumbnail_history.first().copied() {
+                            if this.thumbnail_dir.is_none() {
+                                this.thumbnail_dir = tempfile::tempdir().ok();
+                            }
+                            if let Some(dir) = &this.thumbnail_dir {
+                                let _ = std::fs::copy(&preview.path, dir.path().join(entry.cache_name()));
+                            }
+                        }
                         this.preview = Some(preview);
                         this.status = None;
                         if let Some([x, y]) = pick_after {
@@ -18913,6 +18923,9 @@ impl Workspace {
                                         entry.mip,
                                         entry.slice
                                     );
+                                    let thumb = self.thumbnail_dir.as_ref()
+                                        .map(|dir| dir.path().join(entry.cache_name()))
+                                        .filter(|path| path.is_file());
                                     div()
                                         .id(SharedString::from(format!(
                                             "thumbnail-{}-{}-{}",
@@ -18924,6 +18937,14 @@ impl Workspace {
                                         .py_1()
                                         .rounded_md()
                                         .bg(rgb(0x252f40))
+                                        .when_some(thumb, |tile, path| {
+                                            tile.child(
+                                                img(path)
+                                                    .w(px(48.))
+                                                    .h(px(32.))
+                                                    .object_fit(gpui::ObjectFit::Contain)
+                                            )
+                                        })
                                         .child(label)
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.switch_texture(
@@ -21841,6 +21862,7 @@ fn main() {
                         shader_find,
                         shader_replace,
                         thumbnail_history: Vec::new(),
+                        thumbnail_dir: None,
                         suggest_remote: None,
                         python_input,
                         python_script,
@@ -22699,6 +22721,7 @@ mod ui_tests {
                         shader_find,
                         shader_replace,
                         thumbnail_history: Vec::new(),
+                        thumbnail_dir: None,
                         suggest_remote: None,
                         python_input,
                         python_script,
@@ -23470,6 +23493,7 @@ mod ui_tests {
                         shader_find,
                         shader_replace,
                         thumbnail_history: Vec::new(),
+                        thumbnail_dir: None,
                         suggest_remote: None,
                         python_input,
                         python_script,

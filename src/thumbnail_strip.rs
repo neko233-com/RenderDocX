@@ -13,6 +13,16 @@ pub struct ThumbnailEntry {
 /// Cap for the thumbnail strip, matching a compact one-row dock widget.
 pub const THUMBNAIL_LIMIT: usize = 8;
 
+impl ThumbnailEntry {
+    /// Stable file name for this entry's cached thumbnail image.
+    pub fn cache_name(&self) -> String {
+        format!(
+            "thumb_{}_m{}_a{}_s{}.png",
+            self.texture, self.mip, self.slice, self.sample
+        )
+    }
+}
+
 /// Move an entry to the front, drop duplicates and cap the history length.
 pub fn record(history: &mut Vec<ThumbnailEntry>, entry: ThumbnailEntry) {
     history.retain(|existing| *existing != entry);
@@ -23,6 +33,24 @@ pub fn record(history: &mut Vec<ThumbnailEntry>, entry: ThumbnailEntry) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_name_is_stable_and_distinct() {
+        let a = ThumbnailEntry {
+            texture: 1,
+            mip: 0,
+            slice: 0,
+            sample: 0,
+        };
+        let b = ThumbnailEntry {
+            texture: 1,
+            mip: 1,
+            slice: 0,
+            sample: 0,
+        };
+        assert_eq!(a.cache_name(), "thumb_1_m0_a0_s0.png");
+        assert_ne!(a.cache_name(), b.cache_name());
+    }
 
     #[test]
     fn thumbnail_history_deduplicates_and_caps() {
