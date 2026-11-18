@@ -10,6 +10,8 @@
 
 A typed-value layer translated from `DoSerialise(SDObject&)` (`serialiser.cpp:774`) adds `SdType`/`SdObject` and `read_sd_object`, reading self-describing object trees (name, type, data, recursive children) with depth/child-count guards plus `SDBasic` category constants and `basic_as_u32`. This is the wire format the replay bridge uses to transfer structured data. 2 additional unit tests round-trip a small object tree and reject pathological child counts.
 
+The `.rdc` inspector exposes this as a tool: paste hex bytes of an SDObject wire payload and the GUI expands the parsed object tree with the pure-Rust reader.
+
 Boundary: the self-describing `SDObject` wire format is now readable, but section *payloads* are serialized against per-chunk C++ struct layouts (no embedded type info) and require the replay core's registered deserializers; the D3D11/GL/Vulkan replay engines likewise remain the C++ core. Upstream's serialise layer alone is ~186 KB of C++, and crates.io has no Rust `.rdc` replay library, so replacing the full replay core remains a separate large engineering effort rather than an incremental migration.
 
 The supplied upstream snapshot has version macros for RenderDoc 1.48 but no Git metadata. Its upstream files have been compared by Git blob ID to `v1.x` commit `5ad608809c9028da9f5c5082397cb6afe9c8dd17`; see the root README for the scope and exceptions. Capture and replay remain in the matching RenderDoc core. A separate C++ helper owns the replay lifetime and exposes a versioned process protocol to Rust, avoiding a guessed C++ ABI in Rust. The application API in `renderdoc/api/app/renderdoc_app.h` is a separate, versioned in-process capture interface.

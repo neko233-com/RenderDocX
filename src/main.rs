@@ -1053,6 +1053,8 @@ struct Workspace {
     recording_key: Option<usize>,
     viewer_focus: gpui::FocusHandle,
     rdc_inspect: Option<(PathBuf, renderdocx::rdc_file::RdcFile)>,
+    sd_inspect: Vec<String>,
+    sd_hex_input: Entity<TextareaState>,
 }
 
 impl Workspace {
@@ -4490,6 +4492,51 @@ impl Workspace {
     }
 
     /// Decode one section's payload natively and show a short hex/text preview.
+    /// Parse a pasted hex dump as a self-describing SDObject tree (the replay
+    /// bridge wire format) with the pure-Rust reader, and expand it for display.
+    fn parse_sd_hex(&mut self, cx: &mut Context<Self>) {
+        use renderdocx::structured_data::{BinaryCursor, SdObject, read_sd_object};
+        let text = self.sd_hex_input.read(cx).value().to_string();
+        let hex: String = text
+            .chars()
+            .filter(|ch| ch.is_ascii_hexdigit())
+            .collect();
+        let bytes: Result<Vec<u8>, _> = hex
+            .as_bytes()
+            .chunks(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap_or("0"), 16))
+            .collect();
+        self.sd_inspect = match bytes {
+            Ok(data) => {
+                let mut cursor = BinaryCursor::new(&data);
+                match read_sd_object(&mut cursor, 0) {
+                    Ok(root) => {
+                        let mut lines = Vec::new();
+                        fn expand(object: &SdObject, depth: usize, out: &mut Vec<String>) {
+                            out.push(format!(
+                                "{}{} [type={} base={} basic={} str={}]",
+                                "  ".repeat(depth),
+                                object.name,
+                                object.object_type.name,
+                                object.object_type.basetype,
+                                object.basic,
+                                object.string.as_deref().unwrap_or("-")
+                            ));
+                            for child in &object.children {
+                                expand(child, depth + 1, out);
+                            }
+                        }
+                        expand(&root, 0, &mut lines);
+                        lines
+                    }
+                    Err(error) => vec![format!("parse error: {error}")],
+                }
+            }
+            Err(error) => vec![format!("invalid hex: {error}")],
+        };
+        cx.notify();
+    }
+
     fn preview_rdc_section(&mut self, index: usize, cx: &mut Context<Self>) {
         let preview = self.rdc_inspect.as_ref().and_then(|(_, file)| {
             file.sections.get(index).map(|section| {
@@ -21304,6 +21351,17 @@ impl Render for Workspace {
                                 )).on_click(cx.listener(move |this, _, _, cx| this.preview_rdc_section(index, cx)))
                             })))
                 })
+                .child(div().text_sm().child(self.t("Parse SDObject (hex bytes, bridge wire format)", "解析 SDObject（hex 字节，桥接 wire 格式）")))
+                .child(div().id("sd-hex-input").test_support().w_full().child(
+                    Textarea::new(&self.sd_hex_input).aria_label(self.t("SDObject hex", "SDObject hex"))
+                ))
+                .child(button("sd-parse", self.t("Parse SDObject", "解析 SDObject"), false, |this, cx| this.parse_sd_hex(cx), cx))
+                .when(!self.sd_inspect.is_empty(), |view| {
+                    view.child(div().id("sd-tree").test_support().flex().flex_col().gap_0().max_h(px(160.)).overflow_hidden()
+                        .children(self.sd_inspect.iter().enumerate().map(|(index, line)| {
+                            div().id(("sd-line", index)).test_support().text_sm().child(line.clone())
+                        })))
+                })
             )
             .child(div().flex().flex_col().gap_1()
                 .child(self.t("Configuration", "配置"))
@@ -21802,6 +21860,7 @@ fn main() {
                     let camera_near = cx.new(|cx| InputState::new(window, cx).default_value("0.01"));
                     let camera_far = cx.new(|cx| InputState::new(window, cx).default_value("10000"));
                     let config_editor = cx.new(|cx| TextareaState::new(window, cx));
+                    let sd_hex_input = cx.new(|cx| TextareaState::new(window, cx).rows(3));
                     let shader_find = cx.new(|cx| InputState::new(window, cx));
                     let shader_replace = cx.new(|cx| InputState::new(window, cx));
                     let python_input = cx.new(|cx| InputState::new(window, cx));
@@ -22115,6 +22174,8 @@ fn main() {
                         recording_key: None,
                         viewer_focus: cx.focus_handle(),
                         rdc_inspect: None,
+                        sd_inspect: Vec::new(),
+                        sd_hex_input,
                     });
                     Workspace::install_close_guard(window, cx, &entity);
                     if let Some(path) = initial_capture {
@@ -22649,6 +22710,7 @@ mod ui_tests {
                     let camera_near = cx.new(|cx| InputState::new(window, cx).default_value("0.01"));
                     let camera_far = cx.new(|cx| InputState::new(window, cx).default_value("10000"));
                     let config_editor = cx.new(|cx| TextareaState::new(window, cx));
+                    let sd_hex_input = cx.new(|cx| TextareaState::new(window, cx).rows(3));
                     let shader_find = cx.new(|cx| InputState::new(window, cx));
                     let shader_replace = cx.new(|cx| InputState::new(window, cx));
                     let python_input = cx.new(|cx| InputState::new(window, cx));
@@ -22981,6 +23043,8 @@ mod ui_tests {
                         recording_key: None,
                         viewer_focus: cx.focus_handle(),
                         rdc_inspect: None,
+                        sd_inspect: Vec::new(),
+                        sd_hex_input,
                     })
                 },
             )
@@ -23306,6 +23370,7 @@ mod ui_tests {
                     let camera_near = cx.new(|cx| InputState::new(window, cx).default_value("0.01"));
                     let camera_far = cx.new(|cx| InputState::new(window, cx).default_value("10000"));
                     let config_editor = cx.new(|cx| TextareaState::new(window, cx));
+                    let sd_hex_input = cx.new(|cx| TextareaState::new(window, cx).rows(3));
                     let shader_find = cx.new(|cx| InputState::new(window, cx));
                     let shader_replace = cx.new(|cx| InputState::new(window, cx));
                     let python_input = cx.new(|cx| InputState::new(window, cx));
@@ -23760,6 +23825,8 @@ mod ui_tests {
                         recording_key: None,
                         viewer_focus: cx.focus_handle(),
                         rdc_inspect: None,
+                        sd_inspect: Vec::new(),
+                        sd_hex_input,
                     })
                 },
             )
