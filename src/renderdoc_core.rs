@@ -71,6 +71,53 @@ pub fn load_core_info(path: &Path) -> Result<CoreInfo, String> {
     }
 }
 
+/// A loaded RenderDoc core handle for calling stateless C exports that must be
+/// queried repeatedly (e.g. global hook state). Keeps the library loaded.
+pub struct CoreHandle {
+    library: Library,
+}
+
+impl CoreHandle {
+    /// Load a core library by path; the handle keeps it loaded for the session.
+    pub fn load(path: &Path) -> Result<Self, String> {
+        let library = unsafe { Library::new(path) }
+            .map_err(|error| format!("Could not load {}: {error}", path.display()))?;
+        Ok(Self { library })
+    }
+
+    /// Whether global hooking is active (`RENDERDOC_IsGlobalHookActive`).
+    pub fn is_global_hook_active(&self) -> Option<bool> {
+        unsafe {
+            self.library
+                .get::<FnBool>(b"RENDERDOC_IsGlobalHookActive\0")
+        }
+        .ok()
+        .map(|f| unsafe { f() })
+    }
+
+    /// Whether global hooking is supported here (`RENDERDOC_CanGlobalHook`).
+    pub fn can_global_hook(&self) -> Option<bool> {
+        unsafe { self.library.get::<FnBool>(b"RENDERDOC_CanGlobalHook\0") }
+            .ok()
+            .map(|f| unsafe { f() })
+    }
+
+    /// Stop the global hook (`RENDERDOC_StopGlobalHook`). Void, no C++ types.
+    pub fn stop_global_hook(&self) -> Option<()> {
+        unsafe {
+            self.library
+                .get::<unsafe extern "C" fn()>(b"RENDERDOC_StopGlobalHook\0")
+        }
+        .ok()
+        .map(|f| unsafe { f() })
+    }
+
+    /// Read core info through the same loaded library.
+    pub fn info(&self) -> CoreInfo {
+        unsafe { core_info(&self.library) }
+    }
+}
+
 /// Well-known RenderDoc library names used to locate the core on Windows.
 pub fn library_candidates() -> Vec<&'static str> {
     vec!["renderdoc.dll", "qrenderdoc.dll"]
@@ -89,6 +136,11 @@ mod tests {
     fn missing_library_reports_error_not_panic() {
         let result = load_core_info(Path::new("definitely-missing-renderdoc.dll"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn core_handle_missing_library_reports_error() {
+        assert!(CoreHandle::load(Path::new("definitely-missing-core.dll")).is_err());
     }
 
     #[test]

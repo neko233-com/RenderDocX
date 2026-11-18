@@ -1043,6 +1043,7 @@ struct Workspace {
     python_output: Vec<String>,
     python_pending: bool,
     core_info: Option<renderdocx::renderdoc_core::CoreInfo>,
+    core_handle: Option<renderdocx::renderdoc_core::CoreHandle>,
 }
 
 impl Workspace {
@@ -4390,9 +4391,10 @@ impl Workspace {
             return;
         };
         // Pure Rust: call RenderDoc's stable C exports via libloading — no C++ bridge.
-        match renderdocx::renderdoc_core::load_core_info(&path) {
-            Ok(info) => {
-                self.core_info = Some(info);
+        match renderdocx::renderdoc_core::CoreHandle::load(&path) {
+            Ok(handle) => {
+                self.core_info = Some(handle.info());
+                self.core_handle = Some(handle);
                 self.settings.renderdoc_core = Some(path);
                 self.save();
                 self.status = Some(
@@ -4407,6 +4409,21 @@ impl Workspace {
                 ));
             }
         }
+        cx.notify();
+    }
+
+    /// Stop the global hook via RenderDoc's stable C export (pure Rust, no C++).
+    fn stop_global_hook(&mut self, cx: &mut Context<Self>) {
+        let result = self
+            .core_handle
+            .as_ref()
+            .and_then(|handle| handle.stop_global_hook());
+        self.status = Some(match result {
+            Some(()) => self.t("Global hook stopped.", "已停止全局 hook。").to_owned(),
+            None => self
+                .t("No RenderDoc core loaded.", "未加载 RenderDoc core。")
+                .to_owned(),
+        });
         cx.notify();
     }
 
@@ -20657,6 +20674,27 @@ impl Render for Workspace {
                     )),
                 )
             })
+            .when_some(self.core_handle.as_ref(), |view, handle| {
+                let active = handle.is_global_hook_active().unwrap_or(false);
+                let can = handle.can_global_hook().unwrap_or(false);
+                view.child(
+                    div().flex().flex_wrap().gap_2().items_center()
+                        .child(div().text_sm().child(format!(
+                            "{}: {} · {}: {}",
+                            self.t("Global hook active", "全局 hook 已激活"),
+                            if active { self.t("yes", "是") } else { self.t("no", "否") },
+                            self.t("Supported", "支持"),
+                            if can { self.t("yes", "是") } else { self.t("no", "否") },
+                        )))
+                        .child(button(
+                            "stop-global-hook",
+                            self.t("Stop global hook", "停止全局 hook"),
+                            false,
+                            |this, cx| this.stop_global_hook(cx),
+                            cx,
+                        )),
+                )
+            })
             .when(self.show_launch_config, |view| {
                 view.child(
                     div()
@@ -21607,6 +21645,7 @@ fn main() {
                         python_output: Vec::new(),
                         python_pending: false,
                         core_info: None,
+                        core_handle: None,
                     });
                     Workspace::install_close_guard(window, cx, &entity);
                     if let Some(path) = initial_capture {
@@ -22461,6 +22500,7 @@ mod ui_tests {
                         python_output: Vec::new(),
                         python_pending: false,
                         core_info: None,
+                        core_handle: None,
                     })
                 },
             )
@@ -23228,6 +23268,7 @@ mod ui_tests {
                         python_output: Vec::new(),
                         python_pending: false,
                         core_info: None,
+                        core_handle: None,
                     })
                 },
             )
