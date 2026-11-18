@@ -179,10 +179,164 @@ pub fn read_chunks(data: &[u8]) -> Result<Vec<ChunkHeader>, String> {
     Ok(chunks)
 }
 
+/// `SDBasic` category values from `structured_data.h` (enum class : uint32_t).
+pub mod sdbasic {
+    pub const CHUNK: u32 = 0;
+    pub const STRUCT: u32 = 1;
+    pub const ARRAY: u32 = 2;
+    pub const NULL: u32 = 3;
+    pub const BUFFER: u32 = 4;
+    pub const STRING: u32 = 5;
+    pub const ENUM: u32 = 6;
+    pub const UNSIGNED: u32 = 7;
+    pub const SIGNED: u32 = 8;
+    pub const FLOAT: u32 = 9;
+    pub const BOOLEAN: u32 = 10;
+    pub const CHARACTER: u32 = 11;
+    pub const RESOURCE: u32 = 12;
+    pub const GPU_ADDRESS: u32 = 13;
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SdType {
+    pub name: String,
+    pub basetype: u32,
+    pub flags: u32,
+    pub byte_size: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SdObject {
+    pub name: String,
+    pub object_type: SdType,
+    /// Raw basic value (u64 bits; interpret per `object_type.basetype`).
+    pub basic: u64,
+    pub string: Option<String>,
+    pub children: Vec<SdObject>,
+}
+
+/// Read a self-describing `SDObject` tree in the wire format produced by
+/// `DoSerialise(SDObject&)` in `serialiser.cpp` (lines 774-781): name, type,
+/// data (basic + string), then a u64 child count followed by recursive children.
+/// Guards against pathological child counts to avoid runaway allocation.
+pub fn read_sd_object(cursor: &mut BinaryCursor<'_>, depth: usize) -> Result<SdObject, String> {
+    const MAX_DEPTH: usize = 128;
+    const MAX_CHILDREN: u64 = 1_000_000;
+    if depth > MAX_DEPTH {
+        return Err("SDObject nesting too deep".to_owned());
+    }
+    let name = cursor.string()?.unwrap_or_default();
+    let type_name = cursor.string()?.unwrap_or_default();
+    let basetype = cursor.u32()?;
+    let flags = cursor.u32()?;
+    let byte_size = cursor.u64()?;
+    let object_type = SdType {
+        name: type_name,
+        basetype,
+        flags,
+        byte_size,
+    };
+    let basic = cursor.u64()?;
+    let string = cursor.string()?;
+    let child_count = cursor.u64()?;
+    if child_count > MAX_CHILDREN {
+        return Err("SDObject child count too large".to_owned());
+    }
+    let mut children = Vec::with_capacity(child_count.min(4096) as usize);
+    for _ in 0..child_count {
+        children.push(read_sd_object(cursor, depth + 1)?);
+    }
+    Ok(SdObject {
+        name,
+        object_type,
+        basic,
+        string,
+        children,
+    })
+}
+
+/// Interpret the raw `basic` bits of an SdObject per its basetype.
+pub fn basic_as_u32(object: &SdObject) -> Option<u32> {
+    match object.object_type.basetype {
+        sdbasic::UNSIGNED | sdbasic::ENUM | sdbasic::RESOURCE | sdbasic::GPU_ADDRESS => {
+            Some(object.basic as u32)
+        }
+        sdbasic::BOOLEAN | sdbasic::CHARACTER => Some((object.basic & 0xff) as u32),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chunk_flags::*;
+
+    fn write_string(buf: &mut Vec<u8>, value: Option<&str>) {
+        match value {
+            Some(text) => {
+                buf.extend_from_slice(&(text.len() as i32).to_le_bytes());
+                buf.extend_from_slice(text.as_bytes());
+            }
+            None => buf.extend_from_slice(&(-1i32).to_le_bytes()),
+        }
+    }
+
+    #[test]
+    fn reads_self_describing_sdobject_tree() {
+        let mut buf = Vec::new();
+        // root: name="root", type("MyStruct", Struct, flags 0, byteSize 0),
+        // basic=0, string=null, 2 children
+        write_string(&mut buf, Some("root"));
+        write_string(&mut buf, Some("MyStruct"));
+        buf.extend_from_slice(&sdbasic::STRUCT.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes()); // basic
+        write_string(&mut buf, None);
+        buf.extend_from_slice(&2u64.to_le_bytes()); // child count
+                                                    // child 0: uint value 7
+        write_string(&mut buf, Some("count"));
+        write_string(&mut buf, Some("uint32_t"));
+        buf.extend_from_slice(&sdbasic::UNSIGNED.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&4u64.to_le_bytes());
+        buf.extend_from_slice(&7u64.to_le_bytes());
+        write_string(&mut buf, None);
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        // child 1: string "hello"
+        write_string(&mut buf, Some("label"));
+        write_string(&mut buf, Some("string"));
+        buf.extend_from_slice(&sdbasic::STRING.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&5u64.to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        write_string(&mut buf, Some("hello"));
+        buf.extend_from_slice(&0u64.to_le_bytes());
+
+        let mut cursor = BinaryCursor::new(&buf);
+        let root = read_sd_object(&mut cursor, 0).unwrap();
+        assert_eq!(root.name, "root");
+        assert_eq!(root.object_type.basetype, sdbasic::STRUCT);
+        assert_eq!(root.children.len(), 2);
+        assert_eq!(basic_as_u32(&root.children[0]), Some(7));
+        assert_eq!(root.children[1].string.as_deref(), Some("hello"));
+        assert_eq!(cursor.pos, buf.len());
+    }
+
+    #[test]
+    fn rejects_huge_child_count() {
+        let mut buf = Vec::new();
+        write_string(&mut buf, Some("x"));
+        write_string(&mut buf, Some("t"));
+        buf.extend_from_slice(&sdbasic::STRUCT.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        write_string(&mut buf, None);
+        buf.extend_from_slice(&u64::MAX.to_le_bytes());
+        let mut cursor = BinaryCursor::new(&buf);
+        assert!(read_sd_object(&mut cursor, 0).is_err());
+    }
 
     #[test]
     fn reads_minimal_chunk() {
