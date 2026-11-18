@@ -54,6 +54,8 @@ pub struct Settings {
     pub qrenderdoc: Option<PathBuf>,
     pub renderdoccmd: Option<PathBuf>,
     pub replay_bridge: Option<PathBuf>,
+    /// Optional path to renderdoc.dll for reading core info via stable C ABI.
+    pub renderdoc_core: Option<PathBuf>,
     pub replay_options: crate::replay::ReplayOptions,
     pub shader_processors: Vec<crate::shader_processor::NamedShaderProcessor>,
     pub texture_per_resource_settings: bool,
@@ -83,6 +85,7 @@ impl Default for Settings {
             qrenderdoc: None,
             renderdoccmd: None,
             replay_bridge: None,
+            renderdoc_core: None,
             replay_options: Default::default(),
             shader_processors: Vec::new(),
             texture_per_resource_settings: true,

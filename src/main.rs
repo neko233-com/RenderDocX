@@ -1042,6 +1042,7 @@ struct Workspace {
     python_script: Entity<TextareaState>,
     python_output: Vec<String>,
     python_pending: bool,
+    core_info: Option<renderdocx::renderdoc_core::CoreInfo>,
 }
 
 impl Workspace {
@@ -4378,6 +4379,34 @@ impl Workspace {
         self.frame_stats_raw = layout.frame_stats_raw;
         self.texture_auto_fit = layout.texture_auto_fit;
         self.status = Some(format!("{} {slot}", self.t("Loaded window layout", "已加载窗口布局")));
+        cx.notify();
+    }
+
+    fn select_renderdoc_core(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("RenderDoc core", &["dll"])
+            .pick_file()
+        else {
+            return;
+        };
+        // Pure Rust: call RenderDoc's stable C exports via libloading — no C++ bridge.
+        match renderdocx::renderdoc_core::load_core_info(&path) {
+            Ok(info) => {
+                self.core_info = Some(info);
+                self.settings.renderdoc_core = Some(path);
+                self.save();
+                self.status = Some(
+                    self.t("RenderDoc core info loaded via native C ABI.", "已通过原生 C ABI 读取 RenderDoc core 信息。")
+                        .to_owned(),
+                );
+            }
+            Err(error) => {
+                self.status = Some(format!(
+                    "{}: {error}",
+                    self.t("Could not read RenderDoc core", "无法读取 RenderDoc core")
+                ));
+            }
+        }
         cx.notify();
     }
 
@@ -20605,8 +20634,29 @@ impl Render for Workspace {
                             }
                         },
                         cx,
+                    ))
+                    .child(button(
+                        "configure-renderdoc-core",
+                        self.t("Select renderdoc.dll", "选择 renderdoc.dll"),
+                        false,
+                        |this, cx| this.select_renderdoc_core(cx),
+                        cx,
                     )),
             )
+            .when_some(self.core_info.clone(), |view, info| {
+                view.child(
+                    div().text_sm().text_color(rgb(0x91a7c0)).child(format!(
+                        "RenderDoc core: {} · {} · {}",
+                        info.version.as_deref().unwrap_or("?"),
+                        info.commit_hash.as_deref().unwrap_or("?"),
+                        match info.release_build {
+                            Some(true) => self.t("release", "发布版"),
+                            Some(false) => self.t("dev", "开发版"),
+                            None => "?",
+                        }
+                    )),
+                )
+            })
             .when(self.show_launch_config, |view| {
                 view.child(
                     div()
@@ -21556,6 +21606,7 @@ fn main() {
                         python_script,
                         python_output: Vec::new(),
                         python_pending: false,
+                        core_info: None,
                     });
                     Workspace::install_close_guard(window, cx, &entity);
                     if let Some(path) = initial_capture {
@@ -22409,6 +22460,7 @@ mod ui_tests {
                         python_script,
                         python_output: Vec::new(),
                         python_pending: false,
+                        core_info: None,
                     })
                 },
             )
@@ -23175,6 +23227,7 @@ mod ui_tests {
                         python_script,
                         python_output: Vec::new(),
                         python_pending: false,
+                        core_info: None,
                     })
                 },
             )

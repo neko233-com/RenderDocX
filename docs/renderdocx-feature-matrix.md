@@ -36,7 +36,7 @@
 | # | 上游对话框 | 状态 | 证据 / 缺口 |
 |---|---|---|---|
 | B1 | CaptureDialog（捕获配置） | 🟡 | README：捕获选项/参数/工作目录/有序环境修改（GUI+CLI）；`.cap` 导入导出已实现（D10）；global hook、inject 模式、进程列表、queued frames UI 未迁移 |
-| B2 | SettingsDialog | 🟡 | `src/backend.rs` Settings：语言/纹理偏好/事件列/路径等；上游设置项（临时目录、主题、遥测开关等）远未覆盖 |
+| B2 | SettingsDialog | 🟡 | `src/backend.rs` Settings：语言/纹理偏好/事件列/路径、配置 JSON 编辑器（B10）、布局槽位、最近历史、查看器设置等；**去 C++ 进展**：新增 `src/renderdoc_core.rs` 用 `libloading` 直接调用 renderdoc.dll 的稳定 `extern "C"` 导出（`GetVersionString`/`GetCommitHash`/`IsReleaseBuild`/`GetCurrentProcessMemoryUsage`），纯 Rust FFI 读 core 版本/哈希/构建类型，GUI 可显示——**无需编译任何 C++ 桥接**（3 项单测）；上游设置项（临时目录、主题、遥测开关等）未覆盖 |
 | B3 | TextureSaveDialog | ✅ | `src/texture_export.rs`：全部 mips/阵列网格/cubemap cross/采样映射/alpha/JPEG 质量；cubemap 与多重采样组合待实机验证 |
 | B4 | RemoteManager（远程服务器管理） | 🟡 | README：远程回放/启动/浏览/下载（loopback 实测）；远程目标发现与部分远程工作流未完成 |
 | B5 | VirtualFileDialog（远程目录浏览） | ✅ | README：目录浏览、应用/工作目录选择、`.rdc` 下载（loopback 实测） |
