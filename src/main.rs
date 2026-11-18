@@ -21400,6 +21400,17 @@ impl Render for Workspace {
                 .child(button("inspect-rdc", self.t("Inspect .rdc…", "检查 .rdc…"), false, |this, cx| this.inspect_rdc_file(cx), cx))
                 .when_some(self.rdc_inspect.as_ref(), |view, (path, file)| {
                     view.child(div().text_sm().text_color(rgb(0x91a7c0)).child(path.display().to_string()))
+                        .child(div().id("rdc-meta").test_support().text_sm().child(format!(
+                            "{} · {}: {} · {}: {} · {}: {}×{}",
+                            self.t("Metadata", "元数据"),
+                            self.t("driver", "驱动"),
+                            file.header.driver_name,
+                            self.t("machine", "机器"),
+                            file.header.machine_ident,
+                            self.t("thumbnail", "缩略图"),
+                            file.header.thumb_width,
+                            file.header.thumb_height,
+                        )))
                         .child(div().id("rdc-sections").test_support().flex().flex_col().gap_0().max_h(px(160.)).overflow_hidden()
                             .children(file.sections.iter().enumerate().map(|(index, section)| {
                                 div().id(("rdc-section", index)).test_support().cursor_pointer().text_sm().child(format!(
