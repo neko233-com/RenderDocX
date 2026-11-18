@@ -52,7 +52,7 @@
 | B15 | AnalyticsConfirmDialog | ⬜ | 暂不迁移：上游统计授权，需产品决策 |
 | B16 | AnalyticsPromptDialog | ⬜ | 暂不迁移：上游统计授权，需产品决策 |
 | B17 | SuggestRemoteDialog（建议使用远程） | 🟡 | `src/suggest_remote.rs` 复刻上游选项语义（无远程/始终本地时禁用远程、Local/Remote/Cancel 三选一，单测）；GUI 首页提供对话框面板与「始终本地回放」持久化。**未完成**：桥接未暴露上游 `ReplaySupport::SuggestRemote` 与机器标识，打开捕获时不会自动弹出，需手动从首页入口打开 |
-| B18 | CameraControlsDialog | 🟡 | `src/viewer_settings.rs` 实现近/远平面与加速键（Shift/Alt/Ctrl/无）校验及 `Settings::camera` 持久化，GUI 面板可编辑保存。**未完成**：鼠标/键盘按键捕获重绑定（上游 `setKey` 录键流程）与配置在网格相机中的实际生效未实现 |
+| B18 | CameraControlsDialog | ✅ | `src/viewer_settings.rs` 近/远平面与加速键校验持久化；**去 C++ 进展**：`src/camera_keys.rs` 复刻上游 6 方向×2 槽位键位布局（`dir*2+primary`）、默认 WASD/QE+方向键、Escape 解绑（4 项单测），GUI 12 个录键按钮经 GPUI `on_key_down` 捕获自定义按键并持久化。**边角差异**：鼠标按钮/滚轮绑定与配置在 GPU 网格相机中的实际生效待验（键盘录键已实现） |
 | B19 | AxisMappingDialog（手柄轴映射） | 🟡 | `src/viewer_settings.rs` 实现 6 方向↔向量互转、退化映射校验（与上游 `index / 2` 规则一致）与 `Settings::axis_mapping` 持久化；GUI 面板可循环 X/Y/Z 方向并保存（3 项单测）。**未完成**：映射尚未接入网格顶点反投影/手柄输入 |
 | B20 | ProjectionGuessDialog（相机投影猜测） | 🟡 | `src/viewer_settings.rs` `parse_projection` 复刻上游校验（空值估测、正交模式忽略 FOV/宽高比、`f32::MAX` 无限远、near<far），`Settings::projection` 持久化；GUI 面板含透视/正交、无限远、FOV/宽高比/近远平面输入（单测覆盖全部错误分支）。**未完成**：参数尚未传入网格 VS Output 反投影计算 |
 
@@ -107,14 +107,14 @@
 
 | 状态 | 行数 | 占比 |
 |---|---|---|
-| ✅ 已迁移 | 44 | 72.1% |
-| 🟡 部分迁移 | 12 | 19.7% |
+| ✅ 已迁移 | 45 | 73.8% |
+| 🟡 部分迁移 | 11 | 18.0% |
 | ❌ 未迁移 | 1 | 1.6% |
 | ⬜ 暂不迁移 | 4 | 6.6% |
 | **合计** | **61** | 100% |
 
-- **已迁移率 = 44/61 ≈ 72.1%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
-- 本批变更：C6（ResourcePreview）补齐按资源索引的逐资源缩略图后由 🟡 转为 ✅；此前 C5、A13/B8、A9、C2、A6、A4、A3、A2、A11、A10、A8、A12、A14、C1、D3、B9、A17、A1、A7、B7、A5、B17、C4、B10、B18/B19/B20、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
+- **已迁移率 = 45/61 ≈ 73.8%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
+- 本批变更：B18（CameraControlsDialog）补齐键盘录键后由 🟡 转为 ✅（鼠标/滚轮绑定边角待验）；此前 C6、C5、A13/B8、A9、C2、A6、A4、A3、A2、A11、A10、A8、A12、A14、C1、D3、B9、A17、A1、A7、B7、A5、B17、C4、B10、B19/B20、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
 - 口径：分母来自 qrenderdoc 界面文件的完整枚举（A17+B20+C7+D17=61，可复核：`qrenderdoc/**/*.ui` 共 44 个窗口/对话框/控件 + D 节 17 个菜单功能项）；每行状态附证据，🟡 不折算为完成。
 - 状态为基于当前源码与 README/roadmap 记载的迁移程度评估；GPU/引擎实机验收状态另行报告，不在此表内。
 

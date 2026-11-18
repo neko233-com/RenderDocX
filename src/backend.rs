@@ -1,4 +1,5 @@
 use crate::{
+    camera_keys::KeyBindings,
     i18n::Language,
     remote_hosts::RemoteHost,
     viewer_settings::{AxisMapping, CameraControls, ProjectionGuess},
@@ -81,6 +82,7 @@ pub struct Settings {
     pub axis_mapping: AxisMapping,
     pub projection: ProjectionGuess,
     pub camera: CameraControls,
+    pub camera_keys: KeyBindings,
     pub always_replay_locally: bool,
 }
 
@@ -115,6 +117,7 @@ impl Default for Settings {
             axis_mapping: AxisMapping::default(),
             projection: ProjectionGuess::default(),
             camera: CameraControls::default(),
+            camera_keys: KeyBindings::default(),
             always_replay_locally: false,
         }
     }

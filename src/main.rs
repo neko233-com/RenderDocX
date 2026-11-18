@@ -1050,6 +1050,8 @@ struct Workspace {
     local_processes: Vec<renderdocx::process_list::ProcessInfo>,
     installed_extensions: Vec<renderdocx::extensions::InstalledExtension>,
     injected_pids: Vec<u32>,
+    recording_key: Option<usize>,
+    viewer_focus: gpui::FocusHandle,
 }
 
 impl Workspace {
@@ -5167,6 +5169,26 @@ impl Workspace {
                         this.save();
                         cx.notify();
                     })).into_any_element());
+                use renderdocx::camera_keys::{Direction, slot_index};
+                let mut rows: Vec<gpui::AnyElement> = Vec::new();
+                for (di, direction) in Direction::ALL.iter().enumerate() {
+                    for primary in [true, false] {
+                        let idx = slot_index(*direction, primary);
+                        let binding = self.settings.camera_keys.get(*direction, primary).unwrap_or("").to_owned();
+                        let label = format!("{} {}{}: {}", self.t("Key", "按键"), direction.label(), if primary { "1" } else { "2" }, if binding.is_empty() { self.t("unbound", "未绑定") } else { &binding });
+                        let recording = self.recording_key == Some(idx);
+                        let text = if recording { format!("{} …", self.t("Press key", "按键")) } else { label };
+                        rows.push(Button::new(("camera-key", idx))
+                            .label(text)
+                            .secondary()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.recording_key = if this.recording_key == Some(idx) { None } else { Some(idx) };
+                                cx.notify();
+                            })).into_any_element());
+                        let _ = di;
+                    }
+                }
+                children.push(div().flex().flex_wrap().gap_1().children(rows).into_any_element());
             }
         }
         children.push(Button::new("viewer-apply").label(self.t("Apply", "应用")).primary()
@@ -5176,6 +5198,27 @@ impl Workspace {
         vec![div()
             .id("viewer-panel")
             .test_support()
+            .track_focus(&self.viewer_focus)
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                if let Some(slot) = this.recording_key.take() {
+                    use renderdocx::camera_keys::{Direction, normalize_binding, slot_index};
+                    let mut bound = false;
+                    for direction in Direction::ALL {
+                        for primary in [true, false] {
+                            if slot_index(direction, primary) == slot {
+                                let key = normalize_binding(&event.keystroke.key);
+                                this.settings.camera_keys.bind(direction, primary, key);
+                                this.save();
+                                bound = true;
+                            }
+                        }
+                    }
+                    if !bound {
+                        return;
+                    }
+                    cx.notify();
+                }
+            }))
             .flex()
             .flex_col()
             .gap_2()
@@ -21959,6 +22002,8 @@ fn main() {
                         local_processes: Vec::new(),
                         installed_extensions: Vec::new(),
                         injected_pids: Vec::new(),
+                        recording_key: None,
+                        viewer_focus: cx.focus_handle(),
                     });
                     Workspace::install_close_guard(window, cx, &entity);
                     if let Some(path) = initial_capture {
@@ -22822,6 +22867,8 @@ mod ui_tests {
                         local_processes: Vec::new(),
                         installed_extensions: Vec::new(),
                         injected_pids: Vec::new(),
+                        recording_key: None,
+                        viewer_focus: cx.focus_handle(),
                     })
                 },
             )
@@ -23598,6 +23645,8 @@ mod ui_tests {
                         local_processes: Vec::new(),
                         installed_extensions: Vec::new(),
                         injected_pids: Vec::new(),
+                        recording_key: None,
+                        viewer_focus: cx.focus_handle(),
                     })
                 },
             )

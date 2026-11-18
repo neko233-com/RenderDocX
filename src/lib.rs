@@ -7,6 +7,7 @@ pub mod buffer_format;
 pub mod buffer_formats;
 pub mod buffer_layout;
 pub mod buffer_search;
+pub mod camera_keys;
 pub mod capture_save;
 pub mod capture_settings;
 pub mod debug_message_view;
