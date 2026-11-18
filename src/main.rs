@@ -5692,6 +5692,19 @@ impl Workspace {
                         renderdocx::replay::resource_type_name(resource.resource_type).to_owned()
                     })
                     .collect(),
+                actions: snapshot
+                    .actions
+                    .iter()
+                    .take(2048)
+                    .map(|action| {
+                        (
+                            action.event_id,
+                            action.name.clone(),
+                            action.depth,
+                            action.indices,
+                        )
+                    })
+                    .collect(),
             })
             .unwrap_or_default();
         let task = cx.background_executor().spawn(async move {

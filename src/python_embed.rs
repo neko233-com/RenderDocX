@@ -32,6 +32,15 @@ pub struct CaptureView {
     pub buffer_count: usize,
     pub selected_event: Option<u32>,
     pub resource_names: Vec<String>,
+    /// (event_id, name, depth, indices) for action queries.
+    pub actions: Vec<(u32, String, usize, u32)>,
+}
+
+impl CaptureView {
+    /// Return the action with a given event id, if present.
+    pub fn action(&self, event_id: u32) -> Option<&(u32, String, usize, u32)> {
+        self.actions.iter().find(|action| action.0 == event_id)
+    }
 }
 
 fn cstring(code: &str) -> Result<CString, String> {
@@ -83,6 +92,15 @@ pub fn run_script_with_capture(code: &str, view: &CaptureView) -> EmbedOutput {
         let names = PyList::new(py, &view.resource_names).ok();
         if let Some(names) = names {
             module.set_item("resource_names", names).ok();
+        }
+        // Actions as a list of (event_id, name, depth, indices) tuples.
+        let action_tuples: Vec<(u32, &str, usize, u32)> = view
+            .actions
+            .iter()
+            .map(|(id, name, depth, indices)| (*id, name.as_str(), *depth, *indices))
+            .collect();
+        if let Ok(actions) = PyList::new(py, action_tuples) {
+            module.set_item("actions", actions).ok();
         }
         // Inject as a builtin module importable via `import renderdocx`.
         let modules = py.import("sys").and_then(|sys| sys.getattr("modules")).ok();
@@ -226,13 +244,22 @@ mod tests {
             buffer_count: 1,
             selected_event: Some(11),
             resource_names: vec!["texA".into(), "bufB".into()],
+            actions: vec![
+                (10, "Clear".into(), 0, 0),
+                (11, "DrawIndexed".into(), 1, 300),
+            ],
         };
+        assert_eq!(
+            view.action(11).map(|action| action.1.as_str()),
+            Some("DrawIndexed")
+        );
         let result = run_script_with_capture(
-            "import renderdocx\nprint(renderdocx.frame, renderdocx.api_name, renderdocx.action_count, renderdocx.resource_names[0])",
+            "import renderdocx\nprint(renderdocx.frame, renderdocx.api_name, renderdocx.action_count, renderdocx.resource_names[0])\nprint([a for a in renderdocx.actions if a[0] == 11])",
             &view,
         );
         assert!(result.error.is_none(), "{:?}", result.error);
         assert!(result.stdout.contains("7 Vulkan 42 texA"));
+        assert!(result.stdout.contains("DrawIndexed"));
     }
 
     #[test]
