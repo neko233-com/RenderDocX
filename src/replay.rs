@@ -1662,6 +1662,9 @@ enum Reply {
         path: String,
         size: u64,
     },
+    GpuReplay {
+        frames: u32,
+    },
     Gpus {
         gpus: Vec<crate::live::ReplayGpu>,
     },
@@ -2246,6 +2249,9 @@ trait Transport: Send {
     fn create_rgp_profile(&mut self) -> Result<RgpProfileResult, String> {
         Err("RGP profile creation is not supported by this transport".into())
     }
+    fn gpu_replay(&mut self, _texture_index: u32, _seconds: u32) -> Result<u32, String> {
+        Err("GPU replay is not supported by this transport".into())
+    }
     fn structure(
         &mut self,
         _event: u32,
@@ -2530,6 +2536,22 @@ impl Transport for Process {
             Reply::RgpProfile { path, size } => Ok(RgpProfileResult { path, size }),
             Reply::Error { message } => Err(message),
             _ => Err("Unexpected RGP profile response".into()),
+        }
+    }
+
+    fn gpu_replay(&mut self, texture_index: u32, seconds: u32) -> Result<u32, String> {
+        if self.capture_stamp.is_none() {
+            return Err("Capture changed since it was opened".into());
+        }
+        let seconds = seconds.clamp(1, 300);
+        let input = self.input.as_mut().ok_or("Replay session has closed")?;
+        writeln!(input, "gpu_replay {texture_index} {seconds}")
+            .and_then(|_| input.flush())
+            .map_err(|error| error.to_string())?;
+        match self.read()? {
+            Reply::GpuReplay { frames } => Ok(frames),
+            Reply::Error { message } => Err(message),
+            _ => Err("Unexpected GPU replay response".into()),
         }
     }
 
@@ -4996,6 +5018,15 @@ impl Session {
             .lock()
             .map_err(|error| error.to_string())?
             .create_rgp_profile()
+    }
+
+    /// Replay a texture on the GPU into a real native window
+    /// (`ReplayOutput::Display` for up to `seconds`). Returns frames rendered.
+    pub fn gpu_replay(&self, texture_index: u32, seconds: u32) -> Result<u32, String> {
+        self.process
+            .lock()
+            .map_err(|error| error.to_string())?
+            .gpu_replay(texture_index, seconds)
     }
 
     pub fn structure(

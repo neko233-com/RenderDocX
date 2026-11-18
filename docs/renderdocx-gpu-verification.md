@@ -141,6 +141,24 @@ test real_vulkan_vertex_shader_messages_resolve_and_debug ... ok
 test result: ok. 20 passed; 0 failed; 0 ignored
 ```
 
+## GPU native replay loop
+
+`bridge/replay/main.cpp` command `gpu_replay <texture_index> <seconds>` creates a
+real Win32 window and loops `SetFrameEvent(10000000)` +
+`IReplayOutput::Display()` on the GPU, pumping window messages so closing the
+window stops the loop. Rust exposes `Session::gpu_replay`, the CLI serve command
+`gpu_replay {"texture":N,"seconds":S}`, and a GUI "GPU replay (native window)"
+button.
+
+Observed with a Vulkan capture, texture 0, 3 seconds:
+
+```json
+{"schema":"renderdocx.agent.v1","id":3,"ok":true,"data":{"frames":255}}
+```
+
+255 GPU-rendered frames in a native window — this is the upstream ReplayLoop
+behaviour (GPU output, not a Rust-side approximation).
+
 ## RGP profile creation (`CreateRGPProfile`)
 
 Implemented end-to-end:

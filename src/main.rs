@@ -4868,6 +4868,58 @@ impl Workspace {
         .detach();
     }
 
+    /// Native GPU replay: render the selected texture into a real native window
+    /// through the replay core (`ReplayOutput::Display`), like upstream's
+    /// ReplayLoop.
+    fn gpu_replay_texture(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            self.status = Some(
+                self.t("Open a capture first for GPU replay.", "请先打开捕获再进行 GPU 回放。")
+                    .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let Some(texture) = self.selected_texture else {
+            self.status = Some(
+                self.t("Select a texture first for GPU replay.", "请先选择纹理再进行 GPU 回放。")
+                    .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        if self.replay_pending {
+            return;
+        }
+        self.replay_pending = true;
+        self.status = Some(
+            self.t(
+                "GPU replay opened in a native window (close it to return)…",
+                "已在原生窗口中打开 GPU 回放（关闭窗口即返回）…",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+        let task = cx
+            .background_executor()
+            .spawn(async move { session.gpu_replay(texture as u32, 15) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.replay_pending = false;
+                this.status = Some(match result {
+                    Ok(frames) => format!(
+                        "{} {frames}",
+                        this.t("GPU replay finished, frames:", "GPU 回放结束，帧数：")
+                    ),
+                    Err(error) => format!("{}: {error}", this.t("GPU replay failed", "GPU 回放失败")),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Generate a fresh AMD RGP profile through the replay core
     /// (`IReplayController::CreateRGPProfile`), then reveal the produced file.
     fn create_rgp_profile(&mut self, cx: &mut Context<Self>) {
@@ -21920,6 +21972,7 @@ impl Render for Workspace {
                         .child(button("rdc-suggest-remote", self.t("Suggest remote replay for this capture", "建议对此捕获使用远程回放"), false, |this, cx| this.open_suggest_remote(cx), cx))
                         .child(button("rdc-extract-rgp", self.t("Extract RGP profile…", "提取 RGP profile…"), false, |this, cx| this.extract_rgp_profile(cx), cx))
                         .child(button("create-rgp-profile", self.t("Create RGP profile (AMD)…", "生成 RGP profile（AMD）…"), false, |this, cx| this.create_rgp_profile(cx), cx))
+                        .child(button("gpu-replay", self.t("GPU replay (native window)", "GPU 回放（原生窗口）"), false, |this, cx| this.gpu_replay_texture(cx), cx))
                         .child(div().id("rdc-sections").test_support().flex().flex_col().gap_0().max_h(px(160.)).overflow_hidden()
                             .children(file.sections.iter().enumerate().map(|(index, section)| {
                                 div().id(("rdc-section", index)).test_support().cursor_pointer().text_sm().child(format!(

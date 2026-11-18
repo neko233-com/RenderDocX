@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <cwchar>
 #include <cmath>
@@ -16,6 +17,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 // pipestate.inl uses this non-exported stringiser for vertex attribute names.
@@ -1228,6 +1230,109 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
         std::cout << '}';
       }
       std::cout << "]}" << std::endl;
+      continue;
+    }
+    if(command.compare(0, 11, "gpu_replay ") == 0)
+    {
+      // Native GPU replay loop: render the selected texture into a real Win32
+      // window via ReplayOutput::Display, pumping messages so the user can
+      // close the window. This is the GPU path that ReplayController::ReplayLoop
+      // uses, without blocking forever on the bridge thread.
+      std::istringstream args(command.substr(11));
+      uint32_t index = 0, max_seconds = 15;
+      if(!(args >> index))
+      {
+        error("gpu_replay requires a texture index");
+        continue;
+      }
+      args >> max_seconds;
+      if(max_seconds == 0 || max_seconds > 300)
+        max_seconds = 15;
+      const auto &textures = replay.controller->GetTextures();
+      if(index >= textures.size())
+      {
+        error("Texture index is out of range");
+        continue;
+      }
+#ifdef _WIN32
+      HWND hwnd = CreateWindowExW(0, L"STATIC", L"RenderDocX GPU replay",
+                                  WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+                                  CW_USEDEFAULT, CW_USEDEFAULT, 640, 480, NULL, NULL,
+                                  GetModuleHandleW(NULL), NULL);
+      if(!hwnd)
+      {
+        error("Could not create the GPU replay window");
+        continue;
+      }
+      UpdateWindow(hwnd);
+      WindowingData window = {};
+      window.system = WindowingSystem::Win32;
+      window.win32.window = hwnd;
+#else
+      WindowingData window = {};
+      window.system = WindowingSystem::Headless;
+      window.headless.width = 640;
+      window.headless.height = 480;
+#endif
+      IReplayOutput *output = replay.controller->CreateOutput(window, ReplayOutputType::Texture);
+      if(!output)
+      {
+#ifdef _WIN32
+        DestroyWindow(hwnd);
+#endif
+        error("Could not create a texture replay output for this backend");
+        continue;
+      }
+      TextureDisplay display = {};
+      display.resourceId = textures[index].resourceId;
+      display.subresource = {0, 0, ~0U};
+      display.overlay = DebugOverlay::NoOverlay;
+      display.typeCast = CompType::Typeless;
+      display.hdrMultiplier = -1.0f;
+      display.linearDisplayAsGamma = true;
+      display.flipY = false;
+      display.rangeMin = 0.0f;
+      display.rangeMax = 1.0f;
+      display.scale = 1.0f;
+      display.xOffset = 0.0f;
+      display.yOffset = 0.0f;
+      display.rawOutput = false;
+      display.red = display.green = display.blue = true;
+      display.alpha = false;
+      output->SetTextureDisplay(display);
+
+      uint32_t frames = 0;
+      const auto start = std::chrono::steady_clock::now();
+      bool quit = false;
+      while(!quit)
+      {
+#ifdef _WIN32
+        MSG msg;
+        while(PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
+        {
+          if(msg.message == WM_QUIT || msg.message == WM_CLOSE || msg.message == WM_DESTROY)
+            quit = true;
+          TranslateMessage(&msg);
+          DispatchMessageW(&msg);
+        }
+        if(!IsWindow(hwnd))
+          quit = true;
+#endif
+        if(quit)
+          break;
+        replay.controller->SetFrameEvent(10000000, true);
+        output->Display();
+        frames++;
+        if(std::chrono::steady_clock::now() - start > std::chrono::seconds(max_seconds))
+          break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      output->Shutdown();
+#ifdef _WIN32
+      DestroyWindow(hwnd);
+#endif
+      std::cout << "\nRENDERDOCX/1 {\"type\":\"gpu_replay\",\"frames\":" << frames
+                << ",\"texture\":" << index << "}" << std::endl;
       continue;
     }
     if(command == "create_rgp_profile")
