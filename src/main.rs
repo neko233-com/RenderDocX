@@ -23921,6 +23921,39 @@ mod ui_tests {
         })
         .unwrap();
         cx.update(|cx| assert!(!view.read(cx).show_config_editor));
+        // Diagnostics/update/analytics panel: verify the new controls render
+        // and that the crash-report refresh path is reachable.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let y = window.find("crash-refresh").bounds().origin.y;
+            window.scroll(
+                "home-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(300.) - y)),
+                cx,
+            );
+            window.render_frame(cx);
+            assert!(window.find("crash-refresh").visible());
+            assert!(window.find("crash-clear").visible());
+            assert!(window.find("crash-folder").visible());
+            assert!(window.find("update-check").visible());
+            assert!(window.find("analytics-toggle").visible());
+            window.click("crash-refresh", cx);
+        })
+        .unwrap();
+        // The extension manager and .rdc inspector entry points are present.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let y = window.find("inspect-rdc").bounds().origin.y;
+            window.scroll(
+                "home-scroll",
+                ScrollDelta::Pixels(point(px(0.), px(300.) - y)),
+                cx,
+            );
+            window.render_frame(cx);
+            assert!(window.find("inspect-rdc").visible());
+            assert!(window.find("extensions-refresh").visible());
+        })
+        .unwrap();
         let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
         assert!(!visual.simulate_close());
         cx.update(|cx| {
