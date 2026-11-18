@@ -1,6 +1,22 @@
 //! "Suggest remote replay" dialog state, mirroring upstream
 //! `SuggestRemoteDialog` choices and enabling rules.
 
+/// Decide whether remote replay should be suggested, from capture metadata
+/// alone (pure Rust, no bridge). Upstream asks the replay core for
+/// `ReplaySupport::SuggestRemote`; the common cause is a capture made on a
+/// different machine, so a differing machine identifier is a faithful native
+/// heuristic. `always_replay_locally` suppresses the prompt.
+pub fn should_suggest(
+    capture_machine_ident: u64,
+    local_machine_ident: u64,
+    always_replay_locally: bool,
+) -> bool {
+    if always_replay_locally || capture_machine_ident == 0 {
+        return false;
+    }
+    capture_machine_ident != local_machine_ident
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SuggestRemoteChoice {
     Local,
@@ -50,6 +66,14 @@ impl SuggestRemote {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_suggest_from_machine_ident() {
+        assert!(should_suggest(1234, 9999, false)); // different machine
+        assert!(!should_suggest(1234, 1234, false)); // same machine
+        assert!(!should_suggest(0, 9999, false)); // unknown capture machine
+        assert!(!should_suggest(1234, 9999, true)); // user opted out
+    }
 
     #[test]
     fn remote_choice_requires_a_configured_remote() {
