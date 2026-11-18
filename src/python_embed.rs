@@ -121,6 +121,267 @@ fn HasPythonShell() -> bool {
     true
 }
 
+/// Lightweight handle for a viewer panel, returned by `Get*Viewer()`.
+#[pyo3::pyclass]
+struct ViewerHandle {
+    panel: String,
+}
+
+#[pyo3::pymethods]
+impl ViewerHandle {
+    /// `Show()` -> open the mapped panel through the GUI request queue.
+    fn Show(&self) {
+        queue_ui_request(&self.panel);
+    }
+
+    /// `IsAvailable()` -> this panel exists in RenderDocX.
+    fn IsAvailable(&self) -> bool {
+        true
+    }
+
+    /// `Name()` -> internal panel key (also useful in tests).
+    fn Name(&self) -> String {
+        self.panel.clone()
+    }
+}
+
+fn viewer_handle(panel: &str) -> ViewerHandle {
+    ViewerHandle {
+        panel: panel.to_owned(),
+    }
+}
+
+macro_rules! viewer_getters {
+    ($(($name:ident, $panel:literal, $doc:literal)),* $(,)?) => {
+        $(
+            #[doc = $doc]
+            #[pyo3::pyfunction]
+            #[allow(non_snake_case)]
+            fn $name() -> ViewerHandle {
+                viewer_handle($panel)
+            }
+        )*
+    };
+}
+
+viewer_getters!(
+    (GetEventBrowser, "events", "`GetEventBrowser()` -> event browser handle."),
+    (GetAPIInspector, "parameters", "`GetAPIInspector()` -> API inspector handle."),
+    (GetTextureViewer, "textures", "`GetTextureViewer()` -> texture viewer handle."),
+    (GetPipelineViewer, "parameters", "`GetPipelineViewer()` -> pipeline viewer handle."),
+    (GetMeshPreview, "mesh", "`GetMeshPreview()` -> mesh preview handle."),
+    (GetResourceInspector, "resources", "`GetResourceInspector()` -> resource inspector handle."),
+    (GetDebugMessageView, "messages", "`GetDebugMessageView()` -> debug message view handle."),
+    (GetAnnotationViewer, "annotations", "`GetAnnotationViewer()` -> annotation viewer handle."),
+    (GetPerformanceCounterViewer, "counters", "`GetPerformanceCounterViewer()` -> counter viewer handle."),
+    (GetStatisticsViewer, "statistics", "`GetStatisticsViewer()` -> statistics viewer handle."),
+    (GetTimelineBar, "events", "`GetTimelineBar()` -> timeline handle."),
+    (GetDiagnosticLogView, "log", "`GetDiagnosticLogView()` -> log view handle."),
+    (GetPythonShell, "python", "`GetPythonShell()` -> embedded Python console handle."),
+);
+
+/// `ViewShader(stage, event=None)` -> open the shader viewer for a bound stage.
+/// `stage` uses RenderDoc ShaderStage numbering (0 vertex ... 7 mesh).
+#[pyo3::pyfunction]
+#[pyo3(signature = (stage, event = None))]
+#[allow(non_snake_case)]
+fn ViewShader(stage: u32, event: Option<u32>) -> pyo3::PyResult<ViewerHandle> {
+    if stage >= 8 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "Invalid shader stage",
+        ));
+    }
+    if let Some(event) = event {
+        let session = active_session()?;
+        select_event(&session, event)?;
+    }
+    queue_ui_request(&format!("shader:{stage}"));
+    Ok(viewer_handle(&format!("shader:{stage}")))
+}
+
+/// `EditShader(stage, event=None)` -> open the shader viewer in edit-capable
+/// mode. The GUI's Edit action remains available for the actual source edit.
+#[pyo3::pyfunction]
+#[pyo3(signature = (stage, event = None))]
+#[allow(non_snake_case)]
+fn EditShader(stage: u32, event: Option<u32>) -> pyo3::PyResult<ViewerHandle> {
+    if stage >= 8 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "Invalid shader stage",
+        ));
+    }
+    if let Some(event) = event {
+        let session = active_session()?;
+        select_event(&session, event)?;
+    }
+    queue_ui_request(&format!("edit_shader:{stage}"));
+    Ok(viewer_handle(&format!("edit_shader:{stage}")))
+}
+
+/// `DebugShader(stage, event, vertex=None, x=None, y=None, group=[0,0,0],
+/// thread=[0,0,0])` -> start a shader debug trace for vertex (0), fragment (4),
+/// compute (5) or mesh (7).
+#[pyo3::pyfunction]
+#[pyo3(signature = (stage, event, vertex = None, x = None, y = None, group = [0, 0, 0], thread = [0, 0, 0]))]
+#[allow(non_snake_case)]
+fn DebugShader(
+    py: Python<'_>,
+    stage: u32,
+    event: u32,
+    vertex: Option<u32>,
+    x: Option<u32>,
+    y: Option<u32>,
+    group: [u32; 3],
+    thread: [u32; 3],
+) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    match stage {
+        0 => debug_vertex(py, event, vertex.unwrap_or(0), 0, None, 0),
+        4 => debug_pixel(py, event, x.unwrap_or(0), y.unwrap_or(0), None, None, None),
+        5 => debug_compute(py, event, group, thread),
+        7 => debug_mesh(py, event, group, thread),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(
+            "DebugShader supports vertex (0), fragment (4), compute (5) and mesh (7)",
+        )),
+    }
+}
+
+/// `pipeline_shader(event, stage)` -> the bound shader entry for a stage.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn pipeline_shader(
+    py: Python<'_>,
+    event: u32,
+    stage: u32,
+) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    let session = active_session()?;
+    let pipeline = session
+        .pipeline_for_event(event)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    set_active_event(Some(event));
+    let shader = pipeline.shaders.get(stage as usize).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err("Invalid shader stage")
+    })?;
+    to_py(py, shader)
+}
+
+/// `pipeline_output(event, index=0)` -> one bound output resource.
+#[pyo3::pyfunction]
+#[pyo3(signature = (event, index = 0))]
+#[allow(non_snake_case)]
+fn pipeline_output(
+    py: Python<'_>,
+    event: u32,
+    index: usize,
+) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    let session = active_session()?;
+    let pipeline = session
+        .pipeline_for_event(event)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    set_active_event(Some(event));
+    let output = pipeline.outputs.get(index).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err("Output index is out of range")
+    })?;
+    to_py(py, output)
+}
+
+/// `pipeline_color_attachment(event, index=0)` -> a color attachment.
+#[pyo3::pyfunction]
+#[pyo3(signature = (event, index = 0))]
+#[allow(non_snake_case)]
+fn pipeline_color_attachment(
+    py: Python<'_>,
+    event: u32,
+    index: usize,
+) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    let session = active_session()?;
+    let pipeline = session
+        .pipeline_for_event(event)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    set_active_event(Some(event));
+    let attachment = pipeline
+        .color_attachments
+        .as_ref()
+        .and_then(|attachments| attachments.get(index))
+        .ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err("Color attachment index is out of range")
+        })?;
+    to_py(py, attachment)
+}
+
+/// `action_info(event)` -> the action containing an event.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn action_info(py: Python<'_>, event: u32) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    match find_action_for_event(event) {
+        Some(action) => to_py(py, &action),
+        None => Ok(py.None()),
+    }
+}
+
+/// `action_at(index)` -> one bound action by list index.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn action_at(py: Python<'_>, index: usize) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    match active_actions().get(index) {
+        Some(action) => to_py(py, action),
+        None => Ok(py.None()),
+    }
+}
+
+/// `action_children(index)` -> direct child actions of a bound action.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn action_children(py: Python<'_>, index: usize) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    let children: Vec<crate::replay::Action> = active_actions()
+        .into_iter()
+        .enumerate()
+        .filter(|(_, action)| action.parent == index as i64)
+        .map(|(_, action)| action)
+        .collect();
+    to_py(py, &children)
+}
+
+/// `action_draws()` -> draw and mesh-dispatch actions.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn action_draws(py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    let actions: Vec<crate::replay::Action> = active_actions()
+        .into_iter()
+        .filter(|action| action.flags & DRAW_ACTION_FLAGS != 0)
+        .collect();
+    to_py(py, &actions)
+}
+
+/// `texture_info(index)` -> full texture description, or None.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn texture_info(py: Python<'_>, index: usize) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    match active_textures().get(index) {
+        Some(texture) => to_py(py, texture),
+        None => Ok(py.None()),
+    }
+}
+
+/// `buffer_info(index)` -> full buffer description, or None.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn buffer_info(py: Python<'_>, index: usize) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    match active_buffers().get(index) {
+        Some(buffer) => to_py(py, buffer),
+        None => Ok(py.None()),
+    }
+}
+
+/// `resource_info(index)` -> full resource description, or None.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn resource_info(py: Python<'_>, index: usize) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    match active_resources().get(index) {
+        Some(resource) => to_py(py, resource),
+        None => Ok(py.None()),
+    }
+}
+
 // pyrenderdoc-style resource replacement map (original index -> replacement).
 static REPLACEMENTS: Mutex<Option<std::collections::HashMap<u32, u32>>> = Mutex::new(None);
 
@@ -1651,6 +1912,32 @@ fn build_capture_module<'py>(
         ("HasDiagnosticLogView", pyo3::wrap_pyfunction!(HasDiagnosticLogView, py)),
         ("ShowPythonShell", pyo3::wrap_pyfunction!(ShowPythonShell, py)),
         ("HasPythonShell", pyo3::wrap_pyfunction!(HasPythonShell, py)),
+        ("GetEventBrowser", pyo3::wrap_pyfunction!(GetEventBrowser, py)),
+        ("GetAPIInspector", pyo3::wrap_pyfunction!(GetAPIInspector, py)),
+        ("GetTextureViewer", pyo3::wrap_pyfunction!(GetTextureViewer, py)),
+        ("GetPipelineViewer", pyo3::wrap_pyfunction!(GetPipelineViewer, py)),
+        ("GetMeshPreview", pyo3::wrap_pyfunction!(GetMeshPreview, py)),
+        ("GetResourceInspector", pyo3::wrap_pyfunction!(GetResourceInspector, py)),
+        ("GetDebugMessageView", pyo3::wrap_pyfunction!(GetDebugMessageView, py)),
+        ("GetAnnotationViewer", pyo3::wrap_pyfunction!(GetAnnotationViewer, py)),
+        ("GetPerformanceCounterViewer", pyo3::wrap_pyfunction!(GetPerformanceCounterViewer, py)),
+        ("GetStatisticsViewer", pyo3::wrap_pyfunction!(GetStatisticsViewer, py)),
+        ("GetTimelineBar", pyo3::wrap_pyfunction!(GetTimelineBar, py)),
+        ("GetDiagnosticLogView", pyo3::wrap_pyfunction!(GetDiagnosticLogView, py)),
+        ("GetPythonShell", pyo3::wrap_pyfunction!(GetPythonShell, py)),
+        ("ViewShader", pyo3::wrap_pyfunction!(ViewShader, py)),
+        ("EditShader", pyo3::wrap_pyfunction!(EditShader, py)),
+        ("DebugShader", pyo3::wrap_pyfunction!(DebugShader, py)),
+        ("pipeline_shader", pyo3::wrap_pyfunction!(pipeline_shader, py)),
+        ("pipeline_output", pyo3::wrap_pyfunction!(pipeline_output, py)),
+        ("pipeline_color_attachment", pyo3::wrap_pyfunction!(pipeline_color_attachment, py)),
+        ("action_info", pyo3::wrap_pyfunction!(action_info, py)),
+        ("action_at", pyo3::wrap_pyfunction!(action_at, py)),
+        ("action_children", pyo3::wrap_pyfunction!(action_children, py)),
+        ("action_draws", pyo3::wrap_pyfunction!(action_draws, py)),
+        ("texture_info", pyo3::wrap_pyfunction!(texture_info, py)),
+        ("buffer_info", pyo3::wrap_pyfunction!(buffer_info, py)),
+        ("resource_info", pyo3::wrap_pyfunction!(resource_info, py)),
     ] {
         if let Ok(function) = wrapped {
             dict.set_item(name, function).ok();
@@ -1935,6 +2222,10 @@ mod tests {
             "renderdocx.debug_stop()",
             "renderdocx.Replay().GetPipelineState()",
             "renderdocx.Replay().SetFrameEvent(1)",
+            "renderdocx.pipeline_shader(1, 0)",
+            "renderdocx.pipeline_output(1)",
+            "renderdocx.pipeline_color_attachment(1)",
+            "renderdocx.DebugShader(7, 1)",
         ] {
             let result = run_script_with_capture(
                 &format!("import renderdocx\n{call}"),
@@ -1992,6 +2283,25 @@ mod tests {
         assert!(result.error.is_none(), "{:?}", result.error);
         assert_eq!(result.stdout.trim(), "True True True");
         assert_eq!(take_ui_requests(), vec!["textures", "mesh"]);
+        // Viewer handles and shader view requests.
+        let result = run_script_with_capture(
+            "import renderdocx\n\
+             h = renderdocx.GetTextureViewer()\n\
+             print(h.Name(), h.IsAvailable())\n\
+             h.Show()\n\
+             print(renderdocx.ViewShader(4).Name())\n\
+             print(renderdocx.EditShader(4).Name())",
+            &CaptureView::default(),
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(
+            result.stdout.trim(),
+            "textures True\nshader:4\nedit_shader:4"
+        );
+        assert_eq!(
+            take_ui_requests(),
+            vec!["textures", "shader:4", "edit_shader:4"]
+        );
     }
 
     #[cfg(windows)]
@@ -2022,6 +2332,7 @@ mod tests {
         );
         set_active_actions(snapshot.actions.clone());
         set_active_snapshot(serde_json::to_value(&snapshot).expect("serialize snapshot"));
+        take_ui_requests();
         let result = run_script_with_capture(
             "import renderdocx\n\
              p = renderdocx.pipeline(19)\n\
@@ -2086,6 +2397,14 @@ mod tests {
              print('debug', trace.get('event_id') == 21 and trace.get('stage') == 7)\n\
              print('debugnext', isinstance(renderdocx.debug_next(), dict))\n\
              renderdocx.debug_stop()\n\
+             print('pipeline-fields', renderdocx.pipeline_shader(19, 4).get('bound') and renderdocx.pipeline_shader(19, 7).get('bound') and renderdocx.pipeline_output(19).get('resource_index') == 7 and renderdocx.pipeline_color_attachment(19).get('resource', {}).get('resource_index') == 7)\n\
+             print('action-helpers', renderdocx.action_info(19).get('event_id') == 21 and renderdocx.action_at(0).get('event_id') is not None and len(renderdocx.action_draws()) >= 3 and isinstance(renderdocx.action_children(0), list))\n\
+             print('resource-info', renderdocx.texture_info(0).get('name') == 'Swapchain Image 96' and renderdocx.buffer_info(0).get('length') == '108' and renderdocx.resource_info(7).get('name') == 'Swapchain Image 96')\n\
+             print('viewers', renderdocx.GetTextureViewer().Name() == 'textures' and renderdocx.GetPipelineViewer().IsAvailable())\n\
+             print('viewshader', renderdocx.ViewShader(4).Name() == 'shader:4' and renderdocx.EditShader(4).Name() == 'edit_shader:4')\n\
+             trace = renderdocx.DebugShader(7, 21)\n\
+             print('debugshader', trace.get('event_id') == 21)\n\
+             renderdocx.debug_stop()\n\
              notes0 = renderdocx.GetNotes()\n\
              bookmarks0 = renderdocx.GetBookmarks()\n\
              renderdocx.SetNotes('renderdocx notes')\n\
@@ -2119,6 +2438,13 @@ mod tests {
         assert!(result.stdout.contains("unreplace True"), "{}", result.stdout);
         assert!(result.stdout.contains("debug True"), "{}", result.stdout);
         assert!(result.stdout.contains("debugnext True"), "{}", result.stdout);
+        assert!(result.stdout.contains("pipeline-fields True"), "{}", result.stdout);
+        assert!(result.stdout.contains("action-helpers True"), "{}", result.stdout);
+        assert!(result.stdout.contains("resource-info True"), "{}", result.stdout);
+        assert!(result.stdout.contains("viewers True"), "{}", result.stdout);
+        assert!(result.stdout.contains("viewshader True"), "{}", result.stdout);
+        assert!(result.stdout.contains("debugshader True"), "{}", result.stdout);
+        assert_eq!(take_ui_requests(), vec!["shader:4", "edit_shader:4"]);
         assert!(result.stdout.contains("notes True"), "{}", result.stdout);
         assert!(result.stdout.contains("bookmark True"), "{}", result.stdout);
         assert!(result.stdout.contains("unbookmark True"), "{}", result.stdout);

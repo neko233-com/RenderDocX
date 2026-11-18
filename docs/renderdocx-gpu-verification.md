@@ -128,6 +128,11 @@ It also exercises the pyrenderdoc-compatible CaptureContext surface:
 `GetCaptureFilename` and `DebugMessages`. The `Replay()` wrapper is exercised
 through `SetFrameEvent(19)` followed by `GetPipelineState`, `GetTextures`,
 `GetBuffers`, `GetResources`, `GetFrameInfo` and `GetAPIProperties`.
+The same test covers the per-field helpers (`pipeline_shader`,
+`pipeline_output`, `pipeline_color_attachment`, `action_info`, `action_at`,
+`action_children`, `action_draws`, `texture_info`, `buffer_info`,
+`resource_info`), `Get*Viewer()` handles, `ViewShader`/`EditShader` panel
+requests, and a `DebugShader` mesh trace.
 Notes and bookmarks are written and
 read back through `SetNotes`/`GetNotes`/`SetBookmark`/`GetBookmarks`/
 `RemoveBookmark`, then restored to their original values. Resource replacement

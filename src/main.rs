@@ -6099,6 +6099,16 @@ impl Workspace {
 
     /// Apply panel requests queued by script `Show*` calls after a script run.
     fn apply_python_ui_request(&mut self, request: &str, cx: &mut Context<Self>) {
+        if let Some(stage) = request
+            .strip_prefix("shader:")
+            .or_else(|| request.strip_prefix("edit_shader:"))
+        {
+            if let Ok(stage) = stage.parse::<usize>() {
+                self.tab = CaptureTab::Shaders;
+                self.read_shader(stage, None, cx);
+                return;
+            }
+        }
         match request {
             "events" => self.tab = CaptureTab::Events,
             "parameters" => self.tab = CaptureTab::Parameters,
