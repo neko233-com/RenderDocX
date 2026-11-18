@@ -19,6 +19,21 @@ pub struct EmbedOutput {
     pub error: Option<String>,
 }
 
+/// Read-only summary of the open capture exposed to Python scripts as the
+/// `renderdocx` module (mirrors the most-used `pyrenderdoc.CaptureContext`
+/// properties without embedding the full API binding layer).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CaptureView {
+    pub frame: u32,
+    pub api: u32,
+    pub action_count: usize,
+    pub resource_count: usize,
+    pub texture_count: usize,
+    pub buffer_count: usize,
+    pub selected_event: Option<u32>,
+    pub resource_names: Vec<String>,
+}
+
 fn cstring(code: &str) -> Result<CString, String> {
     CString::new(code).map_err(|_| "Python source contains a NUL byte".to_owned())
 }
@@ -29,6 +44,58 @@ pub fn run_script(code: &str) -> EmbedOutput {
     Python::attach(|py| {
         let globals = PyDict::new(py);
         let mut result = EmbedOutput::default();
+        if let Err(error) = py.run(&cstring(CAPTURE_SETUP).unwrap(), Some(&globals), None) {
+            result.error = Some(format!("capture setup failed: {error}"));
+            return result;
+        }
+        match py.run(&cstring(code).unwrap_or_default(), Some(&globals), None) {
+            Ok(()) => {}
+            Err(error) => result.error = Some(format_py_error(py, &error)),
+        }
+        result.stdout = get_buffer(&globals, "_sysbuf_out");
+        result.stderr = get_buffer(&globals, "_sysbuf_err");
+        let _ = py.run(&cstring(CAPTURE_RESTORE).unwrap(), Some(&globals), None);
+        result
+    })
+}
+
+/// Execute Python with a read-only `renderdocx` capture view installed in
+/// builtins, so scripts can inspect the open capture via
+/// `renderdocx.frame`, `renderdocx.api_name`, `renderdocx.action_count`, etc.
+pub fn run_script_with_capture(code: &str, view: &CaptureView) -> EmbedOutput {
+    use pyo3::types::{PyList, PyModule};
+    let _guard = PY_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    Python::attach(|py| {
+        let globals = PyDict::new(py);
+        let mut result = EmbedOutput::default();
+        // Build the renderdocx module object as a dict-backed namespace.
+        let module = PyDict::new(py);
+        module.set_item("frame", view.frame).ok();
+        module.set_item("api", view.api).ok();
+        module
+            .set_item("api_name", crate::api_enums::graphics_api::name(view.api))
+            .ok();
+        module.set_item("action_count", view.action_count).ok();
+        module.set_item("resource_count", view.resource_count).ok();
+        module.set_item("texture_count", view.texture_count).ok();
+        module.set_item("buffer_count", view.buffer_count).ok();
+        module.set_item("selected_event", view.selected_event).ok();
+        let names = PyList::new(py, &view.resource_names).ok();
+        if let Some(names) = names {
+            module.set_item("resource_names", names).ok();
+        }
+        // Inject as a builtin module importable via `import renderdocx`.
+        let modules = py.import("sys").and_then(|sys| sys.getattr("modules")).ok();
+        if let Some(modules) = modules {
+            let m = PyModule::new(py, "renderdocx").ok();
+            if let Some(m) = m {
+                let dict = m.dict();
+                for (key, value) in &module {
+                    dict.set_item(key, value).ok();
+                }
+                modules.set_item("renderdocx", m).ok();
+            }
+        }
         if let Err(error) = py.run(&cstring(CAPTURE_SETUP).unwrap(), Some(&globals), None) {
             result.error = Some(format!("capture setup failed: {error}"));
             return result;
@@ -146,6 +213,26 @@ mod tests {
         let unregistered = call_extension(dir.path(), "unregister", "1.48");
         assert!(unregistered.error.is_none(), "{:?}", unregistered.error);
         assert!(unregistered.stdout.contains("unregistered"));
+    }
+
+    #[test]
+    fn scripts_can_access_capture_view() {
+        let view = CaptureView {
+            frame: 7,
+            api: crate::api_enums::graphics_api::VULKAN,
+            action_count: 42,
+            resource_count: 3,
+            texture_count: 2,
+            buffer_count: 1,
+            selected_event: Some(11),
+            resource_names: vec!["texA".into(), "bufB".into()],
+        };
+        let result = run_script_with_capture(
+            "import renderdocx\nprint(renderdocx.frame, renderdocx.api_name, renderdocx.action_count, renderdocx.resource_names[0])",
+            &view,
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(result.stdout.contains("7 Vulkan 42 texA"));
     }
 
     #[test]

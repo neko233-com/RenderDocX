@@ -5672,11 +5672,31 @@ impl Workspace {
         self.python_pending = true;
         self.python_output.push(format!(">>> {code}"));
         cx.notify();
-        // Execute in an embedded CPython interpreter (pyo3). The external
-        // process path remains available via the CLI for isolation.
-        let task = cx
-            .background_executor()
-            .spawn(async move { renderdocx::python_embed::run_script(&code) });
+        // Expose the open capture to scripts as the `renderdocx` module.
+        let view = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| renderdocx::python_embed::CaptureView {
+                frame: snapshot.frame,
+                api: snapshot.api,
+                action_count: snapshot.actions.len(),
+                resource_count: snapshot.resource_count,
+                texture_count: snapshot.texture_count,
+                buffer_count: snapshot.buffer_count,
+                selected_event: self.selected_event_id(),
+                resource_names: snapshot
+                    .resources
+                    .iter()
+                    .take(64)
+                    .map(|resource| {
+                        renderdocx::replay::resource_type_name(resource.resource_type).to_owned()
+                    })
+                    .collect(),
+            })
+            .unwrap_or_default();
+        let task = cx.background_executor().spawn(async move {
+            renderdocx::python_embed::run_script_with_capture(&code, &view)
+        });
         cx.spawn(async move |this, cx| {
             let output = task.await;
             let _ = this.update(cx, |this, cx| {
