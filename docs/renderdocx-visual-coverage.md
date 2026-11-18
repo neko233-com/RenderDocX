@@ -45,19 +45,20 @@ can be checked rather than asserted.
 
 `scripts/desktop-drive.ps1` was run against the release binary and produced:
 
-- `target/visual/uia-tree.json`: **72 UI Automation elements** enumerated from the
+- `target/visual/uia-tree.json`: **76 UI Automation elements** enumerated from the
   real GPUI window (AccessKit tree), e.g. `日志`, `关于`, `主题: 深色`,
   `检查 .rdc…`, `Python 脚本`.
 - `target/visual/drive-01-initial.png` (dark theme) and
   `drive-02-after-invoke.png` (light theme), both 1056×799.
-- `target/visual/msi-installed-app.png`: the app launched from its **installed**
-  per-user location after a real `msiexec /i` (exit 0), captured at 1056×799;
-  `msiexec /x` then exited 0 and removed the payload.
-- Invoking the `主题: 深色` control through UI Automation produced a new
-  `主题: 浅色` element in the after-tree (1 new element), proving the interaction
-  reached the real Workspace.
-- Pixel comparison of the two screenshots: **97,719 / 211,200 sampled pixels
-  differ (46.27%)** — the theme change is visible in captured pixels.
+- `target/visual/msi-installed-app.png`: the latest app launched from its
+  **installed** per-user location after a real `msiexec /i` (exit 0), captured at
+  1582×1196; `msiexec /x` then exited 0 and removed the payload.
+- Invoking the `主题: 深色` control through UI Automation reached the real
+  Workspace (`Invoked: 主题: 深色`). The latest run re-enumerated 76 elements and
+  reported 0 new nodes because the toggle replaces its label in place; the
+  before/after pixels are the definitive evidence.
+- Pixel comparison of the two screenshots: **385,541 / 843,744 pixels differ
+  (45.69%)** — the theme change is visible in captured pixels.
 
 Commands:
 

@@ -82,7 +82,8 @@ pwsh -File scripts/desktop-drive.ps1 -Exe target/release/renderdocx.exe -DumpTre
 pwsh -File scripts/desktop-drive.ps1 -InvokeName "主题: 深色"
 ```
 
-It was executed on this checkout: 72 UIA elements, a theme toggle that produced
-a new `主题: 浅色` element, and before/after screenshots differing in 46.27% of
-sampled pixels. `agent-desktop` was not present in the authoring session's tool
-set; this script is the equivalent native driver.
+It was executed on this checkout: 76 UIA elements, a successful
+`Invoked: 主题: 深色` through UI Automation, and before/after screenshots
+differing in 45.69% of pixels (385,541 / 843,744). `agent-desktop` was not
+present in the authoring session's tool set; this script is the equivalent
+native driver.
