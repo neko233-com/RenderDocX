@@ -134,7 +134,9 @@ The same test covers the per-field helpers (`pipeline_shader`,
 `resource_info`), a `PipelineState(19)` object (attributes, `GetShader`,
 `GetOutputs`, attachments, `[]`/`get`/`keys`), and field-addressable
 `Texture(0)` / `Action(21)` objects (including camelCase aliases and
-`GetChildren()`), `Get*Viewer()` handles, `ViewShader`/`EditShader` panel
+`GetChildren()`), a `Resource(7)` object, `ShaderReflection(4)` plus
+`PipelineState.GetShaderReflection(4)`, and `ViewBuffer`,
+`ViewPixelHistory`, `ViewShaderMessages` calls, `Get*Viewer()` handles, `ViewShader`/`EditShader` panel
 requests, and a `DebugShader` mesh trace.
 Notes and bookmarks are written and
 read back through `SetNotes`/`GetNotes`/`SetBookmark`/`GetBookmarks`/

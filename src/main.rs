@@ -6109,6 +6109,16 @@ impl Workspace {
                 return;
             }
         }
+        if let Some(buffer) = request.strip_prefix("buffer:") {
+            let mut parts = buffer.split(':');
+            if let (Some(index), Some(offset)) = (parts.next(), parts.next()) {
+                if let (Ok(index), Ok(offset)) = (index.parse::<usize>(), offset.parse::<u64>()) {
+                    self.tab = CaptureTab::Buffers;
+                    self.read_buffer(index, offset, cx);
+                    return;
+                }
+            }
+        }
         match request {
             "events" => self.tab = CaptureTab::Events,
             "parameters" => self.tab = CaptureTab::Parameters,
@@ -6116,6 +6126,7 @@ impl Workspace {
             "mesh" => self.tab = CaptureTab::Mesh,
             "resources" => self.tab = CaptureTab::Resources,
             "messages" => self.tab = CaptureTab::Messages,
+            "shader_messages" => self.tab = CaptureTab::ShaderMessages,
             "annotations" => self.tab = CaptureTab::Annotations,
             "counters" => self.tab = CaptureTab::Counters,
             "statistics" => self.tab = CaptureTab::Statistics,
