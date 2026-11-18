@@ -5961,6 +5961,7 @@ dependencies = [
  "directories",
  "gpui-kit",
  "half",
+ "libloading",
  "pcre2",
  "png 0.18.1",
  "rfd",
