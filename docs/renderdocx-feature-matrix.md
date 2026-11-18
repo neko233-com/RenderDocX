@@ -114,9 +114,14 @@
 | **合计** | **61** | 100% |
 
 - **已迁移率 = 50/61 ≈ 82.0%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
-- 逐行计数（A–D 区）已复核：✅50/🟡6/❌1/⬜4=61。本批 B17 经复核（对话框完整，自动弹出属需桥接的行为差异）按 A7/A14 一致性升级 ✅；同时补 A17 帮助层。本批 B4（RemoteManager）经复核（远程工作流已实现并 loopback 实测，剩余跨机器验证）升级 ✅；C4 补齐 `find_in_range` 限定范围查找（8 单测）。此前 B19/B20、B2、B18 等已计入。B2（SettingsDialog）此前已升级 ✅（所有实际设置项已覆盖，遥测开关属 ⬜ 产品决策）。此前 B18、C6、C5、A13/B8、A9、C2、A6、A4、A3、A2、A11、A10、A8、A12、A14、C1、D3、B9、A17、A1、A7、B7、A5、B17、C4、B10、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
+- 逐行计数（A–D 区）已复核：✅50/🟡6/❌1/⬜4=61。升级依据：A14/A12/A4/A3/A2/A11/A10/A9/A8/C1/C2/B19/B20/B18/B17/B4/B2 经代码复核，剩余项均为实机验证或需桥接的行为差异（同 A7 判据，不属未迁移）；C5/C6 补齐真实图像缩略图；C4 补齐正则/捕获组/跨文件/范围查找；B9/A17 用 pyo3 嵌入式 CPython 补脚本执行、扩展生命周期与捕获数据访问。每项行内均附具体证据，未重复计数。
 - 口径：分母来自 qrenderdoc 界面文件的完整枚举（A17+B20+C7+D17=61，可复核：`qrenderdoc/**/*.ui` 共 44 个窗口/对话框/控件 + D 节 17 个菜单功能项）；每行状态附证据，🟡 不折算为完成。
 - 状态为基于当前源码与 README/roadmap 记载的迁移程度评估；GPU/引擎实机验收状态另行报告，不在此表内。
+
+## 打包与视觉验证（本批新增，不计入 A–D 分母）
+
+- **MSI 安装包**：`installer/RenderDocX.wxs` 是 RenderDocX 自有 WiX v4/v5 工程（区别于上游 `util/installer/*.wxs`），`scripts/build-msi.ps1` 读取 Cargo.toml 版本、`cargo build --release --bins` 后产出 `target/msi/RenderDocX-<version>-x64.msi`。已用 WiX 5.0.2 对 release 产物构建成功（0.1.0.0 / x64 / 10.03 MB / SHA256 3E21EF0C…），含 GUI+CLI 二进制、README、功能矩阵/roadmap 文档与开始菜单快捷方式。详见 [安装与视觉验证文档](renderdocx-install-visual.md)。安装/卸载实机验证需交互式桌面，未在本会话执行。
+- **视觉验证**：`cargo test --features ui-tests` 的 12 项 GPUI 测试以元素树可见性断言（`window.find(...).visible()`）覆盖日志/配置/纹理预览/直方图/着色器/事件树等面板，可在无头环境运行；`scripts/visual-verify.ps1` 用 Win32 `BitBlt` 从屏幕 DC 截取真实 GPUI 窗口像素到 `target/visual/*.png`，需交互式桌面。本会话无可交互桌面（进程运行但不创建顶层窗口），且 `agent-desktop` 原生桌面驱动工具不可用，故未声称完成真实桌面像素/操控验证。
 
 ## 维护规则
 

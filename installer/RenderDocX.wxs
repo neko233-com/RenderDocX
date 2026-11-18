@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- RenderDocX MSI installer (WiX v4/v5 schema). This is RenderDocX's own
+     package; it is NOT the upstream RenderDoc installer in util/installer. -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="RenderDocX"
+    Manufacturer="neko233-com"
+    Version="$(var.Version)"
+    UpgradeCode="7E8F1A2B-3C4D-5E6F-8A9B-0C1D2E3F4A5B"
+    Scope="perUserOrMachine">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of RenderDocX is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Feature Id="Main" Title="RenderDocX" Level="1" ConfigurableDirectory="INSTALLFOLDER">
+      <ComponentGroupRef Id="ApplicationFiles" />
+      <ComponentGroupRef Id="Documentation" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+
+    <!-- Standard directories (WiX v5) -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="RenderDocX" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="RenderDocX" />
+    </StandardDirectory>
+
+    <ComponentGroup Id="ApplicationFiles">
+      <Component Id="GuiExe" Guid="*" Directory="INSTALLFOLDER">
+        <File Id="GuiExeFile" Source="$(var.BinDir)\renderdocx.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="CliExe" Guid="*" Directory="INSTALLFOLDER">
+        <File Id="CliExeFile" Source="$(var.BinDir)\renderdocx-cli.exe" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="Documentation">
+      <Component Id="Readme" Guid="*" Directory="INSTALLFOLDER">
+        <File Id="ReadmeFile" Source="$(var.RepoDir)\README.md" KeyPath="yes" />
+      </Component>
+      <Component Id="FeatureMatrix" Guid="*" Directory="INSTALLFOLDER">
+        <File Id="FeatureMatrixFile" Source="$(var.RepoDir)\docs\renderdocx-feature-matrix.md" KeyPath="yes" />
+      </Component>
+      <Component Id="Roadmap" Guid="*" Directory="INSTALLFOLDER">
+        <File Id="RoadmapFile" Source="$(var.RepoDir)\docs\renderdocx-roadmap.md" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Component Id="StartMenuShortcut" Guid="*" Directory="ApplicationProgramsFolder">
+      <Shortcut Id="GuiShortcut" Name="RenderDocX"
+                Description="RenderDocX - native GPU debugger"
+                Target="[INSTALLFOLDER]renderdocx.exe" WorkingDirectory="INSTALLFOLDER" />
+      <Shortcut Id="CliShortcut" Name="RenderDocX CLI"
+                Description="RenderDocX Agent CLI"
+                Target="[INSTALLFOLDER]renderdocx-cli.exe" WorkingDirectory="INSTALLFOLDER" />
+      <RemoveFolder Id="RemoveShortcuts" Directory="ApplicationProgramsFolder" On="uninstall" />
+      <RegistryValue Root="HKCU" Key="Software\neko233\RenderDocX"
+                     Name="installed" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+  </Package>
+</Wix>

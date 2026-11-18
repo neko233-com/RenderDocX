@@ -78,6 +78,8 @@ cargo run --release
 
 The UI uses GPUI Kit's pinned GPUI snapshot backend by default. The experimental GPUI Fast backend is available with `--features gpui-fast`; its performance and compatibility must be measured on the intended workload before deployment.
 
+A Windows x64 MSI installer can be produced with `pwsh -File scripts/build-msi.ps1` (requires the WiX v4/v5 `wix.exe` CLI). It packages the GUI and CLI binaries plus documentation. See [MSI packaging and visual verification](docs/renderdocx-install-visual.md) for details and for the GPUI screenshot/element-tree verification workflow.
+
 On Windows, build the RenderDoc core and its matching replay helper from a committed checkout with 64-bit PowerShell 7, Visual Studio C++ tools, and CMake:
 
 ```powershell
