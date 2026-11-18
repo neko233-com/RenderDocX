@@ -111,6 +111,21 @@ fn shader(stage: u32, target: Option<u32>) -> pyo3::PyResult<String> {
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }
 
+/// `renderdocx.callstack(event, resolve=True)` -> JSON callstack.
+#[pyo3::pyfunction]
+#[pyo3(signature = (event, resolve = true))]
+fn callstack(event: u32, resolve: bool) -> pyo3::PyResult<String> {
+    let session = active_session()?;
+    session
+        .callstack(event, resolve)
+        .and_then(|stack| serde_json::to_string(&stack).map_err(|error| error.to_string()))
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
+
+
+
+
 const CAPTURE_SETUP: &str = "import sys, io\n_stdout = getattr(sys, '_rdx_orig_out', sys.stdout)\n_stderr = getattr(sys, '_rdx_orig_err', sys.stderr)\nsys._rdx_orig_out = _stdout\nsys._rdx_orig_err = _stderr\n_sysbuf_out = io.StringIO()\n_sysbuf_err = io.StringIO()\nsys.stdout = _sysbuf_out\nsys.stderr = _sysbuf_err\n";
 const CAPTURE_RESTORE: &str = "sys.stdout = getattr(sys, '_rdx_orig_out', sys.stdout)\nsys.stderr = getattr(sys, '_rdx_orig_err', sys.stderr)\n";
 
@@ -300,6 +315,7 @@ fn build_capture_module<'py>(
         ("shader_messages", pyo3::wrap_pyfunction!(shader_messages, py)),
         ("resource_usage", pyo3::wrap_pyfunction!(resource_usage, py)),
         ("shader", pyo3::wrap_pyfunction!(shader, py)),
+        ("callstack", pyo3::wrap_pyfunction!(callstack, py)),
     ] {
         if let Ok(function) = wrapped {
             dict.set_item(name, function).ok();
@@ -601,7 +617,8 @@ mod tests {
              print(len(json.loads(renderdocx.shader_messages(19))))\n\
              print(len(json.loads(renderdocx.resource_usage(0))))\n\
              s = json.loads(renderdocx.pipeline(19)).get('shaders') or []\n\
-             print('shaders', len(s))",
+             print('shaders', len(s))\n\
+             print('stack', isinstance(json.loads(renderdocx.callstack(19)), dict))",
             &CaptureView::default(),
         );
         set_active_session(None);
