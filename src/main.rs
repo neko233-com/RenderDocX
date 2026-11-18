@@ -5094,9 +5094,21 @@ impl Workspace {
     fn open_suggest_remote(&mut self, cx: &mut Context<Self>) {
         use renderdocx::suggest_remote::SuggestRemote;
         let remote = !self.remote_target_url.read(cx).value().trim().is_empty();
+        // Fill real driver/machine metadata from the inspected .rdc when
+        // available (pure Rust parse), instead of placeholder text.
+        let (driver, machine) = self
+            .rdc_inspect
+            .as_ref()
+            .map(|(_, file)| {
+                (
+                    file.header.driver_name.clone(),
+                    file.header.machine_ident.to_string(),
+                )
+            })
+            .unwrap_or_else(|| ("RenderDoc".to_owned(), "this machine".to_owned()));
         self.suggest_remote = Some(SuggestRemote::new(
-            "RenderDoc".into(),
-            "this machine".into(),
+            driver,
+            machine,
             remote,
             self.settings.always_replay_locally,
         ));
@@ -21428,6 +21440,7 @@ impl Render for Workspace {
                             file.header.thumb_width,
                             file.header.thumb_height,
                         )))
+                        .child(button("rdc-suggest-remote", self.t("Suggest remote replay for this capture", "建议对此捕获使用远程回放"), false, |this, cx| this.open_suggest_remote(cx), cx))
                         .child(div().id("rdc-sections").test_support().flex().flex_col().gap_0().max_h(px(160.)).overflow_hidden()
                             .children(file.sections.iter().enumerate().map(|(index, section)| {
                                 div().id(("rdc-section", index)).test_support().cursor_pointer().text_sm().child(format!(
