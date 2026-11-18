@@ -83,6 +83,8 @@ pub struct Settings {
     pub projection: ProjectionGuess,
     pub camera: CameraControls,
     pub camera_keys: KeyBindings,
+    /// UI theme: "light" or "dark" (upstream UIStyle equivalent).
+    pub theme: String,
     pub always_replay_locally: bool,
 }
 
@@ -118,6 +120,7 @@ impl Default for Settings {
             projection: ProjectionGuess::default(),
             camera: CameraControls::default(),
             camera_keys: KeyBindings::default(),
+            theme: "dark".to_owned(),
             always_replay_locally: false,
         }
     }
@@ -394,5 +397,7 @@ mod tests {
         let reloaded = Settings::from_json(&with_host.to_json_string()).unwrap();
         assert_eq!(reloaded.capture_directory, with_host.capture_directory);
         assert_eq!(reloaded.default_save_directory, with_host.default_save_directory);
+        with_host.theme = "light".to_owned();
+        assert_eq!(Settings::from_json(&with_host.to_json_string()).unwrap().theme, "light");
     }
 }

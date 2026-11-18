@@ -21230,6 +21230,15 @@ impl Render for Workspace {
                     .secondary()
                     .on_click(cx.listener(|this, _, window, cx| this.open_config_editor(window, cx))))
                 .child(div().flex().flex_wrap().gap_2()
+                    .child(Button::new("theme-toggle")
+                        .label(format!("{}: {}", self.t("Theme", "主题"), if self.settings.theme.eq_ignore_ascii_case("light") { self.t("Light", "浅色") } else { self.t("Dark", "深色") }))
+                        .secondary()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.settings.theme = if this.settings.theme.eq_ignore_ascii_case("light") { "dark" } else { "light" }.to_owned();
+                            Theme::change(if this.settings.theme.eq_ignore_ascii_case("light") { ThemeMode::Light } else { ThemeMode::Dark }, None, cx);
+                            this.save();
+                            cx.notify();
+                        })))
                     .child(Button::new("capture-dir-pick")
                         .label(format!("{}: {}", self.t("Capture directory", "捕获目录"),
                             self.settings.capture_directory.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| self.t("default", "默认").to_owned())))
@@ -21666,9 +21675,17 @@ fn main() {
         .with_assets(gpui_kit::assets::Assets)
         .run(|cx: &mut App| {
             gpui_kit::init(cx);
-            Theme::change(ThemeMode::Dark, None, cx);
-            let bounds = Bounds::centered(None, size(px(1040.), px(760.)), cx);
             let settings = Settings::load();
+            Theme::change(
+                if settings.theme.eq_ignore_ascii_case("light") {
+                    ThemeMode::Light
+                } else {
+                    ThemeMode::Dark
+                },
+                None,
+                cx,
+            );
+            let bounds = Bounds::centered(None, size(px(1040.), px(760.)), cx);
             let initial_capture = std::env::var_os("RENDERDOCX_OPEN_CAPTURE")
                 .or_else(|| std::env::args_os().nth(1))
                 .map(std::path::PathBuf::from);

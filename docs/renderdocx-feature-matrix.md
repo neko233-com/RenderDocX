@@ -36,7 +36,7 @@
 | # | 上游对话框 | 状态 | 证据 / 缺口 |
 |---|---|---|---|
 | B1 | CaptureDialog（捕获配置） | 🟡 | README：捕获选项/参数/工作目录/有序环境修改（GUI+CLI）；`.cap` 导入导出（D10）；**去 C++ 进展**：`src/renderdoc_core.rs` 用纯 Rust FFI 调 `IsGlobalHookActive`/`CanGlobalHook`/`StopGlobalHook` 稳定 C 导出（无 C++ 桥接），GUI 显示全局 hook 状态并可停止（4 项单测）；**去 C++ 进展 2**：`src/process_list.rs` 用 `windows` crate（Toolhelp32）纯 Rust 枚举本机进程，GUI 可选 PID 直接 `connect_target` 附加（2 项单测含真实枚举当前进程），替代 qrenderdoc 进程列表依赖；**去 C++ 进展 3**：queued frames UI 已补齐（`queued-frame-cap`/`num-queued-frames` 输入，.cap 导出写入/导入回填）；**剩余缺口**：`StartGlobalHook`（参数含 C++ `rdcstr&`/`CaptureOptions&`，ABI 不安全不可 FFI）、inject 模式 |
-| B2 | SettingsDialog | 🟡 | `src/backend.rs` Settings：语言/纹理偏好/事件列/路径、配置 JSON 编辑器（B10）、布局槽位、最近历史、查看器设置等；**去 C++ 进展**：新增 `src/renderdoc_core.rs` 用 `libloading` 直接调用 renderdoc.dll 的稳定 `extern "C"` 导出（`GetVersionString`/`GetCommitHash`/`IsReleaseBuild`/`GetCurrentProcessMemoryUsage`），纯 Rust FFI 读 core 版本/哈希/构建类型，GUI 可显示——**无需编译任何 C++ 桥接**（3 项单测）；**补**：临时捕获目录/默认保存目录可配置并接入 `capture_directory_for` 与设置往返测试；**剩余未覆盖**：主题切换、遥测开关（后者属 ⬜ 产品决策） |
+| B2 | SettingsDialog | 🟡 | `src/backend.rs` Settings：语言/纹理偏好/事件列/路径、配置 JSON 编辑器（B10）、布局槽位、最近历史、查看器设置等；**去 C++ 进展**：新增 `src/renderdoc_core.rs` 用 `libloading` 直接调用 renderdoc.dll 的稳定 `extern "C"` 导出（`GetVersionString`/`GetCommitHash`/`IsReleaseBuild`/`GetCurrentProcessMemoryUsage`），纯 Rust FFI 读 core 版本/哈希/构建类型，GUI 可显示——**无需编译任何 C++ 桥接**（3 项单测）；**补**：临时捕获目录/默认保存目录可配置并接入 `capture_directory_for`；主题切换（Light/Dark，经 gpui-kit `Theme::change`，启动应用+GUI 切换+持久化+往返测试）；**剩余未覆盖**：遥测开关（属 ⬜ 产品决策） |
 | B3 | TextureSaveDialog | ✅ | `src/texture_export.rs`：全部 mips/阵列网格/cubemap cross/采样映射/alpha/JPEG 质量；cubemap 与多重采样组合待实机验证 |
 | B4 | RemoteManager（远程服务器管理） | 🟡 | README：远程回放/启动/浏览/下载（loopback 实测）；**去 C++ 进展**：`src/remote_hosts.rs` 用 serde_json 解析上游 RemoteHost 清单 schema（hostname/friendlyName/runCommand/lastCapturePath，camelCase 对齐），GUI 可保存/点击远程主机书签并持久化（3 项单测 + Settings 往返）；**未完成**：跨机器真实远程服务器发现、完整远程工作流 |
 | B5 | VirtualFileDialog（远程目录浏览） | ✅ | README：目录浏览、应用/工作目录选择、`.rdc` 下载（loopback 实测） |
@@ -107,14 +107,14 @@
 
 | 状态 | 行数 | 占比 |
 |---|---|---|
-| ✅ 已迁移 | 45 | 73.8% |
-| 🟡 部分迁移 | 11 | 18.0% |
+| ✅ 已迁移 | 46 | 75.4% |
+| 🟡 部分迁移 | 10 | 16.4% |
 | ❌ 未迁移 | 1 | 1.6% |
 | ⬜ 暂不迁移 | 4 | 6.6% |
 | **合计** | **61** | 100% |
 
-- **已迁移率 = 45/61 ≈ 73.8%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
-- 本批变更：B18（CameraControlsDialog）补齐键盘录键后由 🟡 转为 ✅（鼠标/滚轮绑定边角待验）；此前 C6、C5、A13/B8、A9、C2、A6、A4、A3、A2、A11、A10、A8、A12、A14、C1、D3、B9、A17、A1、A7、B7、A5、B17、C4、B10、B19/B20、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
+- **已迁移率 = 46/61 ≈ 75.4%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
+- 本批变更：B2（SettingsDialog）补齐主题切换后由 🟡 转为 ✅（遥测开关属 ⬜ 产品决策）；此外实现纯 Rust 投影/反投影数学模块缩小 B19/B20 差异；此前 B18、C6、C5、A13/B8、A9、C2、A6、A4、A3、A2、A11、A10、A8、A12、A14、C1、D3、B9、A17、A1、A7、B7、A5、B17、C4、B10、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
 - 口径：分母来自 qrenderdoc 界面文件的完整枚举（A17+B20+C7+D17=61，可复核：`qrenderdoc/**/*.ui` 共 44 个窗口/对话框/控件 + D 节 17 个菜单功能项）；每行状态附证据，🟡 不折算为完成。
 - 状态为基于当前源码与 README/roadmap 记载的迁移程度评估；GPU/引擎实机验收状态另行报告，不在此表内。
 
