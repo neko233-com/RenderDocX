@@ -61,13 +61,51 @@ pwsh -File scripts/make-d3d11-capture.ps1
 # CAPTURE=…\target\renderdocx-captures\remote-*\capture.rdc
 ```
 
+## Vulkan toolchain and new tests (added)
+
+No Vulkan SDK was installed, so the Khronos **glslang 16.6.0** Windows release
+was downloaded (`target/tools/glslang`) and `glslang.exe` copied to
+`glslangValidator.exe`. The demos compile GLSL at runtime through
+`glslangValidator` found in `PATH`.
+
+Fixtures built from `util/test/demos` (all succeeded):
+
+| Fixture | Output | Demo |
+|---|---|---|
+| Mesh | `target/vulkan-mesh-fixture/demos_x64.exe` | `VK_RenderDocX_Mesh_Printf` / `VK_Mesh_Shader` |
+| Vertex | `target/vulkan-vertex-fixture/demos_x64.exe` | `VK_RenderDocX_Vertex_Printf` |
+| Geometry | `target/vulkan-geometry-fixture/demos_x64.exe` | `VK_RenderDocX_Geometry_Printf` |
+| ShaderPrintf | `target/vulkan-shader-printf/demos_x64.exe` | `VK_Shader_Printf` |
+
+Captures were generated with `scripts/make-vulkan-capture.ps1`
+(target_launch → wait presenting → trigger 1 frame → target_copy).
+
+`scripts/run-vulkan-tests.ps1` sets all `RENDERDOCX_TEST_VULKAN_*` variables.
+Result: **7 of 8 Vulkan tests pass**
+
+| Test | Result |
+|---|---|
+| real_vulkan_target_launch_uses_packaged_layer | ok |
+| real_vulkan_mesh_shader_debug_trace | ok |
+| real_vulkan_vertex_shader_messages_resolve_and_debug | ok |
+| real_vulkan_geometry_shader_messages_show_approximate_output | ok |
+| real_vulkan_task_and_mesh_shader_messages | ok |
+| real_vulkan_task_message_sanitizes_older_core | ok |
+| real_vulkan_mesh_printf_core_survives_and_initializes_locations | ok |
+| real_vulkan_shader_messages_and_debug_handoff | **fails**: the self-recorded `VK_Shader_Printf` capture returns 0 fragment printf messages for the selected draw (expected 8). The test documents that it expects an upstream pre-recorded `VK_Shader_Printf` capture; the printf layout of a freshly captured run does not match. |
+
+A deliberately mismatched bridge is built with
+`scripts/build-mismatch-bridge.ps1` (real core library, fake core commit). It
+makes `incompatible_core_is_rejected_before_capture_open` pass:
+
+```
+test incompatible_core_is_rejected_before_capture_open ... ok
+```
+
 ## Not executed (environment dependency, not code failure)
 
 | Test(s) | Missing input |
 |---|---|
-| real_vulkan_* (7 tests) | Vulkan mesh/printf demo and pre-made Vulkan captures. No `VULKAN_SDK`, and `glslc`/`glslangValidator`/`spirv-as` are absent, so the demos cannot be built here. |
-| incompatible_core_is_rejected_before_capture_open | A deliberately mismatched bridge/core build (`RENDERDOCX_TEST_MISMATCH_BRIDGE`). |
-| interaction tests requiring a pre-made `.rdc` fixture | `RENDERDOCX_TEST_VERTEX_PRINTF_CAPTURE`, `RENDERDOCX_TEST_MESH_PRINTF_CAPTURE`, etc. |
+| real_vulkan_shader_messages_and_debug_handoff | An upstream `VK_Shader_Printf` capture whose selected draw contains the expected 8 fragment printf messages; the locally captured run has 0. Building the demo and the bridge is not the gap. |
 
-Installing the Vulkan SDK (providing `glslc`) and pre-recording the bundled
-demos would enable those tests; they are not blocked by RenderDocX code.
+All other previously-listed Vulkan gaps are now closed by the toolchain above.

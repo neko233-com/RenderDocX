@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Vertex", "Geometry", "Mesh")]
+    [ValidateSet("Vertex", "Geometry", "Mesh", "ShaderPrintf")]
     [string]$Fixture = "Vertex",
     [string]$OutputDirectory = "",
     [string]$MSBuildPath = ""
@@ -16,7 +16,12 @@ if (-not $OutputDirectory) { $OutputDirectory = Join-Path $root ("target/vulkan-
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 $objectDirectory = Join-Path $OutputDirectory "obj"
 New-Item -ItemType Directory -Force -Path $OutputDirectory, $objectDirectory | Out-Null
-if ($Fixture -eq "Mesh") {
+if ($Fixture -eq "ShaderPrintf") {
+    # Upstream demo with both a compute dispatch and a draw, used by the
+    # shader-messages/debug-handoff test.
+    $fixturePath = Join-Path $demoDirectory "vk/vk_shader_printf.cpp"
+    if (-not (Test-Path -LiteralPath $fixturePath -PathType Leaf)) { throw "The upstream VK_Shader_Printf demo was not found." }
+} elseif ($Fixture -eq "Mesh") {
     $upstreamFixture = Join-Path $demoDirectory "vk/vk_mesh_shader.cpp"
     if (-not (Test-Path -LiteralPath $upstreamFixture -PathType Leaf)) { throw "The upstream Vulkan mesh demo was not found." }
     $sourceText = [IO.File]::ReadAllText($upstreamFixture).Replace("`r`n", "`n")
