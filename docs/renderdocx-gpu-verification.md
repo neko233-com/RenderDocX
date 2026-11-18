@@ -107,7 +107,7 @@ makes `incompatible_core_is_rejected_before_capture_open` pass:
 test incompatible_core_is_rejected_before_capture_open ... ok
 ```
 
-## Full ignored-test result: 20/20 + 1 lib test pass
+## Full ignored-test result: 20/20 + 2 lib tests pass
 
 One command runs every ignored test with all environment variables wired:
 
@@ -115,13 +115,14 @@ One command runs every ignored test with all environment variables wired:
 pwsh -File scripts/verify-all-real-tests.ps1
 ```
 
-It also runs the lib-level ignored test
-`python_embed::tests::python_pipeline_and_buffer_query_a_real_capture`, which
-opens a real capture through the bridge and asserts
-`renderdocx.pipeline(19)` returns the event's pipeline JSON and
-`renderdocx.buffer(0, 0, 16)` returns 32 hex characters (observed: 1 passed).
+It also runs two lib-level ignored tests. `python_pipeline_and_buffer_query_a_real_capture`
+opens a real Mesh capture through the bridge and asserts pipeline, buffer hex,
+structure data, debug/shader messages, resource usage, callstack, event
+formatting, descriptors, pixel history, texture statistics/min-max/fit range,
+PNG export and mesh output. `python_vertex_input_query_a_real_capture` opens a
+real Vertex capture and asserts `renderdocx.vertex_input()` returns input rows.
 
-Observed output (51.59 s + 0.65 s):
+Observed output (20 agent_cli + 2 lib tests):
 
 ```
 test incompatible_core_is_rejected_before_capture_open ... ok

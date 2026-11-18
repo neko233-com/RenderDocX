@@ -6074,6 +6074,7 @@ impl Workspace {
                 snapshot.textures.clone(),
                 self.settings.language,
             );
+            renderdocx::python_embed::set_active_actions(snapshot.actions.clone());
         }
     }
 

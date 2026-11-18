@@ -1,7 +1,8 @@
 #requires -Version 7.0
 <#
-  Run every `#[ignore]` real test (20) against locally built RenderDoc core,
-  bridge, fixtures, Vulkan toolchain, captures and mismatch bridge.
+  Run every `#[ignore]` real test (20 agent_cli + 2 lib) against locally built
+  RenderDoc core, bridge, fixtures, Vulkan toolchain, captures and mismatch
+  bridge.
 
   Prerequisites: see docs/renderdocx-gpu-verification.md.
 #>
@@ -47,6 +48,7 @@ if ($mesh) { $env:RENDERDOCX_TEST_VULKAN_MESH_CAPTURE = $mesh }
 if ($vertex) {
   $env:RENDERDOCX_TEST_VERTEX_PRINTF_CAPTURE = $vertex
   $env:RENDERDOCX_TEST_VULKAN_PRINTF_CAPTURE = $vertex
+  $env:RENDERDOCX_TEST_VULKAN_VERTEX_CAPTURE = $vertex
 }
 if ($geometry) { $env:RENDERDOCX_TEST_GEOMETRY_PRINTF_CAPTURE = $geometry }
 if ($meshPrintf) { $env:RENDERDOCX_TEST_MESH_PRINTF_CAPTURE = $meshPrintf }
@@ -58,9 +60,10 @@ Write-Host "vulkan fonts: mesh=$mesh vertex=$vertex geometry=$geometry meshPrint
 Push-Location $repo
 try {
   cargo test --features ui-tests --test agent_cli -- --ignored --test-threads=1
-  # Lib-level ignored test for embedded-Python dynamic queries. The other two
-  # ignored lib tests are subprocess fixtures and must not be run directly.
-  cargo test --features ui-tests --lib python_embed::tests::python_pipeline_and_buffer_query_a_real_capture -- --ignored --exact
+  # Lib-level ignored tests for embedded-Python dynamic queries (mesh/pipeline
+  # capture and vertex-input capture). The other ignored lib tests are
+  # subprocess fixtures and must not be run directly.
+  cargo test --features ui-tests --lib python_ -- --ignored --test-threads=1
 } finally {
   Pop-Location
 }

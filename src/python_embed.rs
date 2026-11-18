@@ -21,6 +21,7 @@ static ACTIVE_SESSION: Mutex<Option<crate::replay::Session>> = Mutex::new(None);
 static ACTIVE_RESOURCES: Mutex<Option<Vec<crate::replay::ResourceInfo>>> = Mutex::new(None);
 static ACTIVE_BUFFERS: Mutex<Option<Vec<crate::replay::Buffer>>> = Mutex::new(None);
 static ACTIVE_TEXTURES: Mutex<Option<Vec<crate::replay::Texture>>> = Mutex::new(None);
+static ACTIVE_ACTIONS: Mutex<Option<Vec<crate::replay::Action>>> = Mutex::new(None);
 static ACTIVE_LANGUAGE: Mutex<crate::i18n::Language> = Mutex::new(crate::i18n::Language::English);
 
 /// Bind formatting context (resources/buffers/textures/language) for scripts.
@@ -68,6 +69,218 @@ fn active_textures() -> Vec<crate::replay::Texture> {
         .unwrap_or_default()
 }
 
+/// Bind the flattened action list for `vertex_input(action_index)`.
+pub fn set_active_actions(actions: Vec<crate::replay::Action>) {
+    *ACTIVE_ACTIONS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(actions);
+}
+
+fn active_actions() -> Vec<crate::replay::Action> {
+    ACTIVE_ACTIONS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+        .unwrap_or_default()
+}
+
+/// `renderdocx.export_texture(destination, index=0)` -> export a PNG of the
+/// texture. Existing files are never replaced (matching the GUI exporter).
+#[pyo3::pyfunction]
+#[pyo3(signature = (destination, index = 0))]
+fn export_texture(destination: String, index: u32) -> pyo3::PyResult<String> {
+    let session = active_session()?;
+    let path = std::path::PathBuf::from(&destination);
+    session
+        .export_texture(index, &path)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    Ok(destination)
+}
+
+/// `renderdocx.texture_context(destination, index=0, width=64, height=64)` ->
+/// render the texture context view (including its highlight) to a PNG.
+#[pyo3::pyfunction]
+#[pyo3(signature = (destination, index = 0, width = 64, height = 64))]
+fn texture_context(
+    destination: String,
+    index: u32,
+    width: u32,
+    height: u32,
+) -> pyo3::PyResult<String> {
+    let session = active_session()?;
+    let path = std::path::PathBuf::from(&destination);
+    session
+        .render_texture_context_png(
+            index,
+            crate::replay::TextureSelection::default(),
+            width,
+            height,
+            &path,
+        )
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    Ok(destination)
+}
+
+/// `renderdocx.texture_minmax(event, texture_index=0, channels=(True,)*4)` ->
+/// native extrema object for a texture in the bound snapshot.
+#[pyo3::pyfunction]
+#[pyo3(signature = (event, texture_index = 0, channels = None))]
+fn texture_minmax(
+    py: Python<'_>,
+    event: u32,
+    texture_index: usize,
+    channels: Option<Vec<bool>>,
+) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    let session = active_session()?;
+    let textures = active_textures();
+    let texture = textures.get(texture_index).ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("Texture index is out of range in the bound snapshot")
+    })?;
+    let channels = channel_mask(channels);
+    select_event(&session, event)?;
+    let value = session
+        .texture_minmax(
+            event,
+            texture_index as u32,
+            texture,
+            crate::replay::TextureSelection::default(),
+            channels,
+        )
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    to_py(py, &value)
+}
+
+/// `renderdocx.texture_fit_range(event, texture_index=0, channels=None)` ->
+/// `[min, max]` fitted to the enabled channels, mirroring the texture viewer.
+#[pyo3::pyfunction]
+#[pyo3(signature = (event, texture_index = 0, channels = None))]
+fn texture_fit_range(
+    py: Python<'_>,
+    event: u32,
+    texture_index: usize,
+    channels: Option<Vec<bool>>,
+) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    let session = active_session()?;
+    let textures = active_textures();
+    let texture = textures.get(texture_index).ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("Texture index is out of range in the bound snapshot")
+    })?;
+    let channels = channel_mask(channels);
+    let selection = crate::replay::TextureSelection::default();
+    select_event(&session, event)?;
+    let stats = session
+        .texture_minmax(
+            event,
+            texture_index as u32,
+            texture,
+            selection,
+            channels,
+        )
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let range = crate::texture_view::fit_range(
+        &stats,
+        texture.component_type,
+        selection.analysis_type_cast,
+        texture.component_count,
+        channels,
+        texture.is_alpha_only(),
+    )
+    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    // Fixed-size arrays serialize as tuples; use a Vec so scripts get a list.
+    to_py(py, &range.to_vec())
+}
+
+fn channel_mask(channels: Option<Vec<bool>>) -> [bool; 4] {
+    channels
+        .and_then(|channels| <[bool; 4]>::try_from(channels).ok())
+        .unwrap_or([true; 4])
+}
+
+/// Mirror of upstream `ActionFlags::Drawcall | ActionFlags::MeshDispatch`.
+const DRAW_ACTION_FLAGS: u32 = 0x2 | 0x8;
+/// Mirror of upstream `ActionFlags::Drawcall` (input assembly only).
+const DRAWCALL_FLAG: u32 = 0x2;
+
+/// Resolve an event id to the draw/mesh action that contains it. The replay
+/// bridge keys mesh data by the action's own event id (e.g. the
+/// `vkCmdDrawMeshTasksEXT` call), while callers may pass any event inside that
+/// action (such as a preceding `vkCmdSetViewport`).
+fn resolve_draw_event(event: u32) -> u32 {
+    let actions = active_actions();
+    if let Some(action) = actions
+        .iter()
+        .find(|action| action.event_id == event && action.flags & DRAW_ACTION_FLAGS != 0)
+    {
+        return action.event_id;
+    }
+    actions
+        .iter()
+        .find(|action| {
+            action.flags & DRAW_ACTION_FLAGS != 0
+                && action
+                    .api_events
+                    .iter()
+                    .any(|api_event| api_event.event_id == event)
+        })
+        .map_or(event, |action| action.event_id)
+}
+
+/// `renderdocx.mesh(event, stage=1)` -> native Python object for the mesh view
+/// (stage 1=vs_out, 2=gs_out, 3=task_out, 4=mesh_out). Any event inside a draw
+/// or mesh dispatch resolves to that action's event id.
+#[pyo3::pyfunction]
+#[pyo3(signature = (event, stage = 1))]
+fn mesh(py: Python<'_>, event: u32, stage: u32) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    let session = active_session()?;
+    let event = resolve_draw_event(event);
+    let selection = crate::replay::MeshSelection {
+        instance: 0,
+        view: 0,
+        stage,
+    };
+    // Selecting the event first is required by the replay driver's mesh query.
+    session
+        .pipeline_for_event(event)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let value = session
+        .mesh(event, selection)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    to_py(py, &value)
+}
+
+/// `renderdocx.vertex_input(action_index=None, instance=0, offset=0, limit=64)`
+/// -> native Python input page for an action from the bound snapshot. When
+/// `action_index` is omitted the first draw action is used.
+#[pyo3::pyfunction]
+#[pyo3(signature = (action_index = None, instance = 0, offset = 0, limit = 64))]
+fn vertex_input(
+    py: Python<'_>,
+    action_index: Option<usize>,
+    instance: u32,
+    offset: u32,
+    limit: u32,
+) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    let session = active_session()?;
+    let actions = active_actions();
+    let index = action_index.unwrap_or_else(|| {
+        actions
+            .iter()
+            .position(|action| action.flags & DRAWCALL_FLAG != 0)
+            .unwrap_or(0)
+    });
+    let action = actions.get(index).ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("Action index is out of range in the bound snapshot")
+    })?;
+    let pipeline = session
+        .pipeline_for_event(action.event_id)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let buffers = active_buffers();
+    let value = session
+        .vertex_input_page(action, &pipeline, &buffers, instance, offset, limit)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    to_py(py, &value)
+}
+
 fn active_language() -> crate::i18n::Language {
     *ACTIVE_LANGUAGE
         .lock()
@@ -105,6 +318,7 @@ fn descriptors(
     limit: u32,
 ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
     let session = active_session()?;
+    select_event(&session, event)?;
     let value = session
         .descriptors(event, store, offset, limit)
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
@@ -127,6 +341,7 @@ fn texture_statistics(
     let texture = textures.get(texture_index).ok_or_else(|| {
         pyo3::exceptions::PyRuntimeError::new_err("Texture index is out of range in the bound snapshot")
     })?;
+    select_event(&session, event)?;
     let request = crate::replay::HistogramRequest {
         min,
         max,
@@ -162,6 +377,7 @@ fn pixel_history(
     let texture = textures.get(texture_index).ok_or_else(|| {
         pyo3::exceptions::PyRuntimeError::new_err("Texture index is out of range in the bound snapshot")
     })?;
+    select_event(&session, event)?;
     let value = session
         .pixel_history(
             event,
@@ -199,6 +415,16 @@ fn active_session() -> Result<crate::replay::Session, pyo3::PyErr> {
         .unwrap_or_else(|error| error.into_inner())
         .clone()
         .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No capture session is open"))
+}
+
+/// Select `event` so queued lookups (descriptors, messages and texture queries)
+/// observe consistent replay state; the bridge keys several responses by the
+/// currently selected event.
+fn select_event(session: &crate::replay::Session, event: u32) -> pyo3::PyResult<()> {
+    session
+        .pipeline_for_event(event)
+        .map(|_| ())
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }
 
 /// `renderdocx.pipeline(event)` -> native Python object (dict/list) for the
@@ -261,6 +487,7 @@ fn shader_messages(
     limit: u32,
 ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
     let session = active_session()?;
+    select_event(&session, event)?;
     let value = session
         .shader_messages(event, offset, limit)
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
@@ -511,6 +738,12 @@ fn build_capture_module<'py>(
         ("descriptors", pyo3::wrap_pyfunction!(descriptors, py)),
         ("pixel_history", pyo3::wrap_pyfunction!(pixel_history, py)),
         ("texture_statistics", pyo3::wrap_pyfunction!(texture_statistics, py)),
+        ("mesh", pyo3::wrap_pyfunction!(mesh, py)),
+        ("vertex_input", pyo3::wrap_pyfunction!(vertex_input, py)),
+        ("export_texture", pyo3::wrap_pyfunction!(export_texture, py)),
+        ("texture_context", pyo3::wrap_pyfunction!(texture_context, py)),
+        ("texture_minmax", pyo3::wrap_pyfunction!(texture_minmax, py)),
+        ("texture_fit_range", pyo3::wrap_pyfunction!(texture_fit_range, py)),
     ] {
         if let Ok(function) = wrapped {
             dict.set_item(name, function).ok();
@@ -774,6 +1007,10 @@ mod tests {
             "renderdocx.shader_messages(1)",
             "renderdocx.resource_usage(0)",
             "renderdocx.shader(0)",
+            "renderdocx.export_texture('out.png')",
+            "renderdocx.texture_context('ctx.png')",
+            "renderdocx.texture_minmax(1)",
+            "renderdocx.texture_fit_range(1)",
         ] {
             let result = run_script_with_capture(
                 &format!("import renderdocx\n{call}"),
@@ -808,6 +1045,7 @@ mod tests {
             snapshot.textures.clone(),
             crate::i18n::Language::English,
         );
+        set_active_actions(snapshot.actions.clone());
         let result = run_script_with_capture(
             "import renderdocx\n\
              p = renderdocx.pipeline(19)\n\
@@ -823,7 +1061,16 @@ mod tests {
              print('format', len(renderdocx.event_format(19)) > 0)\n\
              print('descs', isinstance(renderdocx.descriptors(19), dict))\n\
              print('pixels', isinstance(renderdocx.pixel_history(19, 0, 1, 1), dict))\n\
-             print('stats', isinstance(renderdocx.texture_statistics(19, 0), dict))",
+             print('stats', isinstance(renderdocx.texture_statistics(19, 0), dict))\n\
+             print('mesh', isinstance(renderdocx.mesh(19, 4), dict))\n\
+             import tempfile, os\n\
+             d = tempfile.mkdtemp()\n\
+             png = os.path.join(d, 'tex.png')\n\
+             print('export', renderdocx.export_texture(png, 0) == png and os.path.getsize(png) > 0)\n\
+             ctx = os.path.join(d, 'ctx.png')\n\
+             print('context', renderdocx.texture_context(ctx, 0, 64, 64) == ctx and os.path.getsize(ctx) > 0)\n\
+             print('minmax', isinstance(renderdocx.texture_minmax(19, 0), dict))\n\
+             print('fit', isinstance(renderdocx.texture_fit_range(19, 0), list))",
             &CaptureView::default(),
         );
         set_active_session(None);
@@ -831,6 +1078,56 @@ mod tests {
         assert!(result.stdout.contains("19"), "{}", result.stdout);
         assert!(result.stdout.contains("32"), "buffer hex length: {}", result.stdout);
         assert!(result.stdout.contains("shaders"), "{}", result.stdout);
+        assert!(result.stdout.contains("mesh True"), "{}", result.stdout);
+        assert!(result.stdout.contains("export True"), "{}", result.stdout);
+        assert!(result.stdout.contains("context True"), "{}", result.stdout);
+        assert!(result.stdout.contains("minmax True"), "{}", result.stdout);
+        assert!(result.stdout.contains("fit True"), "{}", result.stdout);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires RENDERDOCX_TEST_BRIDGE and RENDERDOCX_TEST_VULKAN_VERTEX_CAPTURE"]
+    fn python_vertex_input_query_a_real_capture() {
+        use crate::backend::Settings;
+        use std::path::PathBuf;
+
+        let bridge = PathBuf::from(
+            std::env::var("RENDERDOCX_TEST_BRIDGE").expect("set RENDERDOCX_TEST_BRIDGE"),
+        );
+        let capture = PathBuf::from(
+            std::env::var("RENDERDOCX_TEST_VULKAN_VERTEX_CAPTURE")
+                .expect("set RENDERDOCX_TEST_VULKAN_VERTEX_CAPTURE"),
+        );
+        let mut settings = Settings::default();
+        settings.replay_bridge = Some(bridge);
+        let (session, snapshot) =
+            crate::replay::Session::open(&settings, &capture).expect("open capture");
+        set_active_session(Some(session));
+        set_active_format_context(
+            snapshot.resources.clone(),
+            snapshot.buffers.clone(),
+            snapshot.textures.clone(),
+            crate::i18n::Language::English,
+        );
+        set_active_actions(snapshot.actions.clone());
+        let result = run_script_with_capture(
+            "import renderdocx\n\
+             page = renderdocx.vertex_input(limit=4)\n\
+             print(page.get('event_id'))\n\
+             print(len(page.get('rows') or []))",
+            &CaptureView::default(),
+        );
+        set_active_session(None);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        let rows: usize = result
+            .stdout
+            .trim()
+            .lines()
+            .last()
+            .and_then(|line| line.parse().ok())
+            .unwrap_or(0);
+        assert!(rows > 0, "expected vertex input rows: {}", result.stdout);
     }
 
     #[test]
