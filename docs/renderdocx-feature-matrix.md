@@ -43,7 +43,7 @@
 | B6 | EnvironmentEditor（环境变量编辑） | ✅ | README：有序环境修改，GUI+CLI，Vulkan layer 自动设置实测 |
 | B7 | LiveCapture（目标捕获列表窗口） | ✅ | `live_captures` 列表逐行展示帧号/路径/本地或远程状态；本地捕获点击打开，远程捕获点击请求复制到本地；本批为本地行新增「保存」按钮（`capture_save::save_copy` 复制到指定 `.rdc` 并写入最近历史）。**差异**：以上操作以行内按钮提供，未实现上游右键上下文菜单 |
 | B8 | PerformanceCounterSelection | 🟡 | counter 选择与分页已实现；与 B13 同源的完整工作流未完成 |
-| B9 | ExtensionManager | ❌ | `src/` 无扩展体系 |
+| B9 | ExtensionManager | 🟡 | `src/extensions.rs` 用 serde_json 解析上游 `extension.json` 清单（`extension_api`/`name`/`version`/`minimum_renderdoc`/`description`/`author`/`url`），扫描用户扩展目录、GUI 管理器可刷新与启停（状态持久化，3 项单测）。**未完成**：扩展脚本真正的 `register`/`unregister` 生命周期与 pyrenderdoc API 注入（需 CPython 嵌入，见 A17） |
 | B10 | ConfigEditor（上游配置 JSON 编辑器） | ✅ | `Settings::from_json` / `to_json_string` 提供带错误的配置解析与序列化（单测：往返、非法 JSON、类型错误、未知字段兼容）；GUI 首页「编辑配置 JSON」打开多行编辑器，应用时校验并持久化，取消丢弃；GPUI 交互测试验证打开/编辑器可见/取消 |
 | B11 | AboutDialog | ✅ | 首页 Help▸关于 打开应用内信息面板（版本、Rust+GPUI 说明、迁移范围声明）；以可关闭内嵌面板实现，非上游独立顶层窗口 |
 | B12 | TipsDialog | ✅ | 首页 Help▸提示 打开应用内信息面板（打开捕获/布局槽位/`.cap`/最近列表四条提示）；同上，为可关闭内嵌面板而非独立顶层窗口 |
@@ -98,7 +98,7 @@
 | 实时捕获、触发、捕获列表 | 🟡 | D1/B7 功能已迁移；跨 API/长时间会话稳定性未实机验证 |
 | 远程捕获/回放/浏览 | 🟡 | 见 B4、B5；跨机与其他 API 未验证 |
 | Unity / Tuanjie 集成 | 🟡 | README：包安装与交接已核对（Unity 2022.3 D3D11）；Editor 菜单、Player PID 对话框、其他版本与 Tuanjie 未验证 |
-| 扩展体系 | ❌ | 见 B9 |
+| 扩展体系 | 🟡 | B9 清单发现/启停已迁移；脚本生命周期与 pyrenderdoc API 未实现 |
 | 符号解析 / 重放循环 / 重压缩 / RGP | 🟡 | D12 符号解析 ✅、D14 重压缩 ✅（桥接 C++ 未实机编译）、D13 重放循环仅 Rust 定时近似、D15 RGP ❌ |
 | 遥测 / 更新 / 崩溃上报 | ⬜ | 见 B13–B16，需产品决策 |
 | Python 脚本体系 | 🟡 | A17 脚本执行/控制台已迁移；CPython 嵌入与 pyrenderdoc API 未实现 |
@@ -108,13 +108,13 @@
 | 状态 | 行数 | 占比 |
 |---|---|---|
 | ✅ 已迁移 | 28 | 45.9% |
-| 🟡 部分迁移 | 26 | 42.6% |
-| ❌ 未迁移 | 3 | 4.9% |
+| 🟡 部分迁移 | 28 | 45.9% |
+| ❌ 未迁移 | 1 | 1.6% |
 | ⬜ 暂不迁移 | 4 | 6.6% |
 | **合计** | **61** | 100% |
 
-- **已迁移率 = 28/61 ≈ 45.9%**；**覆盖率（✅+🟡）= 54/61 ≈ 88.5%**。
-- 本批变更：A17（PythonShell）由 ❌ 转为 🟡（脚本执行/控制台外壳已迁移，CPython 嵌入与 pyrenderdoc API 未实现）；此前 A1、A7、B7、A5、B17、C5/C6、C4、B10、B18/B19/B20、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
+- **已迁移率 = 28/61 ≈ 45.9%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
+- 本批变更：B9（扩展体系）由 ❌ 转为 🟡（清单发现/启停已迁移，脚本生命周期未实现）；此前 A17、A1、A7、B7、A5、B17、C5/C6、C4、B10、B18/B19/B20、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
 - 口径：分母来自 qrenderdoc 界面文件的完整枚举（A17+B20+C7+D17=61，可复核：`qrenderdoc/**/*.ui` 共 44 个窗口/对话框/控件 + D 节 17 个菜单功能项）；每行状态附证据，🟡 不折算为完成。
 - 状态为基于当前源码与 README/roadmap 记载的迁移程度评估；GPU/引擎实机验收状态另行报告，不在此表内。
 

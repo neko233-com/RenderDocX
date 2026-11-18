@@ -1045,6 +1045,7 @@ struct Workspace {
     core_info: Option<renderdocx::renderdoc_core::CoreInfo>,
     core_handle: Option<renderdocx::renderdoc_core::CoreHandle>,
     local_processes: Vec<renderdocx::process_list::ProcessInfo>,
+    installed_extensions: Vec<renderdocx::extensions::InstalledExtension>,
 }
 
 impl Workspace {
@@ -4410,6 +4411,43 @@ impl Workspace {
                 ));
             }
         }
+        cx.notify();
+    }
+
+    /// Discover UI extensions by parsing extension.json manifests natively.
+    fn refresh_extensions(&mut self, cx: &mut Context<Self>) {
+        let result = Settings::config_dir()
+            .map(|dir| renderdocx::extensions::discover(&renderdocx::extensions::default_extension_root(&dir)));
+        match result {
+            Some(Ok(list)) => {
+                self.installed_extensions = list;
+                self.status = None;
+            }
+            Some(Err(error)) => {
+                self.status = Some(format!("{}: {error}", self.t("Could not scan extensions", "无法扫描扩展")));
+            }
+            None => {
+                self.status = Some(self.t("No configuration directory available.", "无可用配置目录。").to_owned());
+            }
+        }
+        cx.notify();
+    }
+
+    fn toggle_extension(&mut self, name: String, cx: &mut Context<Self>) {
+        let enabled = self.settings.enabled_extensions.iter().position(|item| item == &name);
+        match enabled {
+            Some(index) => {
+                self.settings.enabled_extensions.remove(index);
+            }
+            None => {
+                self.settings.enabled_extensions.push(name.clone());
+            }
+        }
+        self.save();
+        self.status = Some(format!(
+            "{}: {name}",
+            self.t("Extension toggled", "扩展状态已切换")
+        ));
         cx.notify();
     }
 
@@ -20943,6 +20981,38 @@ impl Render for Workspace {
                         cx.notify();
                     }))))
             .child(div().flex().flex_col().gap_1()
+                .child(self.t("Extensions", "扩展"))
+                .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
+                    "UI extensions discovered from extension.json manifests. Script execution uses the external Python path.",
+                    "从 extension.json 清单发现的 UI 扩展。脚本执行使用外部 Python 路径。",
+                )))
+                .child(Button::new("extensions-refresh")
+                    .label(self.t("Refresh extensions", "刷新扩展")).secondary()
+                    .on_click(cx.listener(|this, _, _, cx| this.refresh_extensions(cx))))
+                .children(self.installed_extensions.iter().enumerate().map(|(index, ext)| {
+                    let name = ext.manifest.name.clone();
+                    let enabled = self.settings.enabled_extensions.iter().any(|item| item == &name);
+                    let label = format!(
+                        "{} {} · {} · {}",
+                        if enabled { "☑" } else { "☐" },
+                        ext.manifest.name,
+                        ext.manifest.version,
+                        ext.manifest.author
+                    );
+                    div()
+                        .id(("extension-toggle", index))
+                        .test_support()
+                        .cursor_pointer()
+                        .text_sm()
+                        .px_2().py_1().rounded_md().bg(rgb(0x252f40))
+                        .child(label)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let name = this.installed_extensions.get(index).map(|e| e.manifest.name.clone());
+                            if let Some(name) = name { this.toggle_extension(name, cx); }
+                        }))
+                }))
+            )
+            .child(div().flex().flex_col().gap_1()
                 .child(self.t("Configuration", "配置"))
                 .child(Button::new("config-editor-open")
                     .label(self.t("Edit configuration JSON", "编辑配置 JSON"))
@@ -21693,6 +21763,7 @@ fn main() {
                         core_info: None,
                         core_handle: None,
                         local_processes: Vec::new(),
+                        installed_extensions: Vec::new(),
                     });
                     Workspace::install_close_guard(window, cx, &entity);
                     if let Some(path) = initial_capture {
@@ -22549,6 +22620,7 @@ mod ui_tests {
                         core_info: None,
                         core_handle: None,
                         local_processes: Vec::new(),
+                        installed_extensions: Vec::new(),
                     })
                 },
             )
@@ -23318,6 +23390,7 @@ mod ui_tests {
                         core_info: None,
                         core_handle: None,
                         local_processes: Vec::new(),
+                        installed_extensions: Vec::new(),
                     })
                 },
             )

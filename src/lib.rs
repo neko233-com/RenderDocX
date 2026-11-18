@@ -21,6 +21,7 @@ pub mod event_ranges;
 pub mod event_step;
 pub mod event_timing;
 pub mod event_tree;
+pub mod extensions;
 pub mod find_replace;
 pub mod frame_statistics;
 pub mod gpu_address;

@@ -56,6 +56,8 @@ pub struct Settings {
     pub replay_bridge: Option<PathBuf>,
     /// Optional path to renderdoc.dll for reading core info via stable C ABI.
     pub renderdoc_core: Option<PathBuf>,
+    /// Manifest names of extensions the user has enabled.
+    pub enabled_extensions: Vec<String>,
     pub replay_options: crate::replay::ReplayOptions,
     pub shader_processors: Vec<crate::shader_processor::NamedShaderProcessor>,
     pub texture_per_resource_settings: bool,
@@ -86,6 +88,7 @@ impl Default for Settings {
             renderdoccmd: None,
             replay_bridge: None,
             renderdoc_core: None,
+            enabled_extensions: Vec::new(),
             replay_options: Default::default(),
             shader_processors: Vec::new(),
             texture_per_resource_settings: true,
@@ -133,9 +136,13 @@ impl Settings {
         self.recent_capture_settings.clear();
     }
 
+    /// Directory holding settings.json; also the parent of user extensions.
+    pub fn config_dir() -> Option<PathBuf> {
+        ProjectDirs::from("com", "neko233", "RenderDocX").map(|p| p.config_dir().to_path_buf())
+    }
+
     fn path() -> Option<PathBuf> {
-        ProjectDirs::from("com", "neko233", "RenderDocX")
-            .map(|p| p.config_dir().join("settings.json"))
+        Self::config_dir().map(|dir| dir.join("settings.json"))
     }
 
     pub fn load() -> Self {
