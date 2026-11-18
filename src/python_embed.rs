@@ -164,6 +164,8 @@ struct ViewerState {
     show_output: bool,
     show_repl: bool,
     show_help: bool,
+    save_callback: Option<pyo3::Py<pyo3::PyAny>>,
+    revert_callback: Option<pyo3::Py<pyo3::PyAny>>,
 }
 
 /// Lightweight handle for a viewer panel, returned by `Get*Viewer()`.
@@ -188,6 +190,13 @@ impl ViewerHandle {
     /// `Name()` -> internal panel key (also useful in tests).
     fn Name(&self) -> String {
         self.panel.clone()
+    }
+
+    fn shader_stage(&self) -> Option<u32> {
+        self.panel
+            .strip_prefix("edit_shader:")
+            .or_else(|| self.panel.strip_prefix("shader:"))
+            .and_then(|stage| stage.parse::<u32>().ok())
     }
 
     /// `Widget()` -> no PySide2 widget; the GPUI panel is native.
@@ -625,6 +634,88 @@ impl ViewerHandle {
             .unwrap_or_else(|error| error.into_inner())
             .highlighted_history = Some(index);
         queue_ui_request("events");
+    }
+
+    #[allow(non_snake_case)]
+    fn SetSaveCallback(&self, callback: Option<Bound<'_, pyo3::PyAny>>) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .save_callback = callback.map(Bound::unbind);
+    }
+
+    #[allow(non_snake_case)]
+    fn SetRevertCallback(&self, callback: Option<Bound<'_, pyo3::PyAny>>) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .revert_callback = callback.map(Bound::unbind);
+    }
+
+    #[allow(non_snake_case)]
+    fn HasSaveCallback(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .save_callback
+            .is_some()
+    }
+
+    #[allow(non_snake_case)]
+    fn HasRevertCallback(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .revert_callback
+            .is_some()
+    }
+
+    /// `InvokeSaveCallback(entry, source)` -> call the registered save callback
+    /// with `(stage, entry, source)`.
+    #[allow(non_snake_case)]
+    fn InvokeSaveCallback(
+        &self,
+        py: Python<'_>,
+        entry: String,
+        source: String,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        let (callback, stage) = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            (state.save_callback.as_ref().map(|callback| callback.clone_ref(py)), self.shader_stage())
+        };
+        let Some(callback) = callback else {
+            return Ok(py.None());
+        };
+        callback
+            .bind(py)
+            .call1((stage, entry, source))
+            .map(Bound::unbind)
+    }
+
+    /// `InvokeRevertCallback()` -> call the registered revert callback with
+    /// the shader stage.
+    #[allow(non_snake_case)]
+    fn InvokeRevertCallback(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        let (callback, stage) = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            (
+                state
+                    .revert_callback
+                    .as_ref()
+                    .map(|callback| callback.clone_ref(py)),
+                self.shader_stage(),
+            )
+        };
+        let Some(callback) = callback else {
+            return Ok(py.None());
+        };
+        callback.bind(py).call1((stage,)).map(Bound::unbind)
     }
 
     #[allow(non_snake_case)]
@@ -1400,12 +1491,19 @@ fn ViewShader(stage: u32, event: Option<u32>) -> pyo3::PyResult<ViewerHandle> {
     Ok(viewer_handle(&format!("shader:{stage}")))
 }
 
-/// `EditShader(stage, event=None)` -> open the shader viewer in edit-capable
-/// mode. The GUI's Edit action remains available for the actual source edit.
+/// `EditShader(stage, event=None, save_callback=None, revert_callback=None)` ->
+/// open the shader viewer in edit-capable mode, optionally registering the
+/// upstream save/revert callbacks. The GUI's Edit action remains available for
+/// the actual source edit.
 #[pyo3::pyfunction]
-#[pyo3(signature = (stage, event = None))]
+#[pyo3(signature = (stage, event = None, save_callback = None, revert_callback = None))]
 #[allow(non_snake_case)]
-fn EditShader(stage: u32, event: Option<u32>) -> pyo3::PyResult<ViewerHandle> {
+fn EditShader(
+    stage: u32,
+    event: Option<u32>,
+    save_callback: Option<Bound<'_, pyo3::PyAny>>,
+    revert_callback: Option<Bound<'_, pyo3::PyAny>>,
+) -> pyo3::PyResult<ViewerHandle> {
     if stage >= 8 {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "Invalid shader stage",
@@ -1416,7 +1514,16 @@ fn EditShader(stage: u32, event: Option<u32>) -> pyo3::PyResult<ViewerHandle> {
         select_event(&session, event)?;
     }
     queue_ui_request(&format!("edit_shader:{stage}"));
-    Ok(viewer_handle(&format!("edit_shader:{stage}")))
+    let handle = viewer_handle(&format!("edit_shader:{stage}"));
+    {
+        let mut state = handle
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.save_callback = save_callback.map(Bound::unbind);
+        state.revert_callback = revert_callback.map(Bound::unbind);
+    }
+    Ok(handle)
 }
 
 /// `ViewBuffer(index, offset=0, length=None, format="")` -> open the buffer view
@@ -6434,6 +6541,39 @@ mod tests {
             &CaptureView::default(),
         );
         assert!(connected.error.is_none(), "{:?}", connected.error);
+    }
+
+    #[test]
+    fn shader_viewer_save_revert_callbacks_are_invoked() {
+        take_ui_requests();
+        let result = run_script_with_capture(
+            "import renderdocx\n\
+             saved = []\n\
+             reverted = []\n\
+             h = renderdocx.EditShader(4, save_callback=lambda stage, entry, source: saved.append((stage, entry, source)), revert_callback=lambda stage: reverted.append(stage))\n\
+             h.InvokeSaveCallback('main', 'void main() {}')\n\
+             h.InvokeRevertCallback()\n\
+             print(h.HasSaveCallback(), h.HasRevertCallback(), saved, reverted)",
+            &CaptureView::default(),
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(
+            result
+                .stdout
+                .contains("True True [(4, 'main', 'void main() {}')] [4]"),
+            "{}",
+            result.stdout
+        );
+        assert_eq!(take_ui_requests(), vec!["edit_shader:4"]);
+        let result = run_script_with_capture(
+            "import renderdocx\n\
+             h = renderdocx.ViewShader(4)\n\
+             print(h.HasSaveCallback(), repr(h.InvokeSaveCallback('main', 'x')), repr(h.InvokeRevertCallback()))",
+            &CaptureView::default(),
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.stdout.trim(), "False None None");
+        take_ui_requests();
     }
 
     #[test]
