@@ -21401,7 +21401,8 @@ impl Render for Workspace {
                         .child(div().id("rdc-sections").test_support().flex().flex_col().gap_0().max_h(px(160.)).overflow_hidden()
                             .children(file.sections.iter().enumerate().map(|(index, section)| {
                                 div().id(("rdc-section", index)).test_support().cursor_pointer().text_sm().child(format!(
-                                    "#{index} type={} ver={} flags={:#x} {}/{} bytes {}",
+                                    "#{index} {} (type={}) ver={} flags={:#x} {}/{} bytes {}",
+                                    renderdocx::rdc_file::section_type_name(section.section_type),
                                     section.section_type,
                                     section.version,
                                     section.flags,

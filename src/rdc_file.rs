@@ -11,6 +11,44 @@
 //! All byte offsets/endianness mirror the upstream struct layout (little-endian,
 //! tightly packed/unaligned).
 
+/// `SectionType` enum values from `renderdoc/api/replay/replay_enums.h`.
+pub mod section_type {
+    pub const UNKNOWN: u32 = 0;
+    pub const FRAME_CAPTURE: u32 = 1;
+    pub const RESOLVE_DATABASE: u32 = 2;
+    pub const BOOKMARKS: u32 = 3;
+    pub const NOTES: u32 = 4;
+    pub const RESOURCE_RENAMES: u32 = 5;
+    pub const AMD_RGP_PROFILE: u32 = 6;
+    pub const EXTENDED_THUMBNAIL: u32 = 7;
+    pub const EMBEDDED_LOGFILE: u32 = 8;
+    pub const EDITED_SHADERS: u32 = 9;
+    pub const D3D12_CORE: u32 = 10;
+    pub const D3D12_SDK_LAYERS: u32 = 11;
+    pub const EMBEDDED_EXTERNAL_FILES: u32 = 12;
+}
+
+/// Human-readable section type name (upstream `SectionType` enum names).
+pub fn section_type_name(section_type: u32) -> &'static str {
+    use section_type::*;
+    match section_type {
+        UNKNOWN => "Unknown",
+        FRAME_CAPTURE => "FrameCapture",
+        RESOLVE_DATABASE => "ResolveDatabase",
+        BOOKMARKS => "Bookmarks",
+        NOTES => "Notes",
+        RESOURCE_RENAMES => "ResourceRenames",
+        AMD_RGP_PROFILE => "AMDRGPProfile",
+        EXTENDED_THUMBNAIL => "ExtendedThumbnail",
+        EMBEDDED_LOGFILE => "EmbeddedLogfile",
+        EDITED_SHADERS => "EditedShaders",
+        D3D12_CORE => "D3D12Core",
+        D3D12_SDK_LAYERS => "D3D12SDKLayers",
+        EMBEDDED_EXTERNAL_FILES => "EmbeddedExternalFiles",
+        _ => "Invalid",
+    }
+}
+
 /// `MAKE_FOURCC('R','D','O','C')` = 0x434F4452, little-endian bytes "RDOC".
 pub const MAGIC: u32 = 0x434f_4452;
 
@@ -462,6 +500,24 @@ mod tests {
         let parsed = RdcFile::parse(&bytes).unwrap();
         let section = parsed.section(3).unwrap();
         assert_eq!(parsed.section_payload(section).unwrap(), source);
+    }
+
+    #[test]
+    fn section_type_names_match_upstream_enum() {
+        assert_eq!(
+            section_type_name(section_type::FRAME_CAPTURE),
+            "FrameCapture"
+        );
+        assert_eq!(
+            section_type_name(section_type::AMD_RGP_PROFILE),
+            "AMDRGPProfile"
+        );
+        assert_eq!(
+            section_type_name(section_type::EMBEDDED_EXTERNAL_FILES),
+            "EmbeddedExternalFiles"
+        );
+        assert_eq!(section_type_name(section_type::UNKNOWN), "Unknown");
+        assert_eq!(section_type_name(999), "Invalid");
     }
 
     #[test]
