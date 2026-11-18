@@ -1582,6 +1582,9 @@ impl PixelHistoryViewObject {
 struct ConstantBufferViewObject {
     value: serde_json::Value,
     stage: u32,
+    event: u32,
+    slot: u32,
+    index: u32,
 }
 
 #[pyo3::pymethods]
@@ -1601,6 +1604,16 @@ impl ConstantBufferViewObject {
     }
 
     #[allow(non_snake_case)]
+    fn GetSlot(&self) -> u32 {
+        self.slot
+    }
+
+    #[allow(non_snake_case)]
+    fn GetIndex(&self) -> u32 {
+        self.index
+    }
+
+    #[allow(non_snake_case)]
     fn GetVariables(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
         to_py(
             py,
@@ -1608,14 +1621,24 @@ impl ConstantBufferViewObject {
         )
     }
 
+    /// `GetRows()` -> BufferViewer rows for the constant block.
+    #[allow(non_snake_case)]
+    fn GetRows(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        to_py(py, &self.value.get("rows").cloned().unwrap_or_default())
+    }
+
     #[allow(non_snake_case)]
     fn Widget(&self, py: Python<'_>) -> pyo3::Py<pyo3::PyAny> {
         py.None()
     }
 
+    /// `Show()` -> open the independent constant-buffer viewer window.
     #[allow(non_snake_case)]
     fn Show(&self) {
-        queue_ui_request(&format!("shader:{}", self.stage));
+        queue_ui_request(&format!(
+            "constant_buffer:{}:{}:{}:{}",
+            self.stage, self.slot, self.index, self.event
+        ));
     }
 
     #[pyo3(signature = (key, default = None))]
@@ -1786,15 +1809,38 @@ fn ViewConstantBuffer(
         .pipeline_for_event(event)
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
     set_active_event(Some(event));
-    queue_ui_request(&format!("shader:{stage}"));
+    queue_ui_request(&format!("constant_buffer:{stage}:{slot}:{idx}:{event}"));
     let value = session
         .shader_constants(event, stage, slot, idx)
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-    let document = serde_json::to_value(&value)
+    let mut document = serde_json::to_value(&value)
         .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+    if let Some(object) = document.as_object_mut() {
+        object.insert(
+            "rows".into(),
+            serde_json::Value::Array(
+                value
+                    .variables
+                    .iter()
+                    .map(|variable| {
+                        serde_json::json!({
+                            "name": variable.name,
+                            "value": variable.value_hex,
+                            "type": variable.variable_type,
+                            "rows": variable.rows,
+                            "columns": variable.columns,
+                        })
+                    })
+                    .collect(),
+            ),
+        );
+    }
     Ok(ConstantBufferViewObject {
         value: document,
         stage,
+        event,
+        slot,
+        index: idx,
     })
 }
 
@@ -6708,6 +6754,10 @@ mod tests {
              p = renderdocx.pipeline(int(dispatch['event_id']))\n\
              d3 = p.get('api_specific', {}).get('d3d11')\n\
              print('d3d11-api-specific', p.get('api_specific', {}).get('kind') == 'D3D11' and isinstance(d3, dict) and d3.get('input_layout', {}).get('bound') is True and d3.get('layout_count', 0) >= 1 and isinstance(d3.get('stream_out'), list) and d3.get('descriptor_count', 0) > 0 and d3.get('descriptor_byte_size', 0) >= 1 and isinstance(d3.get('shader_class_instances'), dict))\n\
+             cbv = renderdocx.ViewConstantBuffer(5, 0, 0, event=int(dispatch['event_id']))\n\
+             rows = cbv.GetRows()\n\
+             print('constant-buffer-viewer', cbv.GetEvent() == int(dispatch['event_id']) and cbv.GetStage() == 5 and cbv.GetSlot() == 0 and cbv.GetIndex() == 0 and len(rows) == 1 and rows[0].get('name') == 'seed' and len(rows[0].get('value')) > 0 and isinstance(cbv.GetVariables(), list))\n\
+             cbv.Show()\n\
              print('sampler-list', len(sr.GetSamplers()) == 0)",
             &CaptureView::default(),
         );
@@ -6730,6 +6780,11 @@ mod tests {
         );
         assert!(
             result.stdout.contains("deep-members True"),
+            "{}",
+            result.stdout
+        );
+        assert!(
+            result.stdout.contains("constant-buffer-viewer True"),
             "{}",
             result.stdout
         );

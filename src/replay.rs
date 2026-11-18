@@ -6018,6 +6018,25 @@ pub mod test_support {
             block: u32,
             element: u32,
         ) -> Result<ShaderConstants, String> {
+            if stage == 5 && block == 0 && element == 0 {
+                return Ok(ShaderConstants {
+                    event_id: event,
+                    stage,
+                    block,
+                    element,
+                    byte_offset: "0".into(),
+                    byte_size: "16".into(),
+                    variables: vec![DebugVariable {
+                        name: "seed".into(),
+                        rows: 1,
+                        columns: 1,
+                        variable_type: 4,
+                        flags: 1,
+                        value_hex: "2a000000".into(),
+                        members: Vec::new(),
+                    }],
+                });
+            }
             if stage != 0 || block != 0 || element >= 2 {
                 return Err("Invalid fixture constants".into());
             }

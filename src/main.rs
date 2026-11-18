@@ -761,6 +761,25 @@ enum ViewerDialog {
     Camera,
 }
 
+/// Independent BufferViewer window for a shader constant block.
+#[derive(Clone, Debug, Default)]
+struct ConstantBufferViewer {
+    event: u32,
+    stage: u32,
+    slot: u32,
+    index: u32,
+    pending: bool,
+    error: Option<String>,
+    rows: Vec<ConstantBufferRow>,
+}
+
+#[derive(Clone, Debug)]
+struct ConstantBufferRow {
+    name: String,
+    value: String,
+    type_id: u32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CaptureTab {
     Events,
@@ -1079,6 +1098,7 @@ struct Workspace {
     replay_loop_generation: u64,
     replay_loop_delay: Entity<InputState>,
     viewer_dialog: Option<ViewerDialog>,
+    constant_buffer_viewer: Option<ConstantBufferViewer>,
     proj_fov: Entity<InputState>,
     proj_aspect: Entity<InputState>,
     proj_near: Entity<InputState>,
@@ -5393,6 +5413,80 @@ impl Workspace {
             .into_any_element()]
     }
 
+    fn constant_buffer_overlay(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        let Some(viewer) = &self.constant_buffer_viewer else {
+            return Vec::new();
+        };
+        let title = format!(
+            "Constant buffer · event {} · stage {} · slot {} · index {}",
+            viewer.event, viewer.stage, viewer.slot, viewer.index
+        );
+        let mut body: Vec<gpui::AnyElement> = Vec::new();
+        if viewer.pending {
+            body.push(
+                div()
+                    .text_color(rgb(0x91a7c0))
+                    .child(self.t("Loading constant buffer…", "正在加载常量缓冲…"))
+                    .into_any_element(),
+            );
+        } else if let Some(error) = &viewer.error {
+            body.push(
+                div()
+                    .text_color(rgb(0xe08a8a))
+                    .child(error.clone())
+                    .into_any_element(),
+            );
+        } else {
+            for row in &viewer.rows {
+                body.push(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(div().w(px(220.)).child(row.name.clone()))
+                        .child(div().text_color(rgb(0xd4b77c)).child(row.value.clone()))
+                        .child(
+                            div()
+                                .text_color(rgb(0x91a7c0))
+                                .child(format!("type {}", row.type_id)),
+                        )
+                        .into_any_element(),
+                );
+            }
+        }
+        vec![div()
+            .id("constant-buffer-viewer")
+            .test_support()
+            .absolute()
+            .inset_0()
+            .bg(rgb(0x050a12))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .max_w(px(680.))
+                    .p_6()
+                    .rounded_lg()
+                    .bg(rgb(0x192332))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(div().text_xl().child(title))
+                    .children(body)
+                    .child(button(
+                        "constant-buffer-close",
+                        self.t("Close", "关闭"),
+                        true,
+                        |this, cx| {
+                            this.constant_buffer_viewer = None;
+                            cx.notify();
+                        },
+                        cx,
+                    )),
+            )
+            .into_any_element()]
+    }
+
     fn save(&mut self) {
         #[cfg(test)]
         let result = if let Some(directory) = &self.buffer_store_override {
@@ -6108,7 +6202,85 @@ impl Workspace {
     }
 
     /// Apply panel requests queued by script `Show*` calls after a script run.
+    /// Open the independent constant-buffer viewer window and fetch its rows.
+    fn open_constant_buffer_viewer(
+        &mut self,
+        stage: u32,
+        slot: u32,
+        index: u32,
+        event: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session.clone() else {
+            self.constant_buffer_viewer = Some(ConstantBufferViewer {
+                event,
+                stage,
+                slot,
+                index,
+                error: Some("No capture is open".into()),
+                ..Default::default()
+            });
+            cx.notify();
+            return;
+        };
+        self.constant_buffer_viewer = Some(ConstantBufferViewer {
+            event,
+            stage,
+            slot,
+            index,
+            pending: true,
+            ..Default::default()
+        });
+        let revision = self.open_revision;
+        let task = cx
+            .background_executor()
+            .spawn(async move { session.shader_constants(event, stage, slot, index) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_revision != revision {
+                    return;
+                }
+                let Some(viewer) = this.constant_buffer_viewer.as_mut() else {
+                    return;
+                };
+                if (viewer.event, viewer.stage, viewer.slot, viewer.index)
+                    != (event, stage, slot, index)
+                {
+                    return;
+                }
+                viewer.pending = false;
+                match result {
+                    Ok(values) => {
+                        viewer.rows = values
+                            .variables
+                            .iter()
+                            .map(|variable| ConstantBufferRow {
+                                name: variable.name.clone(),
+                                value: variable.value_hex.clone(),
+                                type_id: variable.variable_type,
+                            })
+                            .collect();
+                    }
+                    Err(error) => viewer.error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn apply_python_ui_request(&mut self, request: &str, cx: &mut Context<Self>) {
+        if let Some(rest) = request.strip_prefix("constant_buffer:") {
+            let parts = rest
+                .split(':')
+                .filter_map(|part| part.parse::<u32>().ok())
+                .collect::<Vec<_>>();
+            if parts.len() == 4 {
+                self.open_constant_buffer_viewer(parts[0], parts[1], parts[2], parts[3], cx);
+                return;
+            }
+        }
         if let Some(stage) = request
             .strip_prefix("shader:")
             .or_else(|| request.strip_prefix("edit_shader:"))
@@ -21543,6 +21715,7 @@ impl Render for Workspace {
                 .size_full()
                 .child(self.capture_view(window, cx))
                 .children(overlay)
+                .children(self.constant_buffer_overlay(cx))
                 .children(self.log_panel(cx))
                 .into_any_element();
         }
@@ -22828,6 +23001,7 @@ impl Render for Workspace {
                 s.child(div().text_color(rgb(0xd4b77c)).child(status))
             })
             .children(self.info_overlay(cx))
+            .children(self.constant_buffer_overlay(cx))
             .children(self.log_panel(cx))
             .into_any_element()
     }
@@ -23187,6 +23361,7 @@ fn main() {
                         replay_loop_generation: 0,
                         replay_loop_delay,
                         viewer_dialog: None,
+                        constant_buffer_viewer: None,
                         proj_fov,
                         proj_aspect,
                         proj_near,
@@ -24074,6 +24249,7 @@ mod ui_tests {
                         replay_loop_generation: 0,
                         replay_loop_delay,
                         viewer_dialog: None,
+                        constant_buffer_viewer: None,
                         proj_fov,
                         proj_aspect,
                         proj_near,
@@ -24901,6 +25077,7 @@ mod ui_tests {
                         replay_loop_generation: 0,
                         replay_loop_delay,
                         viewer_dialog: None,
+                        constant_buffer_viewer: None,
                         proj_fov,
                         proj_aspect,
                         proj_near,
@@ -31632,5 +31809,51 @@ mod ui_tests {
             "{written}"
         );
         renderdocx::python_embed::take_ui_requests();
+
+        // The constant-buffer request opens an independent viewer window with
+        // BufferViewer rows, and the close action dismisses it.
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.open_constant_buffer_viewer(5, 0, 0, 41, cx)
+            })
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            let ready = cx.update(|cx| {
+                view.read(cx)
+                    .constant_buffer_viewer
+                    .as_ref()
+                    .is_some_and(|viewer| !viewer.pending)
+            });
+            if ready {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "constant buffer viewer did not load"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        cx.update(|cx| {
+            let viewer = view
+                .read(cx)
+                .constant_buffer_viewer
+                .as_ref()
+                .expect("constant buffer viewer");
+            assert_eq!(viewer.rows.len(), 1);
+            assert_eq!(viewer.rows[0].name, "seed");
+            assert_eq!(viewer.rows[0].value, "2a000000");
+            assert_eq!(viewer.rows[0].type_id, 4);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("constant-buffer-close", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(view.read(cx).constant_buffer_viewer.is_none());
+        });
     }
 }
