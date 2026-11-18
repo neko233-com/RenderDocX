@@ -17010,7 +17010,21 @@ impl Workspace {
                         div().id("resource-preview").test_support().flex().flex_col().gap_1()
                             .child(div().text_sm().text_color(rgb(0x82aaff)).child(self.t("Preview", "预览")))
                             .when_some(
-                                self.preview.as_ref().map(|preview| preview.path.clone()),
+                                self.selected_resource
+                                    .and_then(|index| self.thumbnail_dir.as_ref().map(move |dir| (index, dir)))
+                                    .and_then(|(index, dir)| {
+                                        // Find any cached thumbnail for this resource index.
+                                        std::fs::read_dir(dir.path())
+                                            .ok()
+                                            .into_iter()
+                                            .flatten()
+                                            .filter_map(|entry| entry.ok())
+                                            .find(|entry| {
+                                                entry.file_name().to_string_lossy().starts_with(&format!("thumb_{index}_"))
+                                            })
+                                            .map(|entry| entry.path())
+                                            .or_else(|| self.preview.as_ref().map(|preview| preview.path.clone()))
+                                    }),
                                 |card, path| {
                                     card.child(
                                         img(path)
