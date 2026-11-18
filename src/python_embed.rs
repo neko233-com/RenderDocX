@@ -1341,6 +1341,36 @@ impl PipelineObject {
     }
 
     #[allow(non_snake_case)]
+    fn GetAPISpecific(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        to_py(py, &self.field_or_empty("api_specific"))
+    }
+
+    #[allow(non_snake_case)]
+    fn GetAPIKind(&self) -> String {
+        self.field("api_specific")
+            .and_then(|value| value.get("kind"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    #[allow(non_snake_case)]
+    fn GetD3D11State(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.field("api_specific").and_then(|value| value.get("d3d11")) {
+            Some(value) => to_py(py, value),
+            None => Ok(py.None()),
+        }
+    }
+
+    #[allow(non_snake_case)]
+    fn GetVulkanState(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.field("api_specific").and_then(|value| value.get("vulkan")) {
+            Some(value) => to_py(py, value),
+            None => Ok(py.None()),
+        }
+    }
+
+    #[allow(non_snake_case)]
     fn GetShaderReflection(
         &self,
         stage: u32,
@@ -5002,6 +5032,9 @@ mod tests {
              print('replay', controller.GetPipelineState().get('event_id') == 19 and len(controller.GetTextures()) == 2 and len(controller.GetBuffers()) == 1 and len(controller.GetResources()) > 0 and controller.GetFrameInfo() is not None and isinstance(controller.GetAPIProperties(), dict))\n\
              ps = renderdocx.PipelineState(19)\n\
              print('pipeline-object', ps.event_id == 19 and ps.available and ps.GetEventId() == 19 and ps.GetShader(4).get('bound') and len(ps.GetOutputs()) == 2 and ps['event_id'] == 19 and ps.get('event_id') == 19 and ps.GetColorAttachments()[0].get('resource', {}).get('resource_index') == 7 and 'event_id' in ps.keys())\n\
+             apis = ps.GetAPISpecific()\n\
+             vk = ps.GetVulkanState()\n\
+             print('api-specific', apis.get('kind') == 'Vulkan' and ps.GetAPIKind() == 'Vulkan' and isinstance(vk, dict) and isinstance(vk.get('descriptor_sets'), list) and vk.get('render_pass', {}).get('resource_index') == 9 and vk.get('framebuffer_width') == 128 and vk.get('raster_samples') == 1 and ps.GetD3D11State() is None and renderdocx.pipeline(19).get('api_specific', {}).get('kind') == 'Vulkan')\n\
              tex = renderdocx.Texture(0)\n\
              print('texture-object', tex.name == 'Swapchain Image 96' and tex.width == 128 and tex.arraySize == 1 and tex.format == 'B8G8R8A8_SRGB' and tex.get('mips') == 1 and tex['height'] == 128 and 'height' in tex.keys())\n\
              act = renderdocx.Action(21)\n\
@@ -5110,6 +5143,7 @@ mod tests {
         assert!(result.stdout.contains("compat True"), "{}", result.stdout);
         assert!(result.stdout.contains("replay True"), "{}", result.stdout);
         assert!(result.stdout.contains("pipeline-object True"), "{}", result.stdout);
+        assert!(result.stdout.contains("api-specific True"), "{}", result.stdout);
         assert!(result.stdout.contains("texture-object True"), "{}", result.stdout);
         assert!(result.stdout.contains("action-object True"), "{}", result.stdout);
         assert!(result.stdout.contains("replace True"), "{}", result.stdout);
@@ -5350,6 +5384,9 @@ mod tests {
              print('shader-constant', var.name == 'seed' and var.byteOffset == 0 and isinstance(var.defaultValue, str) and var.GetName() == 'seed')\n\
              ty = var.GetType()\n\
              print('reflected-type', ty.name == 'uint' and ty.baseType == 4 and ty.rows == 1 and ty.columns == 1 and ty.GetName() == 'uint' and isinstance(ty.GetMembers(), list) and 'base_type' in ty.keys())\n\
+             p = renderdocx.pipeline(int(dispatch['event_id']))\n\
+             d3 = p.get('api_specific', {}).get('d3d11')\n\
+             print('d3d11-api-specific', p.get('api_specific', {}).get('kind') == 'D3D11' and isinstance(d3, dict) and d3.get('input_layout', {}).get('bound') is True and d3.get('layout_count', 0) >= 1 and isinstance(d3.get('stream_out'), list) and d3.get('descriptor_count', 0) > 0 and d3.get('descriptor_byte_size', 0) >= 1 and isinstance(d3.get('shader_class_instances'), dict))\n\
              print('sampler-list', len(sr.GetSamplers()) == 0)",
             &CaptureView::default(),
         );
@@ -5367,6 +5404,11 @@ mod tests {
         );
         assert!(
             result.stdout.contains("reflected-type True"),
+            "{}",
+            result.stdout
+        );
+        assert!(
+            result.stdout.contains("d3d11-api-specific True"),
             "{}",
             result.stdout
         );

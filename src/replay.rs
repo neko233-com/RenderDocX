@@ -1611,6 +1611,9 @@ pub struct Pipeline {
     pub scissors: Option<Vec<PipelineScissor>>,
     #[serde(default)]
     pub fixed_state: Option<PipelineFixedState>,
+    /// API-specific pipeline state emitted by newer bridges (D3D11/Vulkan).
+    #[serde(default)]
+    pub api_specific: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]

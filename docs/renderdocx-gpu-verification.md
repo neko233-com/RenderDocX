@@ -142,8 +142,11 @@ The same test covers the per-field helpers (`pipeline_shader`,
 texture-viewer state (`ViewTexture`/subresource/overlay/zoom/channels),
 buffer-viewer scroll state, `ShaderSignature` from the fragment reflection, and
 a `ShaderVariable` built from the real mesh debug trace, shader-viewer
-step/watch/source methods, and `ReflectedType` from the D3D11 constant's `uint`
-type, `Get*Viewer()` handles, `ViewShader`/`EditShader` panel
+step/watch/source methods, `ReflectedType` from the D3D11 constant's `uint`
+type, and API-specific pipeline state (Vulkan graphics pipeline/layouts/render
+pass/framebuffer/multisample on the mesh capture; D3D11 input layout,
+rasterizer/descriptor-store state and shader class instances on the constant
+capture), `Get*Viewer()` handles, `ViewShader`/`EditShader` panel
 requests, and a `DebugShader` mesh trace.
 Notes and bookmarks are written and
 read back through `SetNotes`/`GetNotes`/`SetBookmark`/`GetBookmarks`/

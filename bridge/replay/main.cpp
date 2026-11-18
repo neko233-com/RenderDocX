@@ -799,6 +799,11 @@ void write_pipeline(IReplayController *controller, uint32_t event)
     if(found == indices.end() || id == ResourceId()) json_string("", 0);
     else json_string(resources[found->second].name);
   };
+  auto resource_object = [&](ResourceId id) {
+    std::cout << '{';
+    resource(id);
+    std::cout << '}';
+  };
   auto buffer = [&](const BoundVBuffer &binding) {
     std::cout << '{';
     resource(binding.resourceId);
@@ -1023,6 +1028,107 @@ void write_pipeline(IReplayController *controller, uint32_t event)
       equation(blend.colorBlend); std::cout << ",\"alpha\":"; equation(blend.alphaBlend); std::cout << '}';
     }
     std::cout << "]}";
+  }
+  // API-specific state that the generic PipeState interface does not expose.
+  std::cout << ",\"api_specific\":";
+  if(state.IsCaptureD3D11())
+  {
+    const D3D11Pipe::State *d3d11 = controller->GetD3D11PipelineState();
+    std::cout << "{\"kind\":\"D3D11\",\"d3d11\":{\"input_layout\":";
+    resource_object(d3d11->inputAssembly.resourceId);
+    std::cout << ",\"layout_count\":" << d3d11->inputAssembly.layouts.size()
+              << ",\"has_bytecode\":" << (d3d11->inputAssembly.bytecode ? "true" : "false")
+              << ",\"stream_out\":[";
+    for(size_t i = 0; i < d3d11->streamOut.outputs.size(); ++i)
+    {
+      if(i) std::cout << ',';
+      std::cout << "{\"resource\":";
+      resource_object(d3d11->streamOut.outputs[i].resourceId);
+      std::cout << ",\"byte_offset\":" << d3d11->streamOut.outputs[i].byteOffset << '}';
+    }
+    std::cout << "],\"rasterized_stream\":" << d3d11->streamOut.rasterizedStream
+              << ",\"rasterizer_state\":";
+    resource_object(d3d11->rasterizer.state.resourceId);
+    std::cout << ",\"depth_bias\":" << d3d11->rasterizer.state.depthBias
+              << ",\"depth_bias_clamp\":"; number(d3d11->rasterizer.state.depthBiasClamp);
+    std::cout << ",\"slope_scaled_depth_bias\":"; number(d3d11->rasterizer.state.slopeScaledDepthBias);
+    std::cout << ",\"depth_clip\":" << (d3d11->rasterizer.state.depthClip ? "true" : "false")
+              << ",\"scissor_enable\":" << (d3d11->rasterizer.state.scissorEnable ? "true" : "false")
+              << ",\"multisample_enable\":" << (d3d11->rasterizer.state.multisampleEnable ? "true" : "false")
+              << ",\"antialiased_lines\":" << (d3d11->rasterizer.state.antialiasedLines ? "true" : "false")
+              << ",\"forced_sample_count\":" << d3d11->rasterizer.state.forcedSampleCount
+              << ",\"blend_state\":";
+    resource_object(d3d11->outputMerger.blendState.resourceId);
+    std::cout << ",\"alpha_to_coverage\":" << (d3d11->outputMerger.blendState.alphaToCoverage ? "true" : "false")
+              << ",\"depth_stencil_state\":";
+    resource_object(d3d11->outputMerger.depthStencilState.resourceId);
+    std::cout << ",\"depth_read_only\":" << (d3d11->outputMerger.depthReadOnly ? "true" : "false")
+              << ",\"stencil_read_only\":" << (d3d11->outputMerger.stencilReadOnly ? "true" : "false")
+              << ",\"uav_start_slot\":" << d3d11->outputMerger.uavStartSlot
+              << ",\"descriptor_store\":";
+    resource_object(d3d11->descriptorStore);
+    std::cout << ",\"descriptor_count\":" << d3d11->descriptorCount
+              << ",\"descriptor_byte_size\":" << d3d11->descriptorByteSize
+              << ",\"shader_class_instances\":{\"vertex\":" << d3d11->vertexShader.classInstances.size()
+              << ",\"hull\":" << d3d11->hullShader.classInstances.size()
+              << ",\"domain\":" << d3d11->domainShader.classInstances.size()
+              << ",\"geometry\":" << d3d11->geometryShader.classInstances.size()
+              << ",\"pixel\":" << d3d11->pixelShader.classInstances.size()
+              << ",\"compute\":" << d3d11->computeShader.classInstances.size() << "}}}";
+  }
+  else if(state.IsCaptureVK())
+  {
+    const VKPipe::State *vk = controller->GetVulkanPipelineState();
+    std::cout << "{\"kind\":\"Vulkan\",\"vulkan\":{\"graphics_pipeline\":";
+    resource_object(vk->graphics.pipelineResourceId);
+    std::cout << ",\"compute_pipeline\":";
+    resource_object(vk->compute.pipelineResourceId);
+    std::cout << ",\"graphics_layout\":";
+    resource_object(vk->graphics.pipelineFragmentLayoutResourceId);
+    std::cout << ",\"compute_layout\":";
+    resource_object(vk->compute.pipelineComputeLayoutResourceId);
+    std::cout << ",\"flags\":\"" << vk->graphics.flags << "\",\"descriptor_sets\":[";
+    for(size_t i = 0; i < vk->graphics.descriptorSets.size(); ++i)
+    {
+      if(i) std::cout << ',';
+      const VKPipe::DescriptorSet &set = vk->graphics.descriptorSets[i];
+      std::cout << "{\"layout\":";
+      resource_object(set.layoutResourceId);
+      std::cout << ",\"descriptor_set\":";
+      resource_object(set.descriptorSetResourceId);
+      std::cout << ",\"push_descriptor\":" << (set.pushDescriptor ? "true" : "false")
+                << ",\"dynamic_offset_count\":" << set.dynamicOffsets.size()
+                << ",\"descriptor_buffer_index\":" << set.descriptorBufferIndex << '}';
+    }
+    std::cout << "],\"push_constants_size\":" << vk->pushconsts.size()
+              << ",\"render_pass\":";
+    resource_object(vk->currentPass.renderpass.resourceId);
+    std::cout << ",\"render_pass_dynamic\":" << (vk->currentPass.renderpass.dynamic ? "true" : "false")
+              << ",\"render_pass_suspended\":" << (vk->currentPass.renderpass.suspended ? "true" : "false")
+              << ",\"feedback_loop\":" << (vk->currentPass.renderpass.feedbackLoop ? "true" : "false")
+              << ",\"subpass\":" << vk->currentPass.renderpass.subpass
+              << ",\"framebuffer\":";
+    resource_object(vk->currentPass.framebuffer.resourceId);
+    std::cout << ",\"framebuffer_width\":" << vk->currentPass.framebuffer.width
+              << ",\"framebuffer_height\":" << vk->currentPass.framebuffer.height
+              << ",\"framebuffer_layers\":" << vk->currentPass.framebuffer.layers
+              << ",\"color_feedback_allowed\":" << (vk->currentPass.colorFeedbackAllowed ? "true" : "false")
+              << ",\"depth_feedback_allowed\":" << (vk->currentPass.depthFeedbackAllowed ? "true" : "false")
+              << ",\"stencil_feedback_allowed\":" << (vk->currentPass.stencilFeedbackAllowed ? "true" : "false")
+              << ",\"conditional_rendering\":{\"buffer\":";
+    resource_object(vk->conditionalRendering.bufferId);
+    std::cout << ",\"byte_offset\":\"" << vk->conditionalRendering.byteOffset
+              << "\",\"inverted\":" << (vk->conditionalRendering.isInverted ? "true" : "false")
+              << ",\"passing\":" << (vk->conditionalRendering.isPassing ? "true" : "false") << '}'
+              << ",\"raster_samples\":" << vk->multisample.rasterSamples
+              << ",\"sample_shading_enable\":" << (vk->multisample.sampleShadingEnable ? "true" : "false");
+    std::cout << ",\"min_sample_shading\":"; number(vk->multisample.minSampleShading);
+    std::cout << ",\"sample_mask\":" << vk->multisample.sampleMask
+              << ",\"transform_feedback_buffers\":" << vk->transformFeedback.buffers.size() << "}}";
+  }
+  else
+  {
+    std::cout << "null";
   }
   std::cout << '}';
 }
