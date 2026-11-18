@@ -1,6 +1,6 @@
 #requires -Version 7.0
 <#
-  Run every `#[ignore]` real test (20 agent_cli + 4 lib) against locally built
+  Run every `#[ignore]` real test (20 agent_cli + 5 lib) against locally built
   RenderDoc core, bridge, fixtures, Vulkan toolchain, captures and mismatch
   bridge.
 
@@ -67,6 +67,20 @@ if ((Test-Path -LiteralPath $constFixture) -and (Test-Path -LiteralPath $constCo
     $constCapture = Get-ChildItem $constDir -Filter *.rdc -File |
       Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
     if ($constCapture) { $env:RENDERDOCX_TEST_D3D11_CONSTANT_CAPTURE = $constCapture }
+  }
+}
+
+# Generate an OpenGL capture for the API-specific pipeline test.
+$glFixture = Join-Path $repo 'target/replay-bridge/Release/renderdocx-opengl-fixture.exe'
+if ((Test-Path -LiteralPath $glFixture) -and (Test-Path -LiteralPath $constCore)) {
+  $glDir = Join-Path $repo ("target/renderdocx-fixtures/gl-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+  New-Item -ItemType Directory -Force -Path $glDir | Out-Null
+  $prefix = Join-Path $glDir 'frame'
+  $process = Start-Process -FilePath $glFixture -ArgumentList @((Resolve-Path $constCore).Path, $prefix) -WindowStyle Hidden -PassThru -Wait
+  if ($process.ExitCode -eq 0) {
+    $glCapture = Get-ChildItem $glDir -Filter *.rdc -File |
+      Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+    if ($glCapture) { $env:RENDERDOCX_TEST_OPENGL_CAPTURE = $glCapture }
   }
 }
 

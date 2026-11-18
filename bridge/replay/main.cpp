@@ -1076,6 +1076,113 @@ void write_pipeline(IReplayController *controller, uint32_t event)
               << ",\"pixel\":" << d3d11->pixelShader.classInstances.size()
               << ",\"compute\":" << d3d11->computeShader.classInstances.size() << "}}}";
   }
+  else if(state.IsCaptureD3D12())
+  {
+    const D3D12Pipe::State *d3d12 = controller->GetD3D12PipelineState();
+    std::cout << "{\"kind\":\"D3D12\",\"d3d12\":{\"pipeline\":";
+    resource_object(d3d12->pipelineResourceId);
+    std::cout << ",\"descriptor_heaps\":[";
+    for(size_t i = 0; i < d3d12->descriptorHeaps.size(); ++i)
+    {
+      if(i) std::cout << ',';
+      resource_object(d3d12->descriptorHeaps[i]);
+    }
+    std::cout << "],\"root_signature\":";
+    resource_object(d3d12->rootSignature.resourceId);
+    std::cout << ",\"root_parameter_count\":" << d3d12->rootSignature.parameters.size()
+              << ",\"static_sampler_count\":" << d3d12->rootSignature.staticSamplers.size()
+              << ",\"input_layout_count\":" << d3d12->inputAssembly.layouts.size()
+              << ",\"index_strip_cut_value\":" << d3d12->inputAssembly.indexStripCutValue
+              << ",\"topology\":" << uint32_t(d3d12->inputAssembly.topology)
+              << ",\"stream_out\":[";
+    for(size_t i = 0; i < d3d12->streamOut.outputs.size(); ++i)
+    {
+      if(i) std::cout << ',';
+      std::cout << "{\"resource\":";
+      resource_object(d3d12->streamOut.outputs[i].resourceId);
+      std::cout << ",\"byte_offset\":\"" << d3d12->streamOut.outputs[i].byteOffset
+                << "\",\"byte_size\":\"" << d3d12->streamOut.outputs[i].byteSize << "\"}";
+    }
+    std::cout << "],\"rasterized_stream\":" << d3d12->streamOut.rasterizedStream
+              << ",\"sample_mask\":" << d3d12->rasterizer.sampleMask
+              << ",\"depth_bias\":"; number(d3d12->rasterizer.state.depthBias);
+    std::cout << ",\"depth_bias_clamp\":"; number(d3d12->rasterizer.state.depthBiasClamp);
+    std::cout << ",\"slope_scaled_depth_bias\":"; number(d3d12->rasterizer.state.slopeScaledDepthBias);
+    std::cout << ",\"depth_clip\":" << (d3d12->rasterizer.state.depthClip ? "true" : "false")
+              << ",\"line_raster\":" << uint32_t(d3d12->rasterizer.state.lineRasterMode)
+              << ",\"forced_sample_count\":" << d3d12->rasterizer.state.forcedSampleCount
+              << ",\"conservative_raster\":" << uint32_t(d3d12->rasterizer.state.conservativeRasterization)
+              << ",\"base_shading_rate\":[" << d3d12->rasterizer.state.baseShadingRate.first
+              << ',' << d3d12->rasterizer.state.baseShadingRate.second << ']'
+              << ",\"alpha_to_coverage\":" << (d3d12->outputMerger.blendState.alphaToCoverage ? "true" : "false")
+              << ",\"depth_enable\":" << (d3d12->outputMerger.depthStencilState.depthEnable ? "true" : "false")
+              << ",\"depth_writes\":" << (d3d12->outputMerger.depthStencilState.depthWrites ? "true" : "false")
+              << ",\"stencil_enable\":" << (d3d12->outputMerger.depthStencilState.stencilEnable ? "true" : "false")
+              << ",\"depth_read_only\":" << (d3d12->outputMerger.depthReadOnly ? "true" : "false")
+              << ",\"stencil_read_only\":" << (d3d12->outputMerger.stencilReadOnly ? "true" : "false")
+              << ",\"predication\":{\"buffer\":";
+    resource_object(d3d12->predication.resourceId);
+    std::cout << ",\"offset\":\"" << d3d12->predication.offset
+              << "\",\"skip_if_zero\":" << (d3d12->predication.skipIfZero ? "true" : "false") << "}}}";
+  }
+  else if(state.IsCaptureGL())
+  {
+    const GLPipe::State *gl = controller->GetGLPipelineState();
+    std::cout << "{\"kind\":\"OpenGL\",\"gl\":{\"program_pipeline\":";
+    resource_object(gl->pipelineResourceId);
+    std::cout << ",\"vertex_array_object\":";
+    resource_object(gl->vertexInput.vertexArrayObject);
+    std::cout << ",\"attribute_count\":" << gl->vertexInput.attributes.size()
+              << ",\"vertex_buffer_count\":" << gl->vertexInput.vertexBuffers.size()
+              << ",\"index_buffer\":";
+    resource_object(gl->vertexInput.indexBuffer);
+    std::cout << ",\"index_byte_stride\":" << gl->vertexInput.indexByteStride
+              << ",\"topology\":" << uint32_t(gl->vertexInput.topology)
+              << ",\"primitive_restart\":" << (gl->vertexInput.primitiveRestart ? "true" : "false")
+              << ",\"descriptor_store\":";
+    resource_object(gl->descriptorStore);
+    std::cout << ",\"descriptor_count\":" << gl->descriptorCount
+              << ",\"descriptor_byte_size\":" << gl->descriptorByteSize
+              << ",\"texture_completeness_count\":" << gl->textureCompleteness.size()
+              << ",\"feedback\":{\"resource\":";
+    resource_object(gl->transformFeedback.feedbackResourceId);
+    std::cout << ",\"active\":" << (gl->transformFeedback.active ? "true" : "false")
+              << ",\"paused\":" << (gl->transformFeedback.paused ? "true" : "false")
+              << ",\"buffers\":[";
+    for(size_t i = 0; i < 4; ++i)
+    {
+      if(i) std::cout << ',';
+      std::cout << "{\"resource\":";
+      resource_object(gl->transformFeedback.bufferResourceId[i]);
+      std::cout << ",\"byte_offset\":\"" << gl->transformFeedback.byteOffset[i]
+                << "\",\"byte_size\":\"" << gl->transformFeedback.byteSize[i] << "\"}";
+    }
+    std::cout << "]},\"rasterizer\":{\"fill\":" << uint32_t(gl->rasterizer.state.fillMode)
+              << ",\"cull\":" << uint32_t(gl->rasterizer.state.cullMode)
+              << ",\"front_ccw\":" << (gl->rasterizer.state.frontCCW ? "true" : "false")
+              << ",\"depth_bias\":"; number(gl->rasterizer.state.depthBias);
+    std::cout << ",\"slope_scaled_depth_bias\":"; number(gl->rasterizer.state.slopeScaledDepthBias);
+    std::cout << ",\"offset_clamp\":"; number(gl->rasterizer.state.offsetClamp);
+    std::cout << ",\"depth_clamp\":" << (gl->rasterizer.state.depthClamp ? "true" : "false")
+              << ",\"multisample\":" << (gl->rasterizer.state.multisampleEnable ? "true" : "false")
+              << ",\"sample_shading\":" << (gl->rasterizer.state.sampleShading ? "true" : "false")
+              << ",\"sample_mask\":" << (gl->rasterizer.state.sampleMask ? "true" : "false")
+              << ",\"sample_mask_value\":" << gl->rasterizer.state.sampleMaskValue
+              << "},\"depth\":{\"enabled\":" << (gl->depthState.depthEnable ? "true" : "false")
+              << ",\"writes\":" << (gl->depthState.depthWrites ? "true" : "false")
+              << ",\"function\":" << uint32_t(gl->depthState.depthFunction)
+              << ",\"bounds\":" << (gl->depthState.depthBounds ? "true" : "false") << "}"
+              << ",\"stencil_enabled\":" << (gl->stencilState.stencilEnable ? "true" : "false")
+              << ",\"framebuffer\":{\"draw_fbo\":";
+    resource_object(gl->framebuffer.drawFBO.resourceId);
+    std::cout << ",\"read_fbo\":";
+    resource_object(gl->framebuffer.readFBO.resourceId);
+    std::cout << ",\"draw_buffer_count\":" << gl->framebuffer.drawFBO.drawBuffers.size()
+              << ",\"read_buffer\":" << gl->framebuffer.readFBO.readBuffer
+              << ",\"srgb\":" << (gl->framebuffer.framebufferSRGB ? "true" : "false")
+              << ",\"dither\":" << (gl->framebuffer.dither ? "true" : "false")
+              << ",\"default_sample_count\":" << gl->framebuffer.drawFBO.defaultSampleCount << "}}}";
+  }
   else if(state.IsCaptureVK())
   {
     const VKPipe::State *vk = controller->GetVulkanPipelineState();

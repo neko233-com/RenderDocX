@@ -888,6 +888,8 @@ struct Workspace {
     event_path_editing: bool,
     _event_path_subscription: gpui::Subscription,
     selected_event_id: Option<u32>,
+    selected_events: std::collections::BTreeSet<u32>,
+    event_selection_anchor: Option<u32>,
     _event_find_subscription: gpui::Subscription,
     event_find_revision: std::sync::Arc<std::sync::atomic::AtomicU64>,
     event_find_pending: Option<u64>,
@@ -6650,6 +6652,8 @@ impl Workspace {
                         this.poll_messages(session, this.message_generation, cx);
                         this.selected = None;
                         this.selected_event_id = None;
+                        this.selected_events.clear();
+                        this.event_selection_anchor = None;
                         this.pipeline = None;
                         let initial_error = match initial {
                             Some((index, revision, Ok(Some(pipeline)))) => {
@@ -6788,6 +6792,8 @@ impl Workspace {
                             this.capture = None;
                             this.selected = None;
                             this.selected_event_id = None;
+                        this.selected_events.clear();
+                        this.event_selection_anchor = None;
                             this.pipeline = None;
                         }
                         this.status = Some(format!(
@@ -6831,6 +6837,9 @@ impl Workspace {
     }
 
     fn select_capture_start(&mut self, cx: &mut Context<Self>) {
+        self.selected_events.clear();
+        self.selected_events.insert(0);
+        self.event_selection_anchor = Some(0);
         self.select_replay_event(None, 0, 0, cx);
     }
 
@@ -16258,8 +16267,9 @@ impl Workspace {
                             range
                                 .filter_map(|row| {
                                     if row == 0 {
-                                        let selected = this.selected.is_none()
-                                            && this.selected_event_id() == Some(0);
+                                        let selected = (this.selected.is_none()
+                                            && this.selected_event_id() == Some(0))
+                                            || this.selected_events.contains(&0);
                                         return Some(
                                             div()
                                                 .id("capture-start")
@@ -16381,8 +16391,9 @@ impl Workspace {
                                                 index.into(),
                                             ),
                                         };
-                                    let selected = this.selected == Some(index)
-                                        && this.selected_event_id() == Some(event);
+                                    let selected = (this.selected == Some(index)
+                                        && this.selected_event_id() == Some(event))
+                                        || this.selected_events.contains(&event);
                                     let indent = action.depth as f32 * 14.0;
                                     Some(
                                         div()
@@ -16537,7 +16548,21 @@ impl Workspace {
                                                         },
                                                     )
                                                     .on_click(cx.listener(
-                                                        move |this, _, _, cx| {
+                                                        move |this, click: &gpui::ClickEvent, _, cx| {
+                                                            let modifiers = match click {
+                                                                gpui::ClickEvent::Mouse(mouse) => {
+                                                                    mouse.down.modifiers
+                                                                }
+                                                                _ => gpui::Modifiers::default(),
+                                                            };
+                                                            renderdocx::debug_message_view::apply_event_selection(
+                                                                &mut this.selected_events,
+                                                                &mut this.event_selection_anchor,
+                                                                &mut this.selected_event_id,
+                                                                event,
+                                                                modifiers.control,
+                                                                modifiers.shift,
+                                                            );
                                                             this.select_event(index, api_index, cx)
                                                         },
                                                     )),
@@ -20586,6 +20611,8 @@ impl Workspace {
                             this.capture = None;
                             this.selected = None;
                             this.selected_event_id = None;
+                        this.selected_events.clear();
+                        this.event_selection_anchor = None;
                             this.replay_pending = false;
                             this.export_pending = false;
                             this.resource_pending = false;
@@ -22970,6 +22997,8 @@ fn main() {
                         event_path_input,
                         event_path_editing: false,
                         selected_event_id: None,
+                        selected_events: Default::default(),
+                        event_selection_anchor: None,
                         event_find_revision: Default::default(),
                         event_find_pending: None,
                         event_find,
@@ -23853,6 +23882,8 @@ mod ui_tests {
                         event_path_input,
                         event_path_editing: false,
                         selected_event_id: None,
+                        selected_events: Default::default(),
+                        event_selection_anchor: None,
                         event_find_revision: Default::default(),
                         event_find_pending: None,
                         event_find,
@@ -24678,6 +24709,8 @@ mod ui_tests {
                         event_path_input,
                         event_path_editing: false,
                         selected_event_id: None,
+                        selected_events: Default::default(),
+                        event_selection_anchor: None,
                         event_find_revision: Default::default(),
                         event_find_pending: None,
                         event_find,

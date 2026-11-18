@@ -90,6 +90,44 @@ pub fn apply_selection(
     }
 }
 
+/// Event-browser variant of the table selection rules, keyed by event id.
+pub fn apply_event_selection(
+    selected: &mut BTreeSet<u32>,
+    anchor: &mut Option<u32>,
+    primary: &mut Option<u32>,
+    index: u32,
+    control: bool,
+    shift: bool,
+) {
+    if shift {
+        if let Some(anchor) = *anchor {
+            let (start, end) = if anchor <= index {
+                (anchor, index)
+            } else {
+                (index, anchor)
+            };
+            selected.clear();
+            selected.extend(start..=end);
+        } else {
+            selected.clear();
+            selected.insert(index);
+            *anchor = Some(index);
+        }
+        *primary = Some(index);
+    } else if control {
+        if !selected.remove(&index) {
+            selected.insert(index);
+        }
+        *primary = Some(index);
+        *anchor = Some(index);
+    } else {
+        selected.clear();
+        selected.insert(index);
+        *primary = Some(index);
+        *anchor = Some(index);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,6 +189,23 @@ mod tests {
         apply_selection(&mut selected, &mut anchor, &mut primary, 5, true, false);
         assert_eq!(selected, BTreeSet::from([3, 4]));
         apply_selection(&mut selected, &mut anchor, &mut primary, 1, false, false);
+        assert_eq!(selected, BTreeSet::from([1]));
+    }
+
+    #[test]
+    fn event_selection_matches_table_rules() {
+        let mut selected = BTreeSet::new();
+        let mut anchor = None;
+        let mut primary = None;
+        apply_event_selection(&mut selected, &mut anchor, &mut primary, 5, false, false);
+        assert_eq!(selected, BTreeSet::from([5]));
+        apply_event_selection(&mut selected, &mut anchor, &mut primary, 9, true, false);
+        assert_eq!(selected, BTreeSet::from([5, 9]));
+        apply_event_selection(&mut selected, &mut anchor, &mut primary, 7, false, true);
+        assert_eq!(selected, BTreeSet::from([7, 8, 9]));
+        apply_event_selection(&mut selected, &mut anchor, &mut primary, 9, true, false);
+        assert_eq!(selected, BTreeSet::from([7, 8]));
+        apply_event_selection(&mut selected, &mut anchor, &mut primary, 1, false, false);
         assert_eq!(selected, BTreeSet::from([1]));
     }
 

@@ -1363,6 +1363,27 @@ impl PipelineObject {
     }
 
     #[allow(non_snake_case)]
+    fn GetD3D12State(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.field("api_specific").and_then(|value| value.get("d3d12")) {
+            Some(value) => to_py(py, value),
+            None => Ok(py.None()),
+        }
+    }
+
+    #[allow(non_snake_case)]
+    fn GetGLState(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.field("api_specific").and_then(|value| value.get("gl")) {
+            Some(value) => to_py(py, value),
+            None => Ok(py.None()),
+        }
+    }
+
+    #[allow(non_snake_case)]
+    fn GetOpenGLState(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        self.GetGLState(py)
+    }
+
+    #[allow(non_snake_case)]
     fn GetVulkanState(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
         match self.field("api_specific").and_then(|value| value.get("vulkan")) {
             Some(value) => to_py(py, value),
@@ -5414,6 +5435,51 @@ mod tests {
         );
         assert!(
             result.stdout.contains("sampler-list True"),
+            "{}",
+            result.stdout
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires RENDERDOCX_TEST_BRIDGE and RENDERDOCX_TEST_OPENGL_CAPTURE"]
+    fn python_opengl_api_specific_state_a_real_capture() {
+        use crate::backend::Settings;
+        use std::path::PathBuf;
+
+        let bridge = PathBuf::from(
+            std::env::var("RENDERDOCX_TEST_BRIDGE").expect("set RENDERDOCX_TEST_BRIDGE"),
+        );
+        let capture = PathBuf::from(
+            std::env::var("RENDERDOCX_TEST_OPENGL_CAPTURE")
+                .expect("set RENDERDOCX_TEST_OPENGL_CAPTURE"),
+        );
+        let mut settings = Settings::default();
+        settings.replay_bridge = Some(bridge);
+        let (session, snapshot) =
+            crate::replay::Session::open(&settings, &capture).expect("open capture");
+        set_active_session(Some(session));
+        set_active_format_context(
+            snapshot.resources.clone(),
+            snapshot.buffers.clone(),
+            snapshot.textures.clone(),
+            crate::i18n::Language::English,
+        );
+        set_active_actions(snapshot.actions.clone());
+        set_active_snapshot(serde_json::to_value(&snapshot).expect("serialize snapshot"));
+        let result = run_script_with_capture(
+            "import renderdocx\n\
+             actions = renderdocx.capture_actions()\n\
+             draw = next(a for a in actions if 'glDrawArrays' in a.get('name', ''))\n\
+             p = renderdocx.pipeline(int(draw['event_id']))\n\
+             gl = p.get('api_specific', {}).get('gl')\n\
+             print('opengl-api-specific', p.get('api_specific', {}).get('kind') == 'OpenGL' and isinstance(gl, dict) and gl.get('vertex_array_object', {}).get('bound') is True and gl.get('attribute_count', 0) > 0 and gl.get('vertex_buffer_count', 0) > 0 and gl.get('descriptor_count', 0) > 0 and isinstance(gl.get('feedback', {}).get('buffers'), list) and isinstance(gl.get('framebuffer', {}).get('draw_fbo'), dict) and gl.get('rasterizer', {}).get('sample_mask_value') == 4294967295)",
+            &CaptureView::default(),
+        );
+        set_active_session(None);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(
+            result.stdout.contains("opengl-api-specific True"),
             "{}",
             result.stdout
         );
