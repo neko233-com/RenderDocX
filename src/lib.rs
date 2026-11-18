@@ -32,6 +32,7 @@ pub mod mesh_export;
 pub mod mesh_indices;
 pub mod mesh_positions;
 pub mod packed_format;
+pub mod process_list;
 pub mod python_shell;
 pub mod replay;
 pub mod renderdoc_core;

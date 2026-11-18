@@ -1044,6 +1044,7 @@ struct Workspace {
     python_pending: bool,
     core_info: Option<renderdocx::renderdoc_core::CoreInfo>,
     core_handle: Option<renderdocx::renderdoc_core::CoreHandle>,
+    local_processes: Vec<renderdocx::process_list::ProcessInfo>,
 }
 
 impl Workspace {
@@ -4406,6 +4407,23 @@ impl Workspace {
                 self.status = Some(format!(
                     "{}: {error}",
                     self.t("Could not read RenderDoc core", "无法读取 RenderDoc core")
+                ));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Enumerate local processes purely in Rust (Toolhelp32) for PID attach.
+    fn refresh_local_processes(&mut self, cx: &mut Context<Self>) {
+        match renderdocx::process_list::enumerate_processes() {
+            Ok(list) => {
+                self.local_processes = list;
+                self.status = None;
+            }
+            Err(error) => {
+                self.status = Some(format!(
+                    "{}: {error}",
+                    self.t("Could not list processes", "无法列出进程")
                 ));
             }
         }
@@ -20630,6 +20648,13 @@ impl Render for Workspace {
                         cx,
                     ))
                     .child(button(
+                        "list-local-processes",
+                        self.t("Local processes", "本地进程"),
+                        false,
+                        |this, cx| this.refresh_local_processes(cx),
+                        cx,
+                    ))
+                    .child(button(
                         "upstream",
                         upstream,
                         false,
@@ -20967,6 +20992,27 @@ impl Render for Workspace {
                                     dialog.always_replay_locally = !dialog.always_replay_locally;
                                 }
                                 cx.notify();
+                            }))),
+                )
+            })
+            .when(!self.local_processes.is_empty(), |view| {
+                view.child(
+                    div().flex().flex_col().gap_1()
+                        .child(self.t("Local processes (click a PID to attach)", "本地进程（点击 PID 附加）"))
+                        .child(div().flex().flex_wrap().gap_1().max_h(px(120.)).overflow_hidden()
+                            .children(self.local_processes.iter().take(60).enumerate().map(|(index, process)| {
+                                let pid = process.pid;
+                                let label = format!("{} · {}", pid, process.name);
+                                div()
+                                    .id(("local-process", index))
+                                    .test_support()
+                                    .cursor_pointer()
+                                    .text_sm()
+                                    .px_2().py_1().rounded_md().bg(rgb(0x252f40))
+                                    .child(label)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.connect_target(pid, true, None, cx);
+                                    }))
                             }))),
                 )
             })
@@ -21646,6 +21692,7 @@ fn main() {
                         python_pending: false,
                         core_info: None,
                         core_handle: None,
+                        local_processes: Vec::new(),
                     });
                     Workspace::install_close_guard(window, cx, &entity);
                     if let Some(path) = initial_capture {
@@ -22501,6 +22548,7 @@ mod ui_tests {
                         python_pending: false,
                         core_info: None,
                         core_handle: None,
+                        local_processes: Vec::new(),
                     })
                 },
             )
@@ -23269,6 +23317,7 @@ mod ui_tests {
                         python_pending: false,
                         core_info: None,
                         core_handle: None,
+                        local_processes: Vec::new(),
                     })
                 },
             )

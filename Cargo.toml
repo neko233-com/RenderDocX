@@ -38,3 +38,6 @@ sys-locale = "0.3"
 unicode-segmentation = "1.13"
 which = "8"
 tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_System_Diagnostics_ToolHelp", "Win32_Foundation"] }

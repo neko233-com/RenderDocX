@@ -5973,6 +5973,7 @@ dependencies = [
  "tempfile",
  "unicode-segmentation",
  "which",
+ "windows 0.58.0",
 ]
 
 [[package]]
