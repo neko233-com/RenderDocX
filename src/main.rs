@@ -4735,6 +4735,7 @@ impl Workspace {
             let function = if enabling { "register" } else { "unregister" }.to_owned();
             let extension_name = name.clone();
             let view = self.python_capture_view();
+            renderdocx::python_embed::set_active_session(self.session.clone());
             let task = cx.background_executor().spawn(async move {
                 let view = if enabling { Some(&view) } else { None };
                 renderdocx::python_embed::call_extension(&dir, &function, "1.48", view)
@@ -6184,6 +6185,7 @@ impl Workspace {
         cx.notify();
         // Expose the open capture to scripts as the `renderdocx` module.
         let view = self.python_capture_view();
+        renderdocx::python_embed::set_active_session(self.session.clone());
         let task = cx.background_executor().spawn(async move {
             renderdocx::python_embed::run_script_with_capture(&code, &view)
         });
@@ -6649,6 +6651,7 @@ impl Workspace {
                         if replacing_remote {
                             this.replay_pending = false;
                             this.session = None;
+                            renderdocx::python_embed::set_active_session(None);
                             this.snapshot = None;
                             this.capture = None;
                             this.selected = None;
@@ -20400,6 +20403,7 @@ impl Workspace {
                             this.event_annotation_revision.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             this.event_annotation_values.clear();
                             this.session = None;
+                            renderdocx::python_embed::set_active_session(None);
                             this.snapshot = None;
                             this.texture_saved_selection.clear();
                             this.message_generation += 1;

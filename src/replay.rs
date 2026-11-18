@@ -5276,6 +5276,14 @@ impl Session {
         Ok(self.select_pipeline(event, revision)?.is_some())
     }
 
+    /// Select `event` and return its pipeline using the current revision.
+    /// Convenience wrapper for scripting and diagnostics.
+    pub fn pipeline_for_event(&self, event: u32) -> Result<Pipeline, String> {
+        let revision = self.revision.load(Ordering::SeqCst);
+        self.select_pipeline(event, revision)?
+            .ok_or_else(|| "Replay revision changed while selecting".to_owned())
+    }
+
     pub fn select_pipeline(&self, event: u32, revision: u64) -> Result<Option<Pipeline>, String> {
         let mut process = self.process.lock().map_err(|e| e.to_string())?;
         if self.revision.load(Ordering::SeqCst) != revision {

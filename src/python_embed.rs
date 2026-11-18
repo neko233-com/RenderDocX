@@ -13,6 +13,48 @@ static PY_LOCK: Mutex<()> = Mutex::new(());
 // entry remain available to the next, like an interactive interpreter session.
 static REPL_GLOBALS: Mutex<Option<pyo3::Py<PyDict>>> = Mutex::new(None);
 
+// Replay session exposed to script helpers such as renderdocx.pipeline(event).
+static ACTIVE_SESSION: Mutex<Option<crate::replay::Session>> = Mutex::new(None);
+
+/// Register (or clear) the replay session that Python helpers may query.
+pub fn set_active_session(session: Option<crate::replay::Session>) {
+    let mut guard = ACTIVE_SESSION
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    *guard = session;
+}
+
+fn active_session() -> Result<crate::replay::Session, pyo3::PyErr> {
+    ACTIVE_SESSION
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No capture session is open"))
+}
+
+/// `renderdocx.pipeline(event)` -> JSON string of the event pipeline.
+#[pyo3::pyfunction]
+fn pipeline(event: u32) -> pyo3::PyResult<String> {
+    let session = active_session()?;
+    session
+        .pipeline_for_event(event)
+        .and_then(|pipeline| {
+            serde_json::to_string(&pipeline).map_err(|error| error.to_string())
+        })
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
+/// `renderdocx.buffer(index, offset, length)` -> hex string of raw buffer bytes.
+#[pyo3::pyfunction]
+#[pyo3(signature = (index, offset = 0, length = 256))]
+fn buffer(index: u32, offset: u64, length: u32) -> pyo3::PyResult<String> {
+    let session = active_session()?;
+    session
+        .read_buffer(index, offset, length)
+        .map(|bytes| bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
 const CAPTURE_SETUP: &str = "import sys, io\n_stdout = getattr(sys, '_rdx_orig_out', sys.stdout)\n_stderr = getattr(sys, '_rdx_orig_err', sys.stderr)\nsys._rdx_orig_out = _stdout\nsys._rdx_orig_err = _stderr\n_sysbuf_out = io.StringIO()\n_sysbuf_err = io.StringIO()\nsys.stdout = _sysbuf_out\nsys.stderr = _sysbuf_err\n";
 const CAPTURE_RESTORE: &str = "sys.stdout = getattr(sys, '_rdx_orig_out', sys.stdout)\nsys.stderr = getattr(sys, '_rdx_orig_err', sys.stderr)\n";
 
@@ -188,6 +230,13 @@ fn build_capture_module<'py>(
     }
     if let Ok(viewports) = PyList::new(py, view.viewports.clone()) {
         dict.set_item("viewports", viewports).ok();
+    }
+    // Dynamic query helpers that talk to the open replay session.
+    if let Ok(function) = pyo3::wrap_pyfunction!(pipeline, py) {
+        dict.set_item("pipeline", function).ok();
+    }
+    if let Ok(function) = pyo3::wrap_pyfunction!(buffer, py) {
+        dict.set_item("buffer", function).ok();
     }
     // Built-in help() listing the exposed API: the minimal pure-Rust
     // equivalent of the upstream help browser's discovery role.
@@ -430,6 +479,21 @@ mod tests {
         reset_repl();
         let third = run_script_with_capture("print(_rdx_repl_probe)", &view);
         assert!(third.error.is_some(), "reset must drop prior globals");
+    }
+
+    #[test]
+    fn dynamic_helpers_require_an_open_session() {
+        set_active_session(None);
+        let result = run_script_with_capture(
+            "import renderdocx\nrenderdocx.pipeline(1)",
+            &CaptureView::default(),
+        );
+        assert!(result.error.is_some(), "pipeline must fail without a session");
+        let result = run_script_with_capture(
+            "import renderdocx\nrenderdocx.buffer(0)",
+            &CaptureView::default(),
+        );
+        assert!(result.error.is_some(), "buffer must fail without a session");
     }
 
     #[test]
