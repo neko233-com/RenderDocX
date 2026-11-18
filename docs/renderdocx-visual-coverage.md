@@ -50,6 +50,9 @@ can be checked rather than asserted.
   `检查 .rdc…`, `Python 脚本`.
 - `target/visual/drive-01-initial.png` (dark theme) and
   `drive-02-after-invoke.png` (light theme), both 1056×799.
+- `target/visual/msi-installed-app.png`: the app launched from its **installed**
+  per-user location after a real `msiexec /i` (exit 0), captured at 1056×799;
+  `msiexec /x` then exited 0 and removed the payload.
 - Invoking the `主题: 深色` control through UI Automation produced a new
   `主题: 浅色` element in the after-tree (1 new element), proving the interaction
   reached the real Workspace.

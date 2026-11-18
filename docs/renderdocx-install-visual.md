@@ -29,8 +29,22 @@ non-interactively with an administrative install
 (`msiexec /a RenderDocX-0.1.0-x64.msi /qn TARGETDIR=<dir>`), which exited 0 and
 extracted exactly: `PFiles64/RenderDocX/renderdocx.exe` (34.7 MB),
 `renderdocx-cli.exe` (5.5 MB), `README.md`, `renderdocx-feature-matrix.md`,
-`renderdocx-roadmap.md`. Full interactive install/uninstall has not been
-exercised here; that requires an interactive desktop session.
+`renderdocx-roadmap.md`.
+
+**Full install → run → screenshot → uninstall** was also executed with
+`scripts/verify-msi.ps1` (per-user silent install, no elevation needed):
+
+```
+msiexec /i exit code: 0
+Installed executable: C:\Users\<user>\AppData\Local\Programs\RenderDocX\renderdocx.exe
+Captured installed app 1056x799 -> target/visual/msi-installed-app.png
+msiexec /x exit code: 0
+Uninstall removed payload: True
+```
+
+The installed binary's real window was captured at 1056×799 through UI
+Automation + BitBlt, and uninstall removed the payload. Logs are written to
+`target/visual/msi-install.log` / `msi-uninstall.log`.
 
 ## Visual verification
 

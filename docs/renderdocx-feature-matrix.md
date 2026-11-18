@@ -121,7 +121,7 @@
 
 ## 打包与视觉验证（本批新增，不计入 A–D 分母）
 
-- **MSI 安装包**：`installer/RenderDocX.wxs` 是 RenderDocX 自有 WiX v4/v5 工程（区别于上游 `util/installer/*.wxs`），`scripts/build-msi.ps1` 读取 Cargo.toml 版本、`cargo build --release --bins` 后产出 `target/msi/RenderDocX-<version>-x64.msi`。已用 WiX 5.0.2 对 release 产物构建成功（0.1.0.0 / x64 / 10.03 MB / SHA256 3E21EF0C…），含 GUI+CLI 二进制、README、功能矩阵/roadmap 文档与开始菜单快捷方式。`msiexec /a <msi> /qn TARGETDIR=<dir>` 管理安装验证 exit=0，完整解出上述文件。详见 [安装与视觉验证文档](renderdocx-install-visual.md)。完整交互式安装/卸载需交互式桌面，未在本会话执行。
+- **MSI 安装包**：`installer/RenderDocX.wxs` 是 RenderDocX 自有 WiX v4/v5 工程（区别于上游 `util/installer/*.wxs`），`scripts/build-msi.ps1` 读取 Cargo.toml 版本、`cargo build --release --bins` 后产出 `target/msi/RenderDocX-<version>-x64.msi`。已用 WiX 5.0.2 对 release 产物构建成功（0.1.0.0 / x64 / 10.03 MB / SHA256 3E21EF0C…），含 GUI+CLI 二进制、README、功能矩阵/roadmap 文档与开始菜单快捷方式。`msiexec /a <msi> /qn TARGETDIR=<dir>` 管理安装验证 exit=0，完整解出上述文件；`scripts/verify-msi.ps1` 又完成**真实 per-user 静默安装（exit=0，装到 `%LOCALAPPDATA%\Programs\RenderDocX`）→ 运行已安装程序并用 UIA+BitBlt 截取 1056×799 真实窗口 → 卸载（exit=0，载荷移除）**。详见 [安装与视觉验证文档](renderdocx-install-visual.md)。
 - **视觉验证**：`cargo test --features ui-tests` 的 12 项 GPUI 测试以元素树可见性断言（`window.find(...).visible()`）覆盖日志/配置/纹理预览/直方图/着色器/事件树等面板，可在无头环境运行；`scripts/visual-verify.ps1` 用 Win32 `BitBlt` 从屏幕 DC 截取真实 GPUI 窗口像素到 `target/visual/*.png`，需交互式桌面。本会话无可交互桌面（进程运行但不创建顶层窗口），且 `agent-desktop` 原生桌面驱动工具不可用，故未声称完成真实桌面像素/操控验证。
 
 ## 维护规则
