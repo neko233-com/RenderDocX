@@ -23,6 +23,40 @@ static ACTIVE_BUFFERS: Mutex<Option<Vec<crate::replay::Buffer>>> = Mutex::new(No
 static ACTIVE_TEXTURES: Mutex<Option<Vec<crate::replay::Texture>>> = Mutex::new(None);
 static ACTIVE_ACTIONS: Mutex<Option<Vec<crate::replay::Action>>> = Mutex::new(None);
 static ACTIVE_LANGUAGE: Mutex<crate::i18n::Language> = Mutex::new(crate::i18n::Language::English);
+// Complete snapshot document for renderdocx.snapshot(). Serialized once when a
+// capture is bound so scripts can read any field without extra bindings.
+static ACTIVE_SNAPSHOT: Mutex<Option<serde_json::Value>> = Mutex::new(None);
+
+/// Bind the serialized snapshot document for `renderdocx.snapshot()`.
+pub fn set_active_snapshot(snapshot: serde_json::Value) {
+    *ACTIVE_SNAPSHOT
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(snapshot);
+}
+
+fn active_snapshot() -> Option<serde_json::Value> {
+    ACTIVE_SNAPSHOT
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+}
+
+/// `renderdocx.snapshot()` -> the full capture snapshot as a native Python
+/// object (frame info, counters, actions, resources, textures, buffers...).
+#[pyo3::pyfunction]
+fn snapshot(py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    let value = active_snapshot().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("No capture snapshot is bound")
+    })?;
+    to_py(py, &value)
+}
+
+/// `renderdocx.capture_actions()` -> bound action list as native objects,
+/// including event ids, flags and api_events for locating draw indices.
+#[pyo3::pyfunction]
+fn capture_actions(py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    to_py(py, &active_actions())
+}
 
 /// Bind formatting context (resources/buffers/textures/language) for scripts.
 pub fn set_active_format_context(
@@ -82,6 +116,92 @@ fn active_actions() -> Vec<crate::replay::Action> {
         .unwrap_or_else(|error| error.into_inner())
         .clone()
         .unwrap_or_default()
+}
+
+/// `renderdocx.render_texture(destination, index=0, width=64, height=64)` ->
+/// render the texture viewer preview (without context highlight) to a PNG.
+#[pyo3::pyfunction]
+#[pyo3(signature = (destination, index = 0, width = 64, height = 64))]
+fn render_texture(
+    destination: String,
+    index: u32,
+    width: u32,
+    height: u32,
+) -> pyo3::PyResult<String> {
+    let session = active_session()?;
+    let path = std::path::PathBuf::from(&destination);
+    session
+        .render_texture_png(
+            index,
+            crate::replay::TextureSelection::default(),
+            width,
+            height,
+            &path,
+        )
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    Ok(destination)
+}
+
+/// `renderdocx.mesh_read(event, stage=1, kind="vertex", offset=0, length=256)`
+/// -> hex string of mesh vertex or index buffer bytes.
+#[pyo3::pyfunction]
+#[pyo3(signature = (event, stage = 1, kind = "vertex".to_owned(), offset = 0, length = 256))]
+fn mesh_read(
+    event: u32,
+    stage: u32,
+    kind: String,
+    offset: u64,
+    length: u32,
+) -> pyo3::PyResult<String> {
+    let session = active_session()?;
+    let event = resolve_draw_event(event);
+    let selection = crate::replay::MeshSelection {
+        instance: 0,
+        view: 0,
+        stage,
+    };
+    select_event(&session, event)?;
+    // The bridge caches mesh data before its buffers can be read.
+    session
+        .mesh(event, selection)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    session
+        .mesh_read(event, selection, &kind, offset, length)
+        .map(|bytes| bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
+/// `renderdocx.export_buffer(destination, index=0, offset=0, length=None)` ->
+/// export raw buffer bytes; `length=None` exports to the end of the buffer.
+#[pyo3::pyfunction]
+#[pyo3(signature = (destination, index = 0, offset = 0, length = None))]
+fn export_buffer(
+    destination: String,
+    index: u32,
+    offset: u64,
+    length: Option<u64>,
+) -> pyo3::PyResult<String> {
+    let session = active_session()?;
+    let buffers = active_buffers();
+    let total = buffers
+        .get(index as usize)
+        .and_then(|buffer| buffer.length.parse::<u64>().ok())
+        .ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "Buffer index is out of range in the bound snapshot",
+            )
+        })?;
+    let length = length.unwrap_or_else(|| total.saturating_sub(offset));
+    if offset > total || length > total - offset {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "Buffer range is out of bounds",
+        ));
+    }
+    let path = std::path::PathBuf::from(&destination);
+    session
+        .export_buffer(index, offset, length, &path)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    Ok(destination)
 }
 
 /// `renderdocx.export_texture(destination, index=0)` -> export a PNG of the
@@ -394,11 +514,31 @@ fn pixel_history(
 }
 
 /// Register (or clear) the replay session that Python helpers may query.
+/// Clearing the session also drops the bound snapshot context so scripts cannot
+/// read stale data after a capture closes.
 pub fn set_active_session(session: Option<crate::replay::Session>) {
+    let clear = session.is_none();
     let mut guard = ACTIVE_SESSION
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     *guard = session;
+    if clear {
+        *ACTIVE_RESOURCES
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        *ACTIVE_BUFFERS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        *ACTIVE_TEXTURES
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        *ACTIVE_ACTIONS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        *ACTIVE_SNAPSHOT
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+    }
 }
 
 /// Convert any serializable value into a native Python object (dict/list/scalar)
@@ -744,6 +884,11 @@ fn build_capture_module<'py>(
         ("texture_context", pyo3::wrap_pyfunction!(texture_context, py)),
         ("texture_minmax", pyo3::wrap_pyfunction!(texture_minmax, py)),
         ("texture_fit_range", pyo3::wrap_pyfunction!(texture_fit_range, py)),
+        ("render_texture", pyo3::wrap_pyfunction!(render_texture, py)),
+        ("mesh_read", pyo3::wrap_pyfunction!(mesh_read, py)),
+        ("export_buffer", pyo3::wrap_pyfunction!(export_buffer, py)),
+        ("snapshot", pyo3::wrap_pyfunction!(snapshot, py)),
+        ("capture_actions", pyo3::wrap_pyfunction!(capture_actions, py)),
     ] {
         if let Ok(function) = wrapped {
             dict.set_item(name, function).ok();
@@ -1011,6 +1156,10 @@ mod tests {
             "renderdocx.texture_context('ctx.png')",
             "renderdocx.texture_minmax(1)",
             "renderdocx.texture_fit_range(1)",
+            "renderdocx.render_texture('render.png')",
+            "renderdocx.mesh_read(1)",
+            "renderdocx.export_buffer('buf.bin')",
+            "renderdocx.snapshot()",
         ] {
             let result = run_script_with_capture(
                 &format!("import renderdocx\n{call}"),
@@ -1018,6 +1167,13 @@ mod tests {
             );
             assert!(result.error.is_some(), "{call} must fail without a session");
         }
+        // capture_actions() returns an empty list (not an error) when unbound.
+        let result = run_script_with_capture(
+            "import renderdocx\nprint(len(renderdocx.capture_actions()))",
+            &CaptureView::default(),
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.stdout.trim(), "0");
     }
 
     #[cfg(windows)]
@@ -1046,6 +1202,7 @@ mod tests {
             crate::i18n::Language::English,
         );
         set_active_actions(snapshot.actions.clone());
+        set_active_snapshot(serde_json::to_value(&snapshot).expect("serialize snapshot"));
         let result = run_script_with_capture(
             "import renderdocx\n\
              p = renderdocx.pipeline(19)\n\
@@ -1070,7 +1227,15 @@ mod tests {
              ctx = os.path.join(d, 'ctx.png')\n\
              print('context', renderdocx.texture_context(ctx, 0, 64, 64) == ctx and os.path.getsize(ctx) > 0)\n\
              print('minmax', isinstance(renderdocx.texture_minmax(19, 0), dict))\n\
-             print('fit', isinstance(renderdocx.texture_fit_range(19, 0), list))",
+             print('fit', isinstance(renderdocx.texture_fit_range(19, 0), list))\n\
+             snap = renderdocx.snapshot()\n\
+             print('snapshot', isinstance(snap.get('actions'), list) and bool(snap.get('api')))\n\
+             print('actions', isinstance(renderdocx.capture_actions(), list))\n\
+             print('meshread', isinstance(renderdocx.mesh_read(21, 4, 'vertex', 0, 16), str))\n\
+             buf = os.path.join(d, 'buf.bin')\n\
+             print('bufexport', renderdocx.export_buffer(buf, 0) == buf and os.path.getsize(buf) > 0)\n\
+             rp = os.path.join(d, 'render.png')\n\
+             print('render', renderdocx.render_texture(rp, 0, 32, 32) == rp and os.path.getsize(rp) > 0)",
             &CaptureView::default(),
         );
         set_active_session(None);
@@ -1083,6 +1248,11 @@ mod tests {
         assert!(result.stdout.contains("context True"), "{}", result.stdout);
         assert!(result.stdout.contains("minmax True"), "{}", result.stdout);
         assert!(result.stdout.contains("fit True"), "{}", result.stdout);
+        assert!(result.stdout.contains("snapshot True"), "{}", result.stdout);
+        assert!(result.stdout.contains("actions True"), "{}", result.stdout);
+        assert!(result.stdout.contains("meshread True"), "{}", result.stdout);
+        assert!(result.stdout.contains("bufexport True"), "{}", result.stdout);
+        assert!(result.stdout.contains("render True"), "{}", result.stdout);
     }
 
     #[cfg(windows)]
@@ -1111,6 +1281,7 @@ mod tests {
             crate::i18n::Language::English,
         );
         set_active_actions(snapshot.actions.clone());
+        set_active_snapshot(serde_json::to_value(&snapshot).expect("serialize snapshot"));
         let result = run_script_with_capture(
             "import renderdocx\n\
              page = renderdocx.vertex_input(limit=4)\n\

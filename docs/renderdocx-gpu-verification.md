@@ -119,8 +119,10 @@ It also runs two lib-level ignored tests. `python_pipeline_and_buffer_query_a_re
 opens a real Mesh capture through the bridge and asserts pipeline, buffer hex,
 structure data, debug/shader messages, resource usage, callstack, event
 formatting, descriptors, pixel history, texture statistics/min-max/fit range,
-PNG export and mesh output. `python_vertex_input_query_a_real_capture` opens a
-real Vertex capture and asserts `renderdocx.vertex_input()` returns input rows.
+texture preview/context/export PNGs, raw buffer export, mesh output and mesh
+vertex reads, plus the full `snapshot()` document and `capture_actions()` list.
+`python_vertex_input_query_a_real_capture` opens a real Vertex capture and
+asserts `renderdocx.vertex_input()` returns input rows.
 
 Observed output (20 agent_cli + 2 lib tests):
 

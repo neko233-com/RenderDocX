@@ -6075,6 +6075,9 @@ impl Workspace {
                 self.settings.language,
             );
             renderdocx::python_embed::set_active_actions(snapshot.actions.clone());
+            if let Ok(document) = serde_json::to_value(snapshot) {
+                renderdocx::python_embed::set_active_snapshot(document);
+            }
         }
     }
 
