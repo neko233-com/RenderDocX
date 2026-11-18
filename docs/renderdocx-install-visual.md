@@ -57,7 +57,16 @@ Two complementary mechanisms are provided:
    session the GPUI window cannot be created (the process runs but exposes no
    top-level window), so no pixels can be captured.
 
-`agent-desktop` native desktop driving was not available in the session where
-this was written, so automated pointer/keyboard driving of the GPUI window is
-not claimed. Where a desktop driver is available, the screenshot script plus
-the GPUI element-tree tests together provide repeatable visual verification.
+For desktop-driving verification, `scripts/desktop-drive.ps1` uses Windows UI
+Automation to enumerate the GPUI accessibility tree, scroll controls into view,
+invoke them by name/id, and capture before/after PNGs:
+
+```powershell
+pwsh -File scripts/desktop-drive.ps1 -Exe target/release/renderdocx.exe -DumpTree
+pwsh -File scripts/desktop-drive.ps1 -InvokeName "主题: 深色"
+```
+
+It was executed on this checkout: 72 UIA elements, a theme toggle that produced
+a new `主题: 浅色` element, and before/after screenshots differing in 46.27% of
+sampled pixels. `agent-desktop` was not present in the authoring session's tool
+set; this script is the equivalent native driver.

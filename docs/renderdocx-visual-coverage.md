@@ -41,13 +41,45 @@ can be checked rather than asserted.
 - True pixel/pointer verification needs an interactive desktop and is provided
   by `scripts/visual-verify.ps1`.
 
+## Executed desktop-driving verification (real window)
+
+`scripts/desktop-drive.ps1` was run against the release binary and produced:
+
+- `target/visual/uia-tree.json`: **72 UI Automation elements** enumerated from the
+  real GPUI window (AccessKit tree), e.g. `日志`, `关于`, `主题: 深色`,
+  `检查 .rdc…`, `Python 脚本`.
+- `target/visual/drive-01-initial.png` (dark theme) and
+  `drive-02-after-invoke.png` (light theme), both 1056×799.
+- Invoking the `主题: 深色` control through UI Automation produced a new
+  `主题: 浅色` element in the after-tree (1 new element), proving the interaction
+  reached the real Workspace.
+- Pixel comparison of the two screenshots: **97,719 / 211,200 sampled pixels
+  differ (46.27%)** — the theme change is visible in captured pixels.
+
+Commands:
+
+```powershell
+pwsh -File scripts/desktop-drive.ps1 -Exe target/release/renderdocx.exe -DumpTree
+pwsh -File scripts/desktop-drive.ps1 -InvokeName "主题: 深色"
+```
+
+Notes learned empirically: UIA bounding rectangles are client-area coordinates,
+and scrolling updates them (a control moved from y=1360 to y=580). The script
+pins the window at (0,0) with `SetWindowPos` so client coordinates equal screen
+coordinates, scrolls controls into view, and prefers `InvokePattern` (falling
+back to a real mouse click at the element centre).
+
 ## Environment limits found while verifying
 
-- This session has no interactive desktop: the GUI process runs but exposes no
-  top-level window (`MainWindowHandle=0x0`), so `visual-verify.ps1` cannot
-  capture pixels here.
-- `gpui-pre` has no Windows headless renderer: `current_headless_renderer()`
+- `.NET`'s `Process.MainWindowHandle` returns `0x0` for the GPUI window even
+  when it is on screen, so `visual-verify.ps1`'s handle lookup fails. The UI
+  Automation path in `desktop-drive.ps1` works and is the supported method; the
+  earlier "no interactive desktop" conclusion was wrong for this session.
+- `gpui-pre` still has no Windows headless renderer: `current_headless_renderer()`
   returns `Ok(None)` on Windows, and `gpui-kit`'s screenshot tests are
-  `#[cfg(any(target_os = "macos", target_os = "linux"))]`.
-- `agent-desktop` (native desktop driver) is not available in this session's
-  tool set; only browser automation tools are present.
+  `#[cfg(any(target_os = "macos", target_os = "linux"))]`. Screenshots therefore
+  require the real window, which `desktop-drive.ps1` uses.
+- `agent-desktop` (a native desktop driver MCP service) is not present in this
+  session's tool set. `desktop-drive.ps1` provides equivalent driving with
+  Windows UI Automation + Win32 input/BitBlt, and was executed successfully
+  (see the section above).
