@@ -4657,6 +4657,13 @@ impl Workspace {
                 return;
             }
         }
+        let (dir, enabling) = (
+            self.installed_extensions
+                .iter()
+                .find(|extension| extension.manifest.name == name)
+                .map(|extension| extension.dir.clone()),
+            enabled.is_none(),
+        );
         match enabled {
             Some(index) => {
                 self.settings.enabled_extensions.remove(index);
@@ -4670,6 +4677,29 @@ impl Workspace {
             "{}: {name}",
             self.t("Extension toggled", "扩展状态已切换")
         ));
+        // Invoke the extension's lifecycle entry point via embedded CPython.
+        if let Some(dir) = dir {
+            let function = if enabling { "register" } else { "unregister" }.to_owned();
+            let extension_name = name.clone();
+            let task = cx.background_executor().spawn(async move {
+                renderdocx::python_embed::call_extension(&dir, &function, "1.48")
+            });
+            cx.spawn(async move |this, cx| {
+                let result = task.await;
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(error) = result.error {
+                        this.status = Some(format!(
+                            "{} {extension_name}: {error}",
+                            this.t("Extension lifecycle error", "扩展生命周期错误")
+                        ));
+                    } else if !result.stdout.is_empty() {
+                        this.status = Some(result.stdout.trim().to_owned());
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
         cx.notify();
     }
 
@@ -5642,19 +5672,23 @@ impl Workspace {
         self.python_pending = true;
         self.python_output.push(format!(">>> {code}"));
         cx.notify();
+        // Execute in an embedded CPython interpreter (pyo3). The external
+        // process path remains available via the CLI for isolation.
         let task = cx
             .background_executor()
-            .spawn(async move { renderdocx::python_shell::execute(&code) });
+            .spawn(async move { renderdocx::python_embed::run_script(&code) });
         cx.spawn(async move |this, cx| {
-            let result = task.await;
+            let output = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.python_pending = false;
-                match result {
-                    Ok(output) => {
-                        this.python_output
-                            .extend(renderdocx::python_shell::format_output(&output));
-                    }
-                    Err(error) => this.python_output.push(format!("! {error}")),
+                for line in output.stdout.lines() {
+                    this.python_output.push(format!("> {line}"));
+                }
+                for line in output.stderr.lines() {
+                    this.python_output.push(format!("! {line}"));
+                }
+                if let Some(error) = output.error {
+                    this.python_output.push(format!("! {error}"));
                 }
                 cx.notify();
             });

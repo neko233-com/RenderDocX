@@ -29,7 +29,7 @@
 | A14 | DebugMessageView（Errors and Warnings） | ✅ | `src/debug_message_view.rs` 过滤/隐藏/排序，`main.rs` 轮询/跳转/复制；消息描述经 `rich_message::render` 做 HTML/URL 富文本渲染（含 links/ranges 可点击）——经代码核验核心已完整。**边角差异**：上游表格多单元格选择未实现；真机消息流稳定性待验（不属未迁移） |
 | A15 | LogView（核心日志输出窗口） | ✅ | **已去除 C++ 桥接依赖**：`src/renderdoc_log.rs` 纯 Rust 定位并读取上游日志文件（`%TEMP%\RenderDoc\RenderDoc_*.log`，对齐 `win32_stringio.cpp::GetDefaultFiles`；`RENDERDOC_LOG_FILE` 可覆盖），2 项单测；`src/log_view.rs` 按上游正则语义解析各列；GUI 日志面板含过滤/刷新/关闭/级别着色，GPUI 测试通过。桥接 `log` 命令降级为回退。**有意差异**：内嵌面板而非顶层窗口 |
 | A16 | CommentView（捕获注释/书签） | ✅ | `src/annotations.rs`：notes/bookmarks 读取与显式保存，GUI+CLI，D3D11 覆盖 |
-| A17 | PythonShell | 🟡 | `src/python_shell.rs` 实现脚本执行层（外部 Python 子进程、`RENDERDOCX_PYTHON` 可配置、stdout/stderr 捕获与格式化，3 项单测含真实 Python 执行）；GUI 提供脚本控制台（表达式执行/多行脚本运行/输出/清除）。**未完成**：未嵌入 CPython 与 `pyrenderdoc` 绑定，脚本无法访问已打开捕获、无 REPL 状态/调试器附加/帮助浏览器/项目浏览器 |
+| A17 | PythonShell | 🟡 | `src/python_shell.rs` 实现脚本执行层（外部 Python 子进程、`RENDERDOCX_PYTHON` 可配置、stdout/stderr 捕获与格式化，3 项单测含真实 Python 执行）；GUI 提供脚本控制台（表达式执行/多行脚本运行/输出/清除）。**去 C++ 进展 2**：`src/python_embed.rs` 用成熟库 `pyo3` 真正嵌入 CPython（进程内执行、stdout/stderr 捕获、异常、进程级串行化避免串扰，4 项单测）；GUI 控制台执行已切到嵌入式。**未完成**：`pyrenderdoc` API 绑定（脚本访问已打开捕获）、REPL 状态/调试器附加/帮助浏览器/项目浏览器 |
 
 ## B. 对话框（20 个 `.ui`，20 行）
 
@@ -43,7 +43,7 @@
 | B6 | EnvironmentEditor（环境变量编辑） | ✅ | README：有序环境修改，GUI+CLI，Vulkan layer 自动设置实测 |
 | B7 | LiveCapture（目标捕获列表窗口） | ✅ | `live_captures` 列表逐行展示帧号/路径/本地或远程状态；本地捕获点击打开，远程捕获点击请求复制到本地；本批为本地行新增「保存」按钮（`capture_save::save_copy` 复制到指定 `.rdc` 并写入最近历史）。**差异**：以上操作以行内按钮提供，未实现上游右键上下文菜单 |
 | B8 | PerformanceCounterSelection | ✅ | `selected_counters` 选择 + `Session::counter_page` 分页 + 桥接返回的驱动/厂商 counter 元数据（category/name/description），GUI/CLI 共用；**边角差异**：特定驱动 counter 真机验证待验（选择/分页已实现） |
-| B9 | ExtensionManager | 🟡 | `src/extensions.rs` 用 serde_json 解析上游 `extension.json` 清单（`extension_api`/`name`/`version`/`minimum_renderdoc`/`description`/`author`/`url`），扫描用户扩展目录、GUI 管理器可刷新与启停（状态持久化，3 项单测）。**去 C++ 进展 2**：`extensions::inspect_source` 用纯 Rust 静态分析 `__init__.py` 的 `register`/`unregister` 入口（含 async 变体，4 项单测），GUI 显示 API 状态且启用时校验——无有效入口的扩展拒绝启用，全程无 CPython 嵌入；**未完成**：真正的脚本执行与 pyrenderdoc API 注入（需 CPython 或 pyrenderdoc 桥接，见 A17） |
+| B9 | ExtensionManager | 🟡 | `src/extensions.rs` 用 serde_json 解析上游 `extension.json` 清单（`extension_api`/`name`/`version`/`minimum_renderdoc`/`description`/`author`/`url`），扫描用户扩展目录、GUI 管理器可刷新与启停（状态持久化，3 项单测）。**去 C++ 进展 2**：`extensions::inspect_source` 用纯 Rust 静态分析 `__init__.py` 的 `register`/`unregister` 入口（含 async 变体，4 项单测），GUI 显示 API 状态且启用时校验——无有效入口的扩展拒绝启用，全程无 CPython 嵌入；**去 C++ 进展 3**：`python_embed::call_extension` 用 pyo3 嵌入式加载 `__init__.py` 并真正调用 register/unregister（真实临时扩展单测），GUI 启停扩展时执行生命周期。**未完成**：pyrenderdoc API 注入（脚本访问捕获，见 A17） |
 | B10 | ConfigEditor（上游配置 JSON 编辑器） | ✅ | `Settings::from_json` / `to_json_string` 提供带错误的配置解析与序列化（单测：往返、非法 JSON、类型错误、未知字段兼容）；GUI 首页「编辑配置 JSON」打开多行编辑器，应用时校验并持久化，取消丢弃；GPUI 交互测试验证打开/编辑器可见/取消 |
 | B11 | AboutDialog | ✅ | 首页 Help▸关于 打开应用内信息面板（版本、Rust+GPUI 说明、迁移范围声明）；以可关闭内嵌面板实现，非上游独立顶层窗口 |
 | B12 | TipsDialog | ✅ | 首页 Help▸提示 打开应用内信息面板（打开捕获/布局槽位/`.cap`/最近列表四条提示）；同上，为可关闭内嵌面板而非独立顶层窗口 |
