@@ -465,6 +465,167 @@ fn PipelineState(
     Ok(PipelineObject { value: document })
 }
 
+fn json_field_object(
+    py: Python<'_>,
+    value: &serde_json::Value,
+    key: &str,
+) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    match value.get(key) {
+        Some(value) => to_py(py, value),
+        None => Err(pyo3::exceptions::PyAttributeError::new_err(key.to_owned())),
+    }
+}
+
+/// Field-addressable texture description (upstream TextureDescription fields,
+/// including camelCase aliases such as `arraySize`).
+#[pyo3::pyclass]
+struct TextureObject {
+    value: serde_json::Value,
+}
+
+#[pyo3::pymethods]
+impl TextureObject {
+    fn __getattr__(
+        &self,
+        py: Python<'_>,
+        name: &str,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        let key = match name {
+            "arraySize" => "array_size",
+            "format" => "format_name",
+            _ => name,
+        };
+        json_field_object(py, &self.value, key)
+    }
+
+    fn __getitem__(
+        &self,
+        py: Python<'_>,
+        key: &str,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.value.get(key) {
+            Some(value) => to_py(py, value),
+            None => Err(pyo3::exceptions::PyKeyError::new_err(key.to_owned())),
+        }
+    }
+
+    #[pyo3(signature = (key, default = None))]
+    fn get(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        default: Option<Bound<'_, pyo3::PyAny>>,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.value.get(key) {
+            Some(value) => to_py(py, value),
+            None => Ok(default.map(Bound::unbind).unwrap_or_else(|| py.None())),
+        }
+    }
+
+    fn keys(&self) -> Vec<String> {
+        self.value
+            .as_object()
+            .map(|object| object.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+}
+
+/// `Texture(index)` -> field-addressable texture description, or None.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn Texture(index: usize) -> Option<TextureObject> {
+    active_textures()
+        .get(index)
+        .and_then(|texture| serde_json::to_value(texture).ok())
+        .map(|value| TextureObject { value })
+}
+
+/// Field-addressable action description with upstream camelCase aliases and
+/// `GetChildren()`.
+#[pyo3::pyclass]
+struct ActionObject {
+    value: serde_json::Value,
+}
+
+#[pyo3::pymethods]
+impl ActionObject {
+    fn __getattr__(
+        &self,
+        py: Python<'_>,
+        name: &str,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        let key = match name {
+            "eventId" => "event_id",
+            "actionId" => "action_id",
+            "numIndices" => "indices",
+            "numInstances" => "instances",
+            _ => name,
+        };
+        json_field_object(py, &self.value, key)
+    }
+
+    fn __getitem__(
+        &self,
+        py: Python<'_>,
+        key: &str,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.value.get(key) {
+            Some(value) => to_py(py, value),
+            None => Err(pyo3::exceptions::PyKeyError::new_err(key.to_owned())),
+        }
+    }
+
+    #[pyo3(signature = (key, default = None))]
+    fn get(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        default: Option<Bound<'_, pyo3::PyAny>>,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.value.get(key) {
+            Some(value) => to_py(py, value),
+            None => Ok(default.map(Bound::unbind).unwrap_or_else(|| py.None())),
+        }
+    }
+
+    fn keys(&self) -> Vec<String> {
+        self.value
+            .as_object()
+            .map(|object| object.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// `GetChildren()` -> direct child actions.
+    #[allow(non_snake_case)]
+    fn GetChildren(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        let event = self
+            .value
+            .get("event_id")
+            .and_then(serde_json::Value::as_u64);
+        let actions = active_actions();
+        let index = actions
+            .iter()
+            .position(|action| Some(u64::from(action.event_id)) == event);
+        let children: Vec<crate::replay::Action> = match index {
+            Some(index) => actions
+                .into_iter()
+                .filter(|action| action.parent == index as i64)
+                .collect(),
+            None => Vec::new(),
+        };
+        to_py(py, &children)
+    }
+}
+
+/// `Action(event)` -> field-addressable action description, or None.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn Action(event: u32) -> Option<ActionObject> {
+    find_action_for_event(event)
+        .and_then(|action| serde_json::to_value(action).ok())
+        .map(|value| ActionObject { value })
+}
+
 /// `pipeline_shader(event, stage)` -> the bound shader entry for a stage.
 #[pyo3::pyfunction]
 #[allow(non_snake_case)]
@@ -2151,6 +2312,8 @@ fn build_capture_module<'py>(
         ("apply_shader_edit", pyo3::wrap_pyfunction!(apply_shader_edit, py)),
         ("revert_shader_edit", pyo3::wrap_pyfunction!(revert_shader_edit, py)),
         ("PipelineState", pyo3::wrap_pyfunction!(PipelineState, py)),
+        ("Texture", pyo3::wrap_pyfunction!(Texture, py)),
+        ("Action", pyo3::wrap_pyfunction!(Action, py)),
         ("pipeline_shader", pyo3::wrap_pyfunction!(pipeline_shader, py)),
         ("pipeline_output", pyo3::wrap_pyfunction!(pipeline_output, py)),
         ("pipeline_color_attachment", pyo3::wrap_pyfunction!(pipeline_color_attachment, py)),
@@ -2466,6 +2629,12 @@ mod tests {
         );
         assert!(result.error.is_none(), "{:?}", result.error);
         assert_eq!(result.stdout.trim(), "0");
+        let result = run_script_with_capture(
+            "import renderdocx\nprint(repr(renderdocx.Texture(0)), repr(renderdocx.Action(1)))",
+            &CaptureView::default(),
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.stdout.trim(), "None None");
         // pyrenderdoc-compatible accessors report an unloaded capture cleanly.
         let result = run_script_with_capture(
             "import renderdocx\n\
@@ -2615,6 +2784,10 @@ mod tests {
              print('replay', controller.GetPipelineState().get('event_id') == 19 and len(controller.GetTextures()) == 2 and len(controller.GetBuffers()) == 1 and len(controller.GetResources()) > 0 and controller.GetFrameInfo() is not None and isinstance(controller.GetAPIProperties(), dict))\n\
              ps = renderdocx.PipelineState(19)\n\
              print('pipeline-object', ps.event_id == 19 and ps.available and ps.GetEventId() == 19 and ps.GetShader(4).get('bound') and len(ps.GetOutputs()) == 2 and ps['event_id'] == 19 and ps.get('event_id') == 19 and ps.GetColorAttachments()[0].get('resource', {}).get('resource_index') == 7 and 'event_id' in ps.keys())\n\
+             tex = renderdocx.Texture(0)\n\
+             print('texture-object', tex.name == 'Swapchain Image 96' and tex.width == 128 and tex.arraySize == 1 and tex.format == 'B8G8R8A8_SRGB' and tex.get('mips') == 1 and tex['height'] == 128 and 'height' in tex.keys())\n\
+             act = renderdocx.Action(21)\n\
+             print('action-object', act.eventId == 21 and act.actionId == 4 and act.numIndices == 0 and act['name'] == 'vkCmdDrawMeshTasksEXT()' and isinstance(act.GetChildren(), list) and act.get('flags') == 8)\n\
              renderdocx.RegisterReplacement(7, 8)\n\
              replaced = renderdocx.pipeline(19).get('outputs') or [{}]\n\
              print('replace', replaced[0].get('resource_index') == 8)\n\
@@ -2663,6 +2836,8 @@ mod tests {
         assert!(result.stdout.contains("compat True"), "{}", result.stdout);
         assert!(result.stdout.contains("replay True"), "{}", result.stdout);
         assert!(result.stdout.contains("pipeline-object True"), "{}", result.stdout);
+        assert!(result.stdout.contains("texture-object True"), "{}", result.stdout);
+        assert!(result.stdout.contains("action-object True"), "{}", result.stdout);
         assert!(result.stdout.contains("replace True"), "{}", result.stdout);
         assert!(result.stdout.contains("unreplace True"), "{}", result.stdout);
         assert!(result.stdout.contains("debug True"), "{}", result.stdout);

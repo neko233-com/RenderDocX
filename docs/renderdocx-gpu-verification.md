@@ -132,7 +132,9 @@ The same test covers the per-field helpers (`pipeline_shader`,
 `pipeline_output`, `pipeline_color_attachment`, `action_info`, `action_at`,
 `action_children`, `action_draws`, `texture_info`, `buffer_info`,
 `resource_info`), a `PipelineState(19)` object (attributes, `GetShader`,
-`GetOutputs`, attachments, `[]`/`get`/`keys`), `Get*Viewer()` handles, `ViewShader`/`EditShader` panel
+`GetOutputs`, attachments, `[]`/`get`/`keys`), and field-addressable
+`Texture(0)` / `Action(21)` objects (including camelCase aliases and
+`GetChildren()`), `Get*Viewer()` handles, `ViewShader`/`EditShader` panel
 requests, and a `DebugShader` mesh trace.
 Notes and bookmarks are written and
 read back through `SetNotes`/`GetNotes`/`SetBookmark`/`GetBookmarks`/
