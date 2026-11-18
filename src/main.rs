@@ -276,6 +276,54 @@ fn parse_optional_debug_selector(value: &str) -> Result<Option<u32>, ()> {
 
 const SHADER_SOURCE_PAGE_LINES: usize = 200;
 
+/// Byte range covering one shader source page (used for range-limited find).
+fn shader_page_byte_range(contents: &str, page: usize) -> (usize, usize) {
+    let start_line = page.saturating_mul(SHADER_SOURCE_PAGE_LINES);
+    let end_line = start_line + SHADER_SOURCE_PAGE_LINES;
+    let total_lines = contents.split('\n').count();
+    if start_line >= total_lines {
+        return (contents.len(), contents.len());
+    }
+    let mut start = None;
+    let mut end = contents.len();
+    let mut offset = 0usize;
+    for (line, text) in contents.split('\n').enumerate() {
+        let line_end = offset + text.len();
+        if line == start_line {
+            start = Some(offset);
+        }
+        if line == end_line {
+            end = offset;
+            break;
+        }
+        offset = line_end + 1;
+    }
+    (start.unwrap_or(0).min(contents.len()), end.min(contents.len()))
+}
+
+#[cfg(test)]
+mod shader_page_range_tests {
+    use super::*;
+
+    #[test]
+    fn page_range_covers_the_expected_line_span() {
+        let mut text = String::new();
+        for line in 0..450 {
+            text.push_str(&format!("line{line}\n"));
+        }
+        // Page 0 starts at byte 0.
+        assert_eq!(shader_page_byte_range(&text, 0).0, 0);
+        // Page 1 starts after exactly 200 lines (each ends with '\n').
+        let expected: usize = text.split('\n').take(200).map(|line| line.len() + 1).sum();
+        assert_eq!(shader_page_byte_range(&text, 1).0, expected);
+        // A short source is one page covering the whole text.
+        assert_eq!(shader_page_byte_range("ab\ncd", 0), (0, 5));
+        // A page past the end is empty rather than panicking.
+        let (start, end) = shader_page_byte_range("ab\ncd", 99);
+        assert_eq!(start, end);
+    }
+}
+
 fn shader_source_page(contents: &str, page: usize) -> (usize, Vec<(usize, &str)>) {
     let total = contents.lines().count();
     let start = page.saturating_mul(SHADER_SOURCE_PAGE_LINES);
@@ -1036,6 +1084,7 @@ struct Workspace {
     show_find_replace: bool,
     find_options: renderdocx::find_replace::FindOptions,
     find_all_files: bool,
+    find_current_page_only: bool,
     find_cursor: usize,
     shader_find: Entity<InputState>,
     shader_replace: Entity<InputState>,
@@ -1045,6 +1094,7 @@ struct Workspace {
     python_input: Entity<InputState>,
     python_script: Entity<TextareaState>,
     python_output: Vec<String>,
+    python_filter: Entity<InputState>,
     python_pending: bool,
     core_info: Option<renderdocx::renderdoc_core::CoreInfo>,
     core_handle: Option<renderdocx::renderdoc_core::CoreHandle>,
@@ -4677,12 +4727,15 @@ impl Workspace {
             "{}: {name}",
             self.t("Extension toggled", "扩展状态已切换")
         ));
-        // Invoke the extension's lifecycle entry point via embedded CPython.
+        // Invoke the extension's lifecycle entry point via embedded CPython,
+        // passing the open capture as `pyrenderdoc` when one is loaded.
         if let Some(dir) = dir {
             let function = if enabling { "register" } else { "unregister" }.to_owned();
             let extension_name = name.clone();
+            let view = self.python_capture_view();
             let task = cx.background_executor().spawn(async move {
-                renderdocx::python_embed::call_extension(&dir, &function, "1.48")
+                let view = if enabling { Some(&view) } else { None };
+                renderdocx::python_embed::call_extension(&dir, &function, "1.48", view)
             });
             cx.spawn(async move |this, cx| {
                 let result = task.await;
@@ -5319,7 +5372,20 @@ impl Workspace {
             return;
         };
         let current_doc = self.shader_source.unwrap_or(0);
-        let found = if self.find_all_files {
+        let found = if self.find_current_page_only {
+            // "Search in selection": restrict to the current page's byte range.
+            let (page_start, page_end) =
+                shader_page_byte_range(&contents, self.shader_source_page);
+            renderdocx::find_replace::find_in_range(
+                &contents,
+                &needle,
+                self.find_options,
+                page_start,
+                page_end,
+                self.find_cursor,
+            )
+            .map(|(start, end)| (current_doc, start, end))
+        } else if self.find_all_files {
             let documents: Vec<String> = self
                 .shader_data
                 .as_ref()
@@ -5801,16 +5867,10 @@ impl Workspace {
         cx.notify();
     }
 
-    fn run_python(&mut self, code: String, cx: &mut Context<Self>) {
-        if code.trim().is_empty() || self.python_pending {
-            return;
-        }
-        self.python_pending = true;
-        self.python_output.push(format!(">>> {code}"));
-        cx.notify();
-        // Expose the open capture to scripts as the `renderdocx` module.
-        let view = self
-            .snapshot
+    /// Read-only capture summary exposed to embedded Python scripts and
+    /// extension lifecycle calls as `renderdocx` / `pyrenderdoc`.
+    fn python_capture_view(&self) -> renderdocx::python_embed::CaptureView {
+        self.snapshot
             .as_ref()
             .map(|snapshot| renderdocx::python_embed::CaptureView {
                 frame: snapshot.frame,
@@ -5858,7 +5918,18 @@ impl Workspace {
                     })
                     .collect(),
             })
-            .unwrap_or_default();
+            .unwrap_or_default()
+    }
+
+    fn run_python(&mut self, code: String, cx: &mut Context<Self>) {
+        if code.trim().is_empty() || self.python_pending {
+            return;
+        }
+        self.python_pending = true;
+        self.python_output.push(format!(">>> {code}"));
+        cx.notify();
+        // Expose the open capture to scripts as the `renderdocx` module.
+        let view = self.python_capture_view();
         let task = cx.background_executor().spawn(async move {
             renderdocx::python_embed::run_script_with_capture(&code, &view)
         });
@@ -18432,6 +18503,9 @@ impl Workspace {
                                         }, cx))
                                         .child(button("shader-find-all-files", self.t("Find in all files", "在全部文件中查找"), self.find_all_files, |this, cx| {
                                             this.find_all_files = !this.find_all_files; this.find_cursor = 0; cx.notify();
+                                        }, cx))
+                                        .child(button("shader-find-page", self.t("Current page only", "仅当前页"), self.find_current_page_only, |this, cx| {
+                                            this.find_current_page_only = !this.find_current_page_only; this.find_cursor = 0; cx.notify();
                                         }, cx))),
                             )
                         })
@@ -21834,21 +21908,45 @@ impl Render for Workspace {
             .child(div().flex().flex_col().gap_1()
                 .child(self.t("Python scripting", "Python 脚本"))
                 .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
-                    "Scripts run in an external Python process and cannot access the open capture.",
-                    "脚本在外部 Python 进程中运行，无法访问已打开的捕获。",
+                    "Embedded CPython: scripts can access the open capture as the renderdocx module (frame, api_name, action_count, actions, textures, help()). State persists between entries.",
+                    "嵌入式 CPython：脚本可通过 renderdocx 模块访问已打开捕获（frame、api_name、action_count、actions、textures、help()）。变量在多次执行间保留。",
                 )))
                 .child(div().flex().flex_wrap().gap_2()
                     .child(Input::new(&self.python_input).id("python-input").aria_label(self.t("Python expression", "Python 表达式")).w(px(280.)))
                     .child(button("python-execute", self.t("Execute", "执行"), false, |this, cx| this.execute_python_input(cx), cx))
                     .child(button("python-run", self.t("Run script", "运行脚本"), false, |this, cx| this.run_python_script(cx), cx))
-                    .child(button("python-clear", self.t("Clear output", "清除输出"), false, |this, cx| { this.python_output.clear(); cx.notify(); }, cx)))
+                    .child(button("python-clear", self.t("Clear output", "清除输出"), false, |this, cx| { this.python_output.clear(); cx.notify(); }, cx))
+                    .child(button("python-reset", self.t("Reset session", "重置会话"), false, |this, cx| {
+                        renderdocx::python_embed::reset_repl();
+                        this.python_output.clear();
+                        this.status = Some(this.t("Python session reset.", "Python 会话已重置。").to_owned());
+                        cx.notify();
+                    }, cx)))
                 .child(div().id("python-script").test_support().w_full().child(
                     Textarea::new(&self.python_script).aria_label(self.t("Python script", "Python 脚本"))
                 ))
-                .child(div().id("python-output").test_support().flex().flex_col().gap_0().text_sm()
-                    .children(self.python_output.iter().enumerate().map(|(index, line)| {
-                        div().id(("python-line", index)).test_support().child(line.clone())
-                    })))
+                .child(div().flex().flex_wrap().gap_2()
+                    .child(self.t("Find in output", "在输出中查找"))
+                    .child(Input::new(&self.python_filter).id("python-find").aria_label(self.t("Find in output", "在输出中查找")).w(px(220.))))
+                .child({
+                    let needle = self.python_filter.read(cx).value().to_lowercase();
+                    let lines: Vec<(usize, String)> = self
+                        .python_output
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, line)| needle.is_empty() || line.to_lowercase().contains(&needle))
+                        .map(|(index, line)| (index, line.clone()))
+                        .collect();
+                    let matched = lines.len();
+                    div().id("python-output").test_support().flex().flex_col().gap_0().text_sm()
+                        .child(div().id("python-find-count").test_support().text_color(rgb(0x91a7c0)).child(format!(
+                            "{}: {matched}",
+                            self.t("matching lines", "匹配行")
+                        )))
+                        .children(lines.into_iter().map(|(index, line)| {
+                            div().id(("python-line", index)).test_support().child(line)
+                        }))
+                })
             )
             .child(div().flex().flex_col().gap_1()
                 .child(self.t("Mesh viewer settings", "网格查看器设置"))
@@ -22217,6 +22315,7 @@ fn main() {
                     let shader_find = cx.new(|cx| InputState::new(window, cx));
                     let shader_replace = cx.new(|cx| InputState::new(window, cx));
                     let python_input = cx.new(|cx| InputState::new(window, cx));
+                    let python_filter = cx.new(|cx| InputState::new(window, cx));
                     let python_script =
                         cx.new(|cx| TextareaState::new(window, cx).rows(6).auto_grow(4, 12));
                     let vertex_instance =
@@ -22510,6 +22609,7 @@ fn main() {
                         show_find_replace: false,
                         find_options: renderdocx::find_replace::FindOptions::default(),
                         find_all_files: false,
+                        find_current_page_only: false,
                         find_cursor: 0,
                         shader_find,
                         shader_replace,
@@ -22519,6 +22619,7 @@ fn main() {
                         python_input,
                         python_script,
                         python_output: Vec::new(),
+                        python_filter,
                         python_pending: false,
                         core_info: None,
                         core_handle: None,
@@ -23068,6 +23169,7 @@ mod ui_tests {
                     let shader_find = cx.new(|cx| InputState::new(window, cx));
                     let shader_replace = cx.new(|cx| InputState::new(window, cx));
                     let python_input = cx.new(|cx| InputState::new(window, cx));
+                    let python_filter = cx.new(|cx| InputState::new(window, cx));
                     let python_script =
                         cx.new(|cx| TextareaState::new(window, cx).rows(6).auto_grow(4, 12));
                     let vertex_instance =
@@ -23380,6 +23482,7 @@ mod ui_tests {
                         show_find_replace: false,
                         find_options: renderdocx::find_replace::FindOptions::default(),
                         find_all_files: false,
+                        find_current_page_only: false,
                         find_cursor: 0,
                         shader_find,
                         shader_replace,
@@ -23389,6 +23492,7 @@ mod ui_tests {
                         python_input,
                         python_script,
                         python_output: Vec::new(),
+                        python_filter,
                         python_pending: false,
                         core_info: None,
                         core_handle: None,
@@ -23729,6 +23833,7 @@ mod ui_tests {
                     let shader_find = cx.new(|cx| InputState::new(window, cx));
                     let shader_replace = cx.new(|cx| InputState::new(window, cx));
                     let python_input = cx.new(|cx| InputState::new(window, cx));
+                    let python_filter = cx.new(|cx| InputState::new(window, cx));
                     let python_script =
                         cx.new(|cx| TextareaState::new(window, cx).rows(6).auto_grow(4, 12));
                     let vertex_instance =
@@ -24163,6 +24268,7 @@ mod ui_tests {
                         show_find_replace: false,
                         find_options: renderdocx::find_replace::FindOptions::default(),
                         find_all_files: false,
+                        find_current_page_only: false,
                         find_cursor: 0,
                         shader_find,
                         shader_replace,
@@ -24172,6 +24278,7 @@ mod ui_tests {
                         python_input,
                         python_script,
                         python_output: Vec::new(),
+                        python_filter,
                         python_pending: false,
                         core_info: None,
                         core_handle: None,

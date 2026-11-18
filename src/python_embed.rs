@@ -9,6 +9,10 @@ use std::{ffi::CString, sync::Mutex};
 // all embedded calls so concurrent scripts cannot clobber each other's capture.
 static PY_LOCK: Mutex<()> = Mutex::new(());
 
+// Persistent globals for the embedded REPL: variables defined by one console
+// entry remain available to the next, like an interactive interpreter session.
+static REPL_GLOBALS: Mutex<Option<pyo3::Py<PyDict>>> = Mutex::new(None);
+
 const CAPTURE_SETUP: &str = "import sys, io\n_stdout = getattr(sys, '_rdx_orig_out', sys.stdout)\n_stderr = getattr(sys, '_rdx_orig_err', sys.stderr)\nsys._rdx_orig_out = _stdout\nsys._rdx_orig_err = _stderr\n_sysbuf_out = io.StringIO()\n_sysbuf_err = io.StringIO()\nsys.stdout = _sysbuf_out\nsys.stderr = _sysbuf_err\n";
 const CAPTURE_RESTORE: &str = "sys.stdout = getattr(sys, '_rdx_orig_out', sys.stdout)\nsys.stderr = getattr(sys, '_rdx_orig_err', sys.stderr)\n";
 
@@ -71,69 +75,35 @@ pub fn run_script(code: &str) -> EmbedOutput {
 }
 
 /// Execute Python with a read-only `renderdocx` capture view installed in
-/// builtins, so scripts can inspect the open capture via
+/// Builtins, so scripts can inspect the open capture via
 /// `renderdocx.frame`, `renderdocx.api_name`, `renderdocx.action_count`, etc.
 pub fn run_script_with_capture(code: &str, view: &CaptureView) -> EmbedOutput {
-    use pyo3::types::{PyList, PyModule};
     let _guard = PY_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     Python::attach(|py| {
-        let globals = PyDict::new(py);
-        let mut result = EmbedOutput::default();
-        // Build the renderdocx module object as a dict-backed namespace.
-        let module = PyDict::new(py);
-        module.set_item("frame", view.frame).ok();
-        module.set_item("api", view.api).ok();
-        module
-            .set_item("api_name", crate::api_enums::graphics_api::name(view.api))
-            .ok();
-        module.set_item("action_count", view.action_count).ok();
-        module.set_item("resource_count", view.resource_count).ok();
-        module.set_item("texture_count", view.texture_count).ok();
-        module.set_item("buffer_count", view.buffer_count).ok();
-        module.set_item("selected_event", view.selected_event).ok();
-        let names = PyList::new(py, &view.resource_names).ok();
-        if let Some(names) = names {
-            module.set_item("resource_names", names).ok();
-        }
-        // Actions as a list of (event_id, name, depth, indices) tuples.
-        let action_tuples: Vec<(u32, &str, usize, u32)> = view
-            .actions
-            .iter()
-            .map(|(id, name, depth, indices)| (*id, name.as_str(), *depth, *indices))
-            .collect();
-        if let Ok(actions) = PyList::new(py, action_tuples) {
-            module.set_item("actions", actions).ok();
-        }
-        // Textures as (name, width, height, depth, format, mips, samples).
-        let texture_tuples: Vec<(String, u32, u32, u32, String, u32, u32)> = view.textures.clone();
-        if let Ok(textures) = PyList::new(py, texture_tuples) {
-            module.set_item("textures", textures).ok();
-        }
-        // Inject as a builtin module importable via `import renderdocx`.
-        let modules = py.import("sys").and_then(|sys| sys.getattr("modules")).ok();
-        if let Some(modules) = modules {
-            let m = PyModule::new(py, "renderdocx").ok();
-            if let Some(m) = m {
-                let dict = m.dict();
-                for (key, value) in &module {
-                    dict.set_item(key, value).ok();
+        // Reuse the REPL globals so variables persist across console entries.
+        let globals = {
+            let mut guard = REPL_GLOBALS
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            match guard.as_ref() {
+                Some(existing) => existing.clone_ref(py).into_bound(py),
+                None => {
+                    let fresh = PyDict::new(py);
+                    *guard = Some(fresh.clone().unbind());
+                    fresh
                 }
-                // Built-in help() listing the exposed API: the minimal pure-Rust
-                // equivalent of the upstream help browser's discovery role.
-                let help_src = "def _rdx_help():\n    print('RenderDocX Python API: ' + ', '.join(sorted(k for k in dir(renderdocx) if not k.startswith('_'))))\n";
-                let help_globals = PyDict::new(py);
-                help_globals.set_item("renderdocx", &m).ok();
-                if py
-                    .run(&cstring(help_src).unwrap(), Some(&help_globals), None)
-                    .is_ok()
-                {
-                    if let Ok(function) = help_globals.get_item("_rdx_help") {
-                        dict.set_item("help", function).ok();
-                    }
-                }
-                modules.set_item("renderdocx", m).ok();
             }
-        }
+        };
+        let mut result = EmbedOutput::default();
+        // Build and register the renderdocx module (also usable as pyrenderdoc).
+        let module = match build_capture_module(py, view) {
+            Ok(module) => module,
+            Err(error) => {
+                result.error = Some(error);
+                return result;
+            }
+        };
+        register_capture_module(py, &module).ok();
         if let Err(error) = py.run(&cstring(CAPTURE_SETUP).unwrap(), Some(&globals), None) {
             result.error = Some(format!("capture setup failed: {error}"));
             return result;
@@ -147,6 +117,83 @@ pub fn run_script_with_capture(code: &str, view: &CaptureView) -> EmbedOutput {
         let _ = py.run(&cstring(CAPTURE_RESTORE).unwrap(), Some(&globals), None);
         result
     })
+}
+
+/// Clear the persistent REPL globals (start a fresh interpreter session).
+pub fn reset_repl() {
+    let _guard = PY_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let mut guard = REPL_GLOBALS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    *guard = None;
+}
+
+/// Build the `renderdocx` Python module object from a capture view.
+fn build_capture_module<'py>(
+    py: Python<'py>,
+    view: &CaptureView,
+) -> Result<Bound<'py, pyo3::types::PyModule>, String> {
+    use pyo3::types::{PyList, PyModule};
+    let module = PyModule::new(py, "renderdocx").map_err(|error| error.to_string())?;
+    let dict = module.dict();
+    dict.set_item("frame", view.frame).ok();
+    dict.set_item("api", view.api).ok();
+    dict.set_item("api_name", crate::api_enums::graphics_api::name(view.api))
+        .ok();
+    dict.set_item("action_count", view.action_count).ok();
+    dict.set_item("resource_count", view.resource_count).ok();
+    dict.set_item("texture_count", view.texture_count).ok();
+    dict.set_item("buffer_count", view.buffer_count).ok();
+    dict.set_item("selected_event", view.selected_event).ok();
+    if let Ok(names) = PyList::new(py, &view.resource_names) {
+        dict.set_item("resource_names", names).ok();
+    }
+    // Actions as a list of (event_id, name, depth, indices) tuples.
+    let action_tuples: Vec<(u32, &str, usize, u32)> = view
+        .actions
+        .iter()
+        .map(|(id, name, depth, indices)| (*id, name.as_str(), *depth, *indices))
+        .collect();
+    if let Ok(actions) = PyList::new(py, action_tuples) {
+        dict.set_item("actions", actions).ok();
+    }
+    // Textures as (name, width, height, depth, format, mips, samples).
+    if let Ok(textures) = PyList::new(py, view.textures.clone()) {
+        dict.set_item("textures", textures).ok();
+    }
+    // Built-in help() listing the exposed API: the minimal pure-Rust
+    // equivalent of the upstream help browser's discovery role.
+    let help_src = "def _rdx_help():\n    print('RenderDocX Python API: ' + ', '.join(sorted(k for k in dir(renderdocx) if not k.startswith('_'))))\n";
+    let help_globals = PyDict::new(py);
+    help_globals.set_item("renderdocx", &module).ok();
+    if py
+        .run(&cstring(help_src).unwrap(), Some(&help_globals), None)
+        .is_ok()
+    {
+        if let Ok(function) = help_globals.get_item("_rdx_help") {
+            dict.set_item("help", function).ok();
+        }
+    }
+    Ok(module)
+}
+
+/// Register the capture module under both `renderdocx` and `pyrenderdoc` in
+/// `sys.modules`, so `import renderdocx` / `import pyrenderdoc` both work.
+fn register_capture_module(
+    py: Python<'_>,
+    module: &Bound<'_, pyo3::types::PyModule>,
+) -> Result<(), String> {
+    let modules = py
+        .import("sys")
+        .and_then(|sys| sys.getattr("modules"))
+        .map_err(|error| error.to_string())?;
+    modules
+        .set_item("renderdocx", module)
+        .map_err(|error| error.to_string())?;
+    modules
+        .set_item("pyrenderdoc", module)
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn get_buffer(globals: &Bound<'_, PyDict>, name: &str) -> String {
@@ -172,11 +219,29 @@ fn format_py_error(py: Python<'_>, error: &PyErr) -> String {
 /// Load an extension package's `__init__.py` and call one of its lifecycle
 /// entry points (`register(version, pyrenderdoc)` / `unregister()`), capturing
 /// output and exceptions. The extension directory is prepended to `sys.path`.
-pub fn call_extension(dir: &std::path::Path, function: &str, version: &str) -> EmbedOutput {
+pub fn call_extension(
+    dir: &std::path::Path,
+    function: &str,
+    version: &str,
+    view: Option<&CaptureView>,
+) -> EmbedOutput {
     let _guard = PY_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     Python::attach(|py| {
         let globals = PyDict::new(py);
         let mut result = EmbedOutput::default();
+        // Expose the open capture as pyrenderdoc/renderdocx for the extension.
+        if let Some(view) = view {
+            match build_capture_module(py, view) {
+                Ok(module) => {
+                    register_capture_module(py, &module).ok();
+                    globals.set_item("pyrenderdoc", &module).ok();
+                }
+                Err(error) => {
+                    result.error = Some(error);
+                    return result;
+                }
+            }
+        }
         // Build a Python string literal for the directory via repr, avoiding
         // manual escaping of Windows separators.
         let dir_repr = py
@@ -205,7 +270,12 @@ pub fn call_extension(dir: &std::path::Path, function: &str, version: &str) -> E
             return result;
         }
         let call = if function == "register" {
-            format!("_mod.register({version:?}, None)")
+            // Pass the capture module as pyrenderdoc when one is available.
+            if view.is_some() {
+                format!("_mod.register({version:?}, pyrenderdoc)")
+            } else {
+                format!("_mod.register({version:?}, None)")
+            }
         } else {
             "_mod.unregister()".to_owned()
         };
@@ -245,10 +315,10 @@ mod tests {
             "def register(version, pyrenderdoc):\n    print('registered', version)\ndef unregister():\n    print('unregistered')\n",
         )
         .unwrap();
-        let registered = call_extension(dir.path(), "register", "1.48");
+        let registered = call_extension(dir.path(), "register", "1.48", None);
         assert!(registered.error.is_none(), "{:?}", registered.error);
         assert!(registered.stdout.contains("registered 1.48"));
-        let unregistered = call_extension(dir.path(), "unregister", "1.48");
+        let unregistered = call_extension(dir.path(), "unregister", "1.48", None);
         assert!(unregistered.error.is_none(), "{:?}", unregistered.error);
         assert!(unregistered.stdout.contains("unregistered"));
     }
@@ -287,6 +357,41 @@ mod tests {
         assert!(help.error.is_none(), "{:?}", help.error);
         assert!(help.stdout.contains("RenderDocX Python API"));
         assert!(help.stdout.contains("action_count"));
+    }
+
+    #[test]
+    fn extensions_receive_the_capture_view_as_pyrenderdoc() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("__init__.py"),
+            "def register(version, pyrenderdoc):\n    print('frame', pyrenderdoc.frame, 'name', pyrenderdoc.api_name, 'actions', pyrenderdoc.action_count)\ndef unregister():\n    pass\n",
+        )
+        .unwrap();
+        let view = CaptureView {
+            frame: 9,
+            api: crate::api_enums::graphics_api::D3D11,
+            action_count: 12,
+            ..Default::default()
+        };
+        let result = call_extension(dir.path(), "register", "1.48", Some(&view));
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(result.stdout.contains("frame 9 name D3D11 actions 12"));
+    }
+
+    #[test]
+    fn repl_state_persists_across_entries_and_resets() {
+        reset_repl();
+        let view = CaptureView {
+            frame: 1,
+            ..Default::default()
+        };
+        let first = run_script_with_capture("_rdx_repl_probe = 41\nprint(_rdx_repl_probe)", &view);
+        assert!(first.stdout.contains("41"), "{:?}", first.error);
+        let second = run_script_with_capture("print(_rdx_repl_probe + 1)", &view);
+        assert!(second.stdout.contains("42"), "{:?}", second.error);
+        reset_repl();
+        let third = run_script_with_capture("print(_rdx_repl_probe)", &view);
+        assert!(third.error.is_some(), "reset must drop prior globals");
     }
 
     #[test]
