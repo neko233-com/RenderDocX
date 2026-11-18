@@ -159,6 +159,7 @@ struct ViewerState {
     watches: Vec<String>,
     errors: String,
     script_text: String,
+    script_name: String,
     output_filter: Option<String>,
     extension_output_filter: Option<String>,
     show_output: bool,
@@ -1055,27 +1056,44 @@ impl ViewerHandle {
     }
 
     #[allow(non_snake_case)]
-    fn LoadScriptFromFilename(&self, path: String) -> pyo3::PyResult<()> {
-        let text = std::fs::read_to_string(&path)
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-        self.state
+    fn LoadScriptFromFilename(&self, path: String) -> bool {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return false;
+        };
+        let mut state = self
+            .state
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .script_text = text;
-        Ok(())
+            .unwrap_or_else(|error| error.into_inner());
+        state.script_text = text;
+        state.script_name = path;
+        true
     }
 
     #[allow(non_snake_case)]
-    fn CreateNewScriptEditor(&self) {
-        self.state
+    #[pyo3(signature = (name = String::new(), text = String::new()))]
+    fn CreateNewScriptEditor(&self, name: String, text: String) {
+        let mut state = self
+            .state
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .script_text
-            .clear();
+            .unwrap_or_else(|error| error.into_inner());
+        state.script_name = name;
+        state.script_text = text;
     }
 
+    /// `RunScript(code=None)` -> run the supplied code, or the current editor
+    /// contents when no code is passed.
     #[allow(non_snake_case)]
-    fn RunScript(&self, py: Python<'_>, code: String) -> pyo3::PyResult<()> {
+    #[pyo3(signature = (code = None))]
+    fn RunScript(&self, py: Python<'_>, code: Option<String>) -> pyo3::PyResult<()> {
+        let code = match code {
+            Some(code) => code,
+            None => self
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .script_text
+                .clone(),
+        };
         let globals = REPL_GLOBALS
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -6095,19 +6113,28 @@ mod tests {
         let script_dir = tempfile::tempdir().unwrap();
         let script = script_dir.path().join("extension.py");
         std::fs::write(&script, "print(9)\n").unwrap();
-        shell
-            .LoadScriptFromFilename(script.display().to_string())
-            .unwrap();
+        assert!(
+            shell.LoadScriptFromFilename(script.display().to_string()),
+            "load extension.py"
+        );
         assert_eq!(shell.GetScriptText(), "print(9)\n");
+        assert!(!shell.LoadScriptFromFilename(
+            script_dir.path().join("missing.py").display().to_string()
+        ));
+        shell.CreateNewScriptEditor("new.py".to_owned(), "print(11)".to_owned());
+        assert_eq!(shell.GetScriptText(), "print(11)");
         let result = run_script_with_capture(
             "import renderdocx\n\
              shell = renderdocx.GetPythonShell()\n\
              shell.SetScriptText('print(31415)')\n\
-             shell.RunScript(shell.GetScriptText())",
+             shell.RunScript(shell.GetScriptText())\n\
+             shell.SetScriptText('print(27182)')\n\
+             shell.RunScript()",
             &CaptureView::default(),
         );
         assert!(result.error.is_none(), "{:?}", result.error);
         assert!(result.stdout.contains("31415"), "{}", result.stdout);
+        assert!(result.stdout.contains("27182"), "{}", result.stdout);
     }
 
     #[cfg(windows)]
