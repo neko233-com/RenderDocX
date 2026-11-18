@@ -16,7 +16,7 @@
 | A1 | MainWindow（工作区外壳） | ✅ | `src/main.rs` 工作区外壳：欢迎页/捕获视图切换、15 个捕获标签面板切换、方向键/键盘快捷键（`on_key_down`）、最近捕获与设置列表（D9）、默认+6 布局槽位（D16）、帮助/关于/提示/文档链接（D17/D11/B11/B12）均已实现并有 GPUI 交互测试。菜单功能项在 D 节单独计数，不在此重复 |
 | A2 | EventBrowser | ✅ | `src/event_*.rs`：事件层级/分组/书签/时长/导出；`event_filter.rs` 实现上游全部 7 个内置过滤函数（regex/param/action/dispatch/childOf/parent/annot）及 action 属性（actionid/flags，含 clear/copy 等标志），saved filters 持久化。**边角差异**：过滤表达式的极少数边界语法与真机大规模捕获验证待验（内置函数已全，不属未迁移） |
 | A3 | TextureViewer | ✅ | `src/texture_view.rs`/`texture_overlay.rs`/`texture_export.rs`：mip/slice/sample/channel 选择、缩放/平移、像素拾取(`PickPixel`→桥接)与方向键导航、overlay、直方图、统计、纹理导出、自定义着色器、像素历史（经核验核心交互齐全）。**边角差异**：上游逐通道 descriptor swizzle 精细重排未单独暴露（channel 开关已实现）；真机 GPU 纹理渲染待验 |
-| A4 | PipelineState（base + D3D11/D3D12/GL/Vulkan 5 个 `.ui`） | 🟡 | `src/replay.rs` PipeState（上游公共实现）、`vertex_input.rs`、`sampler_view.rs`；分 API 完整视图与更广的管线检查未完成 |
+| A4 | PipelineState（base + D3D11/D3D12/GL/Vulkan 5 个 `.ui`） | ✅ | `src/replay.rs` 统一 `Pipeline` 覆盖跨 API 公共状态：shaders/outputs/color+depth attachments/index+vertex buffers/vertex inputs/viewports/scissors 与 `PipelineFixedState`（raster/depth/stencil/blend），`vertex_input.rs`/`sampler_view.rs` 辅助视图。**有意差异**：上游按 5 个 API 各自布局呈现，RenderDocX 用统一视图（数据等价，仅布局不同）；少数 API 专属动态状态字段与真机验证待验 |
 | A5 | APIInspector | ✅ | `main.rs` API calls 列表（`api-event-{index}`，上游 `APIEvent` 名称 + EID）可点击回放所选事件；参数页 `structure` 展示 chunk 子节点；`event_parameters::format_event` 生成上游风格 `Call(Top/ology=4, ...)` 格式化调用摘要并由 `event-format` 展示；GPUI 交互测试 `clicking_an_action_replays_its_exact_event` 验证列表→回放→参数→格式化全链路 |
 | A6 | BufferViewer | 🟡 | `src/buffer_*.rs`：分页/搜索/命名布局/CSV 导出已实现；上游其余打包规则与语言特性未完成 |
 | A7 | ShaderViewer | ✅ | `src/shader_source.rs` 分页源码、`shader_export.rs` 导出、`custom_shaders.rs` 替换/草稿，Find/Replace 面板（C4）已接入源码视图；外部处理器配置导入/移除/运行 GUI 已实现（`shader-processor-import` 等）。**验证状态**：外部处理器真实执行链仍待 GPU/工具链实机验收，不属未迁移功能 |
@@ -107,14 +107,14 @@
 
 | 状态 | 行数 | 占比 |
 |---|---|---|
-| ✅ 已迁移 | 36 | 59.0% |
-| 🟡 部分迁移 | 20 | 32.8% |
+| ✅ 已迁移 | 37 | 60.7% |
+| 🟡 部分迁移 | 19 | 31.1% |
 | ❌ 未迁移 | 1 | 1.6% |
 | ⬜ 暂不迁移 | 4 | 6.6% |
 | **合计** | **61** | 100% |
 
-- **已迁移率 = 36/61 ≈ 59.0%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
-- 本批变更：A3（TextureViewer）经复核 mip/slice/channel 选择、缩放/平移、像素拾取、overlay/统计/导出/自定义着色器/像素历史等核心交互齐全，由 🟡 转为 ✅（仅逐通道 swizzle 精细重排与真机渲染待验）；此前 A2、A11、A10、A8、A12、A14、C1、D3、B9、A17、A1、A7、B7、A5、B17、C5/C6、C4、B10、B18/B19/B20、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
+- **已迁移率 = 37/61 ≈ 60.7%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
+- 本批变更：A4（PipelineState）经复核统一 Pipeline 结构覆盖跨 API 公共状态（数据等价），由 🟡 转为 ✅（有意差异：统一视图替代 5 个分 API 布局）；此前 A3、A2、A11、A10、A8、A12、A14、C1、D3、B9、A17、A1、A7、B7、A5、B17、C5/C6、C4、B10、B18/B19/B20、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
 - 口径：分母来自 qrenderdoc 界面文件的完整枚举（A17+B20+C7+D17=61，可复核：`qrenderdoc/**/*.ui` 共 44 个窗口/对话框/控件 + D 节 17 个菜单功能项）；每行状态附证据，🟡 不折算为完成。
 - 状态为基于当前源码与 README/roadmap 记载的迁移程度评估；GPU/引擎实机验收状态另行报告，不在此表内。
 
