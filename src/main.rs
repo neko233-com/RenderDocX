@@ -1003,6 +1003,8 @@ struct Workspace {
     launch_arguments: Entity<InputState>,
     launch_delay: Entity<InputState>,
     launch_memory: Entity<InputState>,
+    queued_frame_cap: Entity<InputState>,
+    num_queued_frames: Entity<InputState>,
     launch_working_directory: Option<PathBuf>,
     launch_executable: Option<PathBuf>,
     capture_options: CaptureOptions,
@@ -4252,6 +4254,18 @@ impl Workspace {
                 .unwrap_or_default(),
             command_line: self.launch_arguments.read(cx).value().to_string(),
             environment: self.launch_environment.clone(),
+            queued_frame_cap: self
+                .queued_frame_cap
+                .read(cx)
+                .value()
+                .parse::<u32>()
+                .unwrap_or(0),
+            num_queued_frames: self
+                .num_queued_frames
+                .read(cx)
+                .value()
+                .parse::<u32>()
+                .unwrap_or(0),
             options,
             ..Default::default()
         };
@@ -4291,6 +4305,8 @@ impl Workspace {
                 let delay = settings.options.delay_for_debugger.to_string();
                 let memory = settings.options.soft_memory_limit.to_string();
                 let command_line = settings.command_line.clone();
+                let queued_cap = settings.queued_frame_cap.to_string();
+                let queued_frames = settings.num_queued_frames.to_string();
                 self.capture_options = settings.options;
                 self.launch_environment = settings.environment;
                 self.launch_executable = if settings.executable.is_empty() {
@@ -4312,6 +4328,12 @@ impl Workspace {
                     });
                     self.launch_memory.update(cx, |input, cx| {
                         input.set_value(memory, window, cx)
+                    });
+                    self.queued_frame_cap.update(cx, |input, cx| {
+                        input.set_value(queued_cap, window, cx)
+                    });
+                    self.num_queued_frames.update(cx, |input, cx| {
+                        input.set_value(queued_frames, window, cx)
                     });
                 } else {
                     self.pending_launch_inputs = Some((command_line, delay, memory));
@@ -20542,6 +20564,14 @@ impl Render for Workspace {
             "Soft memory limit (MB)",
             "软内存限制（MB）",
         );
+        let queued_cap_label = self.t(
+            "Queued frame cap",
+            "排队帧上限",
+        );
+        let queued_frames_label = self.t(
+            "Number of queued frames",
+            "排队帧数",
+        );
         let environment_label = self.t(
             "Environment modifications",
             "环境变量修改",
@@ -20916,6 +20946,20 @@ impl Render for Workspace {
                             Input::new(&self.launch_memory)
                                 .id("launch-memory")
                                 .aria_label(memory_label)
+                                .w_full(),
+                        )
+                        .child(queued_cap_label)
+                        .child(
+                            Input::new(&self.queued_frame_cap)
+                                .id("queued-frame-cap")
+                                .aria_label(queued_cap_label)
+                                .w_full(),
+                        )
+                        .child(queued_frames_label)
+                        .child(
+                            Input::new(&self.num_queued_frames)
+                                .id("num-queued-frames")
+                                .aria_label(queued_frames_label)
                                 .w_full(),
                         )
                         .child(div().flex().flex_wrap().gap_2().children(
@@ -21567,6 +21611,8 @@ fn main() {
                     let launch_arguments = cx.new(|cx| InputState::new(window, cx));
                     let launch_delay = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let launch_memory = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let queued_frame_cap = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let num_queued_frames = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let launch_env_name = cx.new(|cx| InputState::new(window, cx));
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
                     let log_filter = cx.new(|cx| InputState::new(window, cx));
@@ -21844,6 +21890,8 @@ fn main() {
                         launch_arguments,
                         launch_delay,
                         launch_memory,
+                        queued_frame_cap,
+                        num_queued_frames,
                         launch_working_directory: None,
                         launch_executable: None,
                         capture_options: CaptureOptions::default(),
@@ -22407,6 +22455,8 @@ mod ui_tests {
                     let launch_arguments = cx.new(|cx| InputState::new(window, cx));
                     let launch_delay = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let launch_memory = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let queued_frame_cap = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let num_queued_frames = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let launch_env_name = cx.new(|cx| InputState::new(window, cx));
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
                     let log_filter = cx.new(|cx| InputState::new(window, cx));
@@ -22703,6 +22753,8 @@ mod ui_tests {
                         launch_arguments,
                         launch_delay,
                         launch_memory,
+                        queued_frame_cap,
+                        num_queued_frames,
                         launch_working_directory: None,
                         launch_executable: None,
                         capture_options: CaptureOptions::default(),
@@ -23057,6 +23109,8 @@ mod ui_tests {
                     let launch_arguments = cx.new(|cx| InputState::new(window, cx));
                     let launch_delay = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let launch_memory = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let queued_frame_cap = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+                    let num_queued_frames = cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let launch_env_name = cx.new(|cx| InputState::new(window, cx));
                     let launch_env_value = cx.new(|cx| InputState::new(window, cx).masked(true));
                     let log_filter = cx.new(|cx| InputState::new(window, cx));
@@ -23475,6 +23529,8 @@ mod ui_tests {
                         launch_arguments,
                         launch_delay,
                         launch_memory,
+                        queued_frame_cap,
+                        num_queued_frames,
                         launch_working_directory: None,
                         launch_executable: None,
                         capture_options: CaptureOptions::default(),
