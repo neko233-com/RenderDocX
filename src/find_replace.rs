@@ -111,6 +111,34 @@ pub fn find_next(
     }
 }
 
+/// Search across multiple documents and return `(document_index, start, end)`
+/// for the first match from `from_doc` onwards. Used by "find in all files".
+pub fn find_in_documents(
+    documents: &[&str],
+    needle: &str,
+    options: FindOptions,
+    from_doc: usize,
+    from_cursor: usize,
+) -> Option<(usize, usize, usize)> {
+    if documents.is_empty() {
+        return None;
+    }
+    let start_doc = from_doc.min(documents.len() - 1);
+    for offset in 0..documents.len() {
+        let doc_index = (start_doc + offset) % documents.len();
+        let text = documents[doc_index];
+        let cursor = if doc_index == start_doc {
+            from_cursor
+        } else {
+            0
+        };
+        if let Some((start, end)) = find_next(text, needle, options, cursor) {
+            return Some((doc_index, start, end));
+        }
+    }
+    None
+}
+
 /// Expand `$0`-`$9` capture references in a replacement string. `$0` is the
 /// whole match; unknown groups expand to an empty string (upstream behaves
 /// similarly for out-of-range captures).
@@ -245,6 +273,18 @@ mod tests {
         let (text, count) = replace_all("Draw draw Drawn", "draw", "DIP", options);
         assert_eq!(count, 2);
         assert_eq!(text, "DIP DIP Drawn");
+    }
+
+    #[test]
+    fn find_in_documents_crosses_file_boundaries_and_wraps() {
+        let docs = ["no match here", "second file has TARGET here", "third none"];
+        let options = FindOptions::default();
+        let found = find_in_documents(&docs, "TARGET", options, 0, 0).unwrap();
+        assert_eq!(found.0, 1);
+        assert_eq!(&docs[1][found.1..found.2], "TARGET");
+        // Wraps from last document back to first.
+        let wrapped = find_in_documents(&docs, "match", options, 2, 0).unwrap();
+        assert_eq!(wrapped.0, 0);
     }
 
     #[test]

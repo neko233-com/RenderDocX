@@ -1035,6 +1035,7 @@ struct Workspace {
     show_config_editor: bool,
     show_find_replace: bool,
     find_options: renderdocx::find_replace::FindOptions,
+    find_all_files: bool,
     find_cursor: usize,
     shader_find: Entity<InputState>,
     shader_replace: Entity<InputState>,
@@ -5126,15 +5127,41 @@ impl Workspace {
             cx.notify();
             return;
         };
-        match renderdocx::find_replace::find_next(&contents, &needle, self.find_options, self.find_cursor) {
-            Some((start, end)) => {
-                let line = contents[..start].bytes().filter(|byte| *byte == b'\n').count();
+        let current_doc = self.shader_source.unwrap_or(0);
+        let found = if self.find_all_files {
+            let documents: Vec<String> = self
+                .shader_data
+                .as_ref()
+                .map(|report| report.source_files.iter().map(|file| file.contents.clone()).collect())
+                .unwrap_or_default();
+            let refs: Vec<&str> = documents.iter().map(String::as_str).collect();
+            renderdocx::find_replace::find_in_documents(&refs, &needle, self.find_options, current_doc, self.find_cursor)
+                .map(|(doc, start, end)| (doc, start, end))
+        } else {
+            renderdocx::find_replace::find_next(&contents, &needle, self.find_options, self.find_cursor)
+                .map(|(start, end)| (current_doc, start, end))
+        };
+        match found {
+            Some((doc, start, end)) => {
+                let target = self
+                    .shader_data
+                    .as_ref()
+                    .and_then(|report| report.source_files.get(doc))
+                    .map(|file| file.contents.as_str())
+                    .unwrap_or(&contents);
+                let line = target[..start.min(target.len())].bytes().filter(|byte| *byte == b'\n').count();
+                if doc != current_doc {
+                    self.shader_source = Some(doc);
+                    self.shader_source_page = 0;
+                }
                 self.shader_source_page = line / SHADER_SOURCE_PAGE_LINES;
                 self.find_cursor = end;
                 self.status = Some(format!(
-                    "{} {}",
+                    "{} {} ({} {})",
                     self.t("Found at line", "找到行"),
-                    line + 1
+                    line + 1,
+                    self.t("file", "文件"),
+                    doc + 1
                 ));
             }
             None => {
@@ -18154,6 +18181,9 @@ impl Workspace {
                                         }, cx))
                                         .child(button("shader-find-regex", self.t("Regular expression", "正则表达式"), self.find_options.regex, |this, cx| {
                                             this.find_options.regex = !this.find_options.regex; cx.notify();
+                                        }, cx))
+                                        .child(button("shader-find-all-files", self.t("Find in all files", "在全部文件中查找"), self.find_all_files, |this, cx| {
+                                            this.find_all_files = !this.find_all_files; this.find_cursor = 0; cx.notify();
                                         }, cx))),
                             )
                         })
@@ -22186,6 +22216,7 @@ fn main() {
                         show_config_editor: false,
                         show_find_replace: false,
                         find_options: renderdocx::find_replace::FindOptions::default(),
+                        find_all_files: false,
                         find_cursor: 0,
                         shader_find,
                         shader_replace,
@@ -23055,6 +23086,7 @@ mod ui_tests {
                         show_config_editor: false,
                         show_find_replace: false,
                         find_options: renderdocx::find_replace::FindOptions::default(),
+                        find_all_files: false,
                         find_cursor: 0,
                         shader_find,
                         shader_replace,
@@ -23837,6 +23869,7 @@ mod ui_tests {
                         show_config_editor: false,
                         show_find_replace: false,
                         find_options: renderdocx::find_replace::FindOptions::default(),
+                        find_all_files: false,
                         find_cursor: 0,
                         shader_find,
                         shader_replace,

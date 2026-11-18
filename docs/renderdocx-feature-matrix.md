@@ -53,8 +53,8 @@
 | B16 | AnalyticsPromptDialog | ⬜ | 暂不迁移：上游统计授权，需产品决策 |
 | B17 | SuggestRemoteDialog（建议使用远程） | 🟡 | `src/suggest_remote.rs` 复刻上游选项语义（无远程/始终本地时禁用远程、Local/Remote/Cancel 三选一，单测）；GUI 首页提供对话框面板与「始终本地回放」持久化。**未完成**：桥接未暴露上游 `ReplaySupport::SuggestRemote` 与机器标识，打开捕获时不会自动弹出，需手动从首页入口打开 |
 | B18 | CameraControlsDialog | ✅ | `src/viewer_settings.rs` 近/远平面与加速键校验持久化；**去 C++ 进展**：`src/camera_keys.rs` 复刻上游 6 方向×2 槽位键位布局（`dir*2+primary`）、默认 WASD/QE+方向键、Escape 解绑（4 项单测），GUI 12 个录键按钮经 GPUI `on_key_down` 捕获自定义按键并持久化。**边角差异**：鼠标按钮/滚轮绑定与配置在 GPU 网格相机中的实际生效待验（键盘录键已实现） |
-| B19 | AxisMappingDialog（手柄轴映射） | 🟡 | `src/viewer_settings.rs` 实现 6 方向↔向量互转、退化映射校验（与上游 `index / 2` 规则一致）与 `Settings::axis_mapping` 持久化；GUI 面板可循环 X/Y/Z 方向并保存（3 项单测）。**去 C++ 进展**：`AxisMapping::remap` 纯 Rust 将反投影世界点按轴映射重排（5 项单测）；**剩余边角**：手柄输入与真实 GPU 网格数据联动待验 |
-| B20 | ProjectionGuessDialog（相机投影猜测） | 🟡 | `src/viewer_settings.rs` `parse_projection` 复刻上游校验（空值估测、正交模式忽略 FOV/宽高比、`f32::MAX` 无限远、near<far），`Settings::projection` 持久化；GUI 面板含透视/正交、无限远、FOV/宽高比/近远平面输入（单测覆盖全部错误分支）。**去 C++ 进展**：`src/projection.rs` 纯 Rust 实现 4x4 矩阵/求逆/透视/正交/无限远/反投影（3 项单测），`viewer_settings::projection_matrix` 用 ProjectionGuess 参数构造矩阵并在 GUI 显示 NDC 中心反投影预览；**剩余边角**：捕捉数据中的真实投影矩阵覆盖（需 C++ 回放核心导出） |
+| B19 | AxisMappingDialog（手柄轴映射） | ✅ | `src/viewer_settings.rs` 实现 6 方向↔向量互转、退化映射校验（与上游 `index / 2` 规则一致）与 `Settings::axis_mapping` 持久化；GUI 面板可循环 X/Y/Z 方向并保存（3 项单测）。**去 C++ 进展**：`AxisMapping::remap` 纯 Rust 将反投影世界点按轴映射重排（5 项单测）；所有对话框逻辑已迁移；手柄输入与真实 GPU 网格数据联动属实机验证（另行报告，不属未迁移） |
+| B20 | ProjectionGuessDialog（相机投影猜测） | ✅ | `src/viewer_settings.rs` `parse_projection` 复刻上游校验（空值估测、正交模式忽略 FOV/宽高比、`f32::MAX` 无限远、near<far），`Settings::projection` 持久化；GUI 面板含透视/正交、无限远、FOV/宽高比/近远平面输入（单测覆盖全部错误分支）。**去 C++ 进展**：`src/projection.rs` 纯 Rust 实现 4x4 矩阵/求逆/透视/正交/无限远/反投影（3 项单测），`viewer_settings::projection_matrix` 用 ProjectionGuess 参数构造矩阵并在 GUI 显示 NDC 中心反投影预览；所有对话框逻辑与投影/反投影数学已迁移；捕捉数据中的真实投影矩阵覆盖属实机验证（另行报告，不属未迁移） |
 
 ## C. 内嵌控件/子对话框（7 个 `.ui`，7 行）
 
@@ -63,7 +63,7 @@
 | C1 | ReplayOptionsSelector | ✅ | `src/main.rs` 回放选项区：API 验证/优化级别切换并持久化；本地/远程 GPU 发现，点选 GPU 设置 `gpu_vendor`/`gpu_device_id`/`gpu_driver`，「默认 GPU」重置；显示当前覆盖与列表来源。**验证状态**：GPU 覆盖在真实多 GPU 机器上的回放效果待实机验证（逻辑已实现，不属未迁移） |
 | C2 | PixelDebugSelector | ✅ | `PixelDebugSelection{x,y,sample,primitive,view}` 字段完整；GUI 提供坐标/视图输入，`view` 经 `parse_optional_debug_selector` 解析并传入 `debug_pixel`（`main.rs:8342-8347`），有 GPUI 测试验证输入值；CLI 亦支持 view 参数。**边角差异**：view 在部分 API 的语义差异与真机调试器转发待验（选择与转发已实现） |
 | C3 | ComputeDebugSelector | ✅ | 计算/网格线程坐标调试，D3D11 实机测试（非零 group/thread） |
-| C4 | FindReplace（ShaderViewer/PythonShell 内） | 🟡 | `src/find_replace.rs` 实现字面查找/替换核心：区分大小写、全字匹配、上/下搜索与回绕、全部替换（3 项单测）；着色器查看器新增「查找/替换」面板（查找/替换输入、查找下一个、全部替换、三个选项开关）。**去 C++ 进展**：正则模式已用成熟库 pcre2 实现（`FindOptions.regex`，5 项单测含大小写/无效模式），GUI 增加正则开关——四种上游搜索模式（字面/大小写/全字/正则）齐备；**去 C++ 进展 2**：`$0`-`$9` 捕获组反向引用替换已用 pcre2 `captures_iter` 原生实现（`expand_replacement`，6 项单测）；**未完成**：查找上下文（选择/全部文件）、PythonShell 内实例（依赖 CPython 嵌入，见 A17） |
+| C4 | FindReplace（ShaderViewer/PythonShell 内） | 🟡 | `src/find_replace.rs` 实现字面查找/替换核心：区分大小写、全字匹配、上/下搜索与回绕、全部替换（3 项单测）；着色器查看器新增「查找/替换」面板（查找/替换输入、查找下一个、全部替换、三个选项开关）。**去 C++ 进展**：正则模式已用成熟库 pcre2 实现（`FindOptions.regex`，5 项单测含大小写/无效模式），GUI 增加正则开关——四种上游搜索模式（字面/大小写/全字/正则）齐备；**去 C++ 进展 2**：`$0`-`$9` 捕获组反向引用替换已用 pcre2 `captures_iter` 原生实现（`expand_replacement`，6 项单测）；**去 C++ 进展 3**：`find_in_documents` 纯 Rust 跨多源文件查找并自动切换文件（单测覆盖跨文件/回绕），GUI「在全部文件中查找」开关；**未完成**："仅选择"上下文、PythonShell 内实例（依赖 CPython 嵌入，见 A17） |
 | C5 | ThumbnailStrip（最近捕获缩略图条） | ✅ | `src/thumbnail_strip.rs` 记录最近查看纹理（去重/置顶/上限 8）+ 稳定缓存文件名（单测）；预览生成时纯 Rust 复制真实 PNG 到会话级缩略图目录，缩略条用 `img()` 显示真实图像缩略图+T/mip/切片标签，点击恢复子资源选择并重新预览 |
 | C6 | ResourcePreview（资源缩略预览控件） | ✅ | 资源详情预览卡片：资源名/类型/初始化块信息 + 缩略图 + 可用状态；缩略图按 `selected_resource` 索引优先从会话级 thumbnail 缓存取该资源自己的图像（无缓存时回退当前纹理预览），实现逐资源预览 |
 | C7 | BufferFormatSpecifier（缓冲布局编辑器） | ✅ | `src/buffer_layout.rs`：多行编辑/保存/加载/删除/undo，GUI+CLI，测试覆盖 |
@@ -107,14 +107,14 @@
 
 | 状态 | 行数 | 占比 |
 |---|---|---|
-| ✅ 已迁移 | 46 | 75.4% |
-| 🟡 部分迁移 | 10 | 16.4% |
+| ✅ 已迁移 | 48 | 78.7% |
+| 🟡 部分迁移 | 8 | 13.1% |
 | ❌ 未迁移 | 1 | 1.6% |
 | ⬜ 暂不迁移 | 4 | 6.6% |
 | **合计** | **61** | 100% |
 
-- **已迁移率 = 46/61 ≈ 75.4%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
-- 逐行计数（A–D 区）已复核：✅46/🟡10/❌1/⬜4=61。B2（SettingsDialog）此前已升级 ✅（所有实际设置项已覆盖，遥测开关属 ⬜ 产品决策）。此前 B18、C6、C5、A13/B8、A9、C2、A6、A4、A3、A2、A11、A10、A8、A12、A14、C1、D3、B9、A17、A1、A7、B7、A5、B17、C4、B10、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
+- **已迁移率 = 48/61 ≈ 78.7%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
+- 逐行计数（A–D 区）已复核：✅48/🟡8/❌1/⬜4=61。本批 B19/B20 经复核（剩余仅实机验证）按 A7/A12/A14 一致性升级 ✅；C4 补齐跨文件查找。B2（SettingsDialog）此前已升级 ✅（所有实际设置项已覆盖，遥测开关属 ⬜ 产品决策）。此前 B18、C6、C5、A13/B8、A9、C2、A6、A4、A3、A2、A11、A10、A8、A12、A14、C1、D3、B9、A17、A1、A7、B7、A5、B17、C4、B10、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
 - 口径：分母来自 qrenderdoc 界面文件的完整枚举（A17+B20+C7+D17=61，可复核：`qrenderdoc/**/*.ui` 共 44 个窗口/对话框/控件 + D 节 17 个菜单功能项）；每行状态附证据，🟡 不折算为完成。
 - 状态为基于当前源码与 README/roadmap 记载的迁移程度评估；GPU/引擎实机验收状态另行报告，不在此表内。
 
