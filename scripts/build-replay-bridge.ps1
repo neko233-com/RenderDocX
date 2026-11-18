@@ -22,6 +22,19 @@ try {
     if (-not $vs) { throw 'Visual Studio with MSBuild and the C++ toolchain is required.' }
     $msbuild = Join-Path $vs 'MSBuild/Current/Bin/amd64/MSBuild.exe'
     $solutionDir = $root.TrimEnd('\') + '\'
+    # renderdoc.vcxproj links breakpad_common/crash_generation_client/
+    # exception_handler and needs the generated version header, but those are
+    # not ProjectReferences, so build them explicitly first.
+    $dependencies = @(
+        'renderdoc/3rdparty/breakpad/client/windows/common.vcxproj',
+        'renderdoc/3rdparty/breakpad/client/windows/crash_generation/crash_generation_client.vcxproj',
+        'renderdoc/3rdparty/breakpad/client/windows/handler/exception_handler.vcxproj',
+        'renderdoc/renderdoc_version.vcxproj'
+    )
+    foreach ($dependency in $dependencies) {
+        & $msbuild $dependency /t:Build /m:1 "/p:Configuration=$CoreConfiguration" /p:Platform=x64 "/p:SolutionDir=$solutionDir" /p:CL_MPCount=2 /v:minimal
+        if ($LASTEXITCODE -ne 0) { throw "RenderDoc core dependency build failed: $dependency" }
+    }
     & $msbuild 'renderdoc/renderdoc.vcxproj' /t:Build /m:1 "/p:Configuration=$CoreConfiguration" /p:Platform=x64 "/p:SolutionDir=$solutionDir" /p:CL_MPCount=2 /v:minimal
     if ($LASTEXITCODE -ne 0) { throw 'RenderDoc core build failed.' }
     if ((git rev-parse --verify HEAD).Trim() -ne $commit -or @(git status --porcelain=v1 --untracked-files=all -- renderdoc).Count -ne 0) {

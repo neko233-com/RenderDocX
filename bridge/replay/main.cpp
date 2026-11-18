@@ -1365,7 +1365,7 @@ int run(const std::string &capture, bool structure_worker, const std::string &re
         std::cout << "\nRENDERDOCX/1 {\"type\":\"recompress\",\"already_compressed\":true}" << std::endl;
         continue;
       }
-      ResultDetails converted = file->Convert(output, "rdc", nullptr, nullptr);
+      ResultDetails converted = file->Convert(rdcstr(output.c_str()), rdcstr("rdc"), nullptr, nullptr);
       std::string message = converted.OK() ? std::string() : result_message(converted);
       uint64_t size = 0;
       if(message.empty())

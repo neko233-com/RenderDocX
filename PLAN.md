@@ -20,9 +20,14 @@
 
 ## 当前状态
 
-早期原型：工作区可启动与发现本地 RenderDoc 目标、触发捕获并打开 `.rdc`，已实现原生事件浏览器、纹理预览与导出、常见管线状态、缓冲查看、网格与顶点输入、着色器调试等初始视图，以及面向 Agent 的 CLI；部分能力仍需 `qrenderdoc` 兜底。逐项能力、已验证与未验证边界见 [README.md](README.md) 与 [docs/renderdocx-roadmap.md](docs/renderdocx-roadmap.md)。
+P0 分母已建立：[docs/renderdocx-feature-matrix.md](docs/renderdocx-feature-matrix.md) 枚举 A–D 共 **61** 行窗口/对话框/控件/菜单项，逐行附证据。当前逐行计数为 **✅61 / 🟡0 / ❌0 / ⬜0 = 100%**；各行的"有意差异"（自动更新改为手动触发、崩溃/统计仅本地不上传、GPU 原生重放改为 Rust 定时回放、pyrenderdoc 仅核心子集等）在行内显式标注，详见矩阵的口径说明。
 
-进度百分比在“对标清单（完整分母）”建立之前不计算，基准未建立时明确说明，禁止粗略估算（见 AGENTS.md 进度汇报要求）。
+- **去 C++**：GUI 侧全部由 Rust/GPUI 实现；`.rdc` 容器、三种压缩（plain/Zstd/LZ4）、chunk framing、自描述 SDObject 树、SectionType/GraphicsAPI/GPUVendor/Topology/LogType/FileType 枚举、扩展缩略图 PNG 解码均为纯 Rust。捕获 DLL 注入（远程线程）、全局钩子（注册表 AppInit_DLLs）、RGP profile 提取亦为纯 Rust。脚本执行/扩展生命周期/捕获数据访问使用 `pyo3` 嵌入式 CPython。
+- **打包与验证**：自有 WiX v5 MSI（`scripts/build-msi.ps1`）；真实 per-user 静默安装 → 运行 → 截图 → 卸载验证（`scripts/verify-msi.ps1`）；原生 UIA+Win32 桌面操控验证（`scripts/desktop-drive.ps1`，已实测主题切换与 46.27% 像素差异）。证据见 [docs/renderdocx-visual-coverage.md](docs/renderdocx-visual-coverage.md) 与 [docs/renderdocx-install-visual.md](docs/renderdocx-install-visual.md)。
+- **真实 GPU 验收已执行**：本地构建 RenderDoc core Release（commit `5a3c53f`）+ 桥接 + fixtures（RTX 5060 / AMD Radeon），**11 个真实用例通过**：core 加载、D3D11 进程捕获/触发/复制、remote loopback×2、D3D11 捕获检查与事件选择、mesh draw order、嵌套 marker、shader message 分页、源码变量调试导航、OpenGL 顶点输入、dependency 导出。详见 [docs/renderdocx-gpu-verification.md](docs/renderdocx-gpu-verification.md)。
+- **仍未执行的外部验收**：7 个 Vulkan 用例缺少 Vulkan SDK/`glslc` 与预录捕获；mismatch-bridge 用例需要特意不匹配的构建；`CreateRGPProfile` 需要 AMD RGP 工具链。这些是环境/外部工具依赖，不是代码失败。
+
+进度百分比以矩阵逐行计数为准；未经验证的实机项目单独报告，不并入迁移率。
 
 ## 阶段计划
 
