@@ -5485,6 +5485,51 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires RENDERDOCX_TEST_BRIDGE and RENDERDOCX_TEST_D3D12_CAPTURE"]
+    fn python_d3d12_api_specific_state_a_real_capture() {
+        use crate::backend::Settings;
+        use std::path::PathBuf;
+
+        let bridge = PathBuf::from(
+            std::env::var("RENDERDOCX_TEST_BRIDGE").expect("set RENDERDOCX_TEST_BRIDGE"),
+        );
+        let capture = PathBuf::from(
+            std::env::var("RENDERDOCX_TEST_D3D12_CAPTURE")
+                .expect("set RENDERDOCX_TEST_D3D12_CAPTURE"),
+        );
+        let mut settings = Settings::default();
+        settings.replay_bridge = Some(bridge);
+        let (session, snapshot) =
+            crate::replay::Session::open(&settings, &capture).expect("open capture");
+        set_active_session(Some(session));
+        set_active_format_context(
+            snapshot.resources.clone(),
+            snapshot.buffers.clone(),
+            snapshot.textures.clone(),
+            crate::i18n::Language::English,
+        );
+        set_active_actions(snapshot.actions.clone());
+        set_active_snapshot(serde_json::to_value(&snapshot).expect("serialize snapshot"));
+        let result = run_script_with_capture(
+            "import renderdocx\n\
+             actions = renderdocx.capture_actions()\n\
+             draw = next(a for a in actions if 'DrawInstanced' in a.get('name', ''))\n\
+             p = renderdocx.pipeline(int(draw['event_id']))\n\
+             d3 = p.get('api_specific', {}).get('d3d12')\n\
+             print('d3d12-api-specific', p.get('api_specific', {}).get('kind') == 'D3D12' and isinstance(d3, dict) and d3.get('pipeline', {}).get('bound') is True and isinstance(d3.get('descriptor_heaps'), list) and d3.get('root_signature', {}).get('bound') is True and d3.get('input_layout_count', 0) >= 1 and d3.get('topology') == 5 and d3.get('sample_mask') == 4294967295 and d3.get('depth_writes') is True and isinstance(d3.get('line_raster'), int) and isinstance(d3.get('predication'), dict))",
+            &CaptureView::default(),
+        );
+        set_active_session(None);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(
+            result.stdout.contains("d3d12-api-specific True"),
+            "{}",
+            result.stdout
+        );
+    }
+
     #[test]
     fn rejects_nul_bytes() {
         assert!(cstring("a\0b").is_err());

@@ -1,6 +1,6 @@
 #requires -Version 7.0
 <#
-  Run every `#[ignore]` real test (20 agent_cli + 5 lib) against locally built
+  Run every `#[ignore]` real test (20 agent_cli + 6 lib) against locally built
   RenderDoc core, bridge, fixtures, Vulkan toolchain, captures and mismatch
   bridge.
 
@@ -37,6 +37,16 @@ foreach ($pair in @(
   )) {
   $path = Join-Path $repo $pair[1]
   if (Test-Path -LiteralPath $path) { Set-Item -Path ("env:" + $pair[0]) -Value $path }
+}
+
+# The D3D12 capture helper needs the CLI binary.
+Push-Location $repo
+try { cargo build --bin renderdocx-cli 2>&1 | Out-Null } finally { Pop-Location }
+$d3d12Fixture = Join-Path $repo 'target/d3d12-fixture/demos_x64.exe'
+$d3d12Cli = Join-Path $repo 'target/debug/renderdocx-cli.exe'
+if ((Test-Path -LiteralPath $d3d12Fixture) -and (Test-Path -LiteralPath $d3d12Cli)) {
+  $d3d12Capture = & (Join-Path $PSScriptRoot 'make-d3d12-capture.ps1') -Fixture $d3d12Fixture -Cli $d3d12Cli -Bridge $Bridge
+  if ($d3d12Capture) { $env:RENDERDOCX_TEST_D3D12_CAPTURE = $d3d12Capture }
 }
 
 $mesh = LatestCapture 'vulkan'
