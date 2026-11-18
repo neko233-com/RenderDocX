@@ -110,6 +110,38 @@ fn descriptors(
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }
 
+/// `renderdocx.texture_statistics(event, texture_index=0, min=0.0, max=1.0)`
+/// -> JSON statistics/histogram for a texture from the bound snapshot.
+#[pyo3::pyfunction]
+#[pyo3(signature = (event, texture_index = 0, min = 0.0, max = 1.0))]
+fn texture_statistics(
+    event: u32,
+    texture_index: usize,
+    min: f32,
+    max: f32,
+) -> pyo3::PyResult<String> {
+    let session = active_session()?;
+    let textures = active_textures();
+    let texture = textures.get(texture_index).ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("Texture index is out of range in the bound snapshot")
+    })?;
+    let request = crate::replay::HistogramRequest {
+        min,
+        max,
+        channels: [true, true, true, true],
+    };
+    session
+        .texture_statistics(
+            event,
+            texture_index as u32,
+            texture,
+            crate::replay::TextureSelection::default(),
+            request,
+        )
+        .and_then(|stats| serde_json::to_string(&stats).map_err(|error| error.to_string()))
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
 /// `renderdocx.pixel_history(event, texture_index=0, x=0, y=0, offset=0, limit=128)`
 /// -> JSON page for a texture from the bound snapshot.
 #[pyo3::pyfunction]
@@ -445,6 +477,7 @@ fn build_capture_module<'py>(
         ("event_format", pyo3::wrap_pyfunction!(event_format, py)),
         ("descriptors", pyo3::wrap_pyfunction!(descriptors, py)),
         ("pixel_history", pyo3::wrap_pyfunction!(pixel_history, py)),
+        ("texture_statistics", pyo3::wrap_pyfunction!(texture_statistics, py)),
     ] {
         if let Ok(function) = wrapped {
             dict.set_item(name, function).ok();
@@ -756,7 +789,8 @@ mod tests {
              print('stack', isinstance(json.loads(renderdocx.callstack(19)), dict))\n\
              print('format', len(renderdocx.event_format(19)) > 0)\n\
              print('descs', isinstance(json.loads(renderdocx.descriptors(19)), dict))\n\
-             print('pixels', isinstance(json.loads(renderdocx.pixel_history(19, 0, 1, 1)), dict))",
+             print('pixels', isinstance(json.loads(renderdocx.pixel_history(19, 0, 1, 1)), dict))\n\
+             print('stats', isinstance(json.loads(renderdocx.texture_statistics(19, 0)), dict))",
             &CaptureView::default(),
         );
         set_active_session(None);
