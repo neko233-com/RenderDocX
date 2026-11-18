@@ -25,7 +25,7 @@ README and the feature-matrix/roadmap documents, plus Start-menu shortcuts.
 
 Verified in this checkout with WiX 5.0.2: a `0.1.0.0` x64 MSI was produced from
 the release binaries (16.32 MB, SHA-256
-`250E5680D853CC92C220E829B15E679124ACCD47C825C35D8CE5F1D1AEEF1B08`). Its contents were verified
+`DF42811F0FAE298887322ABE26D7AD02C227E0933DEAD82623816A6B4C077C75`). Its contents were verified
 non-interactively with an administrative install
 (`msiexec /a RenderDocX-0.1.0-x64.msi /qn TARGETDIR=<dir>`), which exited 0 and
 extracted exactly: `PFiles64/RenderDocX/renderdocx.exe` (34.7 MB),
