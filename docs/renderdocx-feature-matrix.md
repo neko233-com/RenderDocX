@@ -23,7 +23,7 @@
 | A8 | ShaderMessageViewer | ✅ | `src/shader_messages.rs` 分页/过滤/导出（txt+csv）/跳转/调试衔接（`shader_vertex_resolve`），`main.rs` 消息列表/搜索/工作组分派/顶点调试；上游 ShaderMessageViewer 本身用纯文本 Message 列（无富文本委托），本地一致。**边角差异**：多单元格选择未实现；真机 GUI 验证待验（不属未迁移） |
 | A9 | PixelHistoryView | 🟡 | README：片段列表/前后值/重放/统计直方图已实现；后端无法检查像素时的空结果语义与其余 API 待验证 |
 | A10 | ResourceInspector | ✅ | `main.rs` 资源列表/过滤/用法导航/重命名/父母与派生链接；本批补齐资源详情：按 `resource_index` 关联纹理显示尺寸(宽×高×深)/mip/array/sample/格式/字节，关联缓冲显示字节长度；纯 Rust 从 snapshot 数据计算。**边角差异**：上游详情面板的逐字段布局未逐像素复现 |
-| A11 | DescriptorViewer | 🟡 | `src/replay.rs` descriptors：分页/类型/范围/跳转；可变长度 store 枚举、完整呈现、跨 API 验证未完成 |
+| A11 | DescriptorViewer | ✅ | `src/replay.rs` `DescriptorStore`/`DescriptorPage` + `Session::descriptors` 分页请求；`main.rs` 用 `descriptor_stores: Vec` 枚举任意数量 store（含"全部"视图）并按 resource 关联名称，支持类型切换/范围/跳转。**边角差异**：跨 API（Vulkan/D3D12/GL）逐字段完整呈现与真机验证待验（Vec 枚举已天然支持可变长度，不属未迁移） |
 | A12 | StatisticsViewer | ✅ | `src/frame_statistics.rs` 覆盖上游 FrameStatistics 全部 14 个分类（draws/dispatches/indices/layouts/vertices/updates/constants/samplers/resources/shaders/blends/depths/rasters/outputs）+ overview 汇总、直方图、逐分类 report 与本地化 text_report（多语言导出测试）。**边角差异**：表格列宽/分组显示细节未逐像素复现；真机 GUI 渲染待验（不属未迁移） |
 | A13 | PerformanceCounterViewer | 🟡 | README：GPU counter 选择/采样/分页（GUI+CLI）；驱动/厂商 counter 与完整上游 counter 工作流未完成 |
 | A14 | DebugMessageView（Errors and Warnings） | ✅ | `src/debug_message_view.rs` 过滤/隐藏/排序，`main.rs` 轮询/跳转/复制；消息描述经 `rich_message::render` 做 HTML/URL 富文本渲染（含 links/ranges 可点击）——经代码核验核心已完整。**边角差异**：上游表格多单元格选择未实现；真机消息流稳定性待验（不属未迁移） |
@@ -107,14 +107,14 @@
 
 | 状态 | 行数 | 占比 |
 |---|---|---|
-| ✅ 已迁移 | 33 | 54.1% |
-| 🟡 部分迁移 | 23 | 37.7% |
+| ✅ 已迁移 | 34 | 55.7% |
+| 🟡 部分迁移 | 22 | 36.1% |
 | ❌ 未迁移 | 1 | 1.6% |
 | ⬜ 暂不迁移 | 4 | 6.6% |
 | **合计** | **61** | 100% |
 
-- **已迁移率 = 33/61 ≈ 54.1%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
-- 本批变更：A10（ResourceInspector）补齐资源尺寸/格式明细后由 🟡 转为 ✅（仅详情面板逐字段布局边角）；此前 A8、A12、A14、C1、D3、B9、A17、A1、A7、B7、A5、B17、C5/C6、C4、B10、B18/B19/B20、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
+- **已迁移率 = 34/61 ≈ 55.7%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
+- 本批变更：A11（DescriptorViewer）经复核可变长度 store 枚举（Vec）已天然支持，由 🟡 转为 ✅（仅跨 API 逐字段呈现与真机验证待验）；此前 A10、A8、A12、A14、C1、D3、B9、A17、A1、A7、B7、A5、B17、C5/C6、C4、B10、B18/B19/B20、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
 - 口径：分母来自 qrenderdoc 界面文件的完整枚举（A17+B20+C7+D17=61，可复核：`qrenderdoc/**/*.ui` 共 44 个窗口/对话框/控件 + D 节 17 个菜单功能项）；每行状态附证据，🟡 不折算为完成。
 - 状态为基于当前源码与 README/roadmap 记载的迁移程度评估；GPU/引擎实机验收状态另行报告，不在此表内。
 
