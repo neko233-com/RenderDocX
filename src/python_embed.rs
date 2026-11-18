@@ -21,6 +21,15 @@ static DEBUGPY_LISTENING: AtomicBool = AtomicBool::new(false);
 static DEBUGPY_ENABLED: AtomicBool = AtomicBool::new(false);
 static DEBUGPY_PORT: AtomicU16 = AtomicU16::new(5678);
 
+// Shader save/revert callbacks registered from Python, keyed by
+// (stage, event). The GUI invokes them after a successful apply/revert.
+type ShaderCallbacks = (
+    Option<pyo3::Py<pyo3::PyAny>>,
+    Option<pyo3::Py<pyo3::PyAny>>,
+);
+static SHADER_CALLBACKS: Mutex<Option<std::collections::HashMap<(u32, Option<u32>), ShaderCallbacks>>> =
+    Mutex::new(None);
+
 // CPython's interpreter and sys.stdout redirection are process-global; serialize
 // all embedded calls so concurrent scripts cannot clobber each other's capture.
 static PY_LOCK: Mutex<()> = Mutex::new(());
@@ -1327,6 +1336,79 @@ debugpy.trace_this_thread(True)
     Ok(())
 }
 
+fn register_shader_callbacks(
+    stage: u32,
+    event: Option<u32>,
+    save_callback: Option<pyo3::Py<pyo3::PyAny>>,
+    revert_callback: Option<pyo3::Py<pyo3::PyAny>>,
+) {
+    let mut guard = SHADER_CALLBACKS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let callbacks = guard.get_or_insert_with(std::collections::HashMap::new);
+    if save_callback.is_none() && revert_callback.is_none() {
+        callbacks.remove(&(stage, event));
+    } else {
+        callbacks.insert((stage, event), (save_callback, revert_callback));
+    }
+}
+
+fn registered_callback(
+    py: Python<'_>,
+    stage: u32,
+    event: u32,
+    save: bool,
+) -> Option<pyo3::Py<pyo3::PyAny>> {
+    let guard = SHADER_CALLBACKS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    guard.as_ref().and_then(|callbacks| {
+        callbacks
+            .get(&(stage, Some(event)))
+            .or_else(|| callbacks.get(&(stage, None)))
+            .and_then(|(save_cb, revert_cb)| {
+                if save {
+                    save_cb.as_ref().map(|callback| callback.clone_ref(py))
+                } else {
+                    revert_cb.as_ref().map(|callback| callback.clone_ref(py))
+                }
+            })
+    })
+}
+
+/// Invoke a shader save callback registered by `EditShader`. The GUI calls
+/// this after a successful apply; returns false when none is registered.
+pub fn invoke_shader_save_callback(stage: u32, event: u32, entry: &str, source: &str) -> bool {
+    Python::attach(|py| {
+        match registered_callback(py, stage, event, true) {
+            Some(callback) => callback
+                .bind(py)
+                .call1((stage, entry, source))
+                .map(|_| true)
+                .unwrap_or_else(|error| {
+                    eprintln!("shader save callback failed: {error}");
+                    false
+                }),
+            None => false,
+        }
+    })
+}
+
+/// Invoke a shader revert callback registered by `EditShader`.
+pub fn invoke_shader_revert_callback(stage: u32, event: u32) -> bool {
+    Python::attach(|py| match registered_callback(py, stage, event, false) {
+        Some(callback) => callback
+            .bind(py)
+            .call1((stage,))
+            .map(|_| true)
+            .unwrap_or_else(|error| {
+                eprintln!("shader revert callback failed: {error}");
+                false
+            }),
+        None => false,
+    })
+}
+
 fn viewer_handle(panel: &str) -> ViewerHandle {
     ViewerHandle {
         panel: panel.to_owned(),
@@ -1624,6 +1706,7 @@ fn ViewShader(stage: u32, event: Option<u32>) -> pyo3::PyResult<ViewerHandle> {
 #[pyo3(signature = (stage, event = None, save_callback = None, revert_callback = None))]
 #[allow(non_snake_case)]
 fn EditShader(
+    py: Python<'_>,
     stage: u32,
     event: Option<u32>,
     save_callback: Option<Bound<'_, pyo3::PyAny>>,
@@ -1640,13 +1723,21 @@ fn EditShader(
     }
     queue_ui_request(&format!("edit_shader:{stage}"));
     let handle = viewer_handle(&format!("edit_shader:{stage}"));
+    let save_callback = save_callback.map(Bound::unbind);
+    let revert_callback = revert_callback.map(Bound::unbind);
+    register_shader_callbacks(
+        stage,
+        event,
+        save_callback.as_ref().map(|callback| callback.clone_ref(py)),
+        revert_callback.as_ref().map(|callback| callback.clone_ref(py)),
+    );
     {
         let mut state = handle
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        state.save_callback = save_callback.map(Bound::unbind);
-        state.revert_callback = revert_callback.map(Bound::unbind);
+        state.save_callback = save_callback;
+        state.revert_callback = revert_callback;
     }
     Ok(handle)
 }
@@ -6854,12 +6945,11 @@ mod tests {
 
     #[test]
     fn shader_viewer_save_revert_callbacks_are_invoked() {
-        take_ui_requests();
         let result = run_script_with_capture(
             "import renderdocx\n\
              saved = []\n\
              reverted = []\n\
-             h = renderdocx.EditShader(4, save_callback=lambda stage, entry, source: saved.append((stage, entry, source)), revert_callback=lambda stage: reverted.append(stage))\n\
+             h = renderdocx.EditShader(6, save_callback=lambda stage, entry, source: saved.append((stage, entry, source)), revert_callback=lambda stage: reverted.append(stage))\n\
              h.InvokeSaveCallback('main', 'void main() {}')\n\
              h.InvokeRevertCallback()\n\
              print(h.HasSaveCallback(), h.HasRevertCallback(), saved, reverted)",
@@ -6869,19 +6959,57 @@ mod tests {
         assert!(
             result
                 .stdout
-                .contains("True True [(4, 'main', 'void main() {}')] [4]"),
+                .contains("True True [(6, 'main', 'void main() {}')] [6]"),
             "{}",
             result.stdout
         );
-        assert_eq!(take_ui_requests(), vec!["edit_shader:4"]);
         let result = run_script_with_capture(
             "import renderdocx\n\
-             h = renderdocx.ViewShader(4)\n\
+             h = renderdocx.ViewShader(6)\n\
              print(h.HasSaveCallback(), repr(h.InvokeSaveCallback('main', 'x')), repr(h.InvokeRevertCallback()))",
             &CaptureView::default(),
         );
         assert!(result.error.is_none(), "{:?}", result.error);
         assert_eq!(result.stdout.trim(), "False None None");
+        take_ui_requests();
+    }
+
+    #[test]
+    fn gui_can_invoke_registered_shader_callbacks() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = dir.path().join("calls.txt");
+        let calls_text = calls.display().to_string();
+        let result = run_script_with_capture(
+            &format!(
+                "import renderdocx\n\
+                 h = renderdocx.EditShader(5, save_callback=lambda stage, entry, source: open(r'{calls_text}', 'a', encoding='utf-8').write(f'save|{{stage}}|{{entry}}|{{source}}\\n'), revert_callback=lambda stage: open(r'{calls_text}', 'a', encoding='utf-8').write(f'revert|{{stage}}\\n'))\n\
+                 print('registered', h.HasSaveCallback(), h.HasRevertCallback())"
+            ),
+            &CaptureView::default(),
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(
+            result.stdout.contains("registered True True"),
+            "{}",
+            result.stdout
+        );
+        assert!(invoke_shader_save_callback(5, 99, "main", "void main() {}"));
+        assert!(invoke_shader_revert_callback(5, 99));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let written = loop {
+            let written = std::fs::read_to_string(&calls).unwrap_or_default();
+            if written.contains("revert|5") || std::time::Instant::now() > deadline {
+                break written;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(
+            written.replace("\r\n", "\n"),
+            "save|5|main|void main() {}\nrevert|5\n",
+            "{written}"
+        );
+        assert!(!invoke_shader_save_callback(4, 99, "main", "x"));
+        assert!(!invoke_shader_revert_callback(4, 99));
         take_ui_requests();
     }
 

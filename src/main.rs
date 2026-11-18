@@ -8307,6 +8307,8 @@ impl Workspace {
             .to_owned(),
         );
         cx.notify();
+        let callback_stage = stage as u32;
+        let callback_event = event;
         let task = cx.background_executor().spawn(async move {
             let mut processor_diagnostics = String::new();
             let mut output = None;
@@ -8373,6 +8375,17 @@ impl Workspace {
                         this.counter_page = None;
                         this.buffer_data = None;
                         this.buffer_fixed_data = None;
+                        // Python's EditShader save/revert callbacks fire only
+                        // after the replay edit succeeded.
+                        this.notify_shader_callbacks(
+                            callback_stage,
+                            callback_event,
+                            revert,
+                            edit.applied,
+                            replacement
+                                .as_ref()
+                                .map(|(_, entry, source, ..)| (entry.as_str(), source.as_str())),
+                        );
                         if edit.applied {
                             if let (
                                 Some(editor),
@@ -8448,6 +8461,26 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    /// Notify Python `EditShader` save/revert callbacks after a replay edit.
+    fn notify_shader_callbacks(
+        &self,
+        stage: u32,
+        event: u32,
+        revert: bool,
+        applied: bool,
+        replacement: Option<(&str, &str)>,
+    ) {
+        if revert {
+            renderdocx::python_embed::invoke_shader_revert_callback(stage, event);
+        } else if applied {
+            if let Some((entry, source)) = replacement {
+                renderdocx::python_embed::invoke_shader_save_callback(
+                    stage, event, entry, source,
+                );
+            }
+        }
     }
 
     fn save_shader_draft(&mut self, cx: &mut Context<Self>) {
@@ -31571,5 +31604,33 @@ mod ui_tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+
+        // The GUI apply/revert completion path must invoke callbacks that were
+        // registered through Python `EditShader`.
+        let callback_dir = tempfile::tempdir().unwrap();
+        let callback_log = callback_dir.path().join("callbacks.txt");
+        let callback_path = callback_log.display().to_string();
+        let registered = renderdocx::python_embed::run_script_with_capture(
+            &format!(
+                "import renderdocx\n\
+                 renderdocx.EditShader(4, save_callback=lambda stage, entry, source: open(r'{callback_path}', 'a', encoding='utf-8').write(f'save|{{stage}}|{{entry}}|{{source}}\\n'), revert_callback=lambda stage: open(r'{callback_path}', 'a', encoding='utf-8').write(f'revert|{{stage}}\\n'))\n\
+                 print('registered')"
+            ),
+            &renderdocx::python_embed::CaptureView::default(),
+        );
+        assert!(registered.error.is_none(), "{:?}", registered.error);
+        cx.update(|cx| {
+            view.update(cx, |view, _| {
+                view.notify_shader_callbacks(4, 41, false, true, Some(("main", "src")));
+                view.notify_shader_callbacks(4, 41, true, false, None);
+            })
+        });
+        let written = std::fs::read_to_string(&callback_log).unwrap_or_default();
+        assert_eq!(
+            written.replace("\r\n", "\n"),
+            "save|4|main|src\nrevert|4\n",
+            "{written}"
+        );
+        renderdocx::python_embed::take_ui_requests();
     }
 }
