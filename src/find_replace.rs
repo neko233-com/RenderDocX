@@ -111,13 +111,75 @@ pub fn find_next(
     }
 }
 
+/// Expand `$0`-`$9` capture references in a replacement string. `$0` is the
+/// whole match; unknown groups expand to an empty string (upstream behaves
+/// similarly for out-of-range captures).
+pub fn expand_replacement(replacement: &str, matched: &str, groups: &[&str]) -> String {
+    let bytes = replacement.as_bytes();
+    let mut result = String::with_capacity(replacement.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+            let group = (bytes[i + 1] - b'0') as usize;
+            let value = if group == 0 {
+                Some(matched)
+            } else {
+                groups.get(group - 1).copied()
+            };
+            result.push_str(value.unwrap_or(""));
+            i += 2;
+        } else {
+            let ch = replacement[i..].chars().next().unwrap();
+            result.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    result
+}
+
 /// Replace every match, returning the new text and number of replacements.
+/// In regex mode, `$0`-`$9` in `replacement` expand to captured groups.
 pub fn replace_all(
     text: &str,
     needle: &str,
     replacement: &str,
     options: FindOptions,
 ) -> (String, usize) {
+    if options.regex {
+        let pattern = if options.case_sensitive {
+            needle.to_owned()
+        } else {
+            format!("(?i){needle}")
+        };
+        let mut builder = pcre2::bytes::RegexBuilder::new();
+        builder.utf(true);
+        let Ok(regex) = builder.build(&pattern) else {
+            return (text.to_owned(), 0);
+        };
+        let mut result = String::with_capacity(text.len());
+        let mut last = 0;
+        let mut count = 0;
+        for captured in regex.captures_iter(text.as_bytes()).flatten() {
+            let Some(whole) = captured.get(0) else {
+                continue;
+            };
+            let (start, end) = (whole.start(), whole.end());
+            if start < last {
+                continue;
+            }
+            result.push_str(&text[last..start]);
+            let matched = &text[start..end];
+            let groups: Vec<&str> = (1..captured.len())
+                .filter_map(|index| captured.get(index))
+                .filter_map(|m| text.get(m.start()..m.end()))
+                .collect();
+            result.push_str(&expand_replacement(replacement, matched, &groups));
+            last = end;
+            count += 1;
+        }
+        result.push_str(&text[last..]);
+        return (result, count);
+    }
     let matches = find_all(text, needle, options);
     if matches.is_empty() {
         return (text.to_owned(), 0);
@@ -126,7 +188,7 @@ pub fn replace_all(
     let mut last = 0;
     for (start, end) in &matches {
         result.push_str(&text[last..*start]);
-        result.push_str(replacement);
+        result.push_str(&replacement.replace("$0", &text[*start..*end]));
         last = *end;
     }
     result.push_str(&text[last..]);
@@ -207,6 +269,20 @@ mod tests {
         let (replaced, count) = replace_all("a1 b22", r"\d+", "#", options);
         assert_eq!(count, 2);
         assert_eq!(replaced, "a# b#");
+    }
+
+    #[test]
+    fn regex_replacement_expands_capture_groups() {
+        let options = FindOptions {
+            regex: true,
+            case_sensitive: true,
+            ..Default::default()
+        };
+        let (text, count) = replace_all("foo=12 bar=34", r"(\w+)=(\d+)", "$1:$2", options);
+        assert_eq!(count, 2);
+        assert_eq!(text, "foo:12 bar:34");
+        let (text, _) = replace_all("ab", r"(a)(b)", "$0/$2$1", options);
+        assert_eq!(text, "ab/ba");
     }
 
     #[test]
