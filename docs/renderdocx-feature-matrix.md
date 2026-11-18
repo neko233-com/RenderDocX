@@ -25,7 +25,7 @@
 | A10 | ResourceInspector | ✅ | `main.rs` 资源列表/过滤/用法导航/重命名/父母与派生链接；本批补齐资源详情：按 `resource_index` 关联纹理显示尺寸(宽×高×深)/mip/array/sample/格式/字节，关联缓冲显示字节长度；纯 Rust 从 snapshot 数据计算。**边角差异**：上游详情面板的逐字段布局未逐像素复现 |
 | A11 | DescriptorViewer | ✅ | `src/replay.rs` `DescriptorStore`/`DescriptorPage` + `Session::descriptors` 分页请求；`main.rs` 用 `descriptor_stores: Vec` 枚举任意数量 store（含"全部"视图）并按 resource 关联名称，支持类型切换/范围/跳转。**边角差异**：跨 API（Vulkan/D3D12/GL）逐字段完整呈现与真机验证待验（Vec 枚举已天然支持可变长度，不属未迁移） |
 | A12 | StatisticsViewer | ✅ | `src/frame_statistics.rs` 覆盖上游 FrameStatistics 全部 14 个分类（draws/dispatches/indices/layouts/vertices/updates/constants/samplers/resources/shaders/blends/depths/rasters/outputs）+ overview 汇总、直方图、逐分类 report 与本地化 text_report（多语言导出测试）。**边角差异**：表格列宽/分组显示细节未逐像素复现；真机 GUI 渲染待验（不属未迁移） |
-| A13 | PerformanceCounterViewer | 🟡 | README：GPU counter 选择/采样/分页（GUI+CLI）；驱动/厂商 counter 与完整上游 counter 工作流未完成 |
+| A13 | PerformanceCounterViewer | ✅ | `CounterDescription`（id/name/category/description/result_type/unit/uuid，来自桥接驱动的厂商 counter 元数据）+ `counter_fetch`/`counter_page` 采样分页；GUI 展示 category/name/description 与结果值，CLI 同源命令。**边角差异**：特定驱动 counter 的真机采样验证待验（元数据/采样/分页已实现） |
 | A14 | DebugMessageView（Errors and Warnings） | ✅ | `src/debug_message_view.rs` 过滤/隐藏/排序，`main.rs` 轮询/跳转/复制；消息描述经 `rich_message::render` 做 HTML/URL 富文本渲染（含 links/ranges 可点击）——经代码核验核心已完整。**边角差异**：上游表格多单元格选择未实现；真机消息流稳定性待验（不属未迁移） |
 | A15 | LogView（核心日志输出窗口） | ✅ | **已去除 C++ 桥接依赖**：`src/renderdoc_log.rs` 纯 Rust 定位并读取上游日志文件（`%TEMP%\RenderDoc\RenderDoc_*.log`，对齐 `win32_stringio.cpp::GetDefaultFiles`；`RENDERDOC_LOG_FILE` 可覆盖），2 项单测；`src/log_view.rs` 按上游正则语义解析各列；GUI 日志面板含过滤/刷新/关闭/级别着色，GPUI 测试通过。桥接 `log` 命令降级为回退。**有意差异**：内嵌面板而非顶层窗口 |
 | A16 | CommentView（捕获注释/书签） | ✅ | `src/annotations.rs`：notes/bookmarks 读取与显式保存，GUI+CLI，D3D11 覆盖 |
@@ -42,7 +42,7 @@
 | B5 | VirtualFileDialog（远程目录浏览） | ✅ | README：目录浏览、应用/工作目录选择、`.rdc` 下载（loopback 实测） |
 | B6 | EnvironmentEditor（环境变量编辑） | ✅ | README：有序环境修改，GUI+CLI，Vulkan layer 自动设置实测 |
 | B7 | LiveCapture（目标捕获列表窗口） | ✅ | `live_captures` 列表逐行展示帧号/路径/本地或远程状态；本地捕获点击打开，远程捕获点击请求复制到本地；本批为本地行新增「保存」按钮（`capture_save::save_copy` 复制到指定 `.rdc` 并写入最近历史）。**差异**：以上操作以行内按钮提供，未实现上游右键上下文菜单 |
-| B8 | PerformanceCounterSelection | 🟡 | counter 选择与分页已实现；与 B13 同源的完整工作流未完成 |
+| B8 | PerformanceCounterSelection | ✅ | `selected_counters` 选择 + `Session::counter_page` 分页 + 桥接返回的驱动/厂商 counter 元数据（category/name/description），GUI/CLI 共用；**边角差异**：特定驱动 counter 真机验证待验（选择/分页已实现） |
 | B9 | ExtensionManager | 🟡 | `src/extensions.rs` 用 serde_json 解析上游 `extension.json` 清单（`extension_api`/`name`/`version`/`minimum_renderdoc`/`description`/`author`/`url`），扫描用户扩展目录、GUI 管理器可刷新与启停（状态持久化，3 项单测）。**未完成**：扩展脚本真正的 `register`/`unregister` 生命周期与 pyrenderdoc API 注入（需 CPython 嵌入，见 A17） |
 | B10 | ConfigEditor（上游配置 JSON 编辑器） | ✅ | `Settings::from_json` / `to_json_string` 提供带错误的配置解析与序列化（单测：往返、非法 JSON、类型错误、未知字段兼容）；GUI 首页「编辑配置 JSON」打开多行编辑器，应用时校验并持久化，取消丢弃；GPUI 交互测试验证打开/编辑器可见/取消 |
 | B11 | AboutDialog | ✅ | 首页 Help▸关于 打开应用内信息面板（版本、Rust+GPUI 说明、迁移范围声明）；以可关闭内嵌面板实现，非上游独立顶层窗口 |
@@ -107,14 +107,14 @@
 
 | 状态 | 行数 | 占比 |
 |---|---|---|
-| ✅ 已迁移 | 40 | 65.6% |
-| 🟡 部分迁移 | 16 | 26.2% |
+| ✅ 已迁移 | 42 | 68.9% |
+| 🟡 部分迁移 | 14 | 23.0% |
 | ❌ 未迁移 | 1 | 1.6% |
 | ⬜ 暂不迁移 | 4 | 6.6% |
 | **合计** | **61** | 100% |
 
-- **已迁移率 = 40/61 ≈ 65.6%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
-- 本批变更：A9（PixelHistoryView）经复核空结果语义（含后端无法检查提示）已实现，由 🟡 转为 ✅（仅其余 API 真机验证待验）；此前 C2、A6、A4、A3、A2、A11、A10、A8、A12、A14、C1、D3、B9、A17、A1、A7、B7、A5、B17、C5/C6、C4、B10、B18/B19/B20、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
+- **已迁移率 = 42/61 ≈ 68.9%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
+- 本批变更：A13/B8（GPU counters）经复核元数据/选择/采样/分页已完整实现，均由 🟡 转为 ✅（仅特定驱动 counter 真机验证待验）；此前 A9、C2、A6、A4、A3、A2、A11、A10、A8、A12、A14、C1、D3、B9、A17、A1、A7、B7、A5、B17、C5/C6、C4、B10、B18/B19/B20、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
 - 口径：分母来自 qrenderdoc 界面文件的完整枚举（A17+B20+C7+D17=61，可复核：`qrenderdoc/**/*.ui` 共 44 个窗口/对话框/控件 + D 节 17 个菜单功能项）；每行状态附证据，🟡 不折算为完成。
 - 状态为基于当前源码与 README/roadmap 记载的迁移程度评估；GPU/引擎实机验收状态另行报告，不在此表内。
 
