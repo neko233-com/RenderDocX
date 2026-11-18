@@ -142,7 +142,7 @@ event. Mesh debugging is exercised through `debug_mesh(21)`, `debug_next()` and
 `python_vertex_input_query_a_real_capture` opens a real Vertex capture and
 asserts `renderdocx.vertex_input()` returns input rows.
 
-Observed output (20 agent_cli + 2 lib tests):
+Observed output (20 agent_cli + 3 lib tests):
 
 ```
 test incompatible_core_is_rejected_before_capture_open ... ok
@@ -166,6 +166,10 @@ test real_vulkan_task_and_mesh_shader_messages ... ok
 test real_vulkan_task_message_sanitizes_older_core ... ok
 test real_vulkan_vertex_shader_messages_resolve_and_debug ... ok
 test result: ok. 20 passed; 0 failed; 0 ignored
+test python_pipeline_and_buffer_query_a_real_capture ... ok
+test python_shader_printf_debug_a_real_capture ... ok
+test python_vertex_input_query_a_real_capture ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored
 ```
 
 ## GPU native replay loop
