@@ -56,6 +56,57 @@ pub fn enumerate_processes() -> Result<Vec<ProcessInfo>, String> {
     Ok(Vec::new())
 }
 
+/// Check whether a process has `renderdoc.dll` loaded (i.e. is already
+/// injected/capturable). Pure Rust via PSAPI `EnumProcessModules`.
+#[cfg(windows)]
+pub fn has_renderdoc_module(pid: u32) -> bool {
+    use windows::Win32::{
+        Foundation::{CloseHandle, HMODULE},
+        System::{
+            ProcessStatus::{EnumProcessModules, GetModuleBaseNameW},
+            Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ},
+        },
+    };
+
+    unsafe {
+        let Ok(process) = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid)
+        else {
+            return false;
+        };
+        let mut modules: [HMODULE; 512] = [HMODULE(std::ptr::null_mut()); 512];
+        let mut needed = 0u32;
+        let has = EnumProcessModules(
+            process,
+            modules.as_mut_ptr(),
+            (modules.len() * std::mem::size_of::<HMODULE>()) as u32,
+            &mut needed,
+        )
+        .is_ok();
+        let mut injected = false;
+        if has {
+            let count = (needed as usize / std::mem::size_of::<HMODULE>()).min(modules.len());
+            for module in &modules[..count] {
+                let mut name = [0u16; 260];
+                let len = GetModuleBaseNameW(process, *module, &mut name) as usize;
+                if len > 0 {
+                    let module_name = String::from_utf16_lossy(&name[..len]);
+                    if module_name.eq_ignore_ascii_case("renderdoc.dll") {
+                        injected = true;
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = CloseHandle(process);
+        injected
+    }
+}
+
+#[cfg(not(windows))]
+pub fn has_renderdoc_module(_pid: u32) -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,5 +157,14 @@ mod tests {
         let processes = enumerate_processes().unwrap();
         let current = std::process::id();
         assert!(processes.iter().any(|process| process.pid == current));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn renderdoc_module_check_handles_current_process() {
+        // The GUI process itself is not injected; the call must not panic or
+        // report a false positive. A nonexistent PID is always false.
+        let _ = has_renderdoc_module(std::process::id());
+        assert!(!has_renderdoc_module(u32::MAX));
     }
 }

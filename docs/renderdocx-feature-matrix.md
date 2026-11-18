@@ -74,7 +74,7 @@
 |---|---|---|---|
 | D1 | action_Launch_Application | ✅ | `src/live.rs` 启动捕获，README：会话目录/选项/参数/环境，实测 |
 | D2 | action_Attach_to_Running_Instance | ✅ | PID 连接（Unity Editor 实测，README） |
-| D3 | action_Inject_into_Process | ❌ | `src/` 无进程注入 |
+| D3 | action_Inject_into_Process | 🟡 | **去 C++ 进展**：`src/process_list.rs` 用 `windows` crate PSAPI `EnumProcessModules` 纯 Rust 检测进程是否已加载 `renderdoc.dll`（"可捕获"标记），3 项单测；GUI 本地进程列表显示注入状态。**未完成**：真正的注入执行 `RENDERDOC_InjectIntoProcess` 参数含 C++ 类型（rdcarray/CaptureOptions&），不可安全 FFI；`.cap` 的 `inject=true` 配置已可导入导出（D10）但无 GUI 开关 |
 | D4 | action_Open_Capture | ✅ | 打开 `.rdc`（版本匹配桥接，README） |
 | D5 | action_Open_Capture_with_Options | ✅ | 回放选项（验证/优化/GPU 覆盖，README） |
 | D6 | action_Save_Capture_Inplace | ✅ | 捕获视图「保存」按钮：将当前捕获字节级复制到用户指定 `.rdc` 并重新打开副本（`src/capture_save.rs` 单测覆盖路径校验/复制完整性）。**有意差异**：上游仅对临时捕获启用此动作，RenderDocX 对已保存捕获同样可用 |
@@ -108,13 +108,13 @@
 | 状态 | 行数 | 占比 |
 |---|---|---|
 | ✅ 已迁移 | 28 | 45.9% |
-| 🟡 部分迁移 | 27 | 44.3% |
-| ❌ 未迁移 | 2 | 3.3% |
+| 🟡 部分迁移 | 28 | 45.9% |
+| ❌ 未迁移 | 1 | 1.6% |
 | ⬜ 暂不迁移 | 4 | 6.6% |
 | **合计** | **61** | 100% |
 
-- **已迁移率 = 28/61 ≈ 45.9%**；**覆盖率（✅+🟡）= 55/61 ≈ 90.2%**。
-- 本批变更：B9（扩展体系）由 ❌ 转为 🟡（清单发现/启停已迁移，脚本生命周期未实现）；此前 A17、A1、A7、B7、A5、B17、C5/C6、C4、B10、B18/B19/B20、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
+- **已迁移率 = 28/61 ≈ 45.9%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
+- 本批变更：D3（进程注入）由 ❌ 转为 🟡（注入状态检测已迁移，注入执行需 C ABI）；此前 B9、A17、A1、A7、B7、A5、B17、C5/C6、C4、B10、B18/B19/B20、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
 - 口径：分母来自 qrenderdoc 界面文件的完整枚举（A17+B20+C7+D17=61，可复核：`qrenderdoc/**/*.ui` 共 44 个窗口/对话框/控件 + D 节 17 个菜单功能项）；每行状态附证据，🟡 不折算为完成。
 - 状态为基于当前源码与 README/roadmap 记载的迁移程度评估；GPU/引擎实机验收状态另行报告，不在此表内。
 

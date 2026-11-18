@@ -1046,6 +1046,7 @@ struct Workspace {
     core_handle: Option<renderdocx::renderdoc_core::CoreHandle>,
     local_processes: Vec<renderdocx::process_list::ProcessInfo>,
     installed_extensions: Vec<renderdocx::extensions::InstalledExtension>,
+    injected_pids: Vec<u32>,
 }
 
 impl Workspace {
@@ -4455,6 +4456,12 @@ impl Workspace {
     fn refresh_local_processes(&mut self, cx: &mut Context<Self>) {
         match renderdocx::process_list::enumerate_processes() {
             Ok(list) => {
+                // Mark which processes already have renderdoc.dll loaded (pure Rust PSAPI).
+                self.injected_pids = list
+                    .iter()
+                    .filter(|process| renderdocx::process_list::has_renderdoc_module(process.pid))
+                    .map(|process| process.pid)
+                    .collect();
                 self.local_processes = list;
                 self.status = None;
             }
@@ -21072,7 +21079,16 @@ impl Render for Workspace {
                         .child(div().flex().flex_wrap().gap_1().max_h(px(120.)).overflow_hidden()
                             .children(self.local_processes.iter().take(60).enumerate().map(|(index, process)| {
                                 let pid = process.pid;
-                                let label = format!("{} · {}", pid, process.name);
+                                let label = format!(
+                                    "{} · {}{}",
+                                    pid,
+                                    process.name,
+                                    if self.injected_pids.contains(&pid) {
+                                        self.t(" [capturable]", " [可捕获]")
+                                    } else {
+                                        ""
+                                    }
+                                );
                                 div()
                                     .id(("local-process", index))
                                     .test_support()
@@ -21764,6 +21780,7 @@ fn main() {
                         core_handle: None,
                         local_processes: Vec::new(),
                         installed_extensions: Vec::new(),
+                        injected_pids: Vec::new(),
                     });
                     Workspace::install_close_guard(window, cx, &entity);
                     if let Some(path) = initial_capture {
@@ -22621,6 +22638,7 @@ mod ui_tests {
                         core_handle: None,
                         local_processes: Vec::new(),
                         installed_extensions: Vec::new(),
+                        injected_pids: Vec::new(),
                     })
                 },
             )
@@ -23391,6 +23409,7 @@ mod ui_tests {
                         core_handle: None,
                         local_processes: Vec::new(),
                         installed_extensions: Vec::new(),
+                        injected_pids: Vec::new(),
                     })
                 },
             )
