@@ -125,7 +125,10 @@ It also exercises the pyrenderdoc-compatible CaptureContext surface:
 `CurEvent`, `CurSelectedEvent`, `CurAction`, `CurSelectedAction`,
 `CurRootActions`, `CurPipelineState`, `GetAction`, `GetTextures`, `GetBuffers`,
 `GetResources`, `FrameInfo`, `APIProps`, `IsCaptureLoaded`,
-`GetCaptureFilename` and `DebugMessages`. Notes and bookmarks are written and
+`GetCaptureFilename` and `DebugMessages`. The `Replay()` wrapper is exercised
+through `SetFrameEvent(19)` followed by `GetPipelineState`, `GetTextures`,
+`GetBuffers`, `GetResources`, `GetFrameInfo` and `GetAPIProperties`.
+Notes and bookmarks are written and
 read back through `SetNotes`/`GetNotes`/`SetBookmark`/`GetBookmarks`/
 `RemoveBookmark`, then restored to their original values. Resource replacement
 is exercised through `RegisterReplacement(7, 8)`: `pipeline(19)` reports the

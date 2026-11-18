@@ -321,6 +321,129 @@ fn DebugMessages(py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
     to_py(py, &value)
 }
 
+/// Minimal `pyrenderdoc.Replay()` controller wrapper exposing the upstream
+/// method names over RenderDocX's bound session and snapshot.
+#[pyo3::pyclass]
+struct ReplayController;
+
+#[pyo3::pymethods]
+impl ReplayController {
+    #[allow(non_snake_case)]
+    fn GetPipelineState(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        CurPipelineState(py)
+    }
+
+    #[allow(non_snake_case)]
+    fn GetTextures(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        GetTextures(py)
+    }
+
+    #[allow(non_snake_case)]
+    fn GetBuffers(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        GetBuffers(py)
+    }
+
+    #[allow(non_snake_case)]
+    fn GetResources(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        GetResources(py)
+    }
+
+    #[allow(non_snake_case)]
+    fn GetFrameInfo(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        FrameInfo(py)
+    }
+
+    #[allow(non_snake_case)]
+    fn GetAPIProperties(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        APIProps(py)
+    }
+
+    #[allow(non_snake_case)]
+    fn GetDebugMessages(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        DebugMessages(py)
+    }
+
+    #[allow(non_snake_case)]
+    fn SetFrameEvent(&self, event: u32) -> pyo3::PyResult<()> {
+        let session = active_session()?;
+        select_event(&session, event)
+    }
+
+    #[allow(non_snake_case)]
+    #[pyo3(signature = (event, vertex, instance = 0, index = None, view = 0))]
+    fn DebugVertex(
+        &self,
+        py: Python<'_>,
+        event: u32,
+        vertex: u32,
+        instance: u32,
+        index: Option<u32>,
+        view: u32,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        debug_vertex(py, event, vertex, instance, index, view)
+    }
+
+    #[allow(non_snake_case)]
+    #[pyo3(signature = (event, x, y, sample = None, primitive = None, view = None))]
+    fn DebugPixel(
+        &self,
+        py: Python<'_>,
+        event: u32,
+        x: u32,
+        y: u32,
+        sample: Option<u32>,
+        primitive: Option<u32>,
+        view: Option<u32>,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        debug_pixel(py, event, x, y, sample, primitive, view)
+    }
+
+    #[allow(non_snake_case)]
+    #[pyo3(signature = (event, group = [0, 0, 0], thread = [0, 0, 0]))]
+    fn DebugCompute(
+        &self,
+        py: Python<'_>,
+        event: u32,
+        group: [u32; 3],
+        thread: [u32; 3],
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        debug_compute(py, event, group, thread)
+    }
+
+    #[allow(non_snake_case)]
+    #[pyo3(signature = (event, group = [0, 0, 0], thread = [0, 0, 0]))]
+    fn DebugMesh(
+        &self,
+        py: Python<'_>,
+        event: u32,
+        group: [u32; 3],
+        thread: [u32; 3],
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        debug_mesh(py, event, group, thread)
+    }
+
+    /// Upstream `ContinueDebug` returns the next batch of states.
+    #[allow(non_snake_case)]
+    fn ContinueDebug(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        debug_next(py)
+    }
+
+    /// Upstream `FreeTrace` ends and releases the active trace.
+    #[allow(non_snake_case)]
+    fn FreeTrace(&self) -> pyo3::PyResult<()> {
+        debug_stop()
+    }
+}
+
+/// `Replay()` -> controller-style wrapper (GetPipelineState, GetTextures,
+/// GetBuffers, GetResources, GetFrameInfo, GetAPIProperties, GetDebugMessages,
+/// SetFrameEvent, DebugVertex/Pixel/Compute/Mesh, ContinueDebug, FreeTrace).
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn Replay() -> ReplayController {
+    ReplayController
+}
+
 /// `GetNotes()` -> capture comments string from the Notes section.
 #[pyo3::pyfunction]
 #[allow(non_snake_case)]
@@ -1419,6 +1542,7 @@ fn build_capture_module<'py>(
         ("debug_mesh", pyo3::wrap_pyfunction!(debug_mesh, py)),
         ("debug_next", pyo3::wrap_pyfunction!(debug_next, py)),
         ("debug_stop", pyo3::wrap_pyfunction!(debug_stop, py)),
+        ("Replay", pyo3::wrap_pyfunction!(Replay, py)),
     ] {
         if let Ok(function) = wrapped {
             dict.set_item(name, function).ok();
@@ -1701,6 +1825,8 @@ mod tests {
             "renderdocx.debug_mesh(1)",
             "renderdocx.debug_next()",
             "renderdocx.debug_stop()",
+            "renderdocx.Replay().GetPipelineState()",
+            "renderdocx.Replay().SetFrameEvent(1)",
         ] {
             let result = run_script_with_capture(
                 &format!("import renderdocx\n{call}"),
@@ -1827,6 +1953,9 @@ mod tests {
                  and isinstance(renderdocx.DebugMessages(), list)\n\
              )\n\
              print('compat', compat)\n\
+             controller = renderdocx.Replay()\n\
+             controller.SetFrameEvent(19)\n\
+             print('replay', controller.GetPipelineState().get('event_id') == 19 and len(controller.GetTextures()) == 2 and len(controller.GetBuffers()) == 1 and len(controller.GetResources()) > 0 and controller.GetFrameInfo() is not None and isinstance(controller.GetAPIProperties(), dict))\n\
              renderdocx.RegisterReplacement(7, 8)\n\
              replaced = renderdocx.pipeline(19).get('outputs') or [{}]\n\
              print('replace', replaced[0].get('resource_index') == 8)\n\
@@ -1865,6 +1994,7 @@ mod tests {
         assert!(result.stdout.contains("bufexport True"), "{}", result.stdout);
         assert!(result.stdout.contains("render True"), "{}", result.stdout);
         assert!(result.stdout.contains("compat True"), "{}", result.stdout);
+        assert!(result.stdout.contains("replay True"), "{}", result.stdout);
         assert!(result.stdout.contains("replace True"), "{}", result.stdout);
         assert!(result.stdout.contains("unreplace True"), "{}", result.stdout);
         assert!(result.stdout.contains("debug True"), "{}", result.stdout);
