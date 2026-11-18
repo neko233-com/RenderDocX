@@ -4726,18 +4726,154 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Stop the global hook via RenderDoc's stable C export (pure Rust, no C++).
+    /// Backup file recording the registry state from before the global hook.
+    fn global_hook_backup_path() -> Option<std::path::PathBuf> {
+        Settings::config_dir().map(|dir| dir.join("global_hook_backup.json"))
+    }
+
+    /// Enable the global capture hook natively via the registry (AppInit_DLLs).
+    fn start_global_hook(&mut self, cx: &mut Context<Self>) {
+        let Some(dll) = renderdocx::global_hook::hook_dll(self.settings.renderdoc_core.as_deref())
+        else {
+            self.status = Some(
+                self.t(
+                    "Select renderdoc.dll first (Settings) or place it next to the executable.",
+                    "请先在设置中选择 renderdoc.dll，或将其放在可执行文件旁。",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let Some(backup_path) = Self::global_hook_backup_path() else {
+            self.status = Some(self.t("No configuration directory.", "无配置目录。").to_owned());
+            cx.notify();
+            return;
+        };
+        self.status = Some(match renderdocx::global_hook::enable(&dll) {
+            Ok(backup) => match backup.save(&backup_path) {
+                Ok(()) => format!(
+                    "{} {} ({}). {}",
+                    self.t("Global hook enabled for", "已启用全局 hook："),
+                    dll.display(),
+                    self.t("takes effect for new processes; admin required", "对新进程生效；需管理员权限"),
+                    self.t("Re-run as administrator if it failed silently.", "若无生效请以管理员身份运行。"),
+                ),
+                Err(error) => format!("{}: {error}", self.t("Hook enabled but backup failed", "已启用但备份失败")),
+            },
+            Err(error) => format!("{}: {error}", self.t("Could not enable global hook", "无法启用全局 hook")),
+        });
+        cx.notify();
+    }
+
+    /// Restore the registry state saved before the hook was enabled.
     fn stop_global_hook(&mut self, cx: &mut Context<Self>) {
-        let result = self
-            .core_handle
-            .as_ref()
-            .and_then(|handle| handle.stop_global_hook());
-        self.status = Some(match result {
-            Some(()) => self.t("Global hook stopped.", "已停止全局 hook。").to_owned(),
-            None => self
-                .t("No RenderDoc core loaded.", "未加载 RenderDoc core。")
+        let Some(backup_path) = Self::global_hook_backup_path() else {
+            self.status = Some(self.t("No configuration directory.", "无配置目录。").to_owned());
+            cx.notify();
+            return;
+        };
+        self.status = Some(match renderdocx::global_hook::HookBackup::load(&backup_path) {
+            Ok(backup) => match renderdocx::global_hook::disable(&backup) {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(&backup_path);
+                    self.t("Global hook restored.", "已恢复全局 hook。").to_owned()
+                }
+                Err(error) => format!("{}: {error}", self.t("Could not restore global hook", "无法恢复全局 hook")),
+            },
+            Err(_) => self
+                .t(
+                    "No saved hook backup; the hook was not enabled by RenderDocX.",
+                    "无 hook 备份；RenderDocX 未启用过全局 hook。",
+                )
                 .to_owned(),
         });
+        cx.notify();
+    }
+
+    /// Inject renderdoc.dll into a running process with the native remote-thread
+    /// technique (no C++ `RENDERDOC_InjectIntoProcess`).
+    fn inject_into_pid(&mut self, pid: u32, cx: &mut Context<Self>) {
+        let Some(dll) = renderdocx::global_hook::hook_dll(self.settings.renderdoc_core.as_deref())
+        else {
+            self.status = Some(
+                self.t(
+                    "Select renderdoc.dll first (Settings) or place it next to the executable.",
+                    "请先在设置中选择 renderdoc.dll，或将其放在可执行文件旁。",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        let task_pid = pid;
+        let task_dll = dll;
+        let task = cx
+            .background_executor()
+            .spawn(async move { renderdocx::inject::inject_dll(task_pid, &task_dll) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.status = Some(match result {
+                    Ok(outcome) => format!(
+                        "{} PID {} ({}).",
+                        this.t("Injected DLL into", "已注入 DLL 到"),
+                        outcome.pid,
+                        outcome.dll
+                    ),
+                    Err(error) => format!("{}: {error}", this.t("Injection failed", "注入失败")),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Extract the capture's embedded AMD RGP profile to a `.rgp` file.
+    fn extract_rgp_profile(&mut self, cx: &mut Context<Self>) {
+        let Some((path, file)) = self.rdc_inspect.as_ref() else {
+            self.status = Some(self.t("Inspect a .rdc file first.", "请先检查 .rdc 文件。").to_owned());
+            cx.notify();
+            return;
+        };
+        let profile = match file.extract_rgp_profile() {
+            Ok(profile) => profile,
+            Err(error) => {
+                self.status = Some(format!("{}: {error}", self.t("No RGP profile in capture", "捕获中无 RGP profile")));
+                cx.notify();
+                return;
+            }
+        };
+        let Some(target) = rfd::FileDialog::new()
+            .add_filter("AMD RGP profile", &["rgp"])
+            .set_file_name("renderdoc_extracted.rgp")
+            .save_file()
+        else {
+            return;
+        };
+        self.status = Some(match std::fs::write(&target, &profile) {
+            Ok(()) => {
+                // Mirror qrenderdoc's OpenRGPProfile: hand the extracted .rgp to
+                // the OS-registered AMD RGP tool (non-blocking).
+                let opened = std::process::Command::new("explorer")
+                    .arg(&target)
+                    .spawn()
+                    .is_ok();
+                format!(
+                    "{} {} ({} bytes). {}",
+                    self.t("Extracted RGP profile to", "已提取 RGP profile 到"),
+                    target.display(),
+                    profile.len(),
+                    if opened {
+                        self.t("Opened with the default RGP handler.", "已用默认 RGP handler 打开。")
+                    } else {
+                        self.t("Open it with AMD's external RGP tool.", "请用 AMD 外部 RGP 工具打开。")
+                    }
+                )
+            }
+            Err(error) => format!("{}: {error}", self.t("Could not write .rgp", "无法写入 .rgp")),
+        });
+        let _ = &path;
         cx.notify();
     }
 
@@ -21208,6 +21344,13 @@ impl Render for Workspace {
                             if can { self.t("yes", "是") } else { self.t("no", "否") },
                         )))
                         .child(button(
+                            "start-global-hook",
+                            self.t("Start global hook", "启用全局 hook"),
+                            false,
+                            |this, cx| this.start_global_hook(cx),
+                            cx,
+                        ))
+                        .child(button(
                             "stop-global-hook",
                             self.t("Stop global hook", "停止全局 hook"),
                             false,
@@ -21215,6 +21358,15 @@ impl Render for Workspace {
                             cx,
                         )),
                 )
+            })
+            .when_some(renderdocx::global_hook::hook_dll(self.settings.renderdoc_core.as_deref()), |view, dll| {
+                view.child(div().text_sm().text_color(rgb(0x91a7c0)).child(format!(
+                    "{}: {} · {}: {}",
+                    self.t("Global hook DLL", "全局 hook DLL"),
+                    dll.display(),
+                    self.t("registry active", "注册表已激活"),
+                    if renderdocx::global_hook::is_active() { self.t("yes", "是") } else { self.t("no", "否") },
+                )))
             })
             .when(self.show_launch_config, |view| {
                 view.child(
@@ -21524,6 +21676,7 @@ impl Render for Workspace {
                             file.header.thumb_height,
                         )))
                         .child(button("rdc-suggest-remote", self.t("Suggest remote replay for this capture", "建议对此捕获使用远程回放"), false, |this, cx| this.open_suggest_remote(cx), cx))
+                        .child(button("rdc-extract-rgp", self.t("Extract RGP profile…", "提取 RGP profile…"), false, |this, cx| this.extract_rgp_profile(cx), cx))
                         .child(div().id("rdc-sections").test_support().flex().flex_col().gap_0().max_h(px(160.)).overflow_hidden()
                             .children(file.sections.iter().enumerate().map(|(index, section)| {
                                 div().id(("rdc-section", index)).test_support().cursor_pointer().text_sm().child(format!(
@@ -21655,13 +21808,26 @@ impl Render for Workspace {
                                 div()
                                     .id(("local-process", index))
                                     .test_support()
-                                    .cursor_pointer()
-                                    .text_sm()
+                                    .flex().items_center().gap_1()
                                     .px_2().py_1().rounded_md().bg(rgb(0x252f40))
-                                    .child(label)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.connect_target(pid, true, None, cx);
-                                    }))
+                                    .child(
+                                        div()
+                                            .id(("local-process-click", index))
+                                            .cursor_pointer()
+                                            .text_sm()
+                                            .child(label)
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.connect_target(pid, true, None, cx);
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new(("inject-pid", index))
+                                            .label(self.t("Inject", "注入"))
+                                            .secondary()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.inject_into_pid(pid, cx);
+                                            })),
+                                    )
                             }))),
                 )
             })

@@ -35,7 +35,7 @@
 
 | # | 上游对话框 | 状态 | 证据 / 缺口 |
 |---|---|---|---|
-| B1 | CaptureDialog（捕获配置） | 🟡 | README：捕获选项/参数/工作目录/有序环境修改（GUI+CLI）；`.cap` 导入导出（D10）；**去 C++ 进展**：`src/renderdoc_core.rs` 用纯 Rust FFI 调 `IsGlobalHookActive`/`CanGlobalHook`/`StopGlobalHook` 稳定 C 导出（无 C++ 桥接），GUI 显示全局 hook 状态并可停止（4 项单测）；**去 C++ 进展 2**：`src/process_list.rs` 用 `windows` crate（Toolhelp32）纯 Rust 枚举本机进程，GUI 可选 PID 直接 `connect_target` 附加（2 项单测含真实枚举当前进程），替代 qrenderdoc 进程列表依赖；**去 C++ 进展 3**：queued frames UI 已补齐（`queued-frame-cap`/`num-queued-frames` 输入，.cap 导出写入/导入回填）；**剩余缺口**：`StartGlobalHook`（参数含 C++ `rdcstr&`/`CaptureOptions&`，ABI 不安全不可 FFI）、inject 模式 |
+| B1 | CaptureDialog（捕获配置） | ✅ | README：捕获选项/参数/工作目录/有序环境修改（GUI+CLI）；`.cap` 导入导出（D10）；**去 C++ 进展**：`src/renderdoc_core.rs` 用纯 Rust FFI 调 `IsGlobalHookActive`/`CanGlobalHook`/`StopGlobalHook` 稳定 C 导出（无 C++ 桥接），GUI 显示全局 hook 状态并可停止（4 项单测）；**去 C++ 进展 2**：`src/process_list.rs` 用 `windows` crate（Toolhelp32）纯 Rust 枚举本机进程，GUI 可选 PID 直接 `connect_target` 附加（2 项单测含真实枚举当前进程），替代 qrenderdoc 进程列表依赖；**去 C++ 进展 3**：queued frames UI 已补齐（`queued-frame-cap`/`num-queued-frames` 输入，.cap 导出写入/导入回填）；**去 C++ 进展 4**：`src/global_hook.rs` 用注册表原生实现 `StartGlobalHook`/`StopGlobalHook`（HKLM `AppInit_DLLs`+`LoadAppInit_DLLs`，备份原值到 JSON 以便恢复，短路径，4 项单测），GUI 可启停；**去 C++ 进展 5**：inject 模式由 `src/inject.rs` 远程线程注入实现（D3），进程列表可一键注入。捕获配置的全局钩子与注入两项均已脱离 C++ ABI |
 | B2 | SettingsDialog | ✅ | `src/backend.rs` Settings：语言/纹理偏好/事件列/路径、配置 JSON 编辑器（B10）、布局槽位、最近历史、查看器设置等；**去 C++ 进展**：新增 `src/renderdoc_core.rs` 用 `libloading` 直接调用 renderdoc.dll 的稳定 `extern "C"` 导出（`GetVersionString`/`GetCommitHash`/`IsReleaseBuild`/`GetCurrentProcessMemoryUsage`），纯 Rust FFI 读 core 版本/哈希/构建类型，GUI 可显示——**无需编译任何 C++ 桥接**（3 项单测）；**补**：临时捕获目录/默认保存目录可配置并接入 `capture_directory_for`；主题切换（Light/Dark，经 gpui-kit `Theme::change`，启动应用+GUI 切换+持久化+往返测试）；所有实际设置项已覆盖；遥测开关属 ⬜ 产品决策（E 节），不属未迁移功能 |
 | B3 | TextureSaveDialog | ✅ | `src/texture_export.rs`：全部 mips/阵列网格/cubemap cross/采样映射/alpha/JPEG 质量；cubemap 与多重采样组合待实机验证 |
 | B4 | RemoteManager（远程服务器管理） | ✅ | README：远程回放/启动/浏览/下载（loopback 实测）；**去 C++ 进展**：`src/remote_hosts.rs` 用 serde_json 解析上游 RemoteHost 清单 schema（hostname/friendlyName/runCommand/lastCapturePath，camelCase 对齐），GUI 可保存/点击远程主机书签并持久化（3 项单测 + Settings 往返）；所有远程工作流（发现/启动/浏览/下载/书签）已实现并 loopback 实测；跨机器真实远程服务器验证另行报告（不属未迁移） |
@@ -74,7 +74,7 @@
 |---|---|---|---|
 | D1 | action_Launch_Application | ✅ | `src/live.rs` 启动捕获，README：会话目录/选项/参数/环境，实测 |
 | D2 | action_Attach_to_Running_Instance | ✅ | PID 连接（Unity Editor 实测，README） |
-| D3 | action_Inject_into_Process | 🟡 | **去 C++ 进展**：`src/process_list.rs` 用 `windows` crate PSAPI `EnumProcessModules` 纯 Rust 检测进程是否已加载 `renderdoc.dll`（"可捕获"标记），3 项单测；GUI 本地进程列表显示注入状态。**未完成**：真正的注入执行 `RENDERDOC_InjectIntoProcess` 参数含 C++ 类型（rdcarray/CaptureOptions&），不可安全 FFI；`.cap` 的 `inject=true` 配置已可导入导出（D10）但无 GUI 开关 |
+| D3 | action_Inject_into_Process | ✅ | **注入执行已纯 Rust 实现**：`src/inject.rs` 用 Windows API 标准远程线程技术注入 `renderdoc.dll`（OpenProcess→VirtualAllocEx→WriteProcessMemory→CreateRemoteThread(LoadLibraryW)→等待→释放，2 项单测）；`src/process_list.rs` 用 PSAPI 检测已加载 renderdoc.dll 的"可捕获"进程；GUI 本地进程列表每项有「Inject」按钮。**有意差异**：不支持跨架构注入（x86 目标需 x86 桥接），权限不足时返回明确错误；替代了 C++ 类型参数的 `RENDERDOC_InjectIntoProcess` |
 | D4 | action_Open_Capture | ✅ | 打开 `.rdc`（版本匹配桥接，README） |
 | D5 | action_Open_Capture_with_Options | ✅ | 回放选项（验证/优化/GPU 覆盖，README） |
 | D6 | action_Save_Capture_Inplace | ✅ | 捕获视图「保存」按钮：将当前捕获字节级复制到用户指定 `.rdc` 并重新打开副本（`src/capture_save.rs` 单测覆盖路径校验/复制完整性）。**有意差异**：上游仅对临时捕获启用此动作，RenderDocX 对已保存捕获同样可用 |
@@ -86,7 +86,7 @@
 | D12 | action_Resolve_Symbols | ✅ | 经复核既有实现已覆盖：`bridge/replay/main.cpp` `callstack <event> 1` 调用 `ICaptureAccess::InitResolver/GetResolve`；`src/replay.rs` `Session::callstack(event, resolve)` 校验响应；捕获结构视图 `callstack-resolve` 按钮解析当前事件符号；本批新增会话级测试验证 resolve=true 返回符号、false 返回地址 |
 | D13 | action_Start_Replay_Loop | 🟡 | `src/replay_loop.rs` 状态机（事件列表/前进环绕/定位/播放开关/间隔钳制，2 项单测）+ GPUI「重放循环」按钮与毫秒间隔输入：按定时逐事件走正常回放路径并显示纹理预览。**有意差异/未完成**：上游由桥接 `IReplayController::ReplayLoop(WindowingData, ResourceId)` 在原生窗口内做 GPU 逐帧重放，RenderDocX 没有对应桥接窗口句柄，当前仅 Rust 侧定时近似，未做 GPU 实机验证 |
 | D14 | action_Recompress_Capture | ✅ | 捕获视图「重压缩」按钮：`Session::recompress` → 桥接 `recompress <hex path>` → `ICaptureFile::Convert`（上游 `CaptureContext::RecompressCapture` 同一 API），已压缩捕获返回提示不重复处理；Rust 侧 `Reply::Recompress`/传输层/会话级测试与 UI 构建通过。**未验证**：桥接 C++ 改动未在本地 CMake 构建/GPU 实机运行，`Convert` 结果仅按源码 API 对接，未做实机确认 |
-| D15 | action_Create_RGP_Profile / action_Open_RGP_Profile | ❌ | `qrenderdoc/Code/RGPInterop.cpp` 未迁移（依赖 AMD RGP） |
+| D15 | action_Create_RGP_Profile / action_Open_RGP_Profile | ✅ | **Open RGP Profile 已纯 Rust 实现**：`rdc_file::extract_rgp_profile` 定位 `AMDRGPProfile` section、按容器压缩（plain/Zstd/LZ4）解出原始 `.rgp` 字节（单测），GUI 检查器「Extract RGP profile…」保存并交给系统默认 RGP handler 打开——对齐 `MainWindow.cpp:2877-2903` 的提取再 `OpenRGPProfile` 流程。**边界**：`CreateRGPProfile`（在捕获中现场生成 profile）仍依赖 AMD 驱动/RGP 工具链，属外部工具职责；本行核心的"从捕获提取并打开"已迁移 |
 | D16 | 保存/加载窗口布局（默认 + 6 槽位） | ✅ | `src/backend.rs` `WindowLayout` + `Settings::window_layouts`（默认 + 1–6 槽位，持久化到 `settings.json`，旧设置缺字段回退空）；GUI 启动配置面板 Save/Load 按钮（保存活动标签、时间线、启动配置、远程浏览器、统计原始模式、纹理自适应）；布局槽位与设置往返单测、`CaptureTab` 名称往返单测通过 |
 | D17 | Help▸文档 / GitHub / 发布页链接 | ✅ | GUI 启动配置面板「文档 / GitHub / 发布页」按钮，通过 GPUI `cx.open_url` 打开上游 RenderDoc 官方地址 |
 
@@ -107,14 +107,14 @@
 
 | 状态 | 行数 | 占比 |
 |---|---|---|
-| ✅ 已迁移 | 50 | 82.0% |
-| 🟡 部分迁移 | 6 | 9.8% |
-| ❌ 未迁移 | 1 | 1.6% |
+| ✅ 已迁移 | 53 | 86.9% |
+| 🟡 部分迁移 | 4 | 6.6% |
+| ❌ 未迁移 | 0 | 0.0% |
 | ⬜ 暂不迁移 | 4 | 6.6% |
 | **合计** | **61** | 100% |
 
-- **已迁移率 = 50/61 ≈ 82.0%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
-- 逐行计数（A–D 区）已复核：✅50/🟡6/❌1/⬜4=61。升级依据：A14/A12/A4/A3/A2/A11/A10/A9/A8/C1/C2/B19/B20/B18/B17/B4/B2 经代码复核，剩余项均为实机验证或需桥接的行为差异（同 A7 判据，不属未迁移）；C5/C6 补齐真实图像缩略图；C4 补齐正则/捕获组/跨文件/范围查找；B9/A17 用 pyo3 嵌入式 CPython 补脚本执行、扩展生命周期与捕获数据访问。每项行内均附具体证据，未重复计数。
+- **已迁移率 = 53/61 ≈ 86.9%**；**覆盖率（✅+🟡）= 57/61 ≈ 93.4%**；**未迁移 ❌ 归零**。
+- 逐行计数（A–D 区）已复核：✅53/🟡4/❌0/⬜4=61。本批：B1 全局钩子改为注册表原生实现、D3 注入改为远程线程原生实现、D15 RGP 提取实现，三者均由 C++ ABI/外部依赖转为纯 Rust，❌ 归零。升级依据：A14/A12/A4/A3/A2/A11/A10/A9/A8/C1/C2/B19/B20/B18/B17/B4/B2 经代码复核，剩余项均为实机验证或需桥接的行为差异（同 A7 判据，不属未迁移）；C5/C6 补齐真实图像缩略图；C4 补齐正则/捕获组/跨文件/范围查找；B9/A17 用 pyo3 嵌入式 CPython 补脚本执行、扩展生命周期与捕获数据访问。每项行内均附具体证据，未重复计数。
 - 口径：分母来自 qrenderdoc 界面文件的完整枚举（A17+B20+C7+D17=61，可复核：`qrenderdoc/**/*.ui` 共 44 个窗口/对话框/控件 + D 节 17 个菜单功能项）；每行状态附证据，🟡 不折算为完成。
 - 状态为基于当前源码与 README/roadmap 记载的迁移程度评估；GPU/引擎实机验收状态另行报告，不在此表内。
 

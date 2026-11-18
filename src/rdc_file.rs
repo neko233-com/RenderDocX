@@ -274,6 +274,18 @@ impl RdcFile {
             .find(|section| section.section_type == section_type)
     }
 
+    /// Extract the embedded AMD RGP profile, mirroring qrenderdoc's
+    /// "Open RGP Profile" (`MainWindow.cpp:2877-2903`): locate the
+    /// `AMDRGPProfile` section, decode its payload and return the raw `.rgp`
+    /// bytes. Opening the profile still needs AMD's external RGP tooling, but
+    /// extraction itself is pure Rust with no C++ bridge.
+    pub fn extract_rgp_profile(&self) -> Result<Vec<u8>, String> {
+        let section = self
+            .section(section_type::AMD_RGP_PROFILE)
+            .ok_or("Capture has no AMDRGPProfile section")?;
+        self.section_payload(section)
+    }
+
     /// Decode an ExtendedThumbnail section payload: `ExtThumbnailHeader`
     /// (u16 width, u16 height, u32 len, u32 format) followed by `len` image
     /// bytes (translated from `rdcfile.cpp:714`). PNG payloads are decoded to
@@ -643,6 +655,27 @@ mod tests {
         assert_eq!(thumb.height, 1);
         assert_eq!(thumb.format, file_type::PNG);
         assert_eq!(thumb.rgba, vec![255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn extracts_embedded_rgp_profile() {
+        let profile: &[u8] = b"RGP-proprietary-profile-bytes";
+        let sections = vec![SectionInfo {
+            section_type: section_type::AMD_RGP_PROFILE,
+            compressed_length: profile.len() as u64,
+            uncompressed_length: profile.len() as u64,
+            version: 0,
+            flags: 0,
+            name: "AMD RGP Profile".to_owned(),
+            data_offset: 0,
+        }];
+        let bytes = build_rdc(0x102, &sections, &[profile]);
+        let parsed = RdcFile::parse(&bytes).unwrap();
+        assert_eq!(parsed.extract_rgp_profile().unwrap(), profile);
+
+        let empty = build_rdc(0x102, &[], &[]);
+        let no_profile = RdcFile::parse(&empty).unwrap();
+        assert!(no_profile.extract_rgp_profile().is_err());
     }
 
     #[test]
