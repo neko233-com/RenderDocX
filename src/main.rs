@@ -21070,14 +21070,16 @@ impl Render for Workspace {
             .when_some(self.core_info.clone(), |view, info| {
                 view.child(
                     div().text_sm().text_color(rgb(0x91a7c0)).child(format!(
-                        "RenderDoc core: {} · {} · {}",
+                        "RenderDoc core: {} · {} · {} · {}: {}",
                         info.version.as_deref().unwrap_or("?"),
                         info.commit_hash.as_deref().unwrap_or("?"),
                         match info.release_build {
                             Some(true) => self.t("release", "发布版"),
                             Some(false) => self.t("dev", "开发版"),
                             None => "?",
-                        }
+                        },
+                        self.t("GPU vendor", "GPU 厂商"),
+                        renderdocx::api_enums::gpu_vendor::name(self.settings.replay_options.gpu_vendor)
                     )),
                 )
             })

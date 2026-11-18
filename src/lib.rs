@@ -1,4 +1,5 @@
 pub mod annotations;
+pub mod api_enums;
 pub mod backend;
 pub mod buffer_binding;
 pub mod buffer_csv;
