@@ -6137,6 +6137,40 @@ impl Workspace {
                     .take(256)
                     .map(|counter| (counter.name.clone(), counter.category.clone()))
                     .collect(),
+                shaders: self
+                    .pipeline
+                    .as_ref()
+                    .map(|pipeline| {
+                        pipeline
+                            .shaders
+                            .iter()
+                            .map(|shader| {
+                                (
+                                    shader.stage.clone(),
+                                    shader.resource.name.clone(),
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                viewports: self
+                    .pipeline
+                    .as_ref()
+                    .map(|pipeline| {
+                        pipeline
+                            .viewports
+                            .as_ref()
+                            .map(|viewports| {
+                                viewports
+                                    .iter()
+                                    .map(|viewport| {
+                                        (viewport.width.unwrap_or(0.0), viewport.height.unwrap_or(0.0))
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    })
+                    .unwrap_or_default(),
             })
             .unwrap_or_default()
     }

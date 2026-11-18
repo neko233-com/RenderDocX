@@ -46,6 +46,10 @@ pub struct CaptureView {
     pub debug_messages: Vec<(u32, String, String)>,
     /// (name, category) per GPU performance counter.
     pub counters: Vec<(String, String)>,
+    /// (stage, shader name) for the currently selected event's pipeline.
+    pub shaders: Vec<(String, String)>,
+    /// (width, height) per viewport of the currently selected event.
+    pub viewports: Vec<(f32, f32)>,
 }
 
 impl CaptureView {
@@ -177,6 +181,13 @@ fn build_capture_module<'py>(
     // Debug messages as (event_id, source, description).
     if let Ok(messages) = PyList::new(py, view.debug_messages.clone()) {
         dict.set_item("debug_messages", messages).ok();
+    }
+    // Pipeline shaders as (stage, name) and viewports as (width, height).
+    if let Ok(shaders) = PyList::new(py, view.shaders.clone()) {
+        dict.set_item("shaders", shaders).ok();
+    }
+    if let Ok(viewports) = PyList::new(py, view.viewports.clone()) {
+        dict.set_item("viewports", viewports).ok();
     }
     // Built-in help() listing the exposed API: the minimal pure-Rust
     // equivalent of the upstream help browser's discovery role.
@@ -351,6 +362,8 @@ mod tests {
             buffer_count: 1,
             selected_event: Some(11),
             resource_names: vec!["texA".into(), "bufB".into()],
+            shaders: vec![("Vertex".into(), "vertex shader".into())],
+            viewports: vec![(1280.0, 720.0)],
             actions: vec![
                 (10, "Clear".into(), 0, 0),
                 (11, "DrawIndexed".into(), 1, 300),
@@ -365,7 +378,7 @@ mod tests {
             Some("DrawIndexed")
         );
         let result = run_script_with_capture(
-            "import renderdocx\nprint(renderdocx.frame, renderdocx.api_name, renderdocx.action_count, renderdocx.resource_names[0])\nprint([a for a in renderdocx.actions if a[0] == 11])\nprint(renderdocx.textures[0][0], renderdocx.textures[0][1], renderdocx.textures[0][2])\nprint(renderdocx.buffers[0][0], renderdocx.buffers[0][1])\nprint(renderdocx.debug_messages[0][0], renderdocx.debug_messages[0][2])\nprint(renderdocx.counters[0][0], renderdocx.counters[0][1])",
+            "import renderdocx\nprint(renderdocx.frame, renderdocx.api_name, renderdocx.action_count, renderdocx.resource_names[0])\nprint([a for a in renderdocx.actions if a[0] == 11])\nprint(renderdocx.textures[0][0], renderdocx.textures[0][1], renderdocx.textures[0][2])\nprint(renderdocx.buffers[0][0], renderdocx.buffers[0][1])\nprint(renderdocx.debug_messages[0][0], renderdocx.debug_messages[0][2])\nprint(renderdocx.counters[0][0], renderdocx.counters[0][1])\nprint(renderdocx.shaders[0][0], renderdocx.shaders[0][1])\nprint(renderdocx.viewports[0][0])",
             &view,
         );
         assert!(result.error.is_none(), "{:?}", result.error);
@@ -375,6 +388,8 @@ mod tests {
         assert!(result.stdout.contains("VertexBuffer 4096"));
         assert!(result.stdout.contains("11 sample warning"));
         assert!(result.stdout.contains("Draw Calls Drawcall"));
+        assert!(result.stdout.contains("Vertex vertex shader"));
+        assert!(result.stdout.contains("1280"));
 
         let help = run_script_with_capture("import renderdocx\nrenderdocx.help()", &view);
         assert!(help.error.is_none(), "{:?}", help.error);
