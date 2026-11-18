@@ -111,6 +111,45 @@ pub fn find_next(
     }
 }
 
+/// Find the next match restricted to a byte range `[range_start, range_end)` —
+/// the "search in selection" context. Returns absolute byte offsets.
+pub fn find_in_range(
+    text: &str,
+    needle: &str,
+    options: FindOptions,
+    range_start: usize,
+    range_end: usize,
+    cursor: usize,
+) -> Option<(usize, usize)> {
+    let end = range_end.min(text.len());
+    if range_start >= end {
+        return None;
+    }
+    // A cursor outside the range wraps to the start of the range.
+    let start = if cursor >= end || cursor < range_start {
+        range_start
+    } else {
+        cursor
+    };
+    let all: Vec<(usize, usize)> = find_all(&text[..end], needle, options)
+        .into_iter()
+        .filter(|(s, _)| *s >= range_start && *s < end)
+        .collect();
+    match options.direction {
+        FindDirection::Down => all
+            .iter()
+            .copied()
+            .find(|(s, _)| *s >= start)
+            .or_else(|| all.first().copied()),
+        FindDirection::Up => all
+            .iter()
+            .rev()
+            .copied()
+            .find(|(s, _)| *s < start)
+            .or_else(|| all.last().copied()),
+    }
+}
+
 /// Search across multiple documents and return `(document_index, start, end)`
 /// for the first match from `from_doc` onwards. Used by "find in all files".
 pub fn find_in_documents(
@@ -273,6 +312,23 @@ mod tests {
         let (text, count) = replace_all("Draw draw Drawn", "draw", "DIP", options);
         assert_eq!(count, 2);
         assert_eq!(text, "DIP DIP Drawn");
+    }
+
+    #[test]
+    fn find_in_range_restricts_to_selection() {
+        let text = "xx TARGET aa TARGET bb TARGET cc";
+        let options = FindOptions::default();
+        // range covering only "aa TARGET bb"
+        let range_start = 10;
+        let range_end = 22;
+        let first = find_in_range(text, "TARGET", options, range_start, range_end, 0).unwrap();
+        assert_eq!(&text[first.0..first.1], "TARGET");
+        assert!(first.0 >= range_start && first.1 <= range_end);
+        // cursor past range wraps to first in range
+        let wrapped = find_in_range(text, "TARGET", options, range_start, range_end, 999).unwrap();
+        assert_eq!(wrapped, first);
+        // no match in a range without TARGET
+        assert!(find_in_range(text, "TARGET", options, 0, 2, 0).is_none());
     }
 
     #[test]

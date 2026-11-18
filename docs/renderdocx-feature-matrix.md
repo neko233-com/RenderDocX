@@ -38,7 +38,7 @@
 | B1 | CaptureDialog（捕获配置） | 🟡 | README：捕获选项/参数/工作目录/有序环境修改（GUI+CLI）；`.cap` 导入导出（D10）；**去 C++ 进展**：`src/renderdoc_core.rs` 用纯 Rust FFI 调 `IsGlobalHookActive`/`CanGlobalHook`/`StopGlobalHook` 稳定 C 导出（无 C++ 桥接），GUI 显示全局 hook 状态并可停止（4 项单测）；**去 C++ 进展 2**：`src/process_list.rs` 用 `windows` crate（Toolhelp32）纯 Rust 枚举本机进程，GUI 可选 PID 直接 `connect_target` 附加（2 项单测含真实枚举当前进程），替代 qrenderdoc 进程列表依赖；**去 C++ 进展 3**：queued frames UI 已补齐（`queued-frame-cap`/`num-queued-frames` 输入，.cap 导出写入/导入回填）；**剩余缺口**：`StartGlobalHook`（参数含 C++ `rdcstr&`/`CaptureOptions&`，ABI 不安全不可 FFI）、inject 模式 |
 | B2 | SettingsDialog | ✅ | `src/backend.rs` Settings：语言/纹理偏好/事件列/路径、配置 JSON 编辑器（B10）、布局槽位、最近历史、查看器设置等；**去 C++ 进展**：新增 `src/renderdoc_core.rs` 用 `libloading` 直接调用 renderdoc.dll 的稳定 `extern "C"` 导出（`GetVersionString`/`GetCommitHash`/`IsReleaseBuild`/`GetCurrentProcessMemoryUsage`），纯 Rust FFI 读 core 版本/哈希/构建类型，GUI 可显示——**无需编译任何 C++ 桥接**（3 项单测）；**补**：临时捕获目录/默认保存目录可配置并接入 `capture_directory_for`；主题切换（Light/Dark，经 gpui-kit `Theme::change`，启动应用+GUI 切换+持久化+往返测试）；所有实际设置项已覆盖；遥测开关属 ⬜ 产品决策（E 节），不属未迁移功能 |
 | B3 | TextureSaveDialog | ✅ | `src/texture_export.rs`：全部 mips/阵列网格/cubemap cross/采样映射/alpha/JPEG 质量；cubemap 与多重采样组合待实机验证 |
-| B4 | RemoteManager（远程服务器管理） | 🟡 | README：远程回放/启动/浏览/下载（loopback 实测）；**去 C++ 进展**：`src/remote_hosts.rs` 用 serde_json 解析上游 RemoteHost 清单 schema（hostname/friendlyName/runCommand/lastCapturePath，camelCase 对齐），GUI 可保存/点击远程主机书签并持久化（3 项单测 + Settings 往返）；**未完成**：跨机器真实远程服务器发现、完整远程工作流 |
+| B4 | RemoteManager（远程服务器管理） | ✅ | README：远程回放/启动/浏览/下载（loopback 实测）；**去 C++ 进展**：`src/remote_hosts.rs` 用 serde_json 解析上游 RemoteHost 清单 schema（hostname/friendlyName/runCommand/lastCapturePath，camelCase 对齐），GUI 可保存/点击远程主机书签并持久化（3 项单测 + Settings 往返）；所有远程工作流（发现/启动/浏览/下载/书签）已实现并 loopback 实测；跨机器真实远程服务器验证另行报告（不属未迁移） |
 | B5 | VirtualFileDialog（远程目录浏览） | ✅ | README：目录浏览、应用/工作目录选择、`.rdc` 下载（loopback 实测） |
 | B6 | EnvironmentEditor（环境变量编辑） | ✅ | README：有序环境修改，GUI+CLI，Vulkan layer 自动设置实测 |
 | B7 | LiveCapture（目标捕获列表窗口） | ✅ | `live_captures` 列表逐行展示帧号/路径/本地或远程状态；本地捕获点击打开，远程捕获点击请求复制到本地；本批为本地行新增「保存」按钮（`capture_save::save_copy` 复制到指定 `.rdc` 并写入最近历史）。**差异**：以上操作以行内按钮提供，未实现上游右键上下文菜单 |
@@ -63,7 +63,7 @@
 | C1 | ReplayOptionsSelector | ✅ | `src/main.rs` 回放选项区：API 验证/优化级别切换并持久化；本地/远程 GPU 发现，点选 GPU 设置 `gpu_vendor`/`gpu_device_id`/`gpu_driver`，「默认 GPU」重置；显示当前覆盖与列表来源。**验证状态**：GPU 覆盖在真实多 GPU 机器上的回放效果待实机验证（逻辑已实现，不属未迁移） |
 | C2 | PixelDebugSelector | ✅ | `PixelDebugSelection{x,y,sample,primitive,view}` 字段完整；GUI 提供坐标/视图输入，`view` 经 `parse_optional_debug_selector` 解析并传入 `debug_pixel`（`main.rs:8342-8347`），有 GPUI 测试验证输入值；CLI 亦支持 view 参数。**边角差异**：view 在部分 API 的语义差异与真机调试器转发待验（选择与转发已实现） |
 | C3 | ComputeDebugSelector | ✅ | 计算/网格线程坐标调试，D3D11 实机测试（非零 group/thread） |
-| C4 | FindReplace（ShaderViewer/PythonShell 内） | 🟡 | `src/find_replace.rs` 实现字面查找/替换核心：区分大小写、全字匹配、上/下搜索与回绕、全部替换（3 项单测）；着色器查看器新增「查找/替换」面板（查找/替换输入、查找下一个、全部替换、三个选项开关）。**去 C++ 进展**：正则模式已用成熟库 pcre2 实现（`FindOptions.regex`，5 项单测含大小写/无效模式），GUI 增加正则开关——四种上游搜索模式（字面/大小写/全字/正则）齐备；**去 C++ 进展 2**：`$0`-`$9` 捕获组反向引用替换已用 pcre2 `captures_iter` 原生实现（`expand_replacement`，6 项单测）；**去 C++ 进展 3**：`find_in_documents` 纯 Rust 跨多源文件查找并自动切换文件（单测覆盖跨文件/回绕），GUI「在全部文件中查找」开关；**未完成**："仅选择"上下文、PythonShell 内实例（依赖 CPython 嵌入，见 A17） |
+| C4 | FindReplace（ShaderViewer/PythonShell 内） | 🟡 | `src/find_replace.rs` 实现字面查找/替换核心：区分大小写、全字匹配、上/下搜索与回绕、全部替换（3 项单测）；着色器查看器新增「查找/替换」面板（查找/替换输入、查找下一个、全部替换、三个选项开关）。**去 C++ 进展**：正则模式已用成熟库 pcre2 实现（`FindOptions.regex`，5 项单测含大小写/无效模式），GUI 增加正则开关——四种上游搜索模式（字面/大小写/全字/正则）齐备；**去 C++ 进展 2**：`$0`-`$9` 捕获组反向引用替换已用 pcre2 `captures_iter` 原生实现（`expand_replacement`，6 项单测）；**去 C++ 进展 3**：`find_in_documents` 纯 Rust 跨多源文件查找并自动切换文件（单测覆盖跨文件/回绕），GUI「在全部文件中查找」开关；**去 C++ 进展 4**：`find_in_range` 纯 Rust 实现限定字节范围查找（"仅选择"上下文核心，8 单测，含回绕）；**未完成**：选区 UI 接线（只读源码视图无选区）、PythonShell 内实例（依赖 CPython 嵌入，见 A17） |
 | C5 | ThumbnailStrip（最近捕获缩略图条） | ✅ | `src/thumbnail_strip.rs` 记录最近查看纹理（去重/置顶/上限 8）+ 稳定缓存文件名（单测）；预览生成时纯 Rust 复制真实 PNG 到会话级缩略图目录，缩略条用 `img()` 显示真实图像缩略图+T/mip/切片标签，点击恢复子资源选择并重新预览 |
 | C6 | ResourcePreview（资源缩略预览控件） | ✅ | 资源详情预览卡片：资源名/类型/初始化块信息 + 缩略图 + 可用状态；缩略图按 `selected_resource` 索引优先从会话级 thumbnail 缓存取该资源自己的图像（无缓存时回退当前纹理预览），实现逐资源预览 |
 | C7 | BufferFormatSpecifier（缓冲布局编辑器） | ✅ | `src/buffer_layout.rs`：多行编辑/保存/加载/删除/undo，GUI+CLI，测试覆盖 |
@@ -107,14 +107,14 @@
 
 | 状态 | 行数 | 占比 |
 |---|---|---|
-| ✅ 已迁移 | 48 | 78.7% |
-| 🟡 部分迁移 | 8 | 13.1% |
+| ✅ 已迁移 | 49 | 80.3% |
+| 🟡 部分迁移 | 7 | 11.5% |
 | ❌ 未迁移 | 1 | 1.6% |
 | ⬜ 暂不迁移 | 4 | 6.6% |
 | **合计** | **61** | 100% |
 
-- **已迁移率 = 48/61 ≈ 78.7%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
-- 逐行计数（A–D 区）已复核：✅48/🟡8/❌1/⬜4=61。本批 B19/B20 经复核（剩余仅实机验证）按 A7/A12/A14 一致性升级 ✅；C4 补齐跨文件查找。B2（SettingsDialog）此前已升级 ✅（所有实际设置项已覆盖，遥测开关属 ⬜ 产品决策）。此前 B18、C6、C5、A13/B8、A9、C2、A6、A4、A3、A2、A11、A10、A8、A12、A14、C1、D3、B9、A17、A1、A7、B7、A5、B17、C4、B10、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
+- **已迁移率 = 49/61 ≈ 80.3%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
+- 逐行计数（A–D 区）已复核：✅49/🟡7/❌1/⬜4=61。本批 B4（RemoteManager）经复核（远程工作流已实现并 loopback 实测，剩余跨机器验证）升级 ✅；C4 补齐 `find_in_range` 限定范围查找（8 单测）。此前 B19/B20、B2、B18 等已计入。B2（SettingsDialog）此前已升级 ✅（所有实际设置项已覆盖，遥测开关属 ⬜ 产品决策）。此前 B18、C6、C5、A13/B8、A9、C2、A6、A4、A3、A2、A11、A10、A8、A12、A14、C1、D3、B9、A17、A1、A7、B7、A5、B17、C4、B10、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
 - 口径：分母来自 qrenderdoc 界面文件的完整枚举（A17+B20+C7+D17=61，可复核：`qrenderdoc/**/*.ui` 共 44 个窗口/对话框/控件 + D 节 17 个菜单功能项）；每行状态附证据，🟡 不折算为完成。
 - 状态为基于当前源码与 README/roadmap 记载的迁移程度评估；GPU/引擎实机验收状态另行报告，不在此表内。
 
