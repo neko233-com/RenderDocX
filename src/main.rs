@@ -22064,6 +22064,32 @@ impl Render for Workspace {
                             this.save();
                             cx.notify();
                         })))
+                    .child(button("analytics-export", self.t("Export analytics report…", "导出统计报告…"), false, |this, cx| {
+                        if let Some(dir) = Settings::config_dir() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("JSON", &["json"])
+                                .set_file_name("renderdocx-analytics.json")
+                                .save_file()
+                            {
+                                let report = renderdocx::analytics::report_json(
+                                    &dir,
+                                    renderdocx::analytics::Consent::parse(&this.settings.analytics_consent),
+                                );
+                                this.status = Some(match std::fs::write(&path, report) {
+                                    Ok(()) => format!(
+                                        "{} {}",
+                                        this.t("Analytics report saved to", "统计报告已保存到"),
+                                        path.display()
+                                    ),
+                                    Err(error) => format!(
+                                        "{}: {error}",
+                                        this.t("Could not save analytics report", "无法保存统计报告")
+                                    ),
+                                });
+                            }
+                        }
+                        cx.notify();
+                    }, cx))
                     .child(Button::new("analytics-toggle")
                         .label(format!("{}: {}", self.t("Analytics consent", "统计授权"),
                             renderdocx::analytics::Consent::parse(&self.settings.analytics_consent).as_str()))

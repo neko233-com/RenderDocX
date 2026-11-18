@@ -74,6 +74,23 @@ pub fn record_session(path: &Path, consent: Consent) -> Result<u64, String> {
     Ok(next)
 }
 
+/// Build a complete local analytics report (JSON). RenderDocX never uploads
+/// this; it exists so users can inspect or share their own usage summary, which
+/// is the local equivalent of the upstream analytics payload.
+pub fn report_json(config_dir: &Path, consent: Consent) -> String {
+    let sessions = session_count(&counter_path(config_dir));
+    serde_json::json!({
+        "product": "RenderDocX",
+        "version": env!("CARGO_PKG_VERSION"),
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "consent": consent.as_str(),
+        "sessions": sessions,
+        "note": "Local-only report; RenderDocX does not transmit analytics.",
+    })
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,6 +103,19 @@ mod tests {
         assert!(Consent::Unset.should_prompt());
         assert!(!Consent::Granted.should_prompt());
         assert_eq!(Consent::Granted.as_str(), "granted");
+    }
+
+    #[test]
+    fn report_contains_version_and_local_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = counter_path(dir.path());
+        record_session(&path, Consent::Granted).unwrap();
+        let report: serde_json::Value =
+            serde_json::from_str(&report_json(dir.path(), Consent::Granted)).unwrap();
+        assert_eq!(report["product"], "RenderDocX");
+        assert_eq!(report["consent"], "granted");
+        assert_eq!(report["sessions"], 1);
+        assert!(report["version"].as_str().is_some_and(|v| !v.is_empty()));
     }
 
     #[test]

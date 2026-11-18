@@ -55,6 +55,62 @@ fn buffer(index: u32, offset: u64, length: u32) -> pyo3::PyResult<String> {
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }
 
+/// `renderdocx.structure(event, offset=0, limit=128)` -> JSON of the event's
+/// structured data.
+#[pyo3::pyfunction]
+#[pyo3(signature = (event, offset = 0, limit = 128))]
+fn structure(event: u32, offset: u64, limit: u32) -> pyo3::PyResult<String> {
+    let session = active_session()?;
+    session
+        .structure(event, &[], offset, limit)
+        .and_then(|page| serde_json::to_string(&page).map_err(|error| error.to_string()))
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
+/// `renderdocx.capture_debug_messages()` -> JSON array of capture debug
+/// messages (the `debug_messages` name is the pre-fetched list on the module).
+#[pyo3::pyfunction]
+fn capture_debug_messages() -> pyo3::PyResult<String> {
+    let session = active_session()?;
+    session
+        .debug_messages()
+        .and_then(|messages| serde_json::to_string(&messages).map_err(|error| error.to_string()))
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
+/// `renderdocx.shader_messages(event, offset=0, limit=128)` -> JSON page.
+#[pyo3::pyfunction]
+#[pyo3(signature = (event, offset = 0, limit = 128))]
+fn shader_messages(event: u32, offset: u64, limit: u32) -> pyo3::PyResult<String> {
+    let session = active_session()?;
+    session
+        .shader_messages(event, offset, limit)
+        .and_then(|page| serde_json::to_string(&page).map_err(|error| error.to_string()))
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
+/// `renderdocx.resource_usage(index, offset=0, limit=128)` -> JSON page.
+#[pyo3::pyfunction]
+#[pyo3(signature = (index, offset = 0, limit = 128))]
+fn resource_usage(index: u32, offset: u64, limit: u32) -> pyo3::PyResult<String> {
+    let session = active_session()?;
+    session
+        .resource_usage(index, offset, limit)
+        .and_then(|page| serde_json::to_string(&page).map_err(|error| error.to_string()))
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
+/// `renderdocx.shader(stage, target=None)` -> JSON shader report.
+#[pyo3::pyfunction]
+#[pyo3(signature = (stage, target = None))]
+fn shader(stage: u32, target: Option<u32>) -> pyo3::PyResult<String> {
+    let session = active_session()?;
+    session
+        .shader(stage, target)
+        .and_then(|report| serde_json::to_string(&report).map_err(|error| error.to_string()))
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
 const CAPTURE_SETUP: &str = "import sys, io\n_stdout = getattr(sys, '_rdx_orig_out', sys.stdout)\n_stderr = getattr(sys, '_rdx_orig_err', sys.stderr)\nsys._rdx_orig_out = _stdout\nsys._rdx_orig_err = _stderr\n_sysbuf_out = io.StringIO()\n_sysbuf_err = io.StringIO()\nsys.stdout = _sysbuf_out\nsys.stderr = _sysbuf_err\n";
 const CAPTURE_RESTORE: &str = "sys.stdout = getattr(sys, '_rdx_orig_out', sys.stdout)\nsys.stderr = getattr(sys, '_rdx_orig_err', sys.stderr)\n";
 
@@ -237,6 +293,17 @@ fn build_capture_module<'py>(
     }
     if let Ok(function) = pyo3::wrap_pyfunction!(buffer, py) {
         dict.set_item("buffer", function).ok();
+    }
+    for (name, wrapped) in [
+        ("structure", pyo3::wrap_pyfunction!(structure, py)),
+        ("capture_debug_messages", pyo3::wrap_pyfunction!(capture_debug_messages, py)),
+        ("shader_messages", pyo3::wrap_pyfunction!(shader_messages, py)),
+        ("resource_usage", pyo3::wrap_pyfunction!(resource_usage, py)),
+        ("shader", pyo3::wrap_pyfunction!(shader, py)),
+    ] {
+        if let Ok(function) = wrapped {
+            dict.set_item(name, function).ok();
+        }
     }
     // Built-in help() listing the exposed API: the minimal pure-Rust
     // equivalent of the upstream help browser's discovery role.
@@ -489,11 +556,20 @@ mod tests {
             &CaptureView::default(),
         );
         assert!(result.error.is_some(), "pipeline must fail without a session");
-        let result = run_script_with_capture(
-            "import renderdocx\nrenderdocx.buffer(0)",
-            &CaptureView::default(),
-        );
-        assert!(result.error.is_some(), "buffer must fail without a session");
+        for call in [
+            "renderdocx.buffer(0)",
+            "renderdocx.structure(1)",
+            "renderdocx.capture_debug_messages()",
+            "renderdocx.shader_messages(1)",
+            "renderdocx.resource_usage(0)",
+            "renderdocx.shader(0)",
+        ] {
+            let result = run_script_with_capture(
+                &format!("import renderdocx\n{call}"),
+                &CaptureView::default(),
+            );
+            assert!(result.error.is_some(), "{call} must fail without a session");
+        }
     }
 
     #[cfg(windows)]
@@ -516,13 +592,23 @@ mod tests {
             crate::replay::Session::open(&settings, &capture).expect("open capture");
         set_active_session(Some(session));
         let result = run_script_with_capture(
-            "import renderdocx, json\np = json.loads(renderdocx.pipeline(19))\nprint(p.get('event_id'))\nprint(len(renderdocx.buffer(0, 0, 16)))",
+            "import renderdocx, json\n\
+             p = json.loads(renderdocx.pipeline(19))\n\
+             print(p.get('event_id'))\n\
+             print(len(renderdocx.buffer(0, 0, 16)))\n\
+             print(len(json.loads(renderdocx.structure(19))))\n\
+             print(len(json.loads(renderdocx.capture_debug_messages())))\n\
+             print(len(json.loads(renderdocx.shader_messages(19))))\n\
+             print(len(json.loads(renderdocx.resource_usage(0))))\n\
+             s = json.loads(renderdocx.pipeline(19)).get('shaders') or []\n\
+             print('shaders', len(s))",
             &CaptureView::default(),
         );
         set_active_session(None);
         assert!(result.error.is_none(), "{:?}", result.error);
         assert!(result.stdout.contains("19"), "{}", result.stdout);
-        assert!(result.stdout.trim().lines().last().is_some_and(|line| line == "32"));
+        assert!(result.stdout.contains("32"), "buffer hex length: {}", result.stdout);
+        assert!(result.stdout.contains("shaders"), "{}", result.stdout);
     }
 
     #[test]
