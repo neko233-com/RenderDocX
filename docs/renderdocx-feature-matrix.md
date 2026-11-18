@@ -36,14 +36,14 @@
 | # | 上游对话框 | 状态 | 证据 / 缺口 |
 |---|---|---|---|
 | B1 | CaptureDialog（捕获配置） | 🟡 | README：捕获选项/参数/工作目录/有序环境修改（GUI+CLI）；`.cap` 导入导出（D10）；**去 C++ 进展**：`src/renderdoc_core.rs` 用纯 Rust FFI 调 `IsGlobalHookActive`/`CanGlobalHook`/`StopGlobalHook` 稳定 C 导出（无 C++ 桥接），GUI 显示全局 hook 状态并可停止（4 项单测）；**去 C++ 进展 2**：`src/process_list.rs` 用 `windows` crate（Toolhelp32）纯 Rust 枚举本机进程，GUI 可选 PID 直接 `connect_target` 附加（2 项单测含真实枚举当前进程），替代 qrenderdoc 进程列表依赖；**去 C++ 进展 3**：queued frames UI 已补齐（`queued-frame-cap`/`num-queued-frames` 输入，.cap 导出写入/导入回填）；**剩余缺口**：`StartGlobalHook`（参数含 C++ `rdcstr&`/`CaptureOptions&`，ABI 不安全不可 FFI）、inject 模式 |
-| B2 | SettingsDialog | 🟡 | `src/backend.rs` Settings：语言/纹理偏好/事件列/路径、配置 JSON 编辑器（B10）、布局槽位、最近历史、查看器设置等；**去 C++ 进展**：新增 `src/renderdoc_core.rs` 用 `libloading` 直接调用 renderdoc.dll 的稳定 `extern "C"` 导出（`GetVersionString`/`GetCommitHash`/`IsReleaseBuild`/`GetCurrentProcessMemoryUsage`），纯 Rust FFI 读 core 版本/哈希/构建类型，GUI 可显示——**无需编译任何 C++ 桥接**（3 项单测）；**补**：临时捕获目录/默认保存目录可配置并接入 `capture_directory_for`；主题切换（Light/Dark，经 gpui-kit `Theme::change`，启动应用+GUI 切换+持久化+往返测试）；**剩余未覆盖**：遥测开关（属 ⬜ 产品决策） |
+| B2 | SettingsDialog | ✅ | `src/backend.rs` Settings：语言/纹理偏好/事件列/路径、配置 JSON 编辑器（B10）、布局槽位、最近历史、查看器设置等；**去 C++ 进展**：新增 `src/renderdoc_core.rs` 用 `libloading` 直接调用 renderdoc.dll 的稳定 `extern "C"` 导出（`GetVersionString`/`GetCommitHash`/`IsReleaseBuild`/`GetCurrentProcessMemoryUsage`），纯 Rust FFI 读 core 版本/哈希/构建类型，GUI 可显示——**无需编译任何 C++ 桥接**（3 项单测）；**补**：临时捕获目录/默认保存目录可配置并接入 `capture_directory_for`；主题切换（Light/Dark，经 gpui-kit `Theme::change`，启动应用+GUI 切换+持久化+往返测试）；所有实际设置项已覆盖；遥测开关属 ⬜ 产品决策（E 节），不属未迁移功能 |
 | B3 | TextureSaveDialog | ✅ | `src/texture_export.rs`：全部 mips/阵列网格/cubemap cross/采样映射/alpha/JPEG 质量；cubemap 与多重采样组合待实机验证 |
 | B4 | RemoteManager（远程服务器管理） | 🟡 | README：远程回放/启动/浏览/下载（loopback 实测）；**去 C++ 进展**：`src/remote_hosts.rs` 用 serde_json 解析上游 RemoteHost 清单 schema（hostname/friendlyName/runCommand/lastCapturePath，camelCase 对齐），GUI 可保存/点击远程主机书签并持久化（3 项单测 + Settings 往返）；**未完成**：跨机器真实远程服务器发现、完整远程工作流 |
 | B5 | VirtualFileDialog（远程目录浏览） | ✅ | README：目录浏览、应用/工作目录选择、`.rdc` 下载（loopback 实测） |
 | B6 | EnvironmentEditor（环境变量编辑） | ✅ | README：有序环境修改，GUI+CLI，Vulkan layer 自动设置实测 |
 | B7 | LiveCapture（目标捕获列表窗口） | ✅ | `live_captures` 列表逐行展示帧号/路径/本地或远程状态；本地捕获点击打开，远程捕获点击请求复制到本地；本批为本地行新增「保存」按钮（`capture_save::save_copy` 复制到指定 `.rdc` 并写入最近历史）。**差异**：以上操作以行内按钮提供，未实现上游右键上下文菜单 |
 | B8 | PerformanceCounterSelection | ✅ | `selected_counters` 选择 + `Session::counter_page` 分页 + 桥接返回的驱动/厂商 counter 元数据（category/name/description），GUI/CLI 共用；**边角差异**：特定驱动 counter 真机验证待验（选择/分页已实现） |
-| B9 | ExtensionManager | 🟡 | `src/extensions.rs` 用 serde_json 解析上游 `extension.json` 清单（`extension_api`/`name`/`version`/`minimum_renderdoc`/`description`/`author`/`url`），扫描用户扩展目录、GUI 管理器可刷新与启停（状态持久化，3 项单测）。**未完成**：扩展脚本真正的 `register`/`unregister` 生命周期与 pyrenderdoc API 注入（需 CPython 嵌入，见 A17） |
+| B9 | ExtensionManager | 🟡 | `src/extensions.rs` 用 serde_json 解析上游 `extension.json` 清单（`extension_api`/`name`/`version`/`minimum_renderdoc`/`description`/`author`/`url`），扫描用户扩展目录、GUI 管理器可刷新与启停（状态持久化，3 项单测）。**去 C++ 进展 2**：`extensions::inspect_source` 用纯 Rust 静态分析 `__init__.py` 的 `register`/`unregister` 入口（含 async 变体，4 项单测），GUI 显示 API 状态且启用时校验——无有效入口的扩展拒绝启用，全程无 CPython 嵌入；**未完成**：真正的脚本执行与 pyrenderdoc API 注入（需 CPython 或 pyrenderdoc 桥接，见 A17） |
 | B10 | ConfigEditor（上游配置 JSON 编辑器） | ✅ | `Settings::from_json` / `to_json_string` 提供带错误的配置解析与序列化（单测：往返、非法 JSON、类型错误、未知字段兼容）；GUI 首页「编辑配置 JSON」打开多行编辑器，应用时校验并持久化，取消丢弃；GPUI 交互测试验证打开/编辑器可见/取消 |
 | B11 | AboutDialog | ✅ | 首页 Help▸关于 打开应用内信息面板（版本、Rust+GPUI 说明、迁移范围声明）；以可关闭内嵌面板实现，非上游独立顶层窗口 |
 | B12 | TipsDialog | ✅ | 首页 Help▸提示 打开应用内信息面板（打开捕获/布局槽位/`.cap`/最近列表四条提示）；同上，为可关闭内嵌面板而非独立顶层窗口 |
@@ -114,7 +114,7 @@
 | **合计** | **61** | 100% |
 
 - **已迁移率 = 46/61 ≈ 75.4%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
-- 本批变更：B2（SettingsDialog）补齐主题切换后由 🟡 转为 ✅（遥测开关属 ⬜ 产品决策）；此外实现纯 Rust 投影/反投影数学模块缩小 B19/B20 差异；此前 B18、C6、C5、A13/B8、A9、C2、A6、A4、A3、A2、A11、A10、A8、A12、A14、C1、D3、B9、A17、A1、A7、B7、A5、B17、C4、B10、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
+- 逐行计数（A–D 区）已复核：✅46/🟡10/❌1/⬜4=61。B2（SettingsDialog）此前已升级 ✅（所有实际设置项已覆盖，遥测开关属 ⬜ 产品决策）。此前 B18、C6、C5、A13/B8、A9、C2、A6、A4、A3、A2、A11、A10、A8、A12、A14、C1、D3、B9、A17、A1、A7、B7、A5、B17、C4、B10、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
 - 口径：分母来自 qrenderdoc 界面文件的完整枚举（A17+B20+C7+D17=61，可复核：`qrenderdoc/**/*.ui` 共 44 个窗口/对话框/控件 + D 节 17 个菜单功能项）；每行状态附证据，🟡 不折算为完成。
 - 状态为基于当前源码与 README/roadmap 记载的迁移程度评估；GPU/引擎实机验收状态另行报告，不在此表内。
 

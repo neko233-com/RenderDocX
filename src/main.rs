@@ -4627,6 +4627,22 @@ impl Workspace {
 
     fn toggle_extension(&mut self, name: String, cx: &mut Context<Self>) {
         let enabled = self.settings.enabled_extensions.iter().position(|item| item == &name);
+        if enabled.is_none() {
+            // Enabling: reject extensions without valid register/unregister entry points.
+            let valid = self
+                .installed_extensions
+                .iter()
+                .find(|extension| extension.manifest.name == name)
+                .is_some_and(|extension| extension.api.has_register && extension.api.has_unregister);
+            if !valid {
+                self.status = Some(format!(
+                    "{}: {name}",
+                    self.t("Extension has no valid register/unregister entry points", "扩展缺少有效的 register/unregister 入口")
+                ));
+                cx.notify();
+                return;
+            }
+        }
         match enabled {
             Some(index) => {
                 self.settings.enabled_extensions.remove(index);
@@ -21322,12 +21338,17 @@ impl Render for Workspace {
                 .children(self.installed_extensions.iter().enumerate().map(|(index, ext)| {
                     let name = ext.manifest.name.clone();
                     let enabled = self.settings.enabled_extensions.iter().any(|item| item == &name);
+                    let api_hint = if ext.api.has_register && ext.api.has_unregister {
+                        self.t("ok", "正常")
+                    } else {
+                        self.t("invalid API", "API 无效")
+                    };
                     let label = format!(
-                        "{} {} · {} · {}",
+                        "{} {} · {} · {} · {api_hint}",
                         if enabled { "☑" } else { "☐" },
                         ext.manifest.name,
                         ext.manifest.version,
-                        ext.manifest.author
+                        ext.api.syntax_hint
                     );
                     div()
                         .id(("extension-toggle", index))

@@ -41,10 +41,57 @@ impl ExtensionManifest {
     }
 }
 
+/// Result of statically inspecting an extension's `__init__.py` for the
+/// upstream UI-extension entry points. No CPython is embedded: this is a
+/// lightweight source scan, enough to validate the extension before enabling.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExtensionApi {
+    pub has_register: bool,
+    pub has_unregister: bool,
+    pub syntax_hint: String,
+}
+
+/// Scan Python source for top-level `def register`/`def unregister` definitions.
+/// Handles optional `async def` and leading whitespace/indentation.
+pub fn inspect_source(source: &str) -> ExtensionApi {
+    let has_def = |name: &str| -> bool {
+        source.lines().any(|line| {
+            let trimmed = line.trim_start();
+            let body = trimmed.strip_prefix("async ").unwrap_or(trimmed);
+            body.strip_prefix("def ")
+                .and_then(|rest| rest.split('(').next())
+                .is_some_and(|identifier| identifier.trim() == name)
+        })
+    };
+    let has_register = has_def("register");
+    let has_unregister = has_def("unregister");
+    let syntax_hint = if source.trim().is_empty() {
+        "empty source".to_owned()
+    } else if has_register && has_unregister {
+        "valid entry points".to_owned()
+    } else {
+        "missing entry point".to_owned()
+    };
+    ExtensionApi {
+        has_register,
+        has_unregister,
+        syntax_hint,
+    }
+}
+
+/// Read and statically inspect an extension's `__init__.py`.
+pub fn inspect_extension(dir: &Path) -> ExtensionApi {
+    match fs::read_to_string(dir.join("__init__.py")) {
+        Ok(source) => inspect_source(&source),
+        Err(_) => ExtensionApi::default(),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InstalledExtension {
     pub dir: PathBuf,
     pub manifest: ExtensionManifest,
+    pub api: ExtensionApi,
 }
 
 /// Scan a directory for immediate subdirectories containing `extension.json`.
@@ -58,9 +105,11 @@ pub fn discover(root: &Path) -> Result<Vec<InstalledExtension>, String> {
             continue;
         }
         if let Ok(manifest) = ExtensionManifest::load(&path) {
+            let api = inspect_extension(&path);
             result.push(InstalledExtension {
                 dir: path,
                 manifest,
+                api,
             });
         }
     }
@@ -100,6 +149,29 @@ mod tests {
     fn missing_required_fields_are_rejected() {
         assert!(ExtensionManifest::parse("{}").is_err());
         assert!(ExtensionManifest::parse("not json").is_err());
+    }
+
+    #[test]
+    fn inspects_python_entry_points_without_cpython() {
+        let source = r#"
+import renderdoc as rd
+def register(version, pyrenderdoc):
+    print("loaded")
+def unregister():
+    pass
+"#;
+        let api = inspect_source(source);
+        assert!(api.has_register && api.has_unregister);
+        assert_eq!(api.syntax_hint, "valid entry points");
+
+        let async_source = "async def register(v, p):\n    pass\ndef unregister():\n    pass\n";
+        let async_api = inspect_source(async_source);
+        assert!(async_api.has_register && async_api.has_unregister);
+
+        let missing = inspect_source("def register():\n    pass\n");
+        assert!(!missing.has_unregister);
+        assert_eq!(missing.syntax_hint, "missing entry point");
+        assert_eq!(inspect_source("").syntax_hint, "empty source");
     }
 
     #[test]
