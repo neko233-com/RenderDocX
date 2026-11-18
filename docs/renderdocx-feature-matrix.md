@@ -63,7 +63,7 @@
 | C1 | ReplayOptionsSelector | ✅ | `src/main.rs` 回放选项区：API 验证/优化级别切换并持久化；本地/远程 GPU 发现，点选 GPU 设置 `gpu_vendor`/`gpu_device_id`/`gpu_driver`，「默认 GPU」重置；显示当前覆盖与列表来源。**验证状态**：GPU 覆盖在真实多 GPU 机器上的回放效果待实机验证（逻辑已实现，不属未迁移） |
 | C2 | PixelDebugSelector | 🟡 | 像素调试坐标/视图选择器已实现；view 未指定、GPUI selector 转发未实测 |
 | C3 | ComputeDebugSelector | ✅ | 计算/网格线程坐标调试，D3D11 实机测试（非零 group/thread） |
-| C4 | FindReplace（ShaderViewer/PythonShell 内） | 🟡 | `src/find_replace.rs` 实现字面查找/替换核心：区分大小写、全字匹配、上/下搜索与回绕、全部替换（3 项单测）；着色器查看器新增「查找/替换」面板（查找/替换输入、查找下一个、全部替换、三个选项开关）。**未完成**：上游正则模式、查找上下文（选择/全部文件）、PythonShell 内实例（PythonShell 本身未迁移） |
+| C4 | FindReplace（ShaderViewer/PythonShell 内） | 🟡 | `src/find_replace.rs` 实现字面查找/替换核心：区分大小写、全字匹配、上/下搜索与回绕、全部替换（3 项单测）；着色器查看器新增「查找/替换」面板（查找/替换输入、查找下一个、全部替换、三个选项开关）。**去 C++ 进展**：正则模式已用成熟库 pcre2 实现（`FindOptions.regex`，5 项单测含大小写/无效模式），GUI 增加正则开关——四种上游搜索模式（字面/大小写/全字/正则）齐备；**未完成**：`$1` 捕获组替换语法、查找上下文（选择/全部文件）、PythonShell 内实例（PythonShell 本身未迁移） |
 | C5 | ThumbnailStrip（最近捕获缩略图条） | 🟡 | `src/thumbnail_strip.rs` 记录最近查看纹理（去重/置顶/上限 8）并有单测；纹理视图新增可点击缩略条（T/mip/切片标签），点击恢复该子资源选择并重新预览。**未完成**：上游缩略条显示真实纹理图像，RenderDocX 当前为文本标签条 |
 | C6 | ResourcePreview（资源缩略预览控件） | 🟡 | 资源详情新增预览卡片：资源名/类型/初始化块信息 + 当前纹理预览 PNG 缩略图 + 可用状态提示。**未完成**：未按每个资源单独生成缩略图（复用当前纹理预览），与上游逐资源预览不同 |
 | C7 | BufferFormatSpecifier（缓冲布局编辑器） | ✅ | `src/buffer_layout.rs`：多行编辑/保存/加载/删除/undo，GUI+CLI，测试覆盖 |

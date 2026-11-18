@@ -1,8 +1,8 @@
-//! Literal find/replace used by the shader source viewer.
+//! Find/replace used by the shader source viewer.
 //!
-//! Upstream `FindReplace` wraps Scintilla's find API with match-case,
-//! whole-word and direction options. The regular-expression mode is not part
-//! of this module; regex users can still search with an exact literal.
+//! Mirrors upstream `FindReplace`'s match-case, whole-word, direction and
+//! regular-expression options. Regex mode is backed by `pcre2` (already a
+//! project dependency), so all four upstream search modes are available.
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum FindDirection {
@@ -16,12 +16,19 @@ pub struct FindOptions {
     pub case_sensitive: bool,
     pub whole_word: bool,
     pub direction: FindDirection,
+    /// Treat the search text as a PCRE2 regular expression.
+    pub regex: bool,
 }
 
-/// Return non-overlapping byte ranges of every match.
+/// Return non-overlapping byte ranges of every match. In regex mode a PCRE2
+/// pattern is compiled and matched against the UTF-8 bytes; an invalid pattern
+/// simply yields no matches (matching upstream's fail-safe behaviour).
 pub fn find_all(text: &str, needle: &str, options: FindOptions) -> Vec<(usize, usize)> {
     if needle.is_empty() {
         return Vec::new();
+    }
+    if options.regex {
+        return find_all_regex(text, needle, options.case_sensitive);
     }
     let haystack = if options.case_sensitive {
         text.to_owned()
@@ -47,6 +54,24 @@ pub fn find_all(text: &str, needle: &str, options: FindOptions) -> Vec<(usize, u
         }
     }
     matches
+}
+
+fn find_all_regex(text: &str, pattern: &str, case_sensitive: bool) -> Vec<(usize, usize)> {
+    let pattern = if case_sensitive {
+        pattern.to_owned()
+    } else {
+        format!("(?i){pattern}")
+    };
+    let mut builder = pcre2::bytes::RegexBuilder::new();
+    builder.utf(true);
+    let Ok(regex) = builder.build(&pattern) else {
+        return Vec::new();
+    };
+    regex
+        .find_iter(text.as_bytes())
+        .filter_map(|matched| matched.ok())
+        .map(|matched| (matched.start(), matched.end()))
+        .collect()
 }
 
 fn is_word_boundary(text: &str, start: usize, end: usize) -> bool {
@@ -128,6 +153,7 @@ mod tests {
             case_sensitive: true,
             whole_word: true,
             direction: FindDirection::Down,
+            ..Default::default()
         };
         let matches = find_all(TEXT, "draw", options);
         assert_eq!(matches.len(), 2);
@@ -157,5 +183,38 @@ mod tests {
         let (text, count) = replace_all("Draw draw Drawn", "draw", "DIP", options);
         assert_eq!(count, 2);
         assert_eq!(text, "DIP DIP Drawn");
+    }
+
+    #[test]
+    fn regex_mode_finds_patterns_and_is_case_sensitive_on_request() {
+        let options = FindOptions {
+            regex: true,
+            case_sensitive: true,
+            ..Default::default()
+        };
+        let matches = find_all("foo123 bar456", r"\d+", options);
+        assert_eq!(matches.len(), 2);
+        assert_eq!(&"foo123 bar456"[matches[0].0..matches[0].1], "123");
+        assert_eq!(&"foo123 bar456"[matches[1].0..matches[1].1], "456");
+
+        let insensitive = FindOptions {
+            regex: true,
+            case_sensitive: false,
+            ..Default::default()
+        };
+        assert_eq!(find_all("Draw draw DRAW", "draw", insensitive).len(), 3);
+
+        let (replaced, count) = replace_all("a1 b22", r"\d+", "#", options);
+        assert_eq!(count, 2);
+        assert_eq!(replaced, "a# b#");
+    }
+
+    #[test]
+    fn invalid_regex_yields_no_matches() {
+        let options = FindOptions {
+            regex: true,
+            ..Default::default()
+        };
+        assert!(find_all("abc", "[", options).is_empty());
     }
 }

@@ -17881,6 +17881,9 @@ impl Workspace {
                                                 renderdocx::find_replace::FindDirection::Up => renderdocx::find_replace::FindDirection::Down,
                                             };
                                             cx.notify();
+                                        }, cx))
+                                        .child(button("shader-find-regex", self.t("Regular expression", "正则表达式"), self.find_options.regex, |this, cx| {
+                                            this.find_options.regex = !this.find_options.regex; cx.notify();
                                         }, cx))),
                             )
                         })
