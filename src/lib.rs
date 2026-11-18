@@ -1,3 +1,4 @@
+pub mod analytics;
 pub mod annotations;
 pub mod api_enums;
 pub mod backend;
@@ -11,6 +12,7 @@ pub mod buffer_search;
 pub mod camera_keys;
 pub mod capture_save;
 pub mod capture_settings;
+pub mod crash_report;
 pub mod debug_message_view;
 pub mod debug_navigation;
 pub mod event_annotations;
@@ -64,6 +66,7 @@ pub mod viewer_settings;
 pub mod structured_data;
 pub mod suggest_remote;
 pub mod topology;
+pub mod update_check;
 pub mod texture_view;
 pub mod thumbnail_strip;
 

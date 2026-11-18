@@ -85,6 +85,8 @@ pub struct Settings {
     pub camera_keys: KeyBindings,
     /// UI theme: "light" or "dark" (upstream UIStyle equivalent).
     pub theme: String,
+    /// Analytics consent: "unset" | "granted" | "denied" (local counter only).
+    pub analytics_consent: String,
     pub always_replay_locally: bool,
 }
 
@@ -121,6 +123,7 @@ impl Default for Settings {
             camera: CameraControls::default(),
             camera_keys: KeyBindings::default(),
             theme: "dark".to_owned(),
+            analytics_consent: "unset".to_owned(),
             always_replay_locally: false,
         }
     }

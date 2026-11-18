@@ -1095,6 +1095,8 @@ struct Workspace {
     python_script: Entity<TextareaState>,
     python_output: Vec<String>,
     python_filter: Entity<InputState>,
+    crash_reports: Vec<renderdocx::crash_report::CrashReport>,
+    update_pending: bool,
     python_pending: bool,
     core_info: Option<renderdocx::renderdoc_core::CoreInfo>,
     core_handle: Option<renderdocx::renderdoc_core::CoreHandle>,
@@ -4777,6 +4779,93 @@ impl Workspace {
             }
         }
         cx.notify();
+    }
+
+    /// Read locally recorded crash reports.
+    fn refresh_crash_reports(&mut self, cx: &mut Context<Self>) {
+        self.crash_reports = renderdocx::crash_report::default_log_path()
+            .map(|path| renderdocx::crash_report::read_reports(&path))
+            .unwrap_or_default();
+        cx.notify();
+    }
+
+    /// Delete the local crash log.
+    fn clear_crash_reports(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = renderdocx::crash_report::default_log_path() {
+            match renderdocx::crash_report::clear(&path) {
+                Ok(removed) => {
+                    self.crash_reports.clear();
+                    self.status = Some(if removed {
+                        self.t("Crash reports cleared.", "已清除崩溃报告。").to_owned()
+                    } else {
+                        self.t("No crash reports to clear.", "没有可清除的崩溃报告。").to_owned()
+                    });
+                }
+                Err(error) => {
+                    self.status = Some(format!("{}: {error}", self.t("Could not clear crash reports", "无法清除崩溃报告")));
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Open the configuration folder containing the crash log.
+    fn open_crash_folder(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = renderdocx::crash_report::default_log_path() {
+            if let Some(dir) = path.parent() {
+                let _ = std::process::Command::new("explorer").arg(dir).spawn();
+            }
+        }
+        cx.notify();
+    }
+
+    /// Check GitHub releases for a newer version (explicit, user-triggered).
+    fn check_for_updates(&mut self, cx: &mut Context<Self>) {
+        if self.update_pending {
+            return;
+        }
+        self.update_pending = true;
+        self.status = Some(self.t("Checking for updates…", "正在检查更新…").to_owned());
+        cx.notify();
+        let current = renderdocx::update_check::parse_version(env!("CARGO_PKG_VERSION"));
+        let task = cx.background_executor().spawn(async move {
+            (
+                renderdocx::update_check::check_latest("neko233-com/RenderDocX"),
+                current,
+            )
+        });
+        cx.spawn(async move |this, cx| {
+            let (result, current) = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.update_pending = false;
+                this.status = Some(match (result, current) {
+                    (Ok((latest, url)), Some(current)) => {
+                        if renderdocx::update_check::is_newer(latest, current) {
+                            format!(
+                                "{} {} → {} ({url})",
+                                this.t("Update available:", "有更新："),
+                                current.to_string(),
+                                latest.to_string()
+                            )
+                        } else {
+                            format!(
+                                "{} {}",
+                                this.t("Up to date:", "已是最新："),
+                                current.to_string()
+                            )
+                        }
+                    }
+                    (Ok((latest, _)), None) => format!(
+                        "{} {}",
+                        this.t("Latest release:", "最新版本："),
+                        latest.to_string()
+                    ),
+                    (Err(error), _) => format!("{}: {error}", this.t("Update check failed", "更新检查失败")),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Backup file recording the registry state from before the global hook.
@@ -21778,6 +21867,44 @@ impl Render for Workspace {
                 })
             )
             .child(div().flex().flex_col().gap_1()
+                .child(self.t("Diagnostics, update and analytics", "诊断、更新与统计"))
+                .child(div().flex().flex_wrap().gap_2()
+                    .child(button("crash-refresh", self.t("Crash reports", "崩溃报告"), false, |this, cx| this.refresh_crash_reports(cx), cx))
+                    .child(button("crash-clear", self.t("Clear crash reports", "清除崩溃报告"), false, |this, cx| this.clear_crash_reports(cx), cx))
+                    .child(button("crash-folder", self.t("Open config folder", "打开配置目录"), false, |this, cx| this.open_crash_folder(cx), cx))
+                    .child(button("update-check", self.t("Check for updates", "检查更新"), false, |this, cx| this.check_for_updates(cx), cx))
+                    .child(Button::new("analytics-toggle")
+                        .label(format!("{}: {}", self.t("Analytics consent", "统计授权"),
+                            renderdocx::analytics::Consent::parse(&self.settings.analytics_consent).as_str()))
+                        .secondary()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let current = renderdocx::analytics::Consent::parse(&this.settings.analytics_consent);
+                            let next = match current {
+                                renderdocx::analytics::Consent::Unset => renderdocx::analytics::Consent::Granted,
+                                renderdocx::analytics::Consent::Granted => renderdocx::analytics::Consent::Denied,
+                                renderdocx::analytics::Consent::Denied => renderdocx::analytics::Consent::Unset,
+                            };
+                            this.settings.analytics_consent = next.as_str().to_owned();
+                            this.save();
+                            cx.notify();
+                        }))))
+                .child(div().text_sm().text_color(rgb(0x91a7c0)).child(format!(
+                    "{}: {} · {}: {}",
+                    self.t("Recorded crashes", "已记录崩溃"),
+                    self.crash_reports.len(),
+                    self.t("Analytics is local-only and never uploaded", "统计仅本地记录，绝不上传"),
+                    renderdocx::analytics::Consent::parse(&self.settings.analytics_consent).as_str(),
+                )))
+                .when_some(self.crash_reports.last().cloned(), |view, report| {
+                    view.child(div().text_sm().text_color(rgb(0xd08b8b)).child(format!(
+                        "{}: {} ({})",
+                        report.timestamp,
+                        report.message,
+                        report.location.unwrap_or_default()
+                    )))
+                })
+            )
+            .child(div().flex().flex_col().gap_1()
                 .child(self.t("Configuration", "配置"))
                 .child(Button::new("config-editor-open")
                     .label(self.t("Edit configuration JSON", "编辑配置 JSON"))
@@ -22266,7 +22393,18 @@ fn main() {
         .with_assets(gpui_kit::assets::Assets)
         .run(|cx: &mut App| {
             gpui_kit::init(cx);
+            // Capture panics to a local crash log (no upload).
+            if let Some(path) = renderdocx::crash_report::default_log_path() {
+                renderdocx::crash_report::install_panic_hook(path);
+            }
             let settings = Settings::load();
+            // Opt-in local session counter; never transmits anything.
+            if let Some(dir) = Settings::config_dir() {
+                let _ = renderdocx::analytics::record_session(
+                    &renderdocx::analytics::counter_path(&dir),
+                    renderdocx::analytics::Consent::parse(&settings.analytics_consent),
+                );
+            }
             Theme::change(
                 if settings.theme.eq_ignore_ascii_case("light") {
                     ThemeMode::Light
@@ -22620,6 +22758,8 @@ fn main() {
                         python_script,
                         python_output: Vec::new(),
                         python_filter,
+                        crash_reports: Vec::new(),
+                        update_pending: false,
                         python_pending: false,
                         core_info: None,
                         core_handle: None,
@@ -23493,6 +23633,8 @@ mod ui_tests {
                         python_script,
                         python_output: Vec::new(),
                         python_filter,
+                        crash_reports: Vec::new(),
+                        update_pending: false,
                         python_pending: false,
                         core_info: None,
                         core_handle: None,
@@ -24279,6 +24421,8 @@ mod ui_tests {
                         python_script,
                         python_output: Vec::new(),
                         python_filter,
+                        crash_reports: Vec::new(),
+                        update_pending: false,
                         python_pending: false,
                         core_info: None,
                         core_handle: None,
