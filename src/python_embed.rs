@@ -1392,6 +1392,66 @@ impl PipelineObject {
     }
 
     #[allow(non_snake_case)]
+    fn GetD3D12RootParameters(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self
+            .field("api_specific")
+            .and_then(|value| value.get("d3d12"))
+            .and_then(|value| value.get("rootParameters"))
+        {
+            Some(value) => to_py(py, value),
+            None => Ok(py.None()),
+        }
+    }
+
+    #[allow(non_snake_case)]
+    fn GetD3D12StaticSamplers(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self
+            .field("api_specific")
+            .and_then(|value| value.get("d3d12"))
+            .and_then(|value| value.get("staticSamplers"))
+        {
+            Some(value) => to_py(py, value),
+            None => Ok(py.None()),
+        }
+    }
+
+    #[allow(non_snake_case)]
+    fn GetVulkanSampleLocations(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self
+            .field("api_specific")
+            .and_then(|value| value.get("vulkan"))
+            .and_then(|value| value.get("sampleLocations"))
+        {
+            Some(value) => to_py(py, value),
+            None => Ok(py.None()),
+        }
+    }
+
+    #[allow(non_snake_case)]
+    fn GetVulkanRenderPass(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self
+            .field("api_specific")
+            .and_then(|value| value.get("vulkan"))
+            .and_then(|value| value.get("renderPassDetails"))
+        {
+            Some(value) => to_py(py, value),
+            None => Ok(py.None()),
+        }
+    }
+
+    #[allow(non_snake_case)]
+    fn GetVulkanFramebuffer(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self
+            .field("api_specific")
+            .and_then(|value| value.get("vulkan"))
+            .and_then(|value| value.get("framebufferDetails"))
+        {
+            Some(value) => to_py(py, value),
+            None => Ok(py.None()),
+        }
+    }
+
+    #[allow(non_snake_case)]
     fn GetShaderReflection(
         &self,
         stage: u32,
@@ -1625,6 +1685,96 @@ fn Resource(index: usize) -> Option<ResourceObject> {
         .get(index)
         .and_then(|resource| serde_json::to_value(resource).ok())
         .map(|value| ResourceObject { value })
+}
+
+/// Generic field-addressable JSON object used for deep pipeline subobjects
+/// (root parameters, static samplers, sample locations, render pass/framebuffer).
+#[pyo3::pyclass]
+struct FieldObject {
+    value: serde_json::Value,
+}
+
+#[pyo3::pymethods]
+impl FieldObject {
+    fn __getattr__(
+        &self,
+        py: Python<'_>,
+        name: &str,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        json_field_object(py, &self.value, name)
+    }
+
+    fn __getitem__(
+        &self,
+        py: Python<'_>,
+        key: &str,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.value.get(key) {
+            Some(value) => to_py(py, value),
+            None => Err(pyo3::exceptions::PyKeyError::new_err(key.to_owned())),
+        }
+    }
+
+    #[pyo3(signature = (key, default = None))]
+    fn get(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        default: Option<Bound<'_, pyo3::PyAny>>,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.value.get(key) {
+            Some(value) => to_py(py, value),
+            None => Ok(default.map(Bound::unbind).unwrap_or_else(|| py.None())),
+        }
+    }
+
+    fn keys(&self) -> Vec<String> {
+        self.value
+            .as_object()
+            .map(|object| object.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+}
+
+fn field_object(value: Bound<'_, pyo3::PyAny>) -> pyo3::PyResult<FieldObject> {
+    let value = pythonize::depythonize::<serde_json::Value>(&value)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    Ok(FieldObject { value })
+}
+
+/// `RootParameter(value)` -> deep D3D12 root parameter object.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn RootParameter(value: Bound<'_, pyo3::PyAny>) -> pyo3::PyResult<FieldObject> {
+    field_object(value)
+}
+
+/// `StaticSampler(value)` -> deep D3D12 static sampler object.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn StaticSampler(value: Bound<'_, pyo3::PyAny>) -> pyo3::PyResult<FieldObject> {
+    field_object(value)
+}
+
+/// `SampleLocations(value)` -> Vulkan sample locations object.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn SampleLocations(value: Bound<'_, pyo3::PyAny>) -> pyo3::PyResult<FieldObject> {
+    field_object(value)
+}
+
+/// `RenderPass(value)` -> Vulkan render-pass detail object.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn RenderPass(value: Bound<'_, pyo3::PyAny>) -> pyo3::PyResult<FieldObject> {
+    field_object(value)
+}
+
+/// `Framebuffer(value)` -> Vulkan framebuffer detail object.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn Framebuffer(value: Bound<'_, pyo3::PyAny>) -> pyo3::PyResult<FieldObject> {
+    field_object(value)
 }
 
 /// Field-addressable shader signature entry.
@@ -4541,6 +4691,11 @@ fn build_capture_module<'py>(
         ("ConstantBlock", pyo3::wrap_pyfunction!(ConstantBlock, py)),
         ("ShaderConstant", pyo3::wrap_pyfunction!(ShaderConstant, py)),
         ("ReflectedType", pyo3::wrap_pyfunction!(ReflectedType, py)),
+        ("RootParameter", pyo3::wrap_pyfunction!(RootParameter, py)),
+        ("StaticSampler", pyo3::wrap_pyfunction!(StaticSampler, py)),
+        ("SampleLocations", pyo3::wrap_pyfunction!(SampleLocations, py)),
+        ("RenderPass", pyo3::wrap_pyfunction!(RenderPass, py)),
+        ("Framebuffer", pyo3::wrap_pyfunction!(Framebuffer, py)),
         ("SamplerDescriptor", pyo3::wrap_pyfunction!(SamplerDescriptor, py)),
         ("FrameDescription", pyo3::wrap_pyfunction!(FrameDescription, py)),
         ("Descriptor", pyo3::wrap_pyfunction!(Descriptor, py)),
@@ -5056,6 +5211,10 @@ mod tests {
              apis = ps.GetAPISpecific()\n\
              vk = ps.GetVulkanState()\n\
              print('api-specific', apis.get('kind') == 'Vulkan' and ps.GetAPIKind() == 'Vulkan' and isinstance(vk, dict) and isinstance(vk.get('descriptor_sets'), list) and vk.get('render_pass', {}).get('resource_index') == 9 and vk.get('framebuffer_width') == 128 and vk.get('raster_samples') == 1 and ps.GetD3D11State() is None and renderdocx.pipeline(19).get('api_specific', {}).get('kind') == 'Vulkan')\n\
+             sl = renderdocx.SampleLocations(vk['sampleLocations'])\n\
+             rpobj = renderdocx.RenderPass(vk['renderPassDetails'])\n\
+             fb = renderdocx.Framebuffer(vk['framebufferDetails'])\n\
+             print('vulkan-deep', sl.gridWidth == 1 and sl.gridHeight == 1 and isinstance(sl.customLocations, list) and rpobj.resource.get('resource_index') == 9 and rpobj.subpass == 0 and fb.width == 128 and fb.height == 128 and fb.layers == 1 and fb.attachmentCount == 1 and ps.GetVulkanRenderPass().get('subpass') == 0 and ps.GetVulkanFramebuffer().get('width') == 128 and ps.GetVulkanSampleLocations().get('gridWidth') == 1)\n\
              tex = renderdocx.Texture(0)\n\
              print('texture-object', tex.name == 'Swapchain Image 96' and tex.width == 128 and tex.arraySize == 1 and tex.format == 'B8G8R8A8_SRGB' and tex.get('mips') == 1 and tex['height'] == 128 and 'height' in tex.keys())\n\
              act = renderdocx.Action(21)\n\
@@ -5165,6 +5324,7 @@ mod tests {
         assert!(result.stdout.contains("replay True"), "{}", result.stdout);
         assert!(result.stdout.contains("pipeline-object True"), "{}", result.stdout);
         assert!(result.stdout.contains("api-specific True"), "{}", result.stdout);
+        assert!(result.stdout.contains("vulkan-deep True"), "{}", result.stdout);
         assert!(result.stdout.contains("texture-object True"), "{}", result.stdout);
         assert!(result.stdout.contains("action-object True"), "{}", result.stdout);
         assert!(result.stdout.contains("replace True"), "{}", result.stdout);
@@ -5518,13 +5678,23 @@ mod tests {
              draw = next(a for a in actions if 'DrawInstanced' in a.get('name', ''))\n\
              p = renderdocx.pipeline(int(draw['event_id']))\n\
              d3 = p.get('api_specific', {}).get('d3d12')\n\
-             print('d3d12-api-specific', p.get('api_specific', {}).get('kind') == 'D3D12' and isinstance(d3, dict) and d3.get('pipeline', {}).get('bound') is True and isinstance(d3.get('descriptor_heaps'), list) and d3.get('root_signature', {}).get('bound') is True and d3.get('input_layout_count', 0) >= 1 and d3.get('topology') == 5 and d3.get('sample_mask') == 4294967295 and d3.get('depth_writes') is True and isinstance(d3.get('line_raster'), int) and isinstance(d3.get('predication'), dict))",
+             print('d3d12-api-specific', p.get('api_specific', {}).get('kind') == 'D3D12' and isinstance(d3, dict) and d3.get('pipeline', {}).get('bound') is True and isinstance(d3.get('descriptor_heaps'), list) and d3.get('root_signature', {}).get('bound') is True and d3.get('input_layout_count', 0) >= 1 and d3.get('topology') == 5 and d3.get('sample_mask') == 4294967295 and d3.get('depth_writes') is True and isinstance(d3.get('line_raster'), int) and isinstance(d3.get('predication'), dict))\n\
+             rps = d3.get('rootParameters') or []\n\
+             rp = renderdocx.RootParameter(rps[0])\n\
+             ss = renderdocx.StaticSampler({'visibility': 1, 'space': 0, 'reg': 0, 'filterMinify': 0, 'filterMagnify': 0, 'filterMip': 0, 'filterFunction': 1, 'maxLOD': 0.0, 'minLOD': 0.0, 'mipBias': 0.0, 'addressU': 0, 'addressV': 0, 'addressW': 0, 'compareFunction': 0, 'maxAnisotropy': 1, 'borderColorType': 0, 'srgbBorder': False, 'seamlessCubemaps': False, 'unnormalized': False})\n\
+             ps = renderdocx.PipelineState(int(draw['event_id']))\n\
+             print('d3d12-deep', len(rps) >= 1 and isinstance(rp.visibility, int) and isinstance(rp.constantsSize, int) and isinstance(rp.descriptor, dict) and 'visibility' in rp.keys() and ss.filterFunction == 1 and ss.maxAnisotropy == 1 and 'filterMinify' in ss.keys() and len(ps.GetD3D12RootParameters()) >= 1 and ps.GetD3D12StaticSamplers() == [])",
             &CaptureView::default(),
         );
         set_active_session(None);
         assert!(result.error.is_none(), "{:?}", result.error);
         assert!(
             result.stdout.contains("d3d12-api-specific True"),
+            "{}",
+            result.stdout
+        );
+        assert!(
+            result.stdout.contains("d3d12-deep True"),
             "{}",
             result.stdout
         );

@@ -1091,7 +1091,48 @@ void write_pipeline(IReplayController *controller, uint32_t event)
     resource_object(d3d12->rootSignature.resourceId);
     std::cout << ",\"root_parameter_count\":" << d3d12->rootSignature.parameters.size()
               << ",\"static_sampler_count\":" << d3d12->rootSignature.staticSamplers.size()
-              << ",\"input_layout_count\":" << d3d12->inputAssembly.layouts.size()
+              << ",\"rootParameters\":[";
+    for(size_t i = 0; i < d3d12->rootSignature.parameters.size(); ++i)
+    {
+      if(i) std::cout << ',';
+      const D3D12Pipe::RootParam &param = d3d12->rootSignature.parameters[i];
+      std::cout << "{\"visibility\":" << uint32_t(param.visibility)
+                << ",\"space\":" << param.space << ",\"reg\":" << param.reg
+                << ",\"heap\":"; resource_object(param.heap);
+      std::cout << ",\"heapByteOffset\":" << param.heapByteOffset
+                << ",\"tableRangeCount\":" << param.tableRanges.size()
+                << ",\"constantsSize\":" << param.constants.size()
+                << ",\"descriptor\":{\"type\":" << uint32_t(param.descriptor.type) << ",\"resource\":";
+      resource_object(param.descriptor.resource);
+      std::cout << ",\"secondary\":";
+      resource_object(param.descriptor.secondary);
+      std::cout << "}}";
+    }
+    std::cout << "],\"staticSamplers\":[";
+    for(size_t i = 0; i < d3d12->rootSignature.staticSamplers.size(); ++i)
+    {
+      if(i) std::cout << ',';
+      const D3D12Pipe::StaticSampler &sampler = d3d12->rootSignature.staticSamplers[i];
+      std::cout << "{\"visibility\":" << uint32_t(sampler.visibility)
+                << ",\"space\":" << sampler.space << ",\"reg\":" << sampler.reg
+                << ",\"filterMinify\":" << uint32_t(sampler.descriptor.filter.minify)
+                << ",\"filterMagnify\":" << uint32_t(sampler.descriptor.filter.magnify)
+                << ",\"filterMip\":" << uint32_t(sampler.descriptor.filter.mip)
+                << ",\"filterFunction\":" << uint32_t(sampler.descriptor.filter.filter)
+                << ",\"addressU\":" << uint32_t(sampler.descriptor.addressU)
+                << ",\"addressV\":" << uint32_t(sampler.descriptor.addressV)
+                << ",\"addressW\":" << uint32_t(sampler.descriptor.addressW)
+                << ",\"compareFunction\":" << uint32_t(sampler.descriptor.compareFunction)
+                << ",\"maxAnisotropy\":" << sampler.descriptor.maxAnisotropy
+                << ",\"maxLOD\":"; number(sampler.descriptor.maxLOD);
+      std::cout << ",\"minLOD\":"; number(sampler.descriptor.minLOD);
+      std::cout << ",\"mipBias\":"; number(sampler.descriptor.mipBias);
+      std::cout << ",\"borderColorType\":" << uint32_t(sampler.descriptor.borderColorType)
+                << ",\"srgbBorder\":" << (sampler.descriptor.srgbBorder ? "true" : "false")
+                << ",\"seamlessCubemaps\":" << (sampler.descriptor.seamlessCubemaps ? "true" : "false")
+                << ",\"unnormalized\":" << (sampler.descriptor.unnormalized ? "true" : "false") << '}';
+    }
+    std::cout << "],\"input_layout_count\":" << d3d12->inputAssembly.layouts.size()
               << ",\"index_strip_cut_value\":" << d3d12->inputAssembly.indexStripCutValue
               << ",\"topology\":" << uint32_t(d3d12->inputAssembly.topology)
               << ",\"stream_out\":[";
@@ -1227,7 +1268,28 @@ void write_pipeline(IReplayController *controller, uint32_t event)
     std::cout << ",\"byte_offset\":\"" << vk->conditionalRendering.byteOffset
               << "\",\"inverted\":" << (vk->conditionalRendering.isInverted ? "true" : "false")
               << ",\"passing\":" << (vk->conditionalRendering.isPassing ? "true" : "false") << '}'
-              << ",\"raster_samples\":" << vk->multisample.rasterSamples
+              << ",\"sampleLocations\":{\"gridWidth\":" << vk->multisample.sampleLocations.gridWidth
+              << ",\"gridHeight\":" << vk->multisample.sampleLocations.gridHeight
+              << ",\"customLocations\":[";
+    for(size_t i = 0; i < vk->multisample.sampleLocations.customLocations.size(); ++i)
+    {
+      if(i) std::cout << ',';
+      const FloatVector &location = vk->multisample.sampleLocations.customLocations[i];
+      std::cout << '['; number(location.x); std::cout << ','; number(location.y); std::cout << ']';
+    }
+    std::cout << "]},\"renderPassDetails\":{\"resource\":";
+    resource_object(vk->currentPass.renderpass.resourceId);
+    std::cout << ",\"dynamic\":" << (vk->currentPass.renderpass.dynamic ? "true" : "false")
+              << ",\"suspended\":" << (vk->currentPass.renderpass.suspended ? "true" : "false")
+              << ",\"feedbackLoop\":" << (vk->currentPass.renderpass.feedbackLoop ? "true" : "false")
+              << ",\"subpass\":" << vk->currentPass.renderpass.subpass
+              << "},\"framebufferDetails\":{\"resource\":";
+    resource_object(vk->currentPass.framebuffer.resourceId);
+    std::cout << ",\"width\":" << vk->currentPass.framebuffer.width
+              << ",\"height\":" << vk->currentPass.framebuffer.height
+              << ",\"layers\":" << vk->currentPass.framebuffer.layers
+              << ",\"attachmentCount\":" << vk->currentPass.framebuffer.attachments.size()
+              << "},\"raster_samples\":" << vk->multisample.rasterSamples
               << ",\"sample_shading_enable\":" << (vk->multisample.sampleShadingEnable ? "true" : "false");
     std::cout << ",\"min_sample_shading\":"; number(vk->multisample.minSampleShading);
     std::cout << ",\"sample_mask\":" << vk->multisample.sampleMask

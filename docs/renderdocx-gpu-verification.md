@@ -172,7 +172,11 @@ framebuffer state.
 `python_d3d12_api_specific_state_a_real_capture` opens a D3D12 capture produced
 by launching the upstream `D3D12_Leak_Check` demo through the target helper and
 triggering a capture; it asserts PSO/descriptor heaps/root signature, input
-layout/topology, sample mask, depth-write state and predication.
+layout/topology, sample mask, depth-write state, predication, root parameters
+(visibility/constants/descriptor) and static sampler/root-parameter accessors.
+The Vulkan mesh test additionally wraps `sampleLocations`, `renderPassDetails`
+and `framebufferDetails` with the `SampleLocations`/`RenderPass`/`Framebuffer`
+objects and asserts their fields.
 `scripts/verify-all-real-tests.ps1` builds the D3D12 fixture/CLI and generates
 all three captures before running the tests.
 

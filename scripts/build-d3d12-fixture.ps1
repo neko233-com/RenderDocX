@@ -32,6 +32,7 @@ $keep = @(
     "3rdparty\fmt\format.cc", "3rdparty\lz4\lz4.c", "3rdparty\md5\md5.c",
     "main.cpp", "test_common.cpp", "dx\d3d_helpers.cpp",
     "d3d12\d3d12_helpers.cpp", "d3d12\d3d12_test.cpp", "d3d12\d3d12_leak_check.cpp",
+    "d3d12\d3d12_cbuffer_zoo.cpp",
     "win32\win32_platform.cpp", "win32\win32_window.cpp"
 )
 $compiled = @($project.SelectNodes("//*[local-name()='ItemGroup']/*[local-name()='ClCompile'][@Include]"))

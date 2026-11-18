@@ -46,6 +46,7 @@ $psi.RedirectStandardError = $true
 $psi.UseShellExecute = $false
 $psi.CreateNoWindow = $true
 $process = [System.Diagnostics.Process]::Start($psi)
+$targetPid = 0
 try {
     Start-Sleep -Milliseconds 300
     $launch = @{
@@ -53,10 +54,14 @@ try {
         command = 'target_launch'
         path = (Resolve-Path $Fixture).Path
         capture_directory = $OutDir
-        arguments = 'D3D12_Leak_Check --frame-count 100000'
+        arguments = 'D3D12_CBuffer_Zoo --frame-count 100000'
     } | ConvertTo-Json -Compress
     $process.StandardInput.WriteLine($launch)
     $process.StandardInput.Flush()
+    $launchResponse = $process.StandardOutput.ReadLine()
+    $launchData = $launchResponse | ConvertFrom-Json
+    if (-not $launchData.ok) { throw "D3D12 target launch failed: $launchResponse" }
+    $targetPid = [int]$launchData.data.target.pid
     Start-Sleep -Seconds 2
     $process.StandardInput.WriteLine('{"id":2,"command":"target_trigger","frames":1}')
     $process.StandardInput.Flush()
@@ -70,10 +75,11 @@ try {
     $stderr = $process.StandardError.ReadToEnd()
 } finally {
     if (-not $process.HasExited) { $process.Kill() }
+    if ($targetPid -gt 0) {
+        Get-Process -Id $targetPid -ErrorAction SilentlyContinue | Stop-Process -Force
+    }
 }
-if ($stdout -notmatch '"ok":true' -or $stdout -match '"ok":false') {
-    throw "D3D12 target launch failed: $stdout $stderr"
-}
+if ($stderr) { Write-Verbose $stderr }
 $capture = Get-ChildItem $OutDir -Recurse -Filter *.rdc -File |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if (-not $capture) { throw "D3D12 capture was not produced in $OutDir" }
