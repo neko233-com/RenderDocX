@@ -581,6 +581,73 @@ fn export_buffer(
     Ok(destination)
 }
 
+/// `renderdocx.debug_vertex(event, vertex, instance=0, index=None, view=0)` ->
+/// start a vertex-shader debug trace. `index` defaults to `vertex`.
+#[pyo3::pyfunction]
+#[pyo3(signature = (event, vertex, instance = 0, index = None, view = 0))]
+fn debug_vertex(
+    py: Python<'_>,
+    event: u32,
+    vertex: u32,
+    instance: u32,
+    index: Option<u32>,
+    view: u32,
+) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    let session = active_session()?;
+    let event = resolve_draw_event(event);
+    select_event(&session, event)?;
+    let value = session
+        .debug_vertex(vertex, instance, index.unwrap_or(vertex), view)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    to_py(py, &value)
+}
+
+/// `renderdocx.debug_pixel(event, x, y, sample=None, primitive=None, view=None)`
+/// -> start a pixel-shader debug trace.
+#[pyo3::pyfunction]
+#[pyo3(signature = (event, x, y, sample = None, primitive = None, view = None))]
+fn debug_pixel(
+    py: Python<'_>,
+    event: u32,
+    x: u32,
+    y: u32,
+    sample: Option<u32>,
+    primitive: Option<u32>,
+    view: Option<u32>,
+) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    let session = active_session()?;
+    let event = resolve_draw_event(event);
+    select_event(&session, event)?;
+    let value = session
+        .debug_pixel(crate::replay::PixelDebugSelection {
+            x,
+            y,
+            sample,
+            primitive,
+            view,
+        })
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    to_py(py, &value)
+}
+
+/// `renderdocx.debug_compute(event, group=[0,0,0], thread=[0,0,0])` -> start a
+/// compute-shader debug trace.
+#[pyo3::pyfunction]
+#[pyo3(signature = (event, group = [0, 0, 0], thread = [0, 0, 0]))]
+fn debug_compute(
+    py: Python<'_>,
+    event: u32,
+    group: [u32; 3],
+    thread: [u32; 3],
+) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    let session = active_session()?;
+    select_event(&session, event)?;
+    let value = session
+        .debug_compute(crate::replay::ComputeDebugSelection { group, thread })
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    to_py(py, &value)
+}
+
 /// `renderdocx.debug_mesh(event, group=(0,0,0), thread=(0,0,0))` -> start a
 /// mesh-shader debug trace and return its first state.
 #[pyo3::pyfunction]
@@ -1346,6 +1413,9 @@ fn build_capture_module<'py>(
         ("UnregisterReplacement", pyo3::wrap_pyfunction!(UnregisterReplacement, py)),
         ("IsResourceReplaced", pyo3::wrap_pyfunction!(IsResourceReplaced, py)),
         ("GetResourceReplacement", pyo3::wrap_pyfunction!(GetResourceReplacement, py)),
+        ("debug_vertex", pyo3::wrap_pyfunction!(debug_vertex, py)),
+        ("debug_pixel", pyo3::wrap_pyfunction!(debug_pixel, py)),
+        ("debug_compute", pyo3::wrap_pyfunction!(debug_compute, py)),
         ("debug_mesh", pyo3::wrap_pyfunction!(debug_mesh, py)),
         ("debug_next", pyo3::wrap_pyfunction!(debug_next, py)),
         ("debug_stop", pyo3::wrap_pyfunction!(debug_stop, py)),
@@ -1625,6 +1695,9 @@ mod tests {
             "renderdocx.GetBookmarks()",
             "renderdocx.SetBookmark(1, 'x')",
             "renderdocx.RemoveBookmark(1)",
+            "renderdocx.debug_vertex(1, 0)",
+            "renderdocx.debug_pixel(1, 0, 0)",
+            "renderdocx.debug_compute(1)",
             "renderdocx.debug_mesh(1)",
             "renderdocx.debug_next()",
             "renderdocx.debug_stop()",
@@ -1831,20 +1904,89 @@ mod tests {
         let result = run_script_with_capture(
             "import renderdocx\n\
              page = renderdocx.vertex_input(limit=4)\n\
-             print(page.get('event_id'))\n\
-             print(len(page.get('rows') or []))",
+             rows = page.get('rows') or []\n\
+             print('vertex-event', page.get('event_id'))\n\
+             print('vertex-rows', len(rows))\n\
+             row = rows[0]\n\
+             trace = renderdocx.debug_vertex(page['event_id'], row['row'], 0, row.get('vertex_index') or row['row'], 0)\n\
+             print('debug-vertex', trace.get('event_id') == page.get('event_id'))\n\
+             renderdocx.debug_stop()",
             &CaptureView::default(),
         );
         set_active_session(None);
         assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(
+            result.stdout.contains("debug-vertex True"),
+            "{}",
+            result.stdout
+        );
+
         let rows: usize = result
             .stdout
-            .trim()
             .lines()
-            .last()
+            .find_map(|line| line.strip_prefix("vertex-rows "))
             .and_then(|line| line.parse().ok())
             .unwrap_or(0);
         assert!(rows > 0, "expected vertex input rows: {}", result.stdout);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires RENDERDOCX_TEST_BRIDGE and RENDERDOCX_TEST_VULKAN_PRINTF_CAPTURE"]
+    fn python_shader_printf_debug_a_real_capture() {
+        use crate::backend::Settings;
+        use std::path::PathBuf;
+
+        let bridge = PathBuf::from(
+            std::env::var("RENDERDOCX_TEST_BRIDGE").expect("set RENDERDOCX_TEST_BRIDGE"),
+        );
+        let capture = PathBuf::from(
+            std::env::var("RENDERDOCX_TEST_VULKAN_PRINTF_CAPTURE")
+                .expect("set RENDERDOCX_TEST_VULKAN_PRINTF_CAPTURE"),
+        );
+        let mut settings = Settings::default();
+        settings.replay_bridge = Some(bridge);
+        let (session, snapshot) =
+            crate::replay::Session::open(&settings, &capture).expect("open capture");
+        set_active_session(Some(session));
+        set_active_format_context(
+            snapshot.resources.clone(),
+            snapshot.buffers.clone(),
+            snapshot.textures.clone(),
+            crate::i18n::Language::English,
+        );
+        set_active_actions(snapshot.actions.clone());
+        set_active_snapshot(serde_json::to_value(&snapshot).expect("serialize snapshot"));
+        let result = run_script_with_capture(
+            "import renderdocx\n\
+             actions = renderdocx.capture_actions()\n\
+             dispatch = next(a for a in actions if a.get('flags', 0) & 4)\n\
+             draw = next(a for a in actions if a.get('flags', 0) & 2)\n\
+             opt = lambda v: None if v in (None, 4294967295) else v\n\
+             messages = renderdocx.shader_messages(int(dispatch['event_id']))\n\
+             location = messages['messages'][0]['location']\n\
+             trace = renderdocx.debug_compute(int(dispatch['event_id']), location['workgroup'], location['thread'])\n\
+             print('debug-compute', trace.get('event_id') == dispatch['event_id'])\n\
+             renderdocx.debug_stop()\n\
+             messages = renderdocx.shader_messages(int(draw['event_id']))\n\
+             location = messages['messages'][0]['location']\n\
+             trace = renderdocx.debug_pixel(int(draw['event_id']), location['x'], location['y'], opt(location.get('sample')), opt(location.get('primitive')), opt(location.get('view')))\n\
+             print('debug-pixel', trace.get('event_id') == draw['event_id'])\n\
+             renderdocx.debug_stop()",
+            &CaptureView::default(),
+        );
+        set_active_session(None);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(
+            result.stdout.contains("debug-compute True"),
+            "{}",
+            result.stdout
+        );
+        assert!(
+            result.stdout.contains("debug-pixel True"),
+            "{}",
+            result.stdout
+        );
     }
 
     #[test]

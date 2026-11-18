@@ -107,7 +107,7 @@ makes `incompatible_core_is_rejected_before_capture_open` pass:
 test incompatible_core_is_rejected_before_capture_open ... ok
 ```
 
-## Full ignored-test result: 20/20 + 2 lib tests pass
+## Full ignored-test result: 20/20 + 3 lib tests pass
 
 One command runs every ignored test with all environment variables wired:
 
@@ -130,7 +130,11 @@ read back through `SetNotes`/`GetNotes`/`SetBookmark`/`GetBookmarks`/
 `RemoveBookmark`, then restored to their original values. Resource replacement
 is exercised through `RegisterReplacement(7, 8)`: `pipeline(19)` reports the
 replacement index, and `UnregisterReplacement(7)` restores the original. Mesh
-shader debugging is exercised through `debug_mesh(21)`, `debug_next()` and
+vertex debugging is exercised through `debug_vertex(...)`/`debug_stop()` on the
+Vertex capture. A third test uses the upstream VK_Shader_Printf capture and its
+shader messages to run `debug_compute(...)` for the dispatch and
+`debug_pixel(...)` for the draw, asserting both traces report the selected
+event. Mesh debugging is exercised through `debug_mesh(21)`, `debug_next()` and
 `debug_stop()`; the returned trace reports event 21 and the mesh stage.
 `python_vertex_input_query_a_real_capture` opens a real Vertex capture and
 asserts `renderdocx.vertex_input()` returns input rows.

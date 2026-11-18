@@ -1,6 +1,6 @@
 #requires -Version 7.0
 <#
-  Run every `#[ignore]` real test (20 agent_cli + 2 lib) against locally built
+  Run every `#[ignore]` real test (20 agent_cli + 3 lib) against locally built
   RenderDoc core, bridge, fixtures, Vulkan toolchain, captures and mismatch
   bridge.
 
