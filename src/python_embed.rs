@@ -149,6 +149,9 @@ struct ViewerState {
     histogram_max: f32,
     highlighted_resource: Option<usize>,
     highlighted_history: Option<usize>,
+    current_step: u32,
+    watches: Vec<String>,
+    errors: String,
 }
 
 /// Lightweight handle for a viewer panel, returned by `Get*Viewer()`.
@@ -622,6 +625,77 @@ impl ViewerHandle {
     #[allow(non_snake_case)]
     fn CheckUnsavedChanges(&self) -> bool {
         false
+    }
+
+    #[allow(non_snake_case)]
+    fn CurrentStep(&self) -> u32 {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .current_step
+    }
+
+    #[allow(non_snake_case)]
+    fn SetCurrentStep(&self, step: u32) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .current_step = step;
+    }
+
+    #[allow(non_snake_case)]
+    fn AddWatch(&self, name: String) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .watches
+            .push(name);
+    }
+
+    #[allow(non_snake_case)]
+    fn GetWatches(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .watches
+            .clone()
+    }
+
+    #[allow(non_snake_case)]
+    fn RunForward(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        debug_next(py)
+    }
+
+    #[allow(non_snake_case)]
+    fn GetCurrentFileContents(&self) -> pyo3::PyResult<String> {
+        let stage = self
+            .panel
+            .strip_prefix("edit_shader:")
+            .or_else(|| self.panel.strip_prefix("shader:"))
+            .and_then(|stage| stage.parse::<u32>().ok())
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "This viewer is not a shader viewer",
+                )
+            })?;
+        let session = active_session()?;
+        let report = session
+            .shader(stage, None)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        Ok(report
+            .source_files
+            .first()
+            .map(|file| file.contents.clone())
+            .unwrap_or_default())
+    }
+
+    #[allow(non_snake_case)]
+    fn ShowErrors(&self) -> String {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .errors
+            .clone()
     }
 }
 
@@ -2158,6 +2232,18 @@ impl ShaderConstantObject {
             .unwrap_or_default()
             .to_owned()
     }
+
+    #[allow(non_snake_case)]
+    fn GetType(&self) -> pyo3::PyResult<ReflectedTypeObject> {
+        let value = self
+            .value
+            .get("type")
+            .cloned()
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("Shader constant has no type")
+            })?;
+        Ok(ReflectedTypeObject { value })
+    }
 }
 
 /// `ShaderConstant(value)` -> field-addressable reflected constant.
@@ -2171,6 +2257,100 @@ fn ShaderConstant(
     let value = serde_json::to_value(&constant)
         .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
     Ok(ShaderConstantObject { value })
+}
+
+/// Field-addressable reflected type description.
+#[pyo3::pyclass]
+struct ReflectedTypeObject {
+    value: serde_json::Value,
+}
+
+#[pyo3::pymethods]
+impl ReflectedTypeObject {
+    fn __getattr__(
+        &self,
+        py: Python<'_>,
+        name: &str,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        let key = match name {
+            "pointerTypeId" => "pointer_type_id",
+            "arrayStride" => "array_stride",
+            "baseType" => "base_type",
+            "matrixStride" => "matrix_stride",
+            _ => name,
+        };
+        json_field_object(py, &self.value, key)
+    }
+
+    fn __getitem__(
+        &self,
+        py: Python<'_>,
+        key: &str,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.value.get(key) {
+            Some(value) => to_py(py, value),
+            None => Err(pyo3::exceptions::PyKeyError::new_err(key.to_owned())),
+        }
+    }
+
+    #[pyo3(signature = (key, default = None))]
+    fn get(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        default: Option<Bound<'_, pyo3::PyAny>>,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        match self.value.get(key) {
+            Some(value) => to_py(py, value),
+            None => Ok(default.map(Bound::unbind).unwrap_or_else(|| py.None())),
+        }
+    }
+
+    fn keys(&self) -> Vec<String> {
+        self.value
+            .as_object()
+            .map(|object| object.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[allow(non_snake_case)]
+    fn GetName(&self) -> String {
+        self.value
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    #[allow(non_snake_case)]
+    fn GetMembers(&self, py: Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        to_py(py, &self.value.get("members").cloned().unwrap_or_default())
+    }
+
+    #[allow(non_snake_case)]
+    #[pyo3(signature = (index = 0))]
+    fn GetMember(&self, index: usize) -> pyo3::PyResult<ShaderConstantObject> {
+        let value = self
+            .value
+            .get("members")
+            .and_then(|members| members.get(index))
+            .cloned()
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err("Type member index is out of range")
+            })?;
+        Ok(ShaderConstantObject { value })
+    }
+}
+
+/// `ReflectedType(value)` -> field-addressable reflected type.
+#[pyo3::pyfunction]
+#[allow(non_snake_case)]
+fn ReflectedType(value: Bound<'_, pyo3::PyAny>) -> pyo3::PyResult<ReflectedTypeObject> {
+    let reflected = pythonize::depythonize::<crate::replay::ReflectedType>(&value)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    let value = serde_json::to_value(&reflected)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    Ok(ReflectedTypeObject { value })
 }
 
 /// Opaque resource identifier with string form, matching pyrenderdoc's use of
@@ -4309,6 +4489,7 @@ fn build_capture_module<'py>(
         ("ShaderSignature", pyo3::wrap_pyfunction!(ShaderSignature, py)),
         ("ConstantBlock", pyo3::wrap_pyfunction!(ConstantBlock, py)),
         ("ShaderConstant", pyo3::wrap_pyfunction!(ShaderConstant, py)),
+        ("ReflectedType", pyo3::wrap_pyfunction!(ReflectedType, py)),
         ("SamplerDescriptor", pyo3::wrap_pyfunction!(SamplerDescriptor, py)),
         ("FrameDescription", pyo3::wrap_pyfunction!(FrameDescription, py)),
         ("Descriptor", pyo3::wrap_pyfunction!(Descriptor, py)),
@@ -4839,7 +5020,12 @@ mod tests {
              print('action-helpers', renderdocx.action_info(19).get('event_id') == 21 and renderdocx.action_at(0).get('event_id') is not None and len(renderdocx.action_draws()) >= 3 and isinstance(renderdocx.action_children(0), list))\n\
              print('resource-info', renderdocx.texture_info(0).get('name') == 'Swapchain Image 96' and renderdocx.buffer_info(0).get('length') == '108' and renderdocx.resource_info(7).get('name') == 'Swapchain Image 96')\n\
              print('viewers', renderdocx.GetTextureViewer().Name() == 'textures' and renderdocx.GetPipelineViewer().IsAvailable())\n\
-             print('viewshader', renderdocx.ViewShader(4).Name() == 'shader:4' and renderdocx.EditShader(4).Name() == 'edit_shader:4')\n\
+             sh = renderdocx.ViewShader(4)\n\
+             ed = renderdocx.EditShader(4)\n\
+             print('viewshader', sh.Name() == 'shader:4' and ed.Name() == 'edit_shader:4')\n\
+             sh.SetCurrentStep(3)\n\
+             sh.AddWatch('inColor')\n\
+             print('shader-viewer', sh.CurrentStep() == 3 and sh.GetWatches() == ['inColor'] and isinstance(sh.GetCurrentFileContents(), str) and sh.GetCurrentFileContents() != '' and sh.ShowErrors() == '')\n\
              res = renderdocx.Resource(7)\n\
              print('resource-object', res.name == 'Swapchain Image 96' and res.type == 8 and res.resourceId == 'ResourceId::96' and res.autogeneratedName is True and 'name' in res.keys())\n\
              rid = res.GetResourceId()\n\
@@ -4935,6 +5121,7 @@ mod tests {
         assert!(result.stdout.contains("resource-info True"), "{}", result.stdout);
         assert!(result.stdout.contains("viewers True"), "{}", result.stdout);
         assert!(result.stdout.contains("viewshader True"), "{}", result.stdout);
+        assert!(result.stdout.contains("shader-viewer True"), "{}", result.stdout);
         assert!(result.stdout.contains("resource-object True"), "{}", result.stdout);
         assert!(result.stdout.contains("resource-id True"), "{}", result.stdout);
         assert!(result.stdout.contains("shader-reflection True"), "{}", result.stdout);
@@ -5161,6 +5348,8 @@ mod tests {
              var = block.GetVariable(0)\n\
              print('constant-block', len(blocks) >= 1 and block.name == 'Params' and block.byteSize == 16 and block.bufferBacked is True)\n\
              print('shader-constant', var.name == 'seed' and var.byteOffset == 0 and isinstance(var.defaultValue, str) and var.GetName() == 'seed')\n\
+             ty = var.GetType()\n\
+             print('reflected-type', ty.name == 'uint' and ty.baseType == 4 and ty.rows == 1 and ty.columns == 1 and ty.GetName() == 'uint' and isinstance(ty.GetMembers(), list) and 'base_type' in ty.keys())\n\
              print('sampler-list', len(sr.GetSamplers()) == 0)",
             &CaptureView::default(),
         );
@@ -5173,6 +5362,11 @@ mod tests {
         );
         assert!(
             result.stdout.contains("shader-constant True"),
+            "{}",
+            result.stdout
+        );
+        assert!(
+            result.stdout.contains("reflected-type True"),
             "{}",
             result.stdout
         );
