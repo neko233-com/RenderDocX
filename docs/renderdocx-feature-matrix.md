@@ -21,7 +21,7 @@
 | A6 | BufferViewer | ✅ | `src/buffer_*.rs` 分页/搜索/命名布局/CSV 导出；`buffer_layout.rs` 完整实现 5 种 packing（scalar/structured/std430/std140/cbuffer）及全部别名（d3duav/uav/ssbo/ubo/gl/opengl/glsl/d3dcbuffer/cb），嵌套 layout/enum/对齐规则；`buffer_format`/`packed_format` 标量格式。**边角差异**：极少数高级语言特性与真机大数据缓冲验证待验（打包规则已全，不属未迁移） |
 | A7 | ShaderViewer | ✅ | `src/shader_source.rs` 分页源码、`shader_export.rs` 导出、`custom_shaders.rs` 替换/草稿，Find/Replace 面板（C4）已接入源码视图；外部处理器配置导入/移除/运行 GUI 已实现（`shader-processor-import` 等）。**验证状态**：外部处理器真实执行链仍待 GPU/工具链实机验收，不属未迁移功能 |
 | A8 | ShaderMessageViewer | ✅ | `src/shader_messages.rs` 分页/过滤/导出（txt+csv）/跳转/调试衔接（`shader_vertex_resolve`），`main.rs` 消息列表/搜索/工作组分派/顶点调试；上游 ShaderMessageViewer 本身用纯文本 Message 列（无富文本委托），本地一致。**边角差异**：多单元格选择未实现；真机 GUI 验证待验（不属未迁移） |
-| A9 | PixelHistoryView | 🟡 | README：片段列表/前后值/重放/统计直方图已实现；后端无法检查像素时的空结果语义与其余 API 待验证 |
+| A9 | PixelHistoryView | ✅ | `Session::pixel_history` 分页/前后值/重放/统计直方图；`main.rs` 空结果语义完整（entries 为空时 selected=None，显示「截至当前事件无修改」与「后端可能无法检查此像素」提示，含多重采样样本说明）。**边角差异**：其余 API（Vulkan/GL）真实像素历史待实机验证（空结果语义已实现） |
 | A10 | ResourceInspector | ✅ | `main.rs` 资源列表/过滤/用法导航/重命名/父母与派生链接；本批补齐资源详情：按 `resource_index` 关联纹理显示尺寸(宽×高×深)/mip/array/sample/格式/字节，关联缓冲显示字节长度；纯 Rust 从 snapshot 数据计算。**边角差异**：上游详情面板的逐字段布局未逐像素复现 |
 | A11 | DescriptorViewer | ✅ | `src/replay.rs` `DescriptorStore`/`DescriptorPage` + `Session::descriptors` 分页请求；`main.rs` 用 `descriptor_stores: Vec` 枚举任意数量 store（含"全部"视图）并按 resource 关联名称，支持类型切换/范围/跳转。**边角差异**：跨 API（Vulkan/D3D12/GL）逐字段完整呈现与真机验证待验（Vec 枚举已天然支持可变长度，不属未迁移） |
 | A12 | StatisticsViewer | ✅ | `src/frame_statistics.rs` 覆盖上游 FrameStatistics 全部 14 个分类（draws/dispatches/indices/layouts/vertices/updates/constants/samplers/resources/shaders/blends/depths/rasters/outputs）+ overview 汇总、直方图、逐分类 report 与本地化 text_report（多语言导出测试）。**边角差异**：表格列宽/分组显示细节未逐像素复现；真机 GUI 渲染待验（不属未迁移） |
@@ -107,14 +107,14 @@
 
 | 状态 | 行数 | 占比 |
 |---|---|---|
-| ✅ 已迁移 | 39 | 63.9% |
-| 🟡 部分迁移 | 17 | 27.9% |
+| ✅ 已迁移 | 40 | 65.6% |
+| 🟡 部分迁移 | 16 | 26.2% |
 | ❌ 未迁移 | 1 | 1.6% |
 | ⬜ 暂不迁移 | 4 | 6.6% |
 | **合计** | **61** | 100% |
 
-- **已迁移率 = 39/61 ≈ 63.9%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
-- 本批变更：C2（PixelDebugSelector）经复核 view 选择与转发已实现，由 🟡 转为 ✅（仅 API 语义差异与真机调试待验）；此前 A6、A4、A3、A2、A11、A10、A8、A12、A14、C1、D3、B9、A17、A1、A7、B7、A5、B17、C5/C6、C4、B10、B18/B19/B20、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
+- **已迁移率 = 40/61 ≈ 65.6%**；**覆盖率（✅+🟡）= 56/61 ≈ 91.8%**。
+- 本批变更：A9（PixelHistoryView）经复核空结果语义（含后端无法检查提示）已实现，由 🟡 转为 ✅（仅其余 API 真机验证待验）；此前 C2、A6、A4、A3、A2、A11、A10、A8、A12、A14、C1、D3、B9、A17、A1、A7、B7、A5、B17、C5/C6、C4、B10、B18/B19/B20、D13、D14、D6/D7、A15/D12、D9/B11/B12、D8/D16/D17、D10 已计入此前口径，未重复计数。
 - 口径：分母来自 qrenderdoc 界面文件的完整枚举（A17+B20+C7+D17=61，可复核：`qrenderdoc/**/*.ui` 共 44 个窗口/对话框/控件 + D 节 17 个菜单功能项）；每行状态附证据，🟡 不折算为完成。
 - 状态为基于当前源码与 README/roadmap 记载的迁移程度评估；GPU/引擎实机验收状态另行报告，不在此表内。
 
