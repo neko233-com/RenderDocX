@@ -1003,6 +1003,7 @@ struct Workspace {
     recent_submenu_open: bool,
     floating_docks: Vec<FloatingDock>,
     floating_windows: Vec<(FloatingDock, gpui::WindowHandle<FloatingDockWindow>)>,
+    dock_right: Vec<FloatingDock>,
     selected_texture: Option<usize>,
     texture_selection: TextureSelection,
     texture_saved_selection: std::collections::HashMap<usize, (TextureSelection, u64)>,
@@ -4741,6 +4742,7 @@ impl Workspace {
             capture_dialog_shown: self.show_capture_dialog_tab,
             main_tab_order: self.main_tab_order.iter().map(|tab| tab.name().to_owned()).collect(),
             aux_tab_order: self.aux_tab_order.iter().map(|tab| tab.name().to_owned()).collect(),
+            dock_right: self.dock_right.iter().map(|dock| match dock { FloatingDock::EventBrowser => "event_browser".to_owned(), FloatingDock::ApiInspector => "api_inspector".to_owned() }).collect(),
             event_browser_shown: self.dock_event_browser,
             api_inspector_shown: self.dock_api_inspector,
         };
@@ -4784,6 +4786,7 @@ impl Workspace {
         self.show_capture_dialog_tab = layout.capture_dialog_shown;
         self.main_tab_order = normalize_main_tab_order(&layout.main_tab_order);
         self.aux_tab_order = normalize_aux_tab_order(&layout.aux_tab_order);
+        self.dock_right = normalize_right_docks(&layout.dock_right);
         self.dock_event_browser = layout.event_browser_shown;
         self.dock_api_inspector = layout.api_inspector_shown;
         self.status = Some(format!("{} {slot}", self.t("Loaded window layout", "已加载窗口布局")));
@@ -15648,6 +15651,7 @@ impl Workspace {
         float_dock: Option<FloatingDock>,
         close_id: Option<&'static str>,
         close_dock: Option<FloatingDock>,
+        right_docked: bool,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let mut actions = div().flex().items_center().gap_1();
@@ -15662,6 +15666,47 @@ impl Workspace {
                     .hover(|view| view.bg(rgb(0x262626)))
                     .child("⧉")
                     .on_click(cx.listener(move |this, _, _, cx| this.float_dock(dock, cx))),
+            );
+        }
+        if let Some(dock) = float_dock {
+            let (side_id, side_label) = if right_docked {
+                (
+                    match dock {
+                        FloatingDock::EventBrowser => "dock-left-event-browser",
+                        FloatingDock::ApiInspector => "dock-left-api-inspector",
+                    },
+                    "⇤",
+                )
+            } else {
+                (
+                    match dock {
+                        FloatingDock::EventBrowser => "dock-right-event-browser",
+                        FloatingDock::ApiInspector => "dock-right-api-inspector",
+                    },
+                    "⇥",
+                )
+            };
+            actions = actions.child(
+                div()
+                    .id(side_id)
+                    .test_support()
+                    .cursor_pointer()
+                    .px_1()
+                    .rounded_md()
+                    .hover(|view| view.bg(rgb(0x262626)))
+                    .child(side_label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if right_docked {
+                            this.dock_right.retain(|item| *item != dock);
+                        } else if !this.dock_right.contains(&dock) {
+                            this.dock_right.push(dock);
+                        }
+                        match dock {
+                            FloatingDock::EventBrowser => this.dock_event_browser = true,
+                            FloatingDock::ApiInspector => this.dock_api_inspector = true,
+                        }
+                        cx.notify();
+                    })),
             );
         }
         if let (Some(id), Some(dock)) = (close_id, close_dock) {
@@ -15700,6 +15745,7 @@ impl Workspace {
         &self,
         cx: &mut Context<Self>,
         floating: bool,
+        right_docked: bool,
     ) -> gpui::AnyElement {
         let rows: Vec<(usize, String, String)> = {
             let Some(snapshot) = self.snapshot.as_ref() else {
@@ -15789,6 +15835,7 @@ impl Workspace {
                 Some(FloatingDock::EventBrowser),
                 Some("dock-close-event-browser"),
                 Some(FloatingDock::EventBrowser),
+                right_docked,
                 cx,
             ));
         }
@@ -15799,6 +15846,7 @@ impl Workspace {
         &self,
         cx: &mut Context<Self>,
         floating: bool,
+        right_docked: bool,
     ) -> gpui::AnyElement {
         let mut rows: Vec<(String, String)> = Vec::new();
         if let Some(page) = &self.structure.page {
@@ -15878,6 +15926,7 @@ impl Workspace {
                 Some(FloatingDock::ApiInspector),
                 Some("dock-close-api-inspector"),
                 Some(FloatingDock::ApiInspector),
+                right_docked,
                 cx,
             ));
         }
@@ -15888,11 +15937,13 @@ impl Workspace {
         let event_browser = self.dock_event_browser
             && !self
                 .floating_docks
-                .contains(&FloatingDock::EventBrowser);
+                .contains(&FloatingDock::EventBrowser)
+            && !self.dock_right.contains(&FloatingDock::EventBrowser);
         let api_inspector = self.dock_api_inspector
             && !self
                 .floating_docks
-                .contains(&FloatingDock::ApiInspector);
+                .contains(&FloatingDock::ApiInspector)
+            && !self.dock_right.contains(&FloatingDock::ApiInspector);
         if !event_browser && !api_inspector {
             return div().into_any_element();
         }
@@ -15907,7 +15958,7 @@ impl Workspace {
             .flex_col()
             .gap_2();
         if event_browser {
-            let panel = self.dock_event_browser_panel(cx, false);
+            let panel = self.dock_event_browser_panel(cx, false, false);
             column = if api_inspector {
                 column.child(
                     div()
@@ -15921,7 +15972,7 @@ impl Workspace {
             };
         }
         if api_inspector {
-            let panel = self.dock_api_inspector_panel(cx, false);
+            let panel = self.dock_api_inspector_panel(cx, false, false);
             column = column.child(div().flex_1().min_h_0().flex().child(panel));
         }
         column.into_any_element()
@@ -17264,6 +17315,7 @@ impl Workspace {
         self.show_capture_dialog_tab = true;
         self.main_tab_order = standard_main_tab_order();
         self.aux_tab_order = standard_aux_tab_order();
+        self.dock_right.clear();
         self.dock_event_browser = true;
         self.dock_api_inspector = true;
         self.dock_drag_x = None;
@@ -17411,6 +17463,26 @@ impl Workspace {
             .clone()
             .into_iter()
             .map(|tab| self.aux_tab_button(tab, cx))
+            .collect();
+        let right_dock_panels: Vec<gpui::AnyElement> = self
+            .dock_right
+            .iter()
+            .map(|dock| {
+                let panel = match dock {
+                    FloatingDock::EventBrowser => {
+                        self.dock_event_browser_panel(cx, false, true)
+                    }
+                    FloatingDock::ApiInspector => {
+                        self.dock_api_inspector_panel(cx, false, true)
+                    }
+                };
+                div()
+                    .h(px(260.))
+                    .flex_none()
+                    .flex()
+                    .child(panel)
+                    .into_any_element()
+            })
             .collect();
         let mesh_lines = if let Some(page) = &self.mesh.draw {
             page.rows
@@ -23127,11 +23199,13 @@ impl Workspace {
                         (self.dock_event_browser
                             && !self
                                 .floating_docks
-                                .contains(&FloatingDock::EventBrowser))
+                                .contains(&FloatingDock::EventBrowser)
+                            && !self.dock_right.contains(&FloatingDock::EventBrowser))
                             || (self.dock_api_inspector
                                 && !self
                                     .floating_docks
-                                    .contains(&FloatingDock::ApiInspector)),
+                                    .contains(&FloatingDock::ApiInspector)
+                                && !self.dock_right.contains(&FloatingDock::ApiInspector)),
                         |view| view.child(self.dock_splitter(cx)),
                     )
                     .child(
@@ -23713,10 +23787,18 @@ impl Workspace {
                     .child(self.details_splitter(cx))
                     .child(
                         div()
-                            .id("capture-details-scroll")
-                            .test_support()
                             .w(gpui::relative(1.0 - self.dock_details_ratio))
                             .flex_none()
+                            .min_h_0()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .children(right_dock_panels)
+                            .child(
+                                div()
+                                    .id("capture-details-scroll")
+                                    .test_support()
+                                    .flex_1()
                             .min_h_0()
                             .overflow_y_scroll()
                             .bg(rgb(0x0a0a0a))
@@ -23774,6 +23856,7 @@ impl Workspace {
                                 .child(button("event-expand-subtree", self.t("Expand subtree", "展开分组"), false, |this, cx| this.set_event_expansion(false, cx), cx))
                                 .child(button("event-collapse-subtree", self.t("Collapse subtree", "折叠分组"), false, |this, cx| this.set_event_expansion(true, cx), cx))
                                 .child(button("event-show-empty", self.t("Show empty regions", "显示空分组"), self.event_tree.show_empty_regions(), |this, cx| { this.event_tree.set_show_empty_regions(!this.event_tree.show_empty_regions()); cx.notify(); }, cx)))),
+                        ),
                     ),
             )
             .child(self.menu_bar_view(cx))
@@ -23796,6 +23879,27 @@ fn button(
     } else {
         button.secondary()
     }
+}
+
+fn normalize_right_docks(names: &[String]) -> Vec<FloatingDock> {
+    let mut docks = Vec::new();
+    for name in names {
+        let dock = match name.as_str() {
+            "event_browser" | "EventBrowser" | "Event Browser" => {
+                Some(FloatingDock::EventBrowser)
+            }
+            "api_inspector" | "ApiInspector" | "API Inspector" => {
+                Some(FloatingDock::ApiInspector)
+            }
+            _ => None,
+        };
+        if let Some(dock) = dock {
+            if !docks.contains(&dock) {
+                docks.push(dock);
+            }
+        }
+    }
+    docks
 }
 
 fn standard_aux_tab_order() -> Vec<CaptureTab> {
@@ -25462,6 +25566,7 @@ fn main() {
                         recent_submenu_open: false,
                         floating_docks: Vec::new(),
                         floating_windows: Vec::new(),
+                        dock_right: Vec::new(),
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
@@ -26374,6 +26479,7 @@ mod ui_tests {
                         recent_submenu_open: false,
                         floating_docks: Vec::new(),
                         floating_windows: Vec::new(),
+                        dock_right: Vec::new(),
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
@@ -27226,6 +27332,7 @@ mod ui_tests {
                         recent_submenu_open: false,
                         floating_docks: Vec::new(),
                         floating_windows: Vec::new(),
+                        dock_right: Vec::new(),
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
@@ -34248,6 +34355,36 @@ mod ui_tests {
             assert!((view.dock_api_ratio - 0.7).abs() < f32::EPSILON);
             assert!((view.dock_details_ratio - 0.72).abs() < f32::EPSILON);
             assert!((view.dock_timeline_ratio - 0.40).abs() < f32::EPSILON);
+        });
+
+        // Move Event Browser to the right details column and back.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("dock-right-event-browser", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                view.read(cx)
+                    .dock_right
+                    .contains(&FloatingDock::EventBrowser)
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("dock-event-browser").visible());
+            window.click("dock-left-event-browser", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                !view
+                    .read(cx)
+                    .dock_right
+                    .contains(&FloatingDock::EventBrowser)
+            );
         });
 
         // Layout slots persist dock visibility and split ratios.
