@@ -16042,94 +16042,327 @@ impl Workspace {
     }
 
     /// RenderDoc-style dock header used by the left Event Browser/API Inspector.
+    fn pipeline_badge(&self, text: String) -> gpui::Div {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(rgb(0x1a1a1a))
+            .border_1()
+            .border_color(rgb(0x333333))
+            .text_xs()
+            .text_color(rgb(0xa1a1aa))
+            .child(text)
+    }
+
+    fn pipeline_section_title(&self, en: &'static str, zh: &'static str) -> gpui::Div {
+        div()
+            .pt_2()
+            .text_xs()
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(rgb(0x3291ff))
+            .child(self.t(en, zh).to_uppercase())
+    }
+
+    fn pipeline_info_card(
+        &self,
+        title: String,
+        value: String,
+        accent: bool,
+    ) -> gpui::AnyElement {
+        div()
+            .flex_1()
+            .min_w(px(160.))
+            .p_3()
+            .rounded_md()
+            .bg(rgb(0x111111))
+            .border_1()
+            .border_color(rgb(if accent { 0x333333 } else { 0x1f1f1f }))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(div().text_xs().text_color(rgb(0xa1a1aa)).child(title))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(if accent { 0xededed } else { 0x6b6b6b }))
+                    .child(value),
+            )
+            .into_any_element()
+    }
+
     fn pipeline_state_panel(&self) -> gpui::Div {
-        let mut rows: Vec<String> = Vec::new();
+        let mut content = div()
+            .id("pipeline-state-panel")
+            .test_support()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_3();
         if let Some(pipeline) = &self.pipeline {
-            rows.push(format!(
-                "{}: {}",
-                self.t("Event", "事件"),
-                pipeline.event_id
-            ));
-            rows.push(format!(
-                "{}: {}",
-                self.t("Topology", "拓扑"),
-                pipeline.topology
-            ));
-            rows.push(format!(
-                "{}: {} / {}",
-                self.t("Multiview", "多视图"),
-                pipeline.multiview_count.unwrap_or(1),
-                self.t("restart", "重启")
-            ));
-            for shader in &pipeline.shaders {
-                let name = if shader.resource.bound {
-                    shader.resource.name.clone()
-                } else {
-                    self.t("<unbound>", "<未绑定>").to_owned()
-                };
-                rows.push(format!("{}: {name}", shader.stage));
-            }
-            for (index, output) in pipeline.outputs.iter().enumerate() {
-                if output.bound {
-                    rows.push(format!("output {index}: {}", output.name));
+            content = content.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_lg().child(self.t("Pipeline State", "管线状态")))
+                    .child(self.pipeline_badge(format!(
+                        "{} {}",
+                        self.t("Event", "事件"),
+                        pipeline.event_id
+                    )))
+                    .child(self.pipeline_badge(format!(
+                        "{} {}",
+                        self.t("Topology", "拓扑"),
+                        pipeline.topology
+                    )))
+                    .when_some(pipeline.multiview_count, |view, count| {
+                        view.child(self.pipeline_badge(format!(
+                            "{} {count}",
+                            self.t("Multiview", "多视图")
+                        )))
+                    }),
+            );
+
+            content = content.child(self.pipeline_section_title("Stages", "着色阶段"));
+            let mut stages = div().flex().flex_wrap().gap_2();
+            if pipeline.shaders.is_empty() {
+                stages = stages.child(self.pipeline_info_card(
+                    self.t("Stages", "着色阶段").to_owned(),
+                    self.t("No shader stages bound.", "没有绑定着色阶段。")
+                        .to_owned(),
+                    false,
+                ));
+            } else {
+                for shader in &pipeline.shaders {
+                    let bound = shader.resource.bound;
+                    let name = if bound {
+                        self.resource_display_name(
+                            shader.resource.resource_index,
+                            &shader.resource.name,
+                        )
+                        .to_owned()
+                    } else {
+                        self.t("<unbound>", "<未绑定>").to_owned()
+                    };
+                    stages = stages.child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "pipeline-stage-{}",
+                                shader.stage
+                            )))
+                            .test_support()
+                            .flex_1()
+                            .min_w(px(160.))
+                            .p_3()
+                            .rounded_md()
+                            .bg(rgb(0x111111))
+                            .border_1()
+                            .border_color(rgb(if bound { 0x333333 } else { 0x1f1f1f }))
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0x3291ff))
+                                    .child(shader.stage.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(if bound { 0xededed } else { 0x6b6b6b }))
+                                    .child(name),
+                            )
+                            .into_any_element(),
+                    );
                 }
             }
-            if let Some(attachments) = &pipeline.color_attachments {
-                for (index, attachment) in attachments.iter().enumerate() {
-                    if attachment.resource.bound {
-                        rows.push(format!(
-                            "color {index}: {} · {}",
-                            attachment.resource.name, attachment.format
-                        ));
+            content = content.child(stages);
+
+            content = content.child(self.pipeline_section_title("Output Merger", "输出合并"));
+            let mut attachments = div().flex().flex_wrap().gap_2();
+            let mut any_attachment = false;
+            if let Some(colors) = &pipeline.color_attachments {
+                for (index, attachment) in colors.iter().enumerate() {
+                    if !attachment.resource.bound {
+                        continue;
                     }
+                    any_attachment = true;
+                    attachments = attachments.child(self.pipeline_info_card(
+                        format!("{} {index}", self.t("Color", "颜色")),
+                        format!(
+                            "{} · {}",
+                            self.resource_display_name(
+                                attachment.resource.resource_index,
+                                &attachment.resource.name,
+                            ),
+                            attachment.format
+                        ),
+                        true,
+                    ));
                 }
             }
             if let Some(depth) = &pipeline.depth_attachment {
                 if depth.resource.bound {
-                    rows.push(format!(
-                        "depth: {} · {}",
-                        depth.resource.name, depth.format
+                    any_attachment = true;
+                    attachments = attachments.child(self.pipeline_info_card(
+                        self.t("Depth", "深度").to_owned(),
+                        format!(
+                            "{} · {}",
+                            self.resource_display_name(
+                                depth.resource.resource_index,
+                                &depth.resource.name,
+                            ),
+                            depth.format
+                        ),
+                        true,
                     ));
                 }
             }
-            if let Some(fixed) = &pipeline.fixed_state {
-                rows.push(format!(
-                    "raster: fill {} · cull {} · front_ccw {}",
-                    fixed.raster.fill, fixed.raster.cull, fixed.raster.front_ccw
-                ));
-                rows.push(format!(
-                    "depth: enabled {} · writes {} · function {}",
-                    fixed.depth.enabled, fixed.depth.writes, fixed.depth.function
-                ));
-                rows.push(format!(
-                    "stencil: enabled {} · blends {}",
-                    fixed.stencil_enabled,
-                    fixed.blends.len()
+            if let Some(resolve) = &pipeline.depth_resolve_attachment {
+                if resolve.resource.bound {
+                    any_attachment = true;
+                    attachments = attachments.child(self.pipeline_info_card(
+                        self.t("Depth resolve", "深度解析").to_owned(),
+                        format!(
+                            "{} · {}",
+                            self.resource_display_name(
+                                resolve.resource.resource_index,
+                                &resolve.resource.name,
+                            ),
+                            resolve.format
+                        ),
+                        true,
+                    ));
+                }
+            }
+            if !any_attachment {
+                attachments = attachments.child(self.pipeline_info_card(
+                    self.t("Outputs", "输出").to_owned(),
+                    self.t(
+                        "No bound color or depth attachments.",
+                        "没有绑定的颜色/深度附件。",
+                    )
+                    .to_owned(),
+                    false,
                 ));
             }
+            content = content.child(attachments);
+
+            content = content.child(self.pipeline_section_title("Input Assembler", "输入装配"));
+            let mut ia = div().flex().flex_wrap().gap_2();
+            ia = ia.child(self.pipeline_info_card(
+                self.t("Topology", "拓扑").to_owned(),
+                pipeline.topology.to_string(),
+                true,
+            ));
+            if let Some(index) = &pipeline.index_buffer {
+                ia = ia.child(self.pipeline_info_card(
+                    self.t("Index buffer", "索引缓冲").to_owned(),
+                    format!(
+                        "{} · {} bytes",
+                        self.resource_display_name(
+                            index.resource.resource_index,
+                            &index.resource.name,
+                        ),
+                        index.byte_size
+                    ),
+                    true,
+                ));
+            }
+            if let Some(vertices) = &pipeline.vertex_buffers {
+                ia = ia.child(self.pipeline_info_card(
+                    self.t("Vertex buffers", "顶点缓冲").to_owned(),
+                    vertices.len().to_string(),
+                    true,
+                ));
+            }
+            if let Some(viewports) = &pipeline.viewports {
+                if let Some(first) = viewports.first() {
+                    ia = ia.child(self.pipeline_info_card(
+                        self.t("Viewport", "视口").to_owned(),
+                        format!(
+                            "{} × {} · {} × {}",
+                            first.width.unwrap_or(0.0),
+                            first.height.unwrap_or(0.0),
+                            first.x.unwrap_or(0.0),
+                            first.y.unwrap_or(0.0)
+                        ),
+                        true,
+                    ));
+                }
+            }
+            if let Some(scissors) = &pipeline.scissors {
+                ia = ia.child(self.pipeline_info_card(
+                    self.t("Scissors", "裁剪矩形").to_owned(),
+                    scissors.len().to_string(),
+                    true,
+                ));
+            }
+            content = content.child(ia);
+
+            if let Some(fixed) = &pipeline.fixed_state {
+                content = content.child(self.pipeline_section_title("Fixed State", "固定状态"));
+                let fixed_cards = div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(self.pipeline_info_card(
+                        self.t("Raster", "光栅化").to_owned(),
+                        format!(
+                            "{} · {} · front_ccw {}",
+                            fixed.raster.fill, fixed.raster.cull, fixed.raster.front_ccw
+                        ),
+                        true,
+                    ))
+                    .child(self.pipeline_info_card(
+                        self.t("Depth", "深度").to_owned(),
+                        format!(
+                            "{} · writes {} · {}",
+                            fixed.depth.enabled, fixed.depth.writes, fixed.depth.function
+                        ),
+                        true,
+                    ))
+                    .child(self.pipeline_info_card(
+                        self.t("Stencil", "模板").to_owned(),
+                        format!(
+                            "{} · blends {}",
+                            fixed.stencil_enabled,
+                            fixed.blends.len()
+                        ),
+                        true,
+                    ));
+                content = content.child(fixed_cards);
+            }
         } else {
-            rows.push(
-                self.t(
-                    "Select an event to inspect pipeline state.",
-                    "选择事件以查看看管线状态。",
-                )
-                .to_owned(),
+            content = content.child(
+                div()
+                    .p_3()
+                    .text_sm()
+                    .text_color(rgb(0xa1a1aa))
+                    .child(
+                        self.t(
+                            "Select an event to inspect pipeline state.",
+                            "选择事件以查看管线状态。",
+                        ),
+                    ),
             );
         }
-        div().p_3().flex().flex_col().gap_2().child(
-            div()
-                .id("pipeline-state-panel")
-                .test_support()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(
-                    div()
-                        .text_lg()
-                        .child(self.t("Pipeline State", "管线状态")),
-                )
-                .children(rows.into_iter().map(|line| div().text_sm().child(line))),
-        )
+        div()
+            .size_full()
+            .min_h_0()
+            .child(
+                div()
+                    .id("pipeline-state-scroll")
+                    .test_support()
+                    .p_3()
+                    .size_full()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(content),
+            )
     }
 
     fn capture_dialog_panel(&self) -> gpui::Div {
