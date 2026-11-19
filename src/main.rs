@@ -767,6 +767,12 @@ fn structured_value(node: &StructuredNode) -> String {
 enum InfoDialog {
     About,
     Tips,
+    Settings,
+    Extensions,
+    RemoteServers,
+    PythonShell,
+    CrashReports,
+    Processes,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -779,9 +785,20 @@ enum ViewerDialog {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MenuBar {
     File,
-    Edit,
     Window,
+    Tools,
     Help,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuSubmenu {
+    RecentCaptures,
+    RecentSettings,
+    ImportFrom,
+    ExportAs,
+    SaveLayout,
+    LoadLayout,
+    ReportedBugs,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -999,8 +1016,8 @@ struct Workspace {
     main_tab_order: Vec<CaptureTab>,
     aux_tab_order: Vec<CaptureTab>,
     menu_open: Option<MenuBar>,
-    layout_submenu_open: bool,
-    recent_submenu_open: bool,
+    submenu_open: Option<MenuSubmenu>,
+    process_inject: bool,
     floating_docks: Vec<FloatingDock>,
     floating_windows: Vec<(FloatingDock, gpui::WindowHandle<FloatingDockWindow>)>,
     dock_right: Vec<FloatingDock>,
@@ -5686,11 +5703,438 @@ impl Workspace {
                     body.push(div().text_sm().child(format!("• {tip}")).into_any_element());
                 }
             }
+            InfoDialog::Settings => {
+                body.push(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0xa1a1aa))
+                                .child(self.t("Language", "语言")),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .children(Language::ALL.into_iter().enumerate().map(
+                                    |(index, language)| {
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "dialog-language-{index}"
+                                            )))
+                                            .test_support()
+                                            .px_3()
+                                            .py_2()
+                                            .rounded_md()
+                                            .cursor_pointer()
+                                            .bg(rgb(if self.settings.language == language {
+                                                0x0070f3
+                                            } else {
+                                                0x1f1f1f
+                                            }))
+                                            .child(language.label())
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.settings.language = language;
+                                                this.structure.formatted_event = None;
+                                                this.event_tree.clear_formatted_names();
+                                                this.save();
+                                                let expression = this
+                                                    .event_search
+                                                    .read(cx)
+                                                    .value()
+                                                    .to_string();
+                                                this.apply_event_filter(expression, cx);
+                                                cx.notify();
+                                            }))
+                                    },
+                                )),
+                        )
+                        .into_any_element(),
+                );
+                let theme_label = if self.settings.theme.eq_ignore_ascii_case("light") {
+                    self.t("Light", "浅色")
+                } else {
+                    self.t("Dark", "深色")
+                };
+                body.push(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().text_sm().child(self.t("Theme", "主题")))
+                        .child(button(
+                            "dialog-settings-theme",
+                            theme_label,
+                            false,
+                            |this, cx| {
+                                this.settings.theme = if this
+                                    .settings
+                                    .theme
+                                    .eq_ignore_ascii_case("light")
+                                {
+                                    "dark"
+                                } else {
+                                    "light"
+                                }
+                                .to_owned();
+                                Theme::change(
+                                    if this.settings.theme.eq_ignore_ascii_case("light") {
+                                        ThemeMode::Light
+                                    } else {
+                                        ThemeMode::Dark
+                                    },
+                                    None,
+                                    cx,
+                                );
+                                this.save();
+                                cx.notify();
+                            },
+                            cx,
+                        ))
+                        .into_any_element(),
+                );
+                let update_label = if self.settings.auto_check_updates {
+                    self.t("On", "开")
+                } else {
+                    self.t("Off", "关")
+                };
+                body.push(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_sm()
+                                .child(self.t("Automatic update check", "自动检查更新")),
+                        )
+                        .child(button(
+                            "dialog-settings-auto-update",
+                            update_label,
+                            false,
+                            |this, cx| {
+                                this.settings.auto_check_updates =
+                                    !this.settings.auto_check_updates;
+                                this.save();
+                                cx.notify();
+                            },
+                            cx,
+                        ))
+                        .into_any_element(),
+                );
+            }
+            InfoDialog::Extensions => {
+                body.push(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(button(
+                            "dialog-extensions-refresh",
+                            self.t("Refresh extensions", "刷新扩展"),
+                            false,
+                            |this, cx| this.refresh_extensions(cx),
+                            cx,
+                        ))
+                        .into_any_element(),
+                );
+                if self.installed_extensions.is_empty() {
+                    body.push(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xa1a1aa))
+                            .child(self.t("No extensions discovered.", "未发现扩展。"))
+                            .into_any_element(),
+                    );
+                } else {
+                    for (index, extension) in self.installed_extensions.iter().enumerate() {
+                        let name = extension.manifest.name.clone();
+                        let enabled = self
+                            .settings
+                            .enabled_extensions
+                            .iter()
+                            .any(|item| item == &name);
+                        let label =
+                            format!("{} {}", extension.manifest.name, extension.manifest.version);
+                        let toggle_label = if enabled {
+                            self.t("Disable", "禁用")
+                        } else {
+                            self.t("Enable", "启用")
+                        };
+                        body.push(
+                            div()
+                                .id(("dialog-extension", index))
+                                .test_support()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(div().text_sm().child(label))
+                                .child(
+                                    Button::new(("dialog-extension-toggle", index))
+                                        .label(toggle_label)
+                                        .secondary()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.toggle_extension(name.clone(), cx);
+                                        })),
+                                )
+                                .into_any_element(),
+                        );
+                    }
+                }
+            }
+            InfoDialog::RemoteServers => {
+                body.push(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            Input::new(&self.remote_target_url)
+                                .id("dialog-remote-host")
+                                .aria_label(self.t("Remote host", "远程主机"))
+                                .w(px(280.)),
+                        )
+                        .child(button(
+                            "dialog-remote-add",
+                            self.t("Add", "添加"),
+                            false,
+                            |this, cx| this.add_remote_host(cx),
+                            cx,
+                        ))
+                        .into_any_element(),
+                );
+                if self.settings.remote_hosts.is_empty() {
+                    body.push(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xa1a1aa))
+                            .child(self.t("No remote servers configured.", "没有配置远程服务器。"))
+                            .into_any_element(),
+                    );
+                } else {
+                    for (index, host) in self.settings.remote_hosts.iter().enumerate() {
+                        let label = host.display_name().to_owned();
+                        body.push(
+                            div()
+                                .id(("dialog-remote-host-row", index))
+                                .test_support()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(div().text_sm().child(label))
+                                .child(
+                                    Button::new(("dialog-remote-remove", index))
+                                        .label(self.t("Remove", "移除"))
+                                        .secondary()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if index < this.settings.remote_hosts.len() {
+                                                this.settings.remote_hosts.remove(index);
+                                                this.save();
+                                                cx.notify();
+                                            }
+                                        })),
+                                )
+                                .into_any_element(),
+                        );
+                    }
+                }
+            }
+            InfoDialog::PythonShell => {
+                body.push(
+                    div()
+                        .child(
+                            Input::new(&self.python_input)
+                                .id("dialog-python-input")
+                                .aria_label(self.t("Python expression", "Python 表达式"))
+                                .w_full(),
+                        )
+                        .into_any_element(),
+                );
+                body.push(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(button(
+                            "dialog-python-execute",
+                            self.t("Execute", "执行"),
+                            false,
+                            |this, cx| this.execute_python_input(cx),
+                            cx,
+                        ))
+                        .child(button(
+                            "dialog-python-clear",
+                            self.t("Clear output", "清除输出"),
+                            false,
+                            |this, cx| {
+                                this.python_output.clear();
+                                cx.notify();
+                            },
+                            cx,
+                        ))
+                        .child(button(
+                            "dialog-python-reset",
+                            self.t("Reset session", "重置会话"),
+                            false,
+                            |this, cx| {
+                                renderdocx::python_embed::reset_repl();
+                                this.python_output.clear();
+                                cx.notify();
+                            },
+                            cx,
+                        ))
+                        .into_any_element(),
+                );
+                body.push(
+                    div()
+                        .id("dialog-python-output")
+                        .test_support()
+                        .max_h(px(220.))
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .text_sm()
+                        .children(
+                            self.python_output
+                                .iter()
+                                .rev()
+                                .take(30)
+                                .rev()
+                                .cloned()
+                                .map(|line| div().child(line)),
+                        )
+                        .into_any_element(),
+                );
+            }
+            InfoDialog::CrashReports => {
+                body.push(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(button(
+                            "dialog-crash-refresh",
+                            self.t("Refresh", "刷新"),
+                            false,
+                            |this, cx| this.refresh_crash_reports(cx),
+                            cx,
+                        ))
+                        .child(button(
+                            "dialog-crash-clear",
+                            self.t("Clear", "清除"),
+                            false,
+                            |this, cx| this.clear_crash_reports(cx),
+                            cx,
+                        ))
+                        .into_any_element(),
+                );
+                if self.crash_reports.is_empty() {
+                    body.push(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xa1a1aa))
+                            .child(self.t("No crash reports recorded.", "没有崩溃报告。"))
+                            .into_any_element(),
+                    );
+                } else {
+                    for report in self.crash_reports.iter().take(10) {
+                        body.push(
+                            div()
+                                .text_sm()
+                                .child(format!(
+                                    "{} · {} · {}",
+                                    report.timestamp,
+                                    report.location.clone().unwrap_or_default(),
+                                    report.message
+                                ))
+                                .into_any_element(),
+                        );
+                    }
+                }
+            }
+            InfoDialog::Processes => {
+                body.push(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0xa1a1aa))
+                        .child(if self.process_inject {
+                            self.t("Select a process to inject into.", "选择要注入的进程。")
+                        } else {
+                            self.t("Select a process to attach to.", "选择要附加的进程。")
+                        })
+                        .into_any_element(),
+                );
+                body.push(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(button(
+                            "dialog-process-refresh",
+                            self.t("Refresh", "刷新"),
+                            false,
+                            |this, cx| this.refresh_local_processes(cx),
+                            cx,
+                        ))
+                        .into_any_element(),
+                );
+                if self.local_processes.is_empty() {
+                    body.push(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xa1a1aa))
+                            .child(self.t("No local processes found.", "没有找到本地进程。"))
+                            .into_any_element(),
+                    );
+                } else {
+                    for (index, process) in self.local_processes.iter().enumerate() {
+                        let pid = process.pid;
+                        let name = process.name.clone();
+                        let inject = self.process_inject;
+                        let action_label = if inject {
+                            self.t("Inject", "注入")
+                        } else {
+                            self.t("Attach", "附加")
+                        };
+                        body.push(
+                            div()
+                                .id(("dialog-process", index))
+                                .test_support()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(div().text_sm().child(format!("{pid} · {name}")))
+                                .child(
+                                    Button::new(("dialog-process-action", index))
+                                        .label(action_label)
+                                        .secondary()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if inject {
+                                                this.inject_into_pid(pid, cx);
+                                            } else {
+                                                this.connect_target(pid, true, None, cx);
+                                            }
+                                            this.info_dialog = None;
+                                            cx.notify();
+                                        })),
+                                )
+                                .into_any_element(),
+                        );
+                    }
+                }
+            }
         }
         vec![div()
             .id("info-panel")
             .test_support()
             .absolute()
+            .top(px(0.))
+            .left(px(0.))
             .size_full()
             .bg(rgb(0x000000))
             .flex()
@@ -5711,6 +6155,26 @@ impl Workspace {
                             .child(match dialog {
                                 InfoDialog::About => self.t("About RenderDocX", "关于 RenderDocX"),
                                 InfoDialog::Tips => self.t("Tips", "提示"),
+                                InfoDialog::Settings => self.t("Settings", "设置"),
+                                InfoDialog::Extensions => {
+                                    self.t("Manage Extensions", "管理扩展")
+                                }
+                                InfoDialog::RemoteServers => {
+                                    self.t("Manage Remote Servers", "管理远程服务器")
+                                }
+                                InfoDialog::PythonShell => {
+                                    self.t("Python Shell", "Python 终端")
+                                }
+                                InfoDialog::CrashReports => {
+                                    self.t("Reported Bugs", "已报告问题")
+                                }
+                                InfoDialog::Processes => {
+                                    if self.process_inject {
+                                        self.t("Inject into Process", "注入进程")
+                                    } else {
+                                        self.t("Attach to Running Instance", "附加到运行实例")
+                                    }
+                                }
                             })
                     )
                     .children(body)
@@ -16055,8 +16519,7 @@ impl Workspace {
             FloatingDock::ApiInspector => self.dock_api_inspector = true,
         }
         self.menu_open = None;
-        self.layout_submenu_open = false;
-        self.recent_submenu_open = false;
+        self.submenu_open = None;
         self.status = Some(
             self.t(
                 "Panel is floating; use Dock to return it.",
@@ -16164,9 +16627,7 @@ impl Workspace {
             "menu-file-save" => "Ctrl+S",
             "menu-file-save-as" => "Ctrl+Shift+S",
             "menu-file-close" => "Ctrl+W",
-            "menu-edit-find" => "Ctrl+F",
-            "menu-edit-prev-action" => "Ctrl+←",
-            "menu-edit-next-action" => "Ctrl+→",
+            "menu-file-launch" => "Ctrl+N",
             _ => "",
         };
         let mut item = div()
@@ -16193,7 +16654,7 @@ impl Workspace {
         }
         item.on_click(cx.listener(move |this, _, window, cx| {
             this.menu_open = None;
-            this.layout_submenu_open = false;
+            this.submenu_open = None;
             action(this, window, cx);
             cx.notify();
         }))
@@ -16223,8 +16684,7 @@ impl Workspace {
             .child(label);
         item.on_click(cx.listener(move |this, _, window, cx| {
             this.menu_open = None;
-            this.layout_submenu_open = false;
-            this.recent_submenu_open = false;
+            this.submenu_open = None;
             action(this, window, cx);
             cx.notify();
         }))
@@ -16236,12 +16696,12 @@ impl Workspace {
         id: &'static str,
         en: &'static str,
         zh: &'static str,
-        checked: bool,
-        action: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+        submenu: MenuSubmenu,
         cx: &mut Context<Workspace>,
     ) -> gpui::AnyElement {
+        let open = self.submenu_open == Some(submenu);
         let label = self.t(en, zh);
-        let text = if checked {
+        let text = if open {
             format!("✓ {label} ▸")
         } else {
             format!("{label} ▸")
@@ -16256,8 +16716,12 @@ impl Workspace {
             .text_sm()
             .hover(|view| view.bg(rgb(0x262626)))
             .child(text)
-            .on_click(cx.listener(move |this, _, window, cx| {
-                action(this, window, cx);
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.submenu_open = if this.submenu_open == Some(submenu) {
+                    None
+                } else {
+                    Some(submenu)
+                };
                 cx.notify();
             }))
             .into_any_element()
@@ -16272,27 +16736,10 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn layout_submenu(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        const SAVE: [(&str, &str, &str); 6] = [
-            ("menu-layout-save-1", "Save Layout 1", "保存布局 1"),
-            ("menu-layout-save-2", "Save Layout 2", "保存布局 2"),
-            ("menu-layout-save-3", "Save Layout 3", "保存布局 3"),
-            ("menu-layout-save-4", "Save Layout 4", "保存布局 4"),
-            ("menu-layout-save-5", "Save Layout 5", "保存布局 5"),
-            ("menu-layout-save-6", "Save Layout 6", "保存布局 6"),
-        ];
-        const LOAD: [(&str, &str, &str); 6] = [
-            ("menu-layout-load-1", "Load Layout 1", "加载布局 1"),
-            ("menu-layout-load-2", "Load Layout 2", "加载布局 2"),
-            ("menu-layout-load-3", "Load Layout 3", "加载布局 3"),
-            ("menu-layout-load-4", "Load Layout 4", "加载布局 4"),
-            ("menu-layout-load-5", "Load Layout 5", "加载布局 5"),
-            ("menu-layout-load-6", "Load Layout 6", "加载布局 6"),
-        ];
-        let mut dropdown = div()
-            .id("layout-submenu")
-            .test_support()
-            .w(px(230.))
+    fn submenu_container(&self, id: &'static str, width: f32) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(id)
+            .w(px(width))
             .bg(rgb(0x0a0a0a))
             .border_1()
             .border_color(rgb(0x333333))
@@ -16301,63 +16748,244 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_1()
-            .child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .text_sm()
-                    .text_color(rgb(0xa1a1aa))
-                    .child(self.t("Save Layout", "保存布局")),
-            );
-        for (index, (id, en, zh)) in SAVE.iter().enumerate() {
-            let slot = index + 1;
-            dropdown = dropdown.child(self.menu_item(
-                id,
-                en,
-                zh,
-                false,
-                move |this, _, cx| {
-                    this.save_layout(slot, cx);
-                    this.layout_submenu_open = false;
-                },
-                cx,
-            ));
-        }
-        dropdown = dropdown
-            .child(self.menu_separator())
-            .child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .text_sm()
-                    .text_color(rgb(0xa1a1aa))
-                    .child(self.t("Load Layout", "加载布局")),
-            );
-        for (index, (id, en, zh)) in LOAD.iter().enumerate() {
-            let slot = index + 1;
-            dropdown = dropdown.child(self.menu_item(
-                id,
-                en,
-                zh,
-                false,
-                move |this, _, cx| {
-                    this.load_layout(slot, cx);
-                    this.layout_submenu_open = false;
-                },
-                cx,
-            ));
-        }
-        dropdown
-            .child(self.menu_separator())
+    }
+
+    fn save_layout_submenu(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        const SLOTS: [(&str, &str, &str); 6] = [
+            ("menu-layout-save-1", "Save Layout 1", "保存布局 1"),
+            ("menu-layout-save-2", "Save Layout 2", "保存布局 2"),
+            ("menu-layout-save-3", "Save Layout 3", "保存布局 3"),
+            ("menu-layout-save-4", "Save Layout 4", "保存布局 4"),
+            ("menu-layout-save-5", "Save Layout 5", "保存布局 5"),
+            ("menu-layout-save-6", "Save Layout 6", "保存布局 6"),
+        ];
+        let mut dropdown = self
+            .submenu_container("save-layout-submenu", 250.)
             .child(self.menu_item(
-                "menu-layout-reset",
-                "Reset Window Layout",
-                "重置窗口布局",
+                "menu-layout-save-default",
+                "Save Default Layout",
+                "保存默认布局",
+                false,
+                |this, _, cx| this.save_layout(0, cx),
+                cx,
+            ))
+            .child(self.menu_separator());
+        for (index, (id, en, zh)) in SLOTS.iter().enumerate() {
+            let slot = index + 1;
+            dropdown = dropdown.child(self.menu_item(
+                id,
+                en,
+                zh,
+                false,
+                move |this, _, cx| this.save_layout(slot, cx),
+                cx,
+            ));
+        }
+        dropdown.into_any_element()
+    }
+
+    fn load_layout_submenu(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        const SLOTS: [(&str, &str, &str); 6] = [
+            ("menu-layout-load-1", "Load Layout 1", "加载布局 1"),
+            ("menu-layout-load-2", "Load Layout 2", "加载布局 2"),
+            ("menu-layout-load-3", "Load Layout 3", "加载布局 3"),
+            ("menu-layout-load-4", "Load Layout 4", "加载布局 4"),
+            ("menu-layout-load-5", "Load Layout 5", "加载布局 5"),
+            ("menu-layout-load-6", "Load Layout 6", "加载布局 6"),
+        ];
+        let mut dropdown = self
+            .submenu_container("load-layout-submenu", 250.)
+            .child(self.menu_item(
+                "menu-layout-load-default",
+                "Load Default Layout",
+                "加载默认布局",
                 false,
                 |this, _, cx| {
-                    this.reset_dock_layout(cx);
-                    this.layout_submenu_open = false;
+                    if this
+                        .settings
+                        .window_layouts
+                        .contains_key(&Settings::layout_key(0))
+                    {
+                        this.load_layout(0, cx);
+                    } else {
+                        this.reset_dock_layout(cx);
+                    }
                 },
+                cx,
+            ))
+            .child(self.menu_separator());
+        for (index, (id, en, zh)) in SLOTS.iter().enumerate() {
+            let slot = index + 1;
+            dropdown = dropdown.child(self.menu_item(
+                id,
+                en,
+                zh,
+                false,
+                move |this, _, cx| this.load_layout(slot, cx),
+                cx,
+            ));
+        }
+        dropdown.into_any_element()
+    }
+
+    fn recent_captures_submenu(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        const IDS: [&str; 10] = [
+            "menu-recent-0",
+            "menu-recent-1",
+            "menu-recent-2",
+            "menu-recent-3",
+            "menu-recent-4",
+            "menu-recent-5",
+            "menu-recent-6",
+            "menu-recent-7",
+            "menu-recent-8",
+            "menu-recent-9",
+        ];
+        let mut dropdown = self
+            .submenu_container("recent-submenu", 400.)
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_sm()
+                    .text_color(rgb(0xa1a1aa))
+                    .child(self.t("Recent Captures", "最近捕获")),
+            );
+        let recents: Vec<PathBuf> = self
+            .settings
+            .recent_captures
+            .iter()
+            .take(IDS.len())
+            .cloned()
+            .collect();
+        if recents.is_empty() {
+            dropdown = dropdown.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_sm()
+                    .text_color(rgb(0x6b6b6b))
+                    .child(self.t("No recent captures", "没有最近捕获")),
+            );
+        } else {
+            for (index, path) in recents.iter().enumerate() {
+                let label = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.display().to_string());
+                let path = path.clone();
+                dropdown = dropdown.child(self.menu_item_dynamic(
+                    IDS[index],
+                    label,
+                    move |this, _, cx| this.open(path.clone(), cx),
+                    cx,
+                ));
+            }
+        }
+        dropdown.into_any_element()
+    }
+
+    fn recent_settings_submenu(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        const IDS: [&str; 10] = [
+            "menu-recent-settings-0",
+            "menu-recent-settings-1",
+            "menu-recent-settings-2",
+            "menu-recent-settings-3",
+            "menu-recent-settings-4",
+            "menu-recent-settings-5",
+            "menu-recent-settings-6",
+            "menu-recent-settings-7",
+            "menu-recent-settings-8",
+            "menu-recent-settings-9",
+        ];
+        let mut dropdown = self
+            .submenu_container("recent-settings-submenu", 400.)
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_sm()
+                    .text_color(rgb(0xa1a1aa))
+                    .child(self.t("Recent Capture Settings", "最近捕获设置")),
+            );
+        let recents: Vec<PathBuf> = self
+            .settings
+            .recent_capture_settings
+            .iter()
+            .take(IDS.len())
+            .cloned()
+            .collect();
+        if recents.is_empty() {
+            dropdown = dropdown.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_sm()
+                    .text_color(rgb(0x6b6b6b))
+                    .child(self.t("No recent capture settings", "没有最近捕获设置")),
+            );
+        } else {
+            for (index, path) in recents.iter().enumerate() {
+                let label = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.display().to_string());
+                let path = path.clone();
+                dropdown = dropdown.child(self.menu_item_dynamic(
+                    IDS[index],
+                    label,
+                    move |this, window, cx| {
+                        this.import_capture_settings_from(&path, Some(window), cx)
+                    },
+                    cx,
+                ));
+            }
+        }
+        dropdown.into_any_element()
+    }
+
+    fn import_submenu(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        self.submenu_container("import-submenu", 260.)
+            .child(self.menu_item(
+                "menu-file-import-settings",
+                "Capture Settings…",
+                "捕获设置…",
+                false,
+                |this, window, cx| this.import_capture_settings(window, cx),
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn export_submenu(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        self.submenu_container("export-submenu", 260.)
+            .child(self.menu_item(
+                "menu-file-export-settings",
+                "Capture Settings…",
+                "捕获设置…",
+                false,
+                |this, _, cx| this.export_capture_settings(cx),
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn reported_bugs_submenu(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        self.submenu_container("reported-bugs-submenu", 280.)
+            .child(self.menu_item(
+                "menu-help-clear-bugs",
+                "Clear Reported Bugs",
+                "清除已报告问题",
+                false,
+                |this, _, cx| this.clear_crash_reports(cx),
+                cx,
+            ))
+            .child(self.menu_item(
+                "menu-help-refresh-bugs",
+                "Refresh Reports",
+                "刷新报告",
+                false,
+                |this, _, cx| this.refresh_crash_reports(cx),
                 cx,
             ))
             .into_any_element()
@@ -16421,89 +17049,87 @@ impl Workspace {
         )
     }
 
-    fn recent_submenu(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        const IDS: [&str; 10] = [
-            "menu-recent-0",
-            "menu-recent-1",
-            "menu-recent-2",
-            "menu-recent-3",
-            "menu-recent-4",
-            "menu-recent-5",
-            "menu-recent-6",
-            "menu-recent-7",
-            "menu-recent-8",
-            "menu-recent-9",
-        ];
-        let mut dropdown = div()
-            .id("recent-submenu")
-            .test_support()
-            .w(px(380.))
-            .bg(rgb(0x0a0a0a))
-            .border_1()
-            .border_color(rgb(0x333333))
-            .rounded_lg()
-            .p_1()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .text_sm()
-                    .text_color(rgb(0xa1a1aa))
-                    .child(self.t("Recent Captures", "最近捕获")),
-            );
-        let recents: Vec<PathBuf> = self
-            .settings
-            .recent_captures
-            .iter()
-            .take(IDS.len())
-            .cloned()
-            .collect();
-        if recents.is_empty() {
-            dropdown = dropdown.child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .text_sm()
-                    .text_color(rgb(0x6b6b6b))
-                    .child(self.t("No recent captures", "没有最近捕获")),
-            );
-        } else {
-            for (index, path) in recents.iter().enumerate() {
-                let label = path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().to_string())
-                    .unwrap_or_else(|| path.display().to_string());
-                let path = path.clone();
-                dropdown = dropdown.child(self.menu_item_dynamic(
-                    IDS[index],
-                    label,
-                    move |this, _, cx| this.open(path.clone(), cx),
-                    cx,
-                ));
-            }
-        }
-        dropdown.into_any_element()
+    fn menu_main_panel_item(
+        &self,
+        id: &'static str,
+        en: &'static str,
+        zh: &'static str,
+        tab: CaptureTab,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let checked = self.tab == tab;
+        self.menu_item(
+            id,
+            en,
+            zh,
+            checked,
+            move |this, _, cx| {
+                this.show_aux_tabs = false;
+                match tab {
+                    CaptureTab::Textures => this.show_textures_tab = true,
+                    CaptureTab::Pipeline => this.show_pipeline_tab = true,
+                    CaptureTab::Mesh => {
+                        this.show_mesh_tab = true;
+                        if this.mesh.info.is_none() {
+                            this.read_mesh(this.mesh.selection, this.mesh.kind, 0, cx);
+                        }
+                    }
+                    _ => {}
+                }
+                this.tab = tab;
+                cx.notify();
+            },
+            cx,
+        )
     }
 
     fn menu_dropdown(&self, menu: MenuBar, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let mut dropdown = div()
-            .id(("menu-dropdown", menu as usize))
-            .test_support()
-            .w(px(260.))
-            .bg(rgb(0x0a0a0a))
-            .border_1()
-            .border_color(rgb(0x333333))
-            .rounded_lg()
-            .p_1()
-            .flex()
-            .flex_col()
-            .gap_1();
+        let mut dropdown = self
+            .submenu_container("menu-dropdown", 290.)
+            .id(("menu-dropdown", menu as usize));
         match menu {
             MenuBar::File => {
                 dropdown = dropdown
+                    .child(self.menu_item(
+                        "menu-file-launch",
+                        "Launch Application…",
+                        "启动应用…",
+                        false,
+                        |this, _, cx| {
+                            if let Some(path) = rfd::FileDialog::new().pick_file() {
+                                this.launch_executable = Some(path.clone());
+                                this.launch_live(path, cx);
+                            }
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-file-attach",
+                        "Attach to Running Instance",
+                        "附加到运行实例",
+                        false,
+                        |this, _, cx| {
+                            this.process_inject = false;
+                            this.refresh_local_processes(cx);
+                            this.info_dialog = Some(InfoDialog::Processes);
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-file-inject",
+                        "Inject into Process",
+                        "注入到进程",
+                        false,
+                        |this, _, cx| {
+                            this.process_inject = true;
+                            this.refresh_local_processes(cx);
+                            this.info_dialog = Some(InfoDialog::Processes);
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_separator())
                     .child(self.menu_item(
                         "menu-file-open",
                         "Open Capture…",
@@ -16519,29 +17145,33 @@ impl Workspace {
                         },
                         cx,
                     ))
-                    .child(self.menu_submenu_item(
-                        "menu-file-recent",
-                        "Open Recent",
-                        "最近捕获",
-                        self.recent_submenu_open,
+                    .child(self.menu_item(
+                        "menu-file-open-options",
+                        "Open Capture with Options…",
+                        "带选项打开捕获…",
+                        false,
                         |this, _, cx| {
-                            this.recent_submenu_open = !this.recent_submenu_open;
-                            cx.notify();
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("RenderDoc", &["rdc", "cap"])
+                                .pick_file()
+                            {
+                                this.open(path, cx);
+                            }
                         },
                         cx,
                     ))
                     .child(self.menu_item(
                         "menu-file-save",
-                        "Save",
-                        "保存",
+                        "Save Capture Inplace",
+                        "原地保存捕获",
                         false,
                         |this, _, cx| this.save_capture_inplace(cx),
                         cx,
                     ))
                     .child(self.menu_item(
                         "menu-file-save-as",
-                        "Save As…",
-                        "另存为…",
+                        "Save Capture As…",
+                        "另存捕获…",
                         false,
                         |this, _, cx| this.save_capture_as(cx),
                         cx,
@@ -16555,6 +17185,36 @@ impl Workspace {
                         cx,
                     ))
                     .child(self.menu_separator())
+                    .child(self.menu_submenu_item(
+                        "menu-file-import",
+                        "Import From…",
+                        "导入自…",
+                        MenuSubmenu::ImportFrom,
+                        cx,
+                    ))
+                    .child(self.menu_submenu_item(
+                        "menu-file-export",
+                        "Export As…",
+                        "导出为…",
+                        MenuSubmenu::ExportAs,
+                        cx,
+                    ))
+                    .child(self.menu_separator())
+                    .child(self.menu_submenu_item(
+                        "menu-file-recent",
+                        "Recent Captures",
+                        "最近捕获",
+                        MenuSubmenu::RecentCaptures,
+                        cx,
+                    ))
+                    .child(self.menu_submenu_item(
+                        "menu-file-recent-settings",
+                        "Recent Capture Settings",
+                        "最近捕获设置",
+                        MenuSubmenu::RecentSettings,
+                        cx,
+                    ))
+                    .child(self.menu_separator())
                     .child(self.menu_item(
                         "menu-file-exit",
                         "Exit",
@@ -16564,85 +17224,82 @@ impl Workspace {
                         cx,
                     ));
             }
-            MenuBar::Edit => {
-                dropdown = dropdown
-                    .child(self.menu_item(
-                        "menu-edit-find",
-                        "Find Events",
-                        "查找事件",
-                        false,
-                        |this, window, cx| {
-                            this.tab = CaptureTab::Events;
-                            this.event_search
-                                .update(cx, |input, cx| input.focus(window, cx));
-                            cx.notify();
-                        },
-                        cx,
-                    ))
-                    .child(self.menu_item(
-                        "menu-edit-clear-filter",
-                        "Clear Event Filter",
-                        "清除事件过滤",
-                        false,
-                        |this, window, cx| {
-                            this.event_search
-                                .update(cx, |input, cx| input.set_value("", window, cx));
-                            this.apply_event_filter(String::new(), cx);
-                        },
-                        cx,
-                    ))
-                    .child(self.menu_item(
-                        "menu-edit-go-to-event",
-                        "Go to Event…",
-                        "跳转到事件…",
-                        false,
-                        |this, _, cx| {
-                            this.tab = CaptureTab::Events;
-                            this.event_path_editing = true;
-                            cx.notify();
-                        },
-                        cx,
-                    ))
-                    .child(self.menu_separator())
-                    .child(self.menu_item(
-                        "menu-edit-prev-action",
-                        "Previous Action",
-                        "上一个动作",
-                        false,
-                        |this, _, cx| this.step_event(false, cx),
-                        cx,
-                    ))
-                    .child(self.menu_item(
-                        "menu-edit-next-action",
-                        "Next Action",
-                        "下一个动作",
-                        false,
-                        |this, _, cx| this.step_event(true, cx),
-                        cx,
-                    ))
-                    .child(self.menu_separator())
-                    .child(self.menu_item(
-                        "menu-edit-reset-layout",
-                        "Reset Window Layout",
-                        "重置窗口布局",
-                        false,
-                        |this, _, cx| this.reset_dock_layout(cx),
-                        cx,
-                    ));
-            }
             MenuBar::Window => {
-                let event_floating = self
-                    .floating_docks
-                    .contains(&FloatingDock::EventBrowser);
-                let api_floating = self
-                    .floating_docks
-                    .contains(&FloatingDock::ApiInspector);
+                let event_browser_active = self.dock_event_browser
+                    && !self
+                        .floating_docks
+                        .contains(&FloatingDock::EventBrowser);
+                let api_inspector_active = self.dock_api_inspector
+                    && !self
+                        .floating_docks
+                        .contains(&FloatingDock::ApiInspector);
                 dropdown = dropdown
+                    .child(self.menu_submenu_item(
+                        "menu-window-save-layout",
+                        "Save Layout",
+                        "保存布局",
+                        MenuSubmenu::SaveLayout,
+                        cx,
+                    ))
+                    .child(self.menu_submenu_item(
+                        "menu-window-load-layout",
+                        "Load Layout",
+                        "加载布局",
+                        MenuSubmenu::LoadLayout,
+                        cx,
+                    ))
+                    .child(self.menu_separator())
+                    .child(self.menu_panel_item(
+                        "menu-window-annotations",
+                        "Annotation Viewer",
+                        "注释查看器",
+                        CaptureTab::Annotations,
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-window-api-inspector",
+                        "API Inspector",
+                        "API 检查器",
+                        api_inspector_active,
+                        |this, _, cx| {
+                            if this
+                                .floating_docks
+                                .contains(&FloatingDock::ApiInspector)
+                            {
+                                this.dock_dock(FloatingDock::ApiInspector, cx);
+                            } else {
+                                this.dock_api_inspector = !this.dock_api_inspector;
+                                cx.notify();
+                            }
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_panel_item(
+                        "menu-window-comments",
+                        "Comments",
+                        "评论",
+                        CaptureTab::Annotations,
+                        cx,
+                    ))
+                    .child(self.menu_panel_item(
+                        "menu-window-counters",
+                        "Counter Viewer",
+                        "计数器查看器",
+                        CaptureTab::Counters,
+                        cx,
+                    ))
+                    .child(self.menu_panel_item(
+                        "menu-window-messages",
+                        "Errors and Warnings",
+                        "错误与警告",
+                        CaptureTab::Messages,
+                        cx,
+                    ))
                     .child(self.menu_item(
                         "menu-window-event-browser",
                         "Event Browser",
                         "事件浏览器",
-                        self.dock_event_browser && !event_floating,
+                        event_browser_active,
                         |this, _, cx| {
                             if this
                                 .floating_docks
@@ -16657,21 +17314,62 @@ impl Workspace {
                         cx,
                     ))
                     .child(self.menu_item(
-                        "menu-window-api-inspector",
-                        "API Inspector",
-                        "API 检查器",
-                        self.dock_api_inspector && !api_floating,
+                        "menu-window-launch",
+                        "Launch Application Window",
+                        "启动应用窗口",
+                        false,
                         |this, _, cx| {
-                            if this
-                                .floating_docks
-                                .contains(&FloatingDock::ApiInspector)
-                            {
-                                this.dock_dock(FloatingDock::ApiInspector, cx);
-                            } else {
-                                this.dock_api_inspector = !this.dock_api_inspector;
-                                cx.notify();
+                            if let Some(path) = rfd::FileDialog::new().pick_file() {
+                                this.launch_executable = Some(path.clone());
+                                this.launch_live(path, cx);
                             }
                         },
+                        cx,
+                    ))
+                    .child(self.menu_main_panel_item(
+                        "menu-window-mesh-preview",
+                        "Mesh Output",
+                        "网格输出",
+                        CaptureTab::Mesh,
+                        cx,
+                    ))
+                    .child(self.menu_main_panel_item(
+                        "menu-window-pipeline",
+                        "Pipeline State",
+                        "管线状态",
+                        CaptureTab::Pipeline,
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-window-python",
+                        "Python Shell",
+                        "Python 终端",
+                        self.info_dialog == Some(InfoDialog::PythonShell),
+                        |this, _, cx| {
+                            this.info_dialog = Some(InfoDialog::PythonShell);
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_panel_item(
+                        "menu-window-resources",
+                        "Resource Inspector",
+                        "资源检查器",
+                        CaptureTab::Resources,
+                        cx,
+                    ))
+                    .child(self.menu_panel_item(
+                        "menu-window-statistics",
+                        "Statistics Viewer",
+                        "统计查看器",
+                        CaptureTab::Statistics,
+                        cx,
+                    ))
+                    .child(self.menu_main_panel_item(
+                        "menu-window-textures",
+                        "Texture Viewer",
+                        "纹理查看器",
+                        CaptureTab::Textures,
                         cx,
                     ))
                     .child(self.menu_item(
@@ -16684,244 +17382,49 @@ impl Workspace {
                             cx.notify();
                         },
                         cx,
-                    ))
-                    .child(self.menu_item(
-                        "menu-window-aux-panels",
-                        "Auxiliary Panels",
-                        "辅助面板",
-                        self.show_aux_tabs,
-                        |this, _, cx| {
-                            this.show_aux_tabs = !this.show_aux_tabs;
-                            cx.notify();
-                        },
-                        cx,
-                    ))
-                    .child(self.menu_item(
-                        "menu-window-float-event-browser",
-                        "Float Event Browser",
-                        "浮动事件浏览器",
-                        event_floating,
-                        |this, _, cx| this.float_dock(FloatingDock::EventBrowser, cx),
-                        cx,
-                    ))
-                    .child(self.menu_item(
-                        "menu-window-float-api-inspector",
-                        "Float API Inspector",
-                        "浮动 API 检查器",
-                        api_floating,
-                        |this, _, cx| this.float_dock(FloatingDock::ApiInspector, cx),
-                        cx,
-                    ))
-                    .child(self.menu_separator())
-                    .child(self.menu_item(
-                        "menu-window-textures",
-                        "Texture Viewer",
-                        "纹理查看器",
-                        self.show_textures_tab,
-                        |this, _, cx| {
-                            this.show_textures_tab = !this.show_textures_tab;
-                            this.ensure_visible_main_tab();
-                            cx.notify();
-                        },
-                        cx,
-                    ))
-                    .child(self.menu_item(
-                        "menu-window-pipeline",
-                        "Pipeline State",
-                        "管线状态",
-                        self.show_pipeline_tab,
-                        |this, _, cx| {
-                            this.show_pipeline_tab = !this.show_pipeline_tab;
-                            this.ensure_visible_main_tab();
-                            cx.notify();
-                        },
-                        cx,
-                    ))
-                    .child(self.menu_item(
-                        "menu-window-mesh-preview",
-                        "Mesh Preview",
-                        "网格预览",
-                        self.show_mesh_tab,
-                        |this, _, cx| {
-                            this.show_mesh_tab = !this.show_mesh_tab;
-                            this.ensure_visible_main_tab();
-                            cx.notify();
-                        },
-                        cx,
-                    ))
-                    .child(self.menu_item(
-                        "menu-window-capture-dialog",
-                        "Capture Dialog",
-                        "捕获对话框",
-                        self.show_capture_dialog_tab,
-                        |this, _, cx| {
-                            this.show_capture_dialog_tab = !this.show_capture_dialog_tab;
-                            this.ensure_visible_main_tab();
-                            cx.notify();
-                        },
-                        cx,
-                    ))
-                    .child(self.menu_separator())
-                    .child(self.menu_panel_item(
-                        "menu-window-events",
-                        "Events",
-                        "事件",
-                        CaptureTab::Events,
-                        cx,
-                    ))
-                    .child(self.menu_panel_item(
-                        "menu-window-api-calls",
-                        "API Calls",
-                        "API 调用",
-                        CaptureTab::ApiCalls,
-                        cx,
-                    ))
-                    .child(self.menu_panel_item(
-                        "menu-window-parameters",
-                        "Parameters",
-                        "参数",
-                        CaptureTab::Parameters,
-                        cx,
-                    ))
-                    .child(self.menu_panel_item(
-                        "menu-window-buffers",
-                        "Buffers",
-                        "缓冲区",
-                        CaptureTab::Buffers,
-                        cx,
-                    ))
-                    .child(self.menu_panel_item(
-                        "menu-window-shaders",
-                        "Shaders",
-                        "着色器",
-                        CaptureTab::Shaders,
-                        cx,
-                    ))
-                    .child(self.menu_panel_item(
-                        "menu-window-vertex-input",
-                        "Vertex Input",
-                        "顶点输入",
-                        CaptureTab::VertexInput,
-                        cx,
-                    ))
-                    .child(self.menu_panel_item(
-                        "menu-window-resources",
-                        "Resources",
-                        "资源",
-                        CaptureTab::Resources,
-                        cx,
-                    ))
-                    .child(self.menu_panel_item(
-                        "menu-window-messages",
-                        "Messages",
-                        "调试消息",
-                        CaptureTab::Messages,
-                        cx,
-                    ))
-                    .child(self.menu_panel_item(
-                        "menu-window-shader-messages",
-                        "Shader Messages",
-                        "着色器消息",
-                        CaptureTab::ShaderMessages,
-                        cx,
-                    ))
-                    .child(self.menu_panel_item(
-                        "menu-window-statistics",
-                        "Statistics",
-                        "统计",
-                        CaptureTab::Statistics,
-                        cx,
-                    ))
-                    .child(self.menu_panel_item(
-                        "menu-window-counters",
-                        "GPU Counters",
-                        "GPU 计数器",
-                        CaptureTab::Counters,
-                        cx,
-                    ))
-                    .child(self.menu_panel_item(
-                        "menu-window-descriptors",
-                        "Descriptors",
-                        "描述符",
-                        CaptureTab::Descriptors,
-                        cx,
-                    ))
-                    .child(self.menu_panel_item(
-                        "menu-window-annotations",
-                        "Annotations",
-                        "注释与书签",
-                        CaptureTab::Annotations,
-                        cx,
-                    ))
-                    .child(self.menu_separator())
-                    .child(self.menu_submenu_item(
-                        "menu-window-layouts",
-                        "Layouts",
-                        "布局",
-                        self.layout_submenu_open,
-                        |this, _, cx| {
-                            this.layout_submenu_open = !this.layout_submenu_open;
-                            cx.notify();
-                        },
-                        cx,
-                    ))
-                    .child(self.menu_item(
-                        "menu-window-reset-layout",
-                        "Reset Window Layout",
-                        "重置窗口布局",
-                        false,
-                        |this, _, cx| this.reset_dock_layout(cx),
-                        cx,
                     ));
             }
-            MenuBar::Help => {
+            MenuBar::Tools => {
                 dropdown = dropdown
                     .child(self.menu_item(
-                        "menu-help-about",
-                        "About RenderDocX",
-                        "关于 RenderDocX",
+                        "menu-tools-symbols",
+                        "Resolve Symbols",
+                        "解析符号",
                         false,
                         |this, _, cx| {
-                            this.status = Some(format!(
-                                "RenderDocX {} · Rust + GPUI · RenderDoc-compatible replay",
-                                env!("CARGO_PKG_VERSION")
-                            ));
-                            cx.notify();
+                            if this.selected.is_some() {
+                                this.read_event_callstack(true, cx);
+                            } else {
+                                this.status = Some(
+                                    this.t(
+                                        "Select an event before resolving symbols.",
+                                        "请先选择一个事件再解析符号。",
+                                    )
+                                    .to_owned(),
+                                );
+                                cx.notify();
+                            }
                         },
                         cx,
                     ))
                     .child(self.menu_item(
-                        "menu-help-log",
-                        "Open Log",
-                        "打开日志",
+                        "menu-tools-recompress",
+                        "Recompress Capture",
+                        "重新压缩捕获",
                         false,
-                        |this, _, cx| this.open_log(cx),
+                        |this, _, cx| this.recompress_capture(cx),
                         cx,
                     ))
                     .child(self.menu_item(
-                        "menu-help-docs",
-                        "RenderDoc Documentation",
-                        "RenderDoc 文档",
-                        false,
-                        |this, _, cx| {
-                            this.status = Some(
-                                "https://renderdoc.org/docs/".to_owned(),
-                            );
-                            cx.notify();
-                        },
-                        cx,
-                    ))
-                    .child(self.menu_separator())
-                    .child(self.menu_item(
-                        "menu-help-tips",
-                        "Tips",
-                        "使用提示",
+                        "menu-tools-embed",
+                        "Embed External Files",
+                        "嵌入外部文件",
                         false,
                         |this, _, cx| {
                             this.status = Some(
                                 this.t(
-                                    "Tip: drag the dock splitter to resize; use Window > Float to detach a panel.",
-                                    "提示：拖动分栏可调整宽度；使用 Window > 浮动 可分离面板。",
+                                    "Embedding external files is not available for this capture.",
+                                    "此捕获不支持嵌入外部文件。",
                                 )
                                 .to_owned(),
                             );
@@ -16930,15 +17433,171 @@ impl Workspace {
                         cx,
                     ))
                     .child(self.menu_item(
-                        "menu-help-shortcuts",
-                        "Keyboard Shortcuts",
-                        "键盘快捷键",
+                        "menu-tools-remove-external",
+                        "Remove External Files",
+                        "移除外部文件",
                         false,
                         |this, _, cx| {
                             this.status = Some(
-                                "Ctrl+O / Ctrl+S / Ctrl+Shift+S / Ctrl+F / F3 / Shift+F3"
+                                this.t(
+                                    "Removing external files is not available for this capture.",
+                                    "此捕获不支持移除外部文件。",
+                                )
+                                .to_owned(),
+                            );
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_separator())
+                    .child(self.menu_item(
+                        "menu-tools-replay-loop",
+                        "Start Replay Loop",
+                        "开始循环回放",
+                        self.replay_loop.is_some(),
+                        |this, _, cx| this.toggle_replay_loop(cx),
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-tools-rgp-create",
+                        "Create RGP Profile",
+                        "创建 RGP 配置",
+                        false,
+                        |this, _, cx| this.create_rgp_profile(cx),
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-tools-rgp-open",
+                        "Open RGP Profile",
+                        "打开 RGP 配置",
+                        false,
+                        |this, _, cx| this.extract_rgp_profile(cx),
+                        cx,
+                    ))
+                    .child(self.menu_separator())
+                    .child(self.menu_item(
+                        "menu-tools-settings",
+                        "Settings",
+                        "设置",
+                        self.info_dialog == Some(InfoDialog::Settings),
+                        |this, _, cx| {
+                            this.info_dialog = Some(InfoDialog::Settings);
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-tools-extensions",
+                        "Manage Extensions",
+                        "管理扩展",
+                        self.info_dialog == Some(InfoDialog::Extensions),
+                        |this, _, cx| {
+                            this.refresh_extensions(cx);
+                            this.info_dialog = Some(InfoDialog::Extensions);
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-tools-remote",
+                        "Manage Remote Servers",
+                        "管理远程服务器",
+                        self.info_dialog == Some(InfoDialog::RemoteServers),
+                        |this, _, cx| {
+                            this.info_dialog = Some(InfoDialog::RemoteServers);
+                            cx.notify();
+                        },
+                        cx,
+                    ));
+            }
+            MenuBar::Help => {
+                dropdown = dropdown
+                    .child(self.menu_item(
+                        "menu-help-docs",
+                        "View Documentation",
+                        "查看文档",
+                        false,
+                        |this, _, cx| {
+                            this.status = Some("https://renderdoc.org/docs/".to_owned());
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-help-tips",
+                        "Show Tips",
+                        "显示提示",
+                        false,
+                        |this, _, cx| {
+                            this.info_dialog = Some(InfoDialog::Tips);
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_separator())
+                    .child(self.menu_item(
+                        "menu-help-send-report",
+                        "Send Error Report",
+                        "发送错误报告",
+                        false,
+                        |this, _, cx| {
+                            this.refresh_crash_reports(cx);
+                            this.info_dialog = Some(InfoDialog::CrashReports);
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_submenu_item(
+                        "menu-help-reported-bugs",
+                        "Reported Bugs",
+                        "已报告问题",
+                        MenuSubmenu::ReportedBugs,
+                        cx,
+                    ))
+                    .child(self.menu_separator())
+                    .child(self.menu_item(
+                        "menu-help-updates",
+                        "Check for Updates",
+                        "检查更新",
+                        false,
+                        |this, _, cx| this.check_for_updates(false, cx),
+                        cx,
+                    ))
+                    .child(self.menu_separator())
+                    .child(self.menu_item(
+                        "menu-help-github",
+                        "Source on GitHub",
+                        "GitHub 源码",
+                        false,
+                        |this, _, cx| {
+                            this.status = Some(
+                                "https://github.com/neko233-com/RenderDocX".to_owned(),
+                            );
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-help-downloads",
+                        "Build Release Downloads",
+                        "发布版本下载",
+                        false,
+                        |this, _, cx| {
+                            this.status = Some(
+                                "https://github.com/neko233-com/RenderDocX/releases"
                                     .to_owned(),
                             );
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-help-about",
+                        "About RenderDocX",
+                        "关于 RenderDocX",
+                        false,
+                        |this, _, cx| {
+                            this.info_dialog = Some(InfoDialog::About);
                             cx.notify();
                         },
                         cx,
@@ -16954,9 +17613,29 @@ impl Workspace {
         };
         let left = match menu {
             MenuBar::File => 112.0,
-            MenuBar::Edit => 153.0,
-            MenuBar::Window => 194.0,
-            MenuBar::Help => 254.0,
+            MenuBar::Window => 153.0,
+            MenuBar::Tools => 214.0,
+            MenuBar::Help => 264.0,
+        };
+        let submenu = match (menu, self.submenu_open) {
+            (MenuBar::File, Some(MenuSubmenu::RecentCaptures)) => {
+                Some(self.recent_captures_submenu(cx))
+            }
+            (MenuBar::File, Some(MenuSubmenu::RecentSettings)) => {
+                Some(self.recent_settings_submenu(cx))
+            }
+            (MenuBar::File, Some(MenuSubmenu::ImportFrom)) => Some(self.import_submenu(cx)),
+            (MenuBar::File, Some(MenuSubmenu::ExportAs)) => Some(self.export_submenu(cx)),
+            (MenuBar::Window, Some(MenuSubmenu::SaveLayout)) => {
+                Some(self.save_layout_submenu(cx))
+            }
+            (MenuBar::Window, Some(MenuSubmenu::LoadLayout)) => {
+                Some(self.load_layout_submenu(cx))
+            }
+            (MenuBar::Help, Some(MenuSubmenu::ReportedBugs)) => {
+                Some(self.reported_bugs_submenu(cx))
+            }
+            _ => None,
         };
         div()
             .absolute()
@@ -16975,8 +17654,7 @@ impl Workspace {
                         gpui::MouseButton::Left,
                         cx.listener(|this, _, _, cx| {
                             this.menu_open = None;
-                            this.layout_submenu_open = false;
-                            this.recent_submenu_open = false;
+                            this.submenu_open = None;
                             cx.notify();
                         }),
                     ),
@@ -16992,30 +17670,17 @@ impl Workspace {
                     )
                     .child(self.menu_dropdown(menu, cx)),
             )
-            .when(menu == MenuBar::File && self.recent_submenu_open, |view| {
+            .when_some(submenu, |view, submenu| {
                 view.child(
                     div()
                         .absolute()
                         .top(px(44.))
-                        .left(px(left + 260.))
+                        .left(px(left + 290.))
                         .on_mouse_down(
                             gpui::MouseButton::Left,
                             cx.listener(|_, _, _, cx| cx.stop_propagation()),
                         )
-                        .child(self.recent_submenu(cx)),
-                )
-            })
-            .when(menu == MenuBar::Window && self.layout_submenu_open, |view| {
-                view.child(
-                    div()
-                        .absolute()
-                        .top(px(44.))
-                        .left(px(left + 260.))
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            cx.listener(|_, _, _, cx| cx.stop_propagation()),
-                        )
-                        .child(self.layout_submenu(cx)),
+                        .child(submenu),
                 )
             })
             .into_any_element()
@@ -17024,8 +17689,8 @@ impl Workspace {
     fn menu_bar_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let menus = [
             (MenuBar::File, "File", "文件"),
-            (MenuBar::Edit, "Edit", "编辑"),
             (MenuBar::Window, "Window", "窗口"),
+            (MenuBar::Tools, "Tools", "工具"),
             (MenuBar::Help, "Help", "帮助"),
         ];
         let mut bar = div()
@@ -17055,8 +17720,8 @@ impl Workspace {
             let active = self.menu_open == Some(menu);
             let menu_id = match menu {
                 MenuBar::File => "menu-file",
-                MenuBar::Edit => "menu-edit",
                 MenuBar::Window => "menu-window",
+                MenuBar::Tools => "menu-tools",
                 MenuBar::Help => "menu-help",
             };
             let item = div().relative().child(
@@ -17077,8 +17742,7 @@ impl Workspace {
                         } else {
                             Some(menu)
                         };
-                        this.layout_submenu_open = false;
-                        this.recent_submenu_open = false;
+                        this.submenu_open = None;
                         cx.notify();
                     })),
             );
@@ -17300,31 +17964,6 @@ impl Workspace {
                 });
             })
             .into_any_element()
-    }
-
-    fn ensure_visible_main_tab(&mut self) {
-        let visible = match self.tab {
-            CaptureTab::Textures => self.show_textures_tab,
-            CaptureTab::Pipeline => self.show_pipeline_tab,
-            CaptureTab::Mesh => self.show_mesh_tab,
-            CaptureTab::CaptureDialog => self.show_capture_dialog_tab,
-            _ => true,
-        };
-        if visible {
-            return;
-        }
-        if self.show_textures_tab {
-            self.tab = CaptureTab::Textures;
-        } else if self.show_pipeline_tab {
-            self.tab = CaptureTab::Pipeline;
-        } else if self.show_mesh_tab {
-            self.tab = CaptureTab::Mesh;
-        } else if self.show_capture_dialog_tab {
-            self.tab = CaptureTab::CaptureDialog;
-        } else {
-            self.show_textures_tab = true;
-            self.tab = CaptureTab::Textures;
-        }
     }
 
     fn details_splitter(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -23319,23 +23958,6 @@ impl Workspace {
                                     .px_3()
                                     .py_2()
                                     .children(main_tab_buttons)
-                                    .child(button(
-                                        "window-menu",
-                                        self.t("Window", "窗口"),
-                                        self.show_aux_tabs,
-                                        |this, cx| {
-                                            this.show_aux_tabs = !this.show_aux_tabs;
-                                            cx.notify();
-                                        },
-                                        cx,
-                                    ))
-                                    .child(
-                                        div()
-                                            .self_center()
-                                            .text_sm()
-                                            .text_color(rgb(0xa1a1aa))
-                                            .child(count.to_string()),
-                                    ),
                             )
                             .when(self.show_aux_tabs, |view| {
                                 view.child(
@@ -25715,7 +26337,7 @@ fn main() {
                         event_find,
                         selected: None,
                         pipeline: None,
-                        tab: CaptureTab::Events,
+                        tab: CaptureTab::Textures,
                         dock_left_ratio: 0.25,
                         dock_api_ratio: 0.7,
                         dock_details_ratio: 0.72,
@@ -25733,8 +26355,8 @@ fn main() {
                         main_tab_order: standard_main_tab_order(),
                         aux_tab_order: standard_aux_tab_order(),
                         menu_open: None,
-                        layout_submenu_open: false,
-                        recent_submenu_open: false,
+                        submenu_open: None,
+                        process_inject: false,
                         floating_docks: Vec::new(),
                         floating_windows: Vec::new(),
                         dock_right: Vec::new(),
@@ -26647,8 +27269,8 @@ mod ui_tests {
                         main_tab_order: standard_main_tab_order(),
                         aux_tab_order: standard_aux_tab_order(),
                         menu_open: None,
-                        layout_submenu_open: false,
-                        recent_submenu_open: false,
+                        submenu_open: None,
+                        process_inject: false,
                         floating_docks: Vec::new(),
                         floating_windows: Vec::new(),
                         dock_right: Vec::new(),
@@ -27501,8 +28123,8 @@ mod ui_tests {
                         main_tab_order: standard_main_tab_order(),
                         aux_tab_order: standard_aux_tab_order(),
                         menu_open: None,
-                        layout_submenu_open: false,
-                        recent_submenu_open: false,
+                        submenu_open: None,
+                        process_inject: false,
                         floating_docks: Vec::new(),
                         floating_windows: Vec::new(),
                         dock_right: Vec::new(),
@@ -34648,7 +35270,7 @@ mod ui_tests {
             assert!(window.find("pipeline-tab").visible());
             assert!(window.find("mesh-tab").visible());
             assert!(window.find("capture-dialog-tab").visible());
-            assert!(window.find("window-menu").visible());
+            assert!(window.find("menu-window").visible());
             window.click("menu-window", cx);
         })
         .unwrap();
@@ -34661,23 +35283,10 @@ mod ui_tests {
         .unwrap();
         cx.run_until_parked();
         cx.update(|cx| {
-            assert!(!view.read(cx).show_textures_tab);
-        });
-        cx.update_window(handle.into(), |_, window, cx| {
-            window.render_frame(cx);
-            assert!(window.try_find("textures-tab").is_none());
-            window.click("menu-window", cx);
-        })
-        .unwrap();
-        cx.run_until_parked();
-        cx.update_window(handle.into(), |_, window, cx| {
-            window.render_frame(cx);
-            window.click("menu-window-textures", cx);
-        })
-        .unwrap();
-        cx.run_until_parked();
-        cx.update(|cx| {
-            assert!(view.read(cx).show_textures_tab);
+            let view = view.read(cx);
+            assert_eq!(view.tab, CaptureTab::Textures);
+            assert!(view.show_textures_tab);
+            assert!(!view.show_aux_tabs);
         });
         let before_order = cx.update(|cx| view.read(cx).main_tab_order.clone());
         cx.update_window(handle.into(), |_, window, cx| {
@@ -34733,9 +35342,14 @@ mod ui_tests {
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(window.find("capture-dialog-panel").visible());
-            window.click("window-menu", cx);
         })
         .unwrap();
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.show_aux_tabs = true;
+                cx.notify();
+            });
+        });
         cx.run_until_parked();
         let before_aux = cx.update(|cx| view.read(cx).aux_tab_order.clone());
         cx.update_window(handle.into(), |_, window, cx| {
@@ -34774,7 +35388,7 @@ mod ui_tests {
             );
         });
 
-        // Real menu bar: File/Edit/Window/Help with dropdown actions.
+        // Real menu bar: File/Window/Tools/Help with dropdown actions.
         cx.update(|cx| {
             view.update(cx, |view, cx| {
                 view.settings
@@ -34785,8 +35399,8 @@ mod ui_tests {
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(window.find("menu-file").visible());
-            assert!(window.find("menu-edit").visible());
             assert!(window.find("menu-window").visible());
+            assert!(window.find("menu-tools").visible());
             assert!(window.find("menu-help").visible());
             window.click("menu-file", cx);
         })
@@ -34812,16 +35426,17 @@ mod ui_tests {
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(window.try_find("menu-file-open").is_none());
-            window.click("menu-edit", cx);
+            window.click("menu-tools", cx);
         })
         .unwrap();
         cx.run_until_parked();
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            assert!(window.find("menu-edit-go-to-event").visible());
-            assert!(window.find("menu-edit-prev-action").visible());
-            assert!(window.find("menu-edit-next-action").visible());
-            window.click("menu-edit", cx);
+            assert!(window.find("menu-tools-recompress").visible());
+            assert!(window.find("menu-tools-replay-loop").visible());
+            assert!(window.find("menu-tools-settings").visible());
+            assert!(window.find("menu-tools-extensions").visible());
+            window.click("menu-tools", cx);
         })
         .unwrap();
         cx.run_until_parked();
@@ -34833,19 +35448,21 @@ mod ui_tests {
         cx.run_until_parked();
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            assert!(window.find("menu-window-float-event-browser").visible());
-            assert!(window.find("menu-window-events").visible());
-            assert!(window.find("menu-window-buffers").visible());
+            assert!(window.find("menu-window-event-browser").visible());
             assert!(window.find("menu-window-annotations").visible());
-            assert!(window.find("menu-window-layouts").visible());
-            window.click("menu-window-layouts", cx);
+            assert!(window.find("menu-window-counters").visible());
+            assert!(window.find("menu-window-resources").visible());
+            assert!(window.find("menu-window-textures").visible());
+            assert!(window.find("menu-window-save-layout").visible());
+            assert!(window.find("menu-window-load-layout").visible());
+            window.click("menu-window-save-layout", cx);
         })
         .unwrap();
         cx.run_until_parked();
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(window.find("menu-layout-save-1").visible());
-            assert!(window.find("menu-layout-load-1").visible());
+            assert!(window.find("menu-layout-save-default").visible());
             window.click("menu-layout-save-1", cx);
         })
         .unwrap();
@@ -34866,9 +35483,24 @@ mod ui_tests {
         cx.run_until_parked();
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            window.click("menu-window-buffers", cx);
+            window.click("menu-window-load-layout", cx);
         })
         .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("menu-layout-load-1").visible());
+            assert!(window.find("menu-layout-load-default").visible());
+            window.click("menu-window", cx);
+        })
+        .unwrap();
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.tab = CaptureTab::Buffers;
+                view.show_aux_tabs = true;
+                cx.notify();
+            });
+        });
         cx.run_until_parked();
         cx.update(|cx| {
             let view = view.read(cx);
@@ -34877,13 +35509,7 @@ mod ui_tests {
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            window.click("menu-window", cx);
-        })
-        .unwrap();
-        cx.run_until_parked();
-        cx.update_window(handle.into(), |_, window, cx| {
-            window.render_frame(cx);
-            window.click("menu-window-float-event-browser", cx);
+            window.click("dock-float-event-browser", cx);
         })
         .unwrap();
         cx.run_until_parked();
@@ -34938,14 +35564,19 @@ mod ui_tests {
         .unwrap();
         cx.run_until_parked();
         cx.update(|cx| {
-            assert!(
-                view.read(cx)
-                    .status
-                    .as_deref()
-                    .is_some_and(|status| status.contains("RenderDocX")),
-                "Help > About must report the application identity"
+            assert_eq!(
+                view.read(cx).info_dialog,
+                Some(InfoDialog::About),
+                "Help > About must open the About dialog"
             );
         });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("info-panel").visible());
+            window.click("info-close", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
 
         cx.update(|cx| {
             view.update(cx, |view, cx| {
