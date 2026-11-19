@@ -1165,6 +1165,7 @@ struct Workspace {
     viewer_focus: gpui::FocusHandle,
     capture_focus: gpui::FocusHandle,
     capture_focus_initialized: bool,
+    show_title_bar: bool,
     rdc_inspect: Option<(PathBuf, renderdocx::rdc_file::RdcFile)>,
     sd_inspect: Vec<String>,
     sd_hex_input: Entity<TextareaState>,
@@ -18113,6 +18114,7 @@ impl Workspace {
                 .min_h_0()
                 .flex()
                 .flex_col()
+                .overflow_hidden()
                 .track_focus(&self.event_focus)
                 .on_mouse_down(
                     gpui::MouseButton::Left,
@@ -23367,7 +23369,7 @@ impl Workspace {
                                 },
                             )
                             .when(self.tab == CaptureTab::Events, |view| view.child(
-                                div().id("event-columns-header").test_support().h(px(24.)).px_3().flex().items_center().text_sm().text_color(rgb(0xa1a1aa)).bg(rgb(0x1a1a1a))
+                                div().id("event-columns-header").test_support().h(px(24.)).flex_none().mb(px(6.)).px_3().flex().items_center().text_sm().text_color(rgb(0xa1a1aa)).bg(rgb(0x1a1a1a))
                                     .child(div().w(px(22.)).flex_none())
                                     .child(div().flex_1().min_w_0().flex().items_center().gap_3()
                                         .when(self.settings.event_columns.event_id, |row| row.child(div().id("event-header-eid").test_support().w(px(108.)).flex_none().child("EID")))
@@ -23466,6 +23468,35 @@ fn button(
     }
 }
 
+fn with_title_bar(show: bool, content: gpui::AnyElement) -> gpui::AnyElement {
+    if !show {
+        return content;
+    }
+    div()
+        .size_full()
+        .bg(rgb(0x000000))
+        .text_color(rgb(0xededed))
+        .flex()
+        .flex_col()
+        .child(
+            gpui::component::TitleBar::new().child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(0xededed))
+                            .child("RenderDocX"),
+                    ),
+            ),
+        )
+        .child(div().flex_1().min_h_0().child(content))
+        .into_any_element()
+}
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.pending_launch_inputs.is_some() {
@@ -23493,14 +23524,17 @@ impl Render for Workspace {
         if self.snapshot.is_some() {
             self.schedule_auto_texture_fit(window, cx);
             let overlay = self.info_overlay(cx);
-            return div()
-                .relative()
-                .size_full()
-                .child(self.capture_view(window, cx))
-                .children(overlay)
-                .children(self.constant_buffer_overlay(cx))
-                .children(self.log_panel(cx))
-                .into_any_element();
+            return with_title_bar(
+                self.show_title_bar,
+                div()
+                    .relative()
+                    .size_full()
+                    .child(self.capture_view(window, cx))
+                    .children(overlay)
+                    .children(self.constant_buffer_overlay(cx))
+                    .children(self.log_panel(cx))
+                    .into_any_element(),
+            );
         }
         let title = self.t(
             "A clearer view of every frame.",
@@ -23720,7 +23754,7 @@ impl Render for Workspace {
         let live_targets = self.live_targets.clone();
         let status = self.status.clone();
 
-        div()
+        let content = div()
             .id("home-scroll")
             .relative()
             .test_support()
@@ -24786,7 +24820,8 @@ impl Render for Workspace {
             .children(self.info_overlay(cx))
             .children(self.constant_buffer_overlay(cx))
             .children(self.log_panel(cx))
-            .into_any_element()
+            .into_any_element();
+        with_title_bar(self.show_title_bar, content)
     }
 }
 
@@ -24826,7 +24861,7 @@ fn main() {
             gpui_kit::open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    ..Default::default()
+                    ..gpui::component::TitleBar::window_options()
                 },
                 cx,
                 |window, cx| {
@@ -25191,6 +25226,7 @@ fn main() {
                         viewer_focus: cx.focus_handle(),
                         capture_focus: cx.focus_handle(),
                         capture_focus_initialized: false,
+                        show_title_bar: true,
                         rdc_inspect: None,
                         sd_inspect: Vec::new(),
                         sd_hex_input,
@@ -26093,6 +26129,7 @@ mod ui_tests {
                         viewer_focus: cx.focus_handle(),
                         capture_focus: cx.focus_handle(),
                         capture_focus_initialized: false,
+                        show_title_bar: false,
                         rdc_inspect: None,
                         sd_inspect: Vec::new(),
                         sd_hex_input,
@@ -26935,6 +26972,7 @@ mod ui_tests {
                         viewer_focus: cx.focus_handle(),
                         capture_focus: cx.focus_handle(),
                         capture_focus_initialized: false,
+                        show_title_bar: false,
                         rdc_inspect: None,
                         sd_inspect: Vec::new(),
                         sd_hex_input,
