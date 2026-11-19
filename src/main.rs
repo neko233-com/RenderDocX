@@ -1048,6 +1048,7 @@ struct Workspace {
     bottom_drag_y: Option<(f32, f32)>,
     api_stack_drag_y: Option<(f32, f32)>,
     show_aux_tabs: bool,
+    show_event_columns: bool,
     show_textures_tab: bool,
     show_pipeline_tab: bool,
     show_mesh_tab: bool,
@@ -17856,6 +17857,7 @@ impl Workspace {
         let filter_label = self.t("Filter", "筛选");
         let bookmarks_label = self.t("Bookmarks", "书签");
         let times_label = self.t("Times", "耗时");
+        let columns_label = self.t("Columns", "列");
         let breadcrumb = self
             .selected
             .and_then(|index| {
@@ -17921,6 +17923,7 @@ impl Workspace {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap_1()
                     .px_2()
@@ -17969,8 +17972,90 @@ impl Workspace {
                         self.event_tree.has_durations(),
                         |this, cx| this.collect_event_times(cx),
                         cx,
+                    ))
+                    .child(toggle_button(
+                        "dock-event-columns",
+                        columns_label,
+                        self.show_event_columns,
+                        |this, cx| {
+                            this.show_event_columns = !this.show_event_columns;
+                            cx.notify();
+                        },
+                        cx,
                     )),
             )
+            .when(self.show_event_columns, |view| {
+                view.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_1()
+                        .px_2()
+                        .py_1()
+                        .border_b_1()
+                        .border_color(rgb(0x1f1f1f))
+                        .child(toggle_button(
+                            "dock-event-column-eid",
+                            self.t("EID", "事件 ID"),
+                            self.settings.event_columns.event_id,
+                            |this, cx| {
+                                this.settings.event_columns.event_id =
+                                    !this.settings.event_columns.event_id;
+                                this.save();
+                                cx.notify();
+                            },
+                            cx,
+                        ))
+                        .child(toggle_button(
+                            "dock-event-column-action",
+                            self.t("Action", "操作"),
+                            self.settings.event_columns.action,
+                            |this, cx| {
+                                this.settings.event_columns.action =
+                                    !this.settings.event_columns.action;
+                                this.save();
+                                cx.notify();
+                            },
+                            cx,
+                        ))
+                        .child(toggle_button(
+                            "dock-event-column-name",
+                            self.t("Event", "事件"),
+                            self.settings.event_columns.name,
+                            |this, cx| {
+                                this.settings.event_columns.name =
+                                    !this.settings.event_columns.name;
+                                this.save();
+                                cx.notify();
+                            },
+                            cx,
+                        ))
+                        .child(toggle_button(
+                            "dock-event-column-annotation",
+                            self.t("Annotation", "注释"),
+                            self.settings.event_columns.annotation,
+                            |this, cx| {
+                                this.settings.event_columns.annotation =
+                                    !this.settings.event_columns.annotation;
+                                this.save();
+                                cx.notify();
+                            },
+                            cx,
+                        ))
+                        .child(toggle_button(
+                            "dock-event-column-duration",
+                            self.t("Duration", "耗时"),
+                            self.settings.event_columns.duration,
+                            |this, cx| {
+                                this.settings.event_columns.duration =
+                                    !this.settings.event_columns.duration;
+                                this.save();
+                                cx.notify();
+                            },
+                            cx,
+                        )),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -20454,6 +20539,11 @@ impl Workspace {
             .status
             .clone()
             .unwrap_or_else(|| self.t("Ready", "就绪").to_owned());
+        let busy = self.replay_pending
+            || self.export_pending
+            || self.resource_pending
+            || self.event_filter_pending.is_some()
+            || self.event_find_pending.is_some();
         div()
             .id("status-bar")
             .test_support()
@@ -20470,7 +20560,24 @@ impl Workspace {
             .text_xs()
             .text_color(rgb(0xa1a1aa))
             .child(div().id("status-text").test_support().child(text))
-            .child(format!("RenderDocX {}", env!("CARGO_PKG_VERSION")))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .when(busy, |row| {
+                        row.child(
+                            div()
+                                .id("status-progress")
+                                .test_support()
+                                .h(px(3.))
+                                .w(px(120.))
+                                .rounded_full()
+                                .bg(rgb(0x3291ff)),
+                        )
+                    })
+                    .child(format!("RenderDocX {}", env!("CARGO_PKG_VERSION"))),
+            )
             .into_any_element()
     }
 
@@ -28876,6 +28983,7 @@ fn main() {
                         bottom_drag_y: None,
                         api_stack_drag_y: None,
                         show_aux_tabs: cfg!(test),
+                        show_event_columns: false,
                         show_textures_tab: true,
                         show_pipeline_tab: true,
                         show_mesh_tab: true,
@@ -29808,6 +29916,7 @@ mod ui_tests {
                         bottom_drag_y: None,
                         api_stack_drag_y: None,
                         show_aux_tabs: cfg!(test),
+                        show_event_columns: false,
                         show_textures_tab: true,
                         show_pipeline_tab: true,
                         show_mesh_tab: true,
@@ -30680,6 +30789,7 @@ mod ui_tests {
                         bottom_drag_y: None,
                         api_stack_drag_y: None,
                         show_aux_tabs: cfg!(test),
+                        show_event_columns: false,
                         show_textures_tab: true,
                         show_pipeline_tab: true,
                         show_mesh_tab: true,
@@ -37636,6 +37746,7 @@ mod ui_tests {
 
         // RenderDoc default dock layout: left Event Browser + API Inspector,
         // main capture panel on the right.
+        let columns_before = cx.update(|cx| view.read(cx).settings.event_columns.event_id);
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(window.find("dock-left").visible());
@@ -37662,6 +37773,24 @@ mod ui_tests {
             );
             window.render_frame(cx);
             window.click("dock-event-2", cx);
+            window.click("dock-event-columns", cx);
+            window.render_frame(cx);
+            assert!(window.find("dock-event-column-eid").visible());
+            window.click("dock-event-column-eid", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_ne!(
+                view.read(cx).settings.event_columns.event_id,
+                columns_before,
+                "Event Browser columns toggle must flip the EID column"
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("dock-event-column-eid", cx);
+            window.click("dock-event-columns", cx);
         })
         .unwrap();
         cx.run_until_parked();
@@ -38447,5 +38576,22 @@ mod ui_tests {
             assert!(window.find("status-text").visible());
         })
         .unwrap();
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.replay_pending = true;
+                cx.notify();
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("status-progress").visible());
+        })
+        .unwrap();
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.replay_pending = false;
+                cx.notify();
+            });
+        });
     }
 }
