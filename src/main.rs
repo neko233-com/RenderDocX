@@ -16435,6 +16435,30 @@ impl Workspace {
         bottom_docked: bool,
     ) -> gpui::AnyElement {
         let mut rows: Vec<(String, String)> = Vec::new();
+        if let Some(action) = self
+            .selected
+            .and_then(|index| self.snapshot.as_ref()?.actions.get(index))
+        {
+            for api_event in &action.api_events {
+                let name = if api_event.name.is_empty() {
+                    format!(
+                        "{} {}",
+                        self.t("API event", "API 事件"),
+                        api_event.event_id
+                    )
+                } else {
+                    api_event.name.clone()
+                };
+                let value = match api_event.chunk_index {
+                    Some(chunk) => format!(
+                        "E{} · chunk {chunk} · {}",
+                        api_event.event_id, api_event.file_offset
+                    ),
+                    None => format!("E{} · {}", api_event.event_id, api_event.file_offset),
+                };
+                rows.push((name, value));
+            }
+        }
         if let Some(page) = &self.structure.page {
             for child in &page.children {
                 rows.push((
@@ -16462,6 +16486,16 @@ impl Workspace {
                     }
                 }
             }
+        }
+        if rows.is_empty() {
+            rows.push((
+                self.t("No API calls", "无 API 调用").to_owned(),
+                self.t(
+                    "Select an event with API activity.",
+                    "请选择包含 API 调用的事件。",
+                )
+                .to_owned(),
+            ));
         }
         let (root_id, rows_id) = if floating {
             ("floating-api-inspector", "floating-api-inspector-rows")
