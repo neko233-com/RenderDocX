@@ -24,8 +24,8 @@ SHA-256 of the output. Contents: `renderdocx.exe`, `renderdocx-cli.exe`, the
 README and the feature-matrix/roadmap documents, plus Start-menu shortcuts.
 
 Verified in this checkout with WiX 5.0.2: a `0.1.0.0` x64 MSI was produced from
-the release binaries (16.32 MB, SHA-256
-`DF42811F0FAE298887322ABE26D7AD02C227E0933DEAD82623816A6B4C077C75`). Its contents were verified
+the release binaries (16.33 MB, SHA-256
+`0844BB44536236FCC84CF42CBDAA155445A6B2DBA6EC7F4E20F16C11DAD62763`). Its contents were verified
 non-interactively with an administrative install
 (`msiexec /a RenderDocX-0.1.0-x64.msi /qn TARGETDIR=<dir>`), which exited 0 and
 extracted exactly: `PFiles64/RenderDocX/renderdocx.exe` (34.7 MB),
@@ -40,12 +40,12 @@ by the embedded CPython debugger attach path.
 msiexec /i exit code: 0
 Installed executable: C:\Users\<user>\AppData\Local\Programs\RenderDocX\renderdocx.exe
 Bundled debugpy installed: True
-Captured installed app 1582x1196 -> target/visual/msi-installed-app.png
+Captured installed app 1056x799 -> target/visual/msi-installed-app.png
 msiexec /x exit code: 0
 Uninstall removed payload: True
 ```
 
-The installed binary's real window was captured at 1582×1196 through UI
+The installed binary's real window was captured at 1056×799 through UI
 Automation + BitBlt (the screenshot shows the Chinese workspace UI and the
 embedded-CPython extension description), and uninstall removed the payload.
 Logs are written to `target/visual/msi-install.log` / `msi-uninstall.log`.
