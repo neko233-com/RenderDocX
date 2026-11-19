@@ -17484,14 +17484,9 @@ impl Workspace {
                         "嵌入外部文件",
                         false,
                         |this, _, cx| {
-                            this.status = Some(
-                                this.t(
-                                    "Embedding external files is not available for this capture.",
-                                    "此捕获不支持嵌入外部文件。",
-                                )
-                                .to_owned(),
-                            );
-                            cx.notify();
+                            if let Some(root) = rfd::FileDialog::new().pick_folder() {
+                                this.export_dependencies("embed", root, cx);
+                            }
                         },
                         cx,
                     ))
@@ -17501,14 +17496,9 @@ impl Workspace {
                         "移除外部文件",
                         false,
                         |this, _, cx| {
-                            this.status = Some(
-                                this.t(
-                                    "Removing external files is not available for this capture.",
-                                    "此捕获不支持移除外部文件。",
-                                )
-                                .to_owned(),
-                            );
-                            cx.notify();
+                            if let Some(root) = rfd::FileDialog::new().pick_folder() {
+                                this.export_dependencies("remove", root, cx);
+                            }
                         },
                         cx,
                     ))
