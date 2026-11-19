@@ -18009,6 +18009,31 @@ impl Workspace {
             .into_any_element()
     }
 
+    fn status_bar(&self) -> gpui::AnyElement {
+        let text = self
+            .status
+            .clone()
+            .unwrap_or_else(|| self.t("Ready", "就绪").to_owned());
+        div()
+            .id("status-bar")
+            .test_support()
+            .h(px(24.))
+            .w_full()
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_between()
+            .px_3()
+            .bg(rgb(0x0a0a0a))
+            .border_t_1()
+            .border_color(rgb(0x1f1f1f))
+            .text_xs()
+            .text_color(rgb(0xa1a1aa))
+            .child(div().id("status-text").test_support().child(text))
+            .child(format!("RenderDocX {}", env!("CARGO_PKG_VERSION")))
+            .into_any_element()
+    }
+
     fn reset_dock_layout(&mut self, cx: &mut Context<Self>) {
         self.dock_left_ratio = 0.25;
         self.dock_api_ratio = 0.7;
@@ -18633,7 +18658,6 @@ impl Workspace {
         let depth_label = self.t("depth", "深度");
         let pipeline = self.pipeline.clone();
         let selected_event = self.selected_event_id();
-        let status = self.status.clone();
         let preview_path = self.preview.as_ref().map(|preview| preview.path.clone());
 
         let list = if self.tab == CaptureTab::Annotations {
@@ -23876,9 +23900,6 @@ impl Workspace {
                     .child(div().text_xl().child(frame))
                     .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(counts)),
             )
-            .when_some(status, |view, text| {
-                view.child(div().text_color(rgb(0xf5a623)).child(text))
-            })
             .when(self.timeline.shown, |view| {
                 view.child(
                     div()
@@ -24776,11 +24797,15 @@ impl Render for DockDragPreview {
     }
 }
 
-fn with_title_bar(show: bool, content: gpui::AnyElement) -> gpui::AnyElement {
+fn with_title_bar(
+    show: bool,
+    content: gpui::AnyElement,
+    status_bar: Option<gpui::AnyElement>,
+) -> gpui::AnyElement {
     if !show {
         return content;
     }
-    div()
+    let mut root = div()
         .size_full()
         .bg(rgb(0x000000))
         .text_color(rgb(0xededed))
@@ -24801,8 +24826,11 @@ fn with_title_bar(show: bool, content: gpui::AnyElement) -> gpui::AnyElement {
                     ),
             ),
         )
-        .child(div().flex_1().min_h_0().child(content))
-        .into_any_element()
+        .child(div().flex_1().min_h_0().child(content));
+    if let Some(status_bar) = status_bar {
+        root = root.child(status_bar);
+    }
+    root.into_any_element()
 }
 
 impl Render for Workspace {
@@ -24832,17 +24860,16 @@ impl Render for Workspace {
         if self.snapshot.is_some() {
             self.schedule_auto_texture_fit(window, cx);
             let overlay = self.info_overlay(cx);
-            return with_title_bar(
-                self.show_title_bar,
-                div()
-                    .relative()
-                    .size_full()
-                    .child(self.capture_view(window, cx))
-                    .children(overlay)
-                    .children(self.constant_buffer_overlay(cx))
-                    .children(self.log_panel(cx))
-                    .into_any_element(),
-            );
+            let content = div()
+                .relative()
+                .size_full()
+                .child(self.capture_view(window, cx))
+                .children(overlay)
+                .children(self.constant_buffer_overlay(cx))
+                .children(self.log_panel(cx))
+                .into_any_element();
+            let status_bar = self.status_bar();
+            return with_title_bar(self.show_title_bar, content, Some(status_bar));
         }
         let title = self.t(
             "A clearer view of every frame.",
@@ -25060,7 +25087,6 @@ impl Render for Workspace {
         let live_status = self.live_status.clone();
         let live_captures = self.live_captures.clone();
         let live_targets = self.live_targets.clone();
-        let status = self.status.clone();
 
         let content = div()
             .id("home-scroll")
@@ -25241,7 +25267,7 @@ impl Render for Workspace {
                                 .text_color(rgb(0x3291ff))
                                 .child(launch_config_label),
                         )
-                        .when_some(status.clone(), |view, message| view.child(div().text_color(rgb(0xf5a623)).child(message)))
+                        .when_some(self.status.clone(), |view, message| view.child(div().text_color(rgb(0xf5a623)).child(message)))
                         .child(arguments_label)
                         .child(
                             Input::new(&self.launch_arguments)
@@ -26122,14 +26148,12 @@ impl Render for Workspace {
                         }))
                 }),
             ))
-            .when_some(status, |s, status| {
-                s.child(div().text_color(rgb(0xf5a623)).child(status))
-            })
             .children(self.info_overlay(cx))
             .children(self.constant_buffer_overlay(cx))
             .children(self.log_panel(cx))
             .into_any_element();
-        with_title_bar(self.show_title_bar, content)
+        let status_bar = self.status_bar();
+        with_title_bar(self.show_title_bar, content, Some(status_bar))
     }
 }
 
@@ -35585,5 +35609,20 @@ mod ui_tests {
                 cx.notify();
             })
         });
+
+        // The real window chrome adds the RenderDoc-style bottom status bar.
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.show_title_bar = true;
+                view.status = Some("status-bar-check".to_owned());
+                cx.notify();
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("status-bar").visible());
+            assert!(window.find("status-text").visible());
+        })
+        .unwrap();
     }
 }
