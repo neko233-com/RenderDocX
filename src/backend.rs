@@ -58,6 +58,9 @@ pub struct WindowLayout {
     /// the action-details panel on the right.
     #[serde(default = "default_details_ratio")]
     pub details_ratio: f32,
+    /// Stable serialization names of the main tab order.
+    #[serde(default)]
+    pub main_tab_order: Vec<String>,
     #[serde(default = "default_true")]
     pub textures_shown: bool,
     #[serde(default = "default_true")]
@@ -84,6 +87,7 @@ impl Default for WindowLayout {
             left_ratio: default_left_ratio(),
             api_ratio: default_api_ratio(),
             details_ratio: default_details_ratio(),
+            main_tab_order: Vec::new(),
             textures_shown: true,
             pipeline_shown: true,
             mesh_shown: true,

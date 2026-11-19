@@ -979,6 +979,7 @@ struct Workspace {
     show_pipeline_tab: bool,
     show_mesh_tab: bool,
     show_capture_dialog_tab: bool,
+    main_tab_order: Vec<CaptureTab>,
     menu_open: Option<MenuBar>,
     layout_submenu_open: bool,
     recent_submenu_open: bool,
@@ -4719,6 +4720,7 @@ impl Workspace {
             pipeline_shown: self.show_pipeline_tab,
             mesh_shown: self.show_mesh_tab,
             capture_dialog_shown: self.show_capture_dialog_tab,
+            main_tab_order: self.main_tab_order.iter().map(|tab| tab.name().to_owned()).collect(),
             event_browser_shown: self.dock_event_browser,
             api_inspector_shown: self.dock_api_inspector,
         };
@@ -4759,6 +4761,7 @@ impl Workspace {
         self.show_pipeline_tab = layout.pipeline_shown;
         self.show_mesh_tab = layout.mesh_shown;
         self.show_capture_dialog_tab = layout.capture_dialog_shown;
+        self.main_tab_order = normalize_main_tab_order(&layout.main_tab_order);
         self.dock_event_browser = layout.event_browser_shown;
         self.dock_api_inspector = layout.api_inspector_shown;
         self.status = Some(format!("{} {slot}", self.t("Loaded window layout", "已加载窗口布局")));
@@ -16965,6 +16968,85 @@ impl Workspace {
             .into_any_element()
     }
 
+    fn main_tab_visible(&self, tab: CaptureTab) -> bool {
+        match tab {
+            CaptureTab::Textures => self.show_textures_tab,
+            CaptureTab::Pipeline => self.show_pipeline_tab,
+            CaptureTab::Mesh => self.show_mesh_tab,
+            CaptureTab::CaptureDialog => self.show_capture_dialog_tab,
+            _ => false,
+        }
+    }
+
+    fn main_tab_label(&self, tab: CaptureTab) -> &'static str {
+        match tab {
+            CaptureTab::Textures => self.t("Texture Viewer", "纹理"),
+            CaptureTab::Pipeline => self.t("Pipeline State", "管线状态"),
+            CaptureTab::Mesh => self.t("Mesh Preview", "网格预览"),
+            CaptureTab::CaptureDialog => self.t("Capture Dialog", "捕获对话框"),
+            _ => "",
+        }
+    }
+
+    fn activate_main_tab(&mut self, tab: CaptureTab, cx: &mut Context<Self>) {
+        self.tab = tab;
+        if tab == CaptureTab::Mesh && self.mesh.info.is_none() {
+            self.read_mesh(self.mesh.selection, self.mesh.kind, 0, cx);
+        }
+        cx.notify();
+    }
+
+    fn move_main_tab(&mut self, dragged: CaptureTab, target: CaptureTab) {
+        if dragged == target {
+            return;
+        }
+        let Some(from) = self.main_tab_order.iter().position(|tab| *tab == dragged) else {
+            return;
+        };
+        let Some(to) = self.main_tab_order.iter().position(|tab| *tab == target) else {
+            return;
+        };
+        let tab = self.main_tab_order.remove(from);
+        let insert = if from < to { to.saturating_sub(1) } else { to };
+        self.main_tab_order.insert(insert.min(self.main_tab_order.len()), tab);
+    }
+
+    fn main_tab_button(&self, tab: CaptureTab, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let id = match tab {
+            CaptureTab::Textures => "textures-tab",
+            CaptureTab::Pipeline => "pipeline-tab",
+            CaptureTab::Mesh => "mesh-tab",
+            CaptureTab::CaptureDialog => "capture-dialog-tab",
+            _ => "main-tab",
+        };
+        let label = self.main_tab_label(tab);
+        let active = self.tab == tab;
+        let drop_workspace = cx.entity();
+        div()
+            .id(id)
+            .test_support()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .cursor_pointer()
+            .text_sm()
+            .bg(rgb(if active { 0x1f1f1f } else { 0x0a0a0a }))
+            .hover(|view| view.bg(rgb(0x262626)))
+            .child(label)
+            .on_click(cx.listener(move |this, _, _, cx| this.activate_main_tab(tab, cx)))
+            .on_drag(tab, move |_, _, _, cx| {
+                cx.new(|_| TabDragPreview { label })
+            })
+            .on_drop::<CaptureTab>(move |dragged, _, cx| {
+                let dragged = *dragged;
+                drop_workspace.update(cx, |workspace, cx| {
+                    workspace.move_main_tab(dragged, tab);
+                    cx.notify();
+                });
+            })
+            .into_any_element()
+    }
+
     fn ensure_visible_main_tab(&mut self) {
         let visible = match self.tab {
             CaptureTab::Textures => self.show_textures_tab,
@@ -17019,6 +17101,7 @@ impl Workspace {
         self.show_pipeline_tab = true;
         self.show_mesh_tab = true;
         self.show_capture_dialog_tab = true;
+        self.main_tab_order = standard_main_tab_order();
         self.dock_event_browser = true;
         self.dock_api_inspector = true;
         self.dock_drag_x = None;
@@ -17154,6 +17237,13 @@ impl Workspace {
             .snapshot
             .as_ref()
             .expect("capture view requires a snapshot");
+        let main_tab_buttons: Vec<gpui::AnyElement> = self
+            .main_tab_order
+            .clone()
+            .into_iter()
+            .filter(|tab| self.main_tab_visible(*tab))
+            .map(|tab| self.main_tab_button(tab, cx))
+            .collect();
         let mesh_lines = if let Some(page) = &self.mesh.draw {
             page.rows
                 .iter()
@@ -17469,7 +17559,7 @@ impl Workspace {
                 "显示 API 事件",
             )
         };
-        let textures_label = self.t("Textures", "纹理");
+
         let next_mip = self.t("Next mip", "切换 mip");
         let next_slice = self.t("Next slice", "切换层");
         let next_sample = self.t("Next sample", "切换采样");
@@ -22866,57 +22956,7 @@ impl Workspace {
                                     .gap_2()
                                     .px_3()
                                     .py_2()
-                                    .when(self.show_textures_tab, |view| {
-                                        view.child(button(
-                                            "textures-tab",
-                                            textures_label,
-                                            self.tab == CaptureTab::Textures,
-                                            |this, cx| {
-                                                this.tab = CaptureTab::Textures;
-                                                cx.notify();
-                                            },
-                                            cx,
-                                        ))
-                                    })
-                                    .when(self.show_pipeline_tab, |view| {
-                                        view.child(button(
-                                            "pipeline-tab",
-                                            self.t("Pipeline State", "管线状态"),
-                                            self.tab == CaptureTab::Pipeline,
-                                            |this, cx| {
-                                                this.tab = CaptureTab::Pipeline;
-                                                cx.notify();
-                                            },
-                                            cx,
-                                        ))
-                                    })
-                                    .when(self.show_mesh_tab, |view| {
-                                        view.child(button(
-                                            "mesh-tab",
-                                            self.t("Mesh Preview", "网格预览"),
-                                            self.tab == CaptureTab::Mesh,
-                                            |this, cx| {
-                                                this.tab = CaptureTab::Mesh;
-                                                if this.mesh.info.is_none() {
-                                                    this.read_mesh(this.mesh.selection, this.mesh.kind, 0, cx);
-                                                }
-                                                cx.notify();
-                                            },
-                                            cx,
-                                        ))
-                                    })
-                                    .when(self.show_capture_dialog_tab, |view| {
-                                        view.child(button(
-                                            "capture-dialog-tab",
-                                            self.t("Capture Dialog", "捕获对话框"),
-                                            self.tab == CaptureTab::CaptureDialog,
-                                            |this, cx| {
-                                                this.tab = CaptureTab::CaptureDialog;
-                                                cx.notify();
-                                            },
-                                            cx,
-                                        ))
-                                    })
+                                    .children(main_tab_buttons)
                                     .child(button(
                                         "window-menu",
                                         self.t("Window", "窗口"),
@@ -23706,6 +23746,51 @@ fn button(
         button.primary()
     } else {
         button.secondary()
+    }
+}
+
+fn standard_main_tab_order() -> Vec<CaptureTab> {
+    vec![
+        CaptureTab::Textures,
+        CaptureTab::Pipeline,
+        CaptureTab::Mesh,
+        CaptureTab::CaptureDialog,
+    ]
+}
+
+fn normalize_main_tab_order(names: &[String]) -> Vec<CaptureTab> {
+    let mut order = Vec::new();
+    for name in names {
+        if let Some(tab) = CaptureTab::from_name(name) {
+            if !order.contains(&tab) {
+                order.push(tab);
+            }
+        }
+    }
+    for tab in standard_main_tab_order() {
+        if !order.contains(&tab) {
+            order.push(tab);
+        }
+    }
+    order
+}
+
+struct TabDragPreview {
+    label: &'static str,
+}
+
+impl Render for TabDragPreview {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .bg(rgb(0x1f1f1f))
+            .border_1()
+            .border_color(rgb(0x333333))
+            .text_sm()
+            .text_color(rgb(0xededed))
+            .child(self.label)
     }
 }
 
@@ -25283,6 +25368,7 @@ fn main() {
                         show_pipeline_tab: true,
                         show_mesh_tab: true,
                         show_capture_dialog_tab: true,
+                        main_tab_order: standard_main_tab_order(),
                         menu_open: None,
                         layout_submenu_open: false,
                         recent_submenu_open: false,
@@ -26191,6 +26277,7 @@ mod ui_tests {
                         show_pipeline_tab: true,
                         show_mesh_tab: true,
                         show_capture_dialog_tab: true,
+                        main_tab_order: standard_main_tab_order(),
                         menu_open: None,
                         layout_submenu_open: false,
                         recent_submenu_open: false,
@@ -27039,6 +27126,7 @@ mod ui_tests {
                         show_pipeline_tab: true,
                         show_mesh_tab: true,
                         show_capture_dialog_tab: true,
+                        main_tab_order: standard_main_tab_order(),
                         menu_open: None,
                         layout_submenu_open: false,
                         recent_submenu_open: false,
@@ -34148,6 +34236,20 @@ mod ui_tests {
         cx.run_until_parked();
         cx.update(|cx| {
             assert!(view.read(cx).show_textures_tab);
+        });
+        let before_order = cx.update(|cx| view.read(cx).main_tab_order.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.drag_to("mesh-tab", "textures-tab", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_ne!(
+                view.read(cx).main_tab_order,
+                before_order,
+                "dragging a main tab must reorder it"
+            );
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
