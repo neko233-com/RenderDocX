@@ -17801,6 +17801,15 @@ impl Workspace {
         let find_label = self.t("Find Event", "查找事件");
         let filter_label = self.t("Filter", "筛选");
         let bookmarks_label = self.t("Bookmarks", "书签");
+        let times_label = self.t("Times", "耗时");
+        let breadcrumb = self
+            .selected
+            .and_then(|index| {
+                self.snapshot
+                    .as_ref()
+                    .and_then(|snapshot| renderdocx::event_path::format(&snapshot.actions, index))
+            })
+            .unwrap_or_else(|| self.t("Capture Start", "捕获开始").to_owned());
         let eid_label = self.t("EID", "事件 ID");
         let event_header = self.t("Event", "事件");
         let api_header = self.t("API Calls", "API 调用");
@@ -17899,6 +17908,13 @@ impl Workspace {
                         false,
                         |this, cx| this.export_events(cx),
                         cx,
+                    ))
+                    .child(toggle_button(
+                        "dock-event-times",
+                        times_label,
+                        self.event_tree.has_durations(),
+                        |this, cx| this.collect_event_times(cx),
+                        cx,
                     )),
             )
             .child(
@@ -17961,6 +17977,27 @@ impl Workspace {
             )
             .child(
                 div()
+                    .px_2()
+                    .py_1()
+                    .text_xs()
+                    .text_color(rgb(0x6b6b6b))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(breadcrumb),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(rgb(0x1f1f1f))
+                    .text_xs()
+                    .text_color(rgb(0xf5a623))
+                    .child(bookmarks_label),
+            )
+            .child(
+                div()
                     .flex()
                     .items_center()
                     .gap_2()
@@ -17978,16 +18015,6 @@ impl Workspace {
                     .when(self.event_tree.has_durations(), |row| {
                         row.child(div().w(px(70.)).flex_none().child(duration_header))
                     }),
-            )
-            .child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .border_b_1()
-                    .border_color(rgb(0x1f1f1f))
-                    .text_xs()
-                    .text_color(rgb(0xf5a623))
-                    .child(bookmarks_label),
             );
 
         let mut list = div()
