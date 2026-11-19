@@ -15814,11 +15814,78 @@ impl Workspace {
             .into_any_element()
     }
 
+    fn menu_separator(&self) -> gpui::AnyElement {
+        div()
+            .h(px(1.))
+            .w_full()
+            .my_1()
+            .bg(rgb(0x1f1f1f))
+            .into_any_element()
+    }
+
+    fn menu_panel_item(
+        &self,
+        id: &'static str,
+        en: &'static str,
+        zh: &'static str,
+        tab: CaptureTab,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let checked = self.tab == tab && self.show_aux_tabs;
+        self.menu_item(
+            id,
+            en,
+            zh,
+            checked,
+            move |this, _, cx| {
+                this.show_aux_tabs = true;
+                this.tab = tab;
+                match tab {
+                    CaptureTab::Mesh => {
+                        if this.mesh.info.is_none() {
+                            this.read_mesh(this.mesh.selection, this.mesh.kind, 0, cx);
+                        }
+                    }
+                    CaptureTab::VertexInput => {
+                        if this.input_page.is_none() {
+                            this.load_vertex_instance(cx);
+                        }
+                    }
+                    CaptureTab::Buffers => this.refresh_buffer_formats(cx),
+                    CaptureTab::Parameters => {
+                        if this.structure.page.is_none() {
+                            this.read_structure(Vec::new(), 0, cx);
+                        }
+                    }
+                    CaptureTab::Resources => this.refresh_resources(),
+                    CaptureTab::ShaderMessages => {
+                        if this.shader_message_page.is_none() {
+                            this.read_shader_messages(0, cx);
+                        }
+                    }
+                    CaptureTab::Descriptors => {
+                        if this.descriptor_page.is_none() {
+                            this.read_descriptors(this.descriptor_store, 0, cx);
+                        }
+                    }
+                    CaptureTab::Annotations => {
+                        if this.annotations.notes.is_none() {
+                            this.load_annotations(cx);
+                        }
+                    }
+                    _ => {}
+                }
+                cx.notify();
+            },
+            cx,
+        )
+    }
+
     fn menu_dropdown(&self, menu: MenuBar, cx: &mut Context<Self>) -> gpui::AnyElement {
         let mut dropdown = div()
             .id(("menu-dropdown", menu as usize))
             .test_support()
-            .w(px(250.))
+            .w(px(260.))
             .bg(rgb(0x0a0a0a))
             .border_1()
             .border_color(rgb(0x333333))
@@ -15868,6 +15935,15 @@ impl Workspace {
                         false,
                         |this, _, cx| this.close_capture(cx),
                         cx,
+                    ))
+                    .child(self.menu_separator())
+                    .child(self.menu_item(
+                        "menu-file-exit",
+                        "Exit",
+                        "退出",
+                        false,
+                        |_, _, cx| cx.quit(),
+                        cx,
                     ));
             }
             MenuBar::Edit => {
@@ -15897,6 +15973,36 @@ impl Workspace {
                         },
                         cx,
                     ))
+                    .child(self.menu_item(
+                        "menu-edit-go-to-event",
+                        "Go to Event…",
+                        "跳转到事件…",
+                        false,
+                        |this, _, cx| {
+                            this.tab = CaptureTab::Events;
+                            this.event_path_editing = true;
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_separator())
+                    .child(self.menu_item(
+                        "menu-edit-prev-action",
+                        "Previous Action",
+                        "上一个动作",
+                        false,
+                        |this, _, cx| this.step_event(false, cx),
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-edit-next-action",
+                        "Next Action",
+                        "下一个动作",
+                        false,
+                        |this, _, cx| this.step_event(true, cx),
+                        cx,
+                    ))
+                    .child(self.menu_separator())
                     .child(self.menu_item(
                         "menu-edit-reset-layout",
                         "Reset Window Layout",
@@ -15988,6 +16094,99 @@ impl Workspace {
                         |this, _, cx| this.float_dock(FloatingDock::ApiInspector, cx),
                         cx,
                     ))
+                    .child(self.menu_separator())
+                    .child(self.menu_panel_item(
+                        "menu-window-events",
+                        "Events",
+                        "事件",
+                        CaptureTab::Events,
+                        cx,
+                    ))
+                    .child(self.menu_panel_item(
+                        "menu-window-api-calls",
+                        "API Calls",
+                        "API 调用",
+                        CaptureTab::ApiCalls,
+                        cx,
+                    ))
+                    .child(self.menu_panel_item(
+                        "menu-window-parameters",
+                        "Parameters",
+                        "参数",
+                        CaptureTab::Parameters,
+                        cx,
+                    ))
+                    .child(self.menu_panel_item(
+                        "menu-window-buffers",
+                        "Buffers",
+                        "缓冲区",
+                        CaptureTab::Buffers,
+                        cx,
+                    ))
+                    .child(self.menu_panel_item(
+                        "menu-window-shaders",
+                        "Shaders",
+                        "着色器",
+                        CaptureTab::Shaders,
+                        cx,
+                    ))
+                    .child(self.menu_panel_item(
+                        "menu-window-vertex-input",
+                        "Vertex Input",
+                        "顶点输入",
+                        CaptureTab::VertexInput,
+                        cx,
+                    ))
+                    .child(self.menu_panel_item(
+                        "menu-window-resources",
+                        "Resources",
+                        "资源",
+                        CaptureTab::Resources,
+                        cx,
+                    ))
+                    .child(self.menu_panel_item(
+                        "menu-window-messages",
+                        "Messages",
+                        "调试消息",
+                        CaptureTab::Messages,
+                        cx,
+                    ))
+                    .child(self.menu_panel_item(
+                        "menu-window-shader-messages",
+                        "Shader Messages",
+                        "着色器消息",
+                        CaptureTab::ShaderMessages,
+                        cx,
+                    ))
+                    .child(self.menu_panel_item(
+                        "menu-window-statistics",
+                        "Statistics",
+                        "统计",
+                        CaptureTab::Statistics,
+                        cx,
+                    ))
+                    .child(self.menu_panel_item(
+                        "menu-window-counters",
+                        "GPU Counters",
+                        "GPU 计数器",
+                        CaptureTab::Counters,
+                        cx,
+                    ))
+                    .child(self.menu_panel_item(
+                        "menu-window-descriptors",
+                        "Descriptors",
+                        "描述符",
+                        CaptureTab::Descriptors,
+                        cx,
+                    ))
+                    .child(self.menu_panel_item(
+                        "menu-window-annotations",
+                        "Annotations",
+                        "注释与书签",
+                        CaptureTab::Annotations,
+                        cx,
+                    ))
+                    .child(self.menu_separator())
                     .child(self.menu_item(
                         "menu-window-reset-layout",
                         "Reset Window Layout",
@@ -16029,6 +16228,38 @@ impl Workspace {
                         |this, _, cx| {
                             this.status = Some(
                                 "https://renderdoc.org/docs/".to_owned(),
+                            );
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_separator())
+                    .child(self.menu_item(
+                        "menu-help-tips",
+                        "Tips",
+                        "使用提示",
+                        false,
+                        |this, _, cx| {
+                            this.status = Some(
+                                this.t(
+                                    "Tip: drag the dock splitter to resize; use Window > Float to detach a panel.",
+                                    "提示：拖动分栏可调整宽度；使用 Window > 浮动 可分离面板。",
+                                )
+                                .to_owned(),
+                            );
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-help-shortcuts",
+                        "Keyboard Shortcuts",
+                        "键盘快捷键",
+                        false,
+                        |this, _, cx| {
+                            this.status = Some(
+                                "Ctrl+O / Ctrl+S / Ctrl+Shift+S / Ctrl+F / F3 / Shift+F3"
+                                    .to_owned(),
                             );
                             cx.notify();
                         },
@@ -33137,6 +33368,21 @@ mod ui_tests {
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(window.try_find("menu-file-open").is_none());
+            window.click("menu-edit", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("menu-edit-go-to-event").visible());
+            assert!(window.find("menu-edit-prev-action").visible());
+            assert!(window.find("menu-edit-next-action").visible());
+            window.click("menu-edit", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
             window.click("menu-window", cx);
         })
         .unwrap();
@@ -33144,6 +33390,26 @@ mod ui_tests {
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(window.find("menu-window-float-event-browser").visible());
+            assert!(window.find("menu-window-events").visible());
+            assert!(window.find("menu-window-buffers").visible());
+            assert!(window.find("menu-window-annotations").visible());
+            window.click("menu-window-buffers", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let view = view.read(cx);
+            assert_eq!(view.tab, CaptureTab::Buffers);
+            assert!(view.show_aux_tabs);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("menu-window", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
             window.click("menu-window-float-event-browser", cx);
         })
         .unwrap();
