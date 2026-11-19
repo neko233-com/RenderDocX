@@ -55,3 +55,9 @@ __pycache__
 
 # codegraph233 本地索引（勿提交）
 /.codegraph233/
+
+# 本地 Agent 工具状态与记忆（勿提交）
+/.workbuddy/
+/.opencode/
+/.claude/
+/.idea/
