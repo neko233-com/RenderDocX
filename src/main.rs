@@ -1026,6 +1026,7 @@ struct Workspace {
     texture_selection: TextureSelection,
     texture_saved_selection: std::collections::HashMap<usize, (TextureSelection, u64)>,
     texture_custom_revision: u64,
+    pending_texture_autoselect: bool,
     texture_auto_fit: bool,
     texture_auto_fit_generation: u64,
     texture_auto_fit_scheduled: bool,
@@ -7624,6 +7625,7 @@ impl Workspace {
                             _ => None,
                         };
                         this.selected_texture = None;
+                        this.pending_texture_autoselect = true;
                         this.texture_selection = TextureSelection::default();
                         this.texture_saved_selection.clear();
                         this.texture_custom_revision = 0;
@@ -18121,6 +18123,7 @@ impl Workspace {
                             renderdocx::python_embed::set_active_session(None);
                             self.snapshot = None;
                             self.texture_saved_selection.clear();
+                            self.pending_texture_autoselect = false;
                             self.message_generation += 1;
                             self.message_poll_pending = false;
                             self.message_visible.clear();
@@ -18193,6 +18196,18 @@ impl Workspace {
                     window.focus(&focus, cx);
                 });
             });
+        }
+        if self.pending_texture_autoselect {
+            self.pending_texture_autoselect = false;
+            if self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| !snapshot.textures.is_empty())
+            {
+                // RenderDoc selects the first texture when a capture opens so the
+                // Texture Viewer shows a preview instead of an empty pane.
+                self.switch_texture(0, None, window, cx);
+            }
         }
         if self.tab == CaptureTab::Annotations && self.annotations.editor.is_none() {
             if let Some((_, doc)) = &self.annotations.notes {
@@ -26540,6 +26555,7 @@ fn main() {
                         texture_saved_selection: std::collections::HashMap::new(),
                         texture_custom_revision: 0,
                         texture_auto_fit: false,
+                        pending_texture_autoselect: false,
                         texture_auto_fit_generation: 0,
                         texture_auto_fit_scheduled: false,
                         texture_auto_fit_last: None,
@@ -27454,6 +27470,7 @@ mod ui_tests {
                         texture_saved_selection: std::collections::HashMap::new(),
                         texture_custom_revision: 0,
                         texture_auto_fit: false,
+                        pending_texture_autoselect: false,
                         texture_auto_fit_generation: 0,
                         texture_auto_fit_scheduled: false,
                         texture_auto_fit_last: None,
@@ -28308,6 +28325,7 @@ mod ui_tests {
                         texture_saved_selection: std::collections::HashMap::new(),
                         texture_custom_revision: 0,
                         texture_auto_fit: false,
+                        pending_texture_autoselect: false,
                         texture_auto_fit_generation: 0,
                         texture_auto_fit_scheduled: false,
                         texture_auto_fit_last: None,
