@@ -37,7 +37,7 @@ impl Default for EventColumns {
 
 /// A saved window layout. Upstream qrenderdoc stores one default layout plus
 /// six numbered slots; RenderDocX persists the same slots in `settings.json`.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct WindowLayout {
     /// Stable serialization name of the active capture tab (see `CaptureTab::name`).
@@ -47,6 +47,46 @@ pub struct WindowLayout {
     pub remote_browser_shown: bool,
     pub frame_stats_raw: bool,
     pub texture_auto_fit: bool,
+    /// Fraction of the capture workspace used by the left dock column.
+    #[serde(default = "default_left_ratio")]
+    pub left_ratio: f32,
+    /// Fraction of the left column used by the Event Browser (rest is API
+    /// Inspector), matching qrenderdoc's default 0.7/0.3 split.
+    #[serde(default = "default_api_ratio")]
+    pub api_ratio: f32,
+    #[serde(default = "default_true")]
+    pub event_browser_shown: bool,
+    #[serde(default = "default_true")]
+    pub api_inspector_shown: bool,
+}
+
+impl Default for WindowLayout {
+    fn default() -> Self {
+        Self {
+            tab: String::new(),
+            timeline_shown: false,
+            launch_config_shown: false,
+            remote_browser_shown: false,
+            frame_stats_raw: false,
+            texture_auto_fit: false,
+            left_ratio: default_left_ratio(),
+            api_ratio: default_api_ratio(),
+            event_browser_shown: true,
+            api_inspector_shown: true,
+        }
+    }
+}
+
+fn default_left_ratio() -> f32 {
+    0.25
+}
+
+fn default_api_ratio() -> f32 {
+    0.7
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -321,6 +361,7 @@ mod tests {
                 remote_browser_shown: true,
                 frame_stats_raw: true,
                 texture_auto_fit: false,
+                ..Default::default()
             },
         );
         let reloaded: Settings =

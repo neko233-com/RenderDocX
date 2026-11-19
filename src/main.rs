@@ -947,6 +947,10 @@ struct Workspace {
     selected: Option<usize>,
     pipeline: Option<Pipeline>,
     tab: CaptureTab,
+    dock_left_ratio: f32,
+    dock_api_ratio: f32,
+    dock_event_browser: bool,
+    dock_api_inspector: bool,
     selected_texture: Option<usize>,
     texture_selection: TextureSelection,
     texture_saved_selection: std::collections::HashMap<usize, (TextureSelection, u64)>,
@@ -4463,6 +4467,10 @@ impl Workspace {
             remote_browser_shown: self.show_remote_browser,
             frame_stats_raw: self.frame_stats_raw,
             texture_auto_fit: self.texture_auto_fit,
+            left_ratio: self.dock_left_ratio,
+            api_ratio: self.dock_api_ratio,
+            event_browser_shown: self.dock_event_browser,
+            api_inspector_shown: self.dock_api_inspector,
         };
         self.settings
             .window_layouts
@@ -4494,6 +4502,10 @@ impl Workspace {
         self.show_remote_browser = layout.remote_browser_shown;
         self.frame_stats_raw = layout.frame_stats_raw;
         self.texture_auto_fit = layout.texture_auto_fit;
+        self.dock_left_ratio = layout.left_ratio.clamp(0.15, 0.5);
+        self.dock_api_ratio = layout.api_ratio.clamp(0.3, 0.85);
+        self.dock_event_browser = layout.event_browser_shown;
+        self.dock_api_inspector = layout.api_inspector_shown;
         self.status = Some(format!("{} {slot}", self.t("Loaded window layout", "已加载窗口布局")));
         cx.notify();
     }
@@ -15191,6 +15203,205 @@ impl Workspace {
             })
     }
 
+    /// RenderDoc-style dock header used by the left Event Browser/API Inspector.
+    fn dock_header(&self, title: &str) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .bg(rgb(0x101827))
+            .text_sm()
+            .text_color(rgb(0x9ecbff))
+            .child(title.to_owned())
+    }
+
+    fn dock_event_browser_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let rows: Vec<(usize, u32, String)> = {
+            let Some(snapshot) = self.snapshot.as_ref() else {
+                return div().into_any_element();
+            };
+            self.event_tree
+                .visible
+                .iter()
+                .filter_map(|&index| {
+                    snapshot
+                        .actions
+                        .get(index)
+                        .map(|action| (index, action.event_id, action.name.clone()))
+                })
+                .collect()
+        };
+        let mut list = div()
+            .id("dock-event-browser-rows")
+            .test_support()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        for (index, event, name) in rows {
+            let selected = self.selected == Some(index);
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("dock-event-{index}")))
+                    .test_support()
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .bg(rgb(if selected { 0x304c7c } else { 0x192332 }))
+                    .hover(|row| row.bg(rgb(0x263950)))
+                    .child(
+                        div()
+                            .w(px(52.))
+                            .flex_none()
+                            .text_color(rgb(0x91a7c0))
+                            .child(event.to_string()),
+                    )
+                    .child(div().flex_1().min_w_0().overflow_hidden().child(name))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_event(index, None, cx);
+                    })),
+            );
+        }
+        div()
+            .id("dock-event-browser")
+            .test_support()
+            .flex()
+            .flex_col()
+            .min_h_0()
+            .bg(rgb(0x192332))
+            .rounded_lg()
+            .overflow_hidden()
+            .child(self.dock_header(self.t("Event Browser", "事件浏览器")))
+            .child(list)
+            .into_any_element()
+    }
+
+    fn dock_api_inspector_panel(&self) -> gpui::AnyElement {
+        let mut rows: Vec<(String, String)> = Vec::new();
+        if let Some(page) = &self.structure.page {
+            for child in &page.children {
+                rows.push((
+                    child.name.clone(),
+                    child
+                        .value
+                        .clone()
+                        .unwrap_or_else(|| child.type_name.clone()),
+                ));
+            }
+        }
+        if rows.is_empty() {
+            if let Some(pipeline) = &self.pipeline {
+                for shader in &pipeline.shaders {
+                    if shader.resource.bound {
+                        rows.push((
+                            format!("{} shader", shader.stage),
+                            shader.resource.name.clone(),
+                        ));
+                    }
+                }
+                for (index, output) in pipeline.outputs.iter().enumerate() {
+                    if output.bound {
+                        rows.push((format!("output {index}"), output.name.clone()));
+                    }
+                }
+            }
+        }
+        let mut list = div()
+            .id("dock-api-inspector-rows")
+            .test_support()
+            .flex_1()
+            .min_h_0()
+            .overflow_hidden()
+            .flex()
+            .flex_col();
+        for (name, value) in rows {
+            list = list.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .gap_2()
+                    .text_sm()
+                    .child(div().w(px(150.)).flex_none().child(name))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_color(rgb(0xd4b77c))
+                            .child(value),
+                    ),
+            );
+        }
+        div()
+            .id("dock-api-inspector")
+            .test_support()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .bg(rgb(0x192332))
+            .rounded_lg()
+            .overflow_hidden()
+            .child(self.dock_header(self.t("API Inspector", "API 检查器")))
+            .child(list)
+            .into_any_element()
+    }
+
+    fn dock_left_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let event_browser = self.dock_event_browser;
+        let api_inspector = self.dock_api_inspector;
+        if !event_browser && !api_inspector {
+            return div().into_any_element();
+        }
+        let mut column = div()
+            .id("dock-left")
+            .test_support()
+            .absolute()
+            .left(px(0.))
+            .top(px(0.))
+            .bottom(px(0.))
+            .w(px(260.))
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap_2();
+        if event_browser {
+            let panel = self.dock_event_browser_panel(cx);
+            column = if api_inspector {
+                column.child(
+                    div()
+                        .h(gpui::relative(self.dock_api_ratio.clamp(0.3, 0.85)))
+                        .min_h_0()
+                        .flex()
+                        .child(panel),
+                )
+            } else {
+                column.child(div().flex_1().min_h_0().flex().child(panel))
+            };
+        }
+        if api_inspector {
+            let panel = self.dock_api_inspector_panel();
+            column = column.child(div().flex_1().min_h_0().flex().child(panel));
+        }
+        column.into_any_element()
+    }
+
+    fn reset_dock_layout(&mut self, cx: &mut Context<Self>) {
+        self.dock_left_ratio = 0.25;
+        self.dock_api_ratio = 0.7;
+        self.dock_event_browser = true;
+        self.dock_api_inspector = true;
+        self.timeline.shown = true;
+        self.tab = CaptureTab::Textures;
+        self.status = Some(self.t("Reset window layout to RenderDoc defaults", "已恢复 RenderDoc 默认窗口布局").to_owned());
+        cx.notify();
+    }
+
     fn capture_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The workspace view currently builds many nested panels in one frame. Grow on the
         // same thread before constructing them when the caller's stack is nearly exhausted.
@@ -20871,6 +21082,9 @@ impl Workspace {
                         |this, cx| { this.show_remote_browser = !this.show_remote_browser; cx.notify(); }, cx)))
                     .child(button("capture-timeline", self.t("Timeline", "时间线"), self.timeline.shown, |this, cx| { this.timeline.shown = !this.timeline.shown; cx.notify(); }, cx))
                     .child(button("capture-log", self.t("Log", "日志"), self.show_log, |this, cx| { if this.show_log { this.show_log = false; cx.notify(); } else { this.open_log(cx); } }, cx))
+                    .child(button("dock-toggle-event-browser", self.t("Event browser", "事件浏览器"), self.dock_event_browser, |this, cx| { this.dock_event_browser = !this.dock_event_browser; cx.notify(); }, cx))
+                    .child(button("dock-toggle-api-inspector", self.t("API inspector", "API 检查器"), self.dock_api_inspector, |this, cx| { this.dock_api_inspector = !this.dock_api_inspector; cx.notify(); }, cx))
+                    .child(button("dock-reset-layout", self.t("Reset layout", "重置布局"), false, |this, cx| this.reset_dock_layout(cx), cx))
                     .child(button(
                         "capture-upstream",
                         upstream,
@@ -20899,16 +21113,21 @@ impl Workspace {
             })
             .child(
                 div()
+                    .relative()
                     .flex()
                     .flex_1()
                     .min_h_0()
                     .gap_4()
+                    .child(self.dock_left_panel(cx))
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .flex_1()
                             .min_w_0()
+                            .when(self.dock_event_browser || self.dock_api_inspector, |view| {
+                                view.pl(px(276.))
+                            })
                             .bg(rgb(0x192332))
                             .rounded_lg()
                             .overflow_hidden()
@@ -23212,6 +23431,10 @@ fn main() {
                         selected: None,
                         pipeline: None,
                         tab: CaptureTab::Events,
+                        dock_left_ratio: 0.25,
+                        dock_api_ratio: 0.7,
+                        dock_event_browser: true,
+                        dock_api_inspector: true,
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
@@ -24100,6 +24323,10 @@ mod ui_tests {
                         selected: None,
                         pipeline: None,
                         tab: CaptureTab::Events,
+                        dock_left_ratio: 0.25,
+                        dock_api_ratio: 0.7,
+                        dock_event_browser: true,
+                        dock_api_inspector: true,
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
@@ -24614,7 +24841,7 @@ mod ui_tests {
         let (session, events, selections) =
             renderdocx::replay::test_support::recording_remote_session();
         let (handle, view) = cx.update(|cx| {
-            let bounds = Bounds::centered(None, size(px(1040.), px(760.)), cx);
+            let bounds = Bounds::centered(None, size(px(1400.), px(900.)), cx);
             gpui_kit::open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -24928,6 +25155,10 @@ mod ui_tests {
                         saved_event_filters: Vec::new(),
                         pipeline: None,
                         tab: CaptureTab::Events,
+                        dock_left_ratio: 0.25,
+                        dock_api_ratio: 0.7,
+                        dock_event_browser: true,
+                        dock_api_inspector: true,
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
@@ -31854,6 +32085,74 @@ mod ui_tests {
         cx.run_until_parked();
         cx.update(|cx| {
             assert!(view.read(cx).constant_buffer_viewer.is_none());
+        });
+
+        // RenderDoc default dock layout: left Event Browser + API Inspector,
+        // main capture panel on the right.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("dock-left").visible());
+            assert!(window.find("dock-event-browser").visible());
+            assert!(window.find("dock-api-inspector").visible());
+            window.click("dock-event-2", cx);
+        })
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            if cx.update(|cx| view.read(cx).pipeline.as_ref().is_some_and(|p| p.event_id == 77)) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "dock event browser did not replay event 77"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("dock-toggle-event-browser", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let view = view.read(cx);
+            assert!(!view.dock_event_browser);
+            assert!(view.dock_api_inspector);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("dock-toggle-event-browser", cx);
+            window.click("dock-reset-layout", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let view = view.read(cx);
+            assert!(view.dock_event_browser);
+            assert!(view.dock_api_inspector);
+            assert!((view.dock_left_ratio - 0.25).abs() < f32::EPSILON);
+            assert!((view.dock_api_ratio - 0.7).abs() < f32::EPSILON);
+        });
+
+        // Layout slots persist dock visibility and split ratios.
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.dock_left_ratio = 0.31;
+                view.dock_api_ratio = 0.55;
+                view.dock_event_browser = false;
+                view.dock_api_inspector = false;
+                view.save_layout(1, cx);
+                view.dock_left_ratio = 0.25;
+                view.dock_api_ratio = 0.7;
+                view.dock_event_browser = true;
+                view.dock_api_inspector = true;
+                view.load_layout(1, cx);
+                assert!((view.dock_left_ratio - 0.31).abs() < f32::EPSILON);
+                assert!((view.dock_api_ratio - 0.55).abs() < f32::EPSILON);
+                assert!(!view.dock_event_browser);
+                assert!(!view.dock_api_inspector);
+            })
         });
     }
 }
