@@ -981,6 +981,7 @@ struct Workspace {
     show_capture_dialog_tab: bool,
     menu_open: Option<MenuBar>,
     layout_submenu_open: bool,
+    recent_submenu_open: bool,
     floating_docks: Vec<FloatingDock>,
     floating_windows: Vec<(FloatingDock, gpui::WindowHandle<FloatingDockWindow>)>,
     selected_texture: Option<usize>,
@@ -15895,6 +15896,7 @@ impl Workspace {
         }
         self.menu_open = None;
         self.layout_submenu_open = false;
+        self.recent_submenu_open = false;
         self.status = Some(
             self.t(
                 "Panel is floating; use Dock to return it.",
@@ -16032,6 +16034,37 @@ impl Workspace {
         item.on_click(cx.listener(move |this, _, window, cx| {
             this.menu_open = None;
             this.layout_submenu_open = false;
+            action(this, window, cx);
+            cx.notify();
+        }))
+        .into_any_element()
+    }
+
+    fn menu_item_dynamic(
+        &self,
+        id: &'static str,
+        label: String,
+        action: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+        cx: &mut Context<Workspace>,
+    ) -> gpui::AnyElement {
+        let item = div()
+            .id(id)
+            .test_support()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_4()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .cursor_pointer()
+            .text_sm()
+            .hover(|view| view.bg(rgb(0x262626)))
+            .child(label);
+        item.on_click(cx.listener(move |this, _, window, cx| {
+            this.menu_open = None;
+            this.layout_submenu_open = false;
+            this.recent_submenu_open = false;
             action(this, window, cx);
             cx.notify();
         }))
@@ -16228,6 +16261,73 @@ impl Workspace {
         )
     }
 
+    fn recent_submenu(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        const IDS: [&str; 10] = [
+            "menu-recent-0",
+            "menu-recent-1",
+            "menu-recent-2",
+            "menu-recent-3",
+            "menu-recent-4",
+            "menu-recent-5",
+            "menu-recent-6",
+            "menu-recent-7",
+            "menu-recent-8",
+            "menu-recent-9",
+        ];
+        let mut dropdown = div()
+            .id("recent-submenu")
+            .test_support()
+            .w(px(380.))
+            .bg(rgb(0x0a0a0a))
+            .border_1()
+            .border_color(rgb(0x333333))
+            .rounded_lg()
+            .p_1()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_sm()
+                    .text_color(rgb(0xa1a1aa))
+                    .child(self.t("Recent Captures", "最近捕获")),
+            );
+        let recents: Vec<PathBuf> = self
+            .settings
+            .recent_captures
+            .iter()
+            .take(IDS.len())
+            .cloned()
+            .collect();
+        if recents.is_empty() {
+            dropdown = dropdown.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_sm()
+                    .text_color(rgb(0x6b6b6b))
+                    .child(self.t("No recent captures", "没有最近捕获")),
+            );
+        } else {
+            for (index, path) in recents.iter().enumerate() {
+                let label = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.display().to_string());
+                let path = path.clone();
+                dropdown = dropdown.child(self.menu_item_dynamic(
+                    IDS[index],
+                    label,
+                    move |this, _, cx| this.open(path.clone(), cx),
+                    cx,
+                ));
+            }
+        }
+        dropdown.into_any_element()
+    }
+
     fn menu_dropdown(&self, menu: MenuBar, cx: &mut Context<Self>) -> gpui::AnyElement {
         let mut dropdown = div()
             .id(("menu-dropdown", menu as usize))
@@ -16256,6 +16356,17 @@ impl Workspace {
                             {
                                 this.open(path, cx);
                             }
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_submenu_item(
+                        "menu-file-recent",
+                        "Open Recent",
+                        "最近捕获",
+                        self.recent_submenu_open,
+                        |this, _, cx| {
+                            this.recent_submenu_open = !this.recent_submenu_open;
+                            cx.notify();
                         },
                         cx,
                     ))
@@ -16705,6 +16816,7 @@ impl Workspace {
                         cx.listener(|this, _, _, cx| {
                             this.menu_open = None;
                             this.layout_submenu_open = false;
+                            this.recent_submenu_open = false;
                             cx.notify();
                         }),
                     ),
@@ -16720,6 +16832,19 @@ impl Workspace {
                     )
                     .child(self.menu_dropdown(menu, cx)),
             )
+            .when(menu == MenuBar::File && self.recent_submenu_open, |view| {
+                view.child(
+                    div()
+                        .absolute()
+                        .top(px(44.))
+                        .left(px(left + 260.))
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                        )
+                        .child(self.recent_submenu(cx)),
+                )
+            })
             .when(menu == MenuBar::Window && self.layout_submenu_open, |view| {
                 view.child(
                     div()
@@ -16793,6 +16918,7 @@ impl Workspace {
                             Some(menu)
                         };
                         this.layout_submenu_open = false;
+                        this.recent_submenu_open = false;
                         cx.notify();
                     })),
             );
@@ -25142,6 +25268,7 @@ fn main() {
                         show_capture_dialog_tab: true,
                         menu_open: None,
                         layout_submenu_open: false,
+                        recent_submenu_open: false,
                         floating_docks: Vec::new(),
                         floating_windows: Vec::new(),
                         selected_texture: None,
@@ -26049,6 +26176,7 @@ mod ui_tests {
                         show_capture_dialog_tab: true,
                         menu_open: None,
                         layout_submenu_open: false,
+                        recent_submenu_open: false,
                         floating_docks: Vec::new(),
                         floating_windows: Vec::new(),
                         selected_texture: None,
@@ -26896,6 +27024,7 @@ mod ui_tests {
                         show_capture_dialog_tab: true,
                         menu_open: None,
                         layout_submenu_open: false,
+                        recent_submenu_open: false,
                         floating_docks: Vec::new(),
                         floating_windows: Vec::new(),
                         selected_texture: None,
@@ -34051,6 +34180,13 @@ mod ui_tests {
         });
 
         // Real menu bar: File/Edit/Window/Help with dropdown actions.
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.settings
+                    .record_capture(std::path::Path::new("recent-capture.rdc"));
+                cx.notify();
+            });
+        });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(window.find("menu-file").visible());
@@ -34066,6 +34202,14 @@ mod ui_tests {
             assert!(window.find("menu-file-open").visible());
             assert!(window.find("menu-file-save").visible());
             assert!(window.find("menu-file-save-as").visible());
+            assert!(window.find("menu-file-recent").visible());
+            window.click("menu-file-recent", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("menu-recent-0").visible());
             window.click("menu-file", cx);
         })
         .unwrap();
