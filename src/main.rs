@@ -802,6 +802,19 @@ enum MenuSubmenu {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TabGroup {
+    Main,
+    Aux,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TabContextMenu {
+    group: TabGroup,
+    tab: CaptureTab,
+    position: (f32, f32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FloatingDock {
     EventBrowser,
     ApiInspector,
@@ -1021,6 +1034,7 @@ struct Workspace {
     aux_tab_order: Vec<CaptureTab>,
     menu_open: Option<MenuBar>,
     submenu_open: Option<MenuSubmenu>,
+    tab_context: Option<TabContextMenu>,
     process_inject: bool,
     floating_docks: Vec<FloatingDock>,
     floating_windows: Vec<(FloatingDock, gpui::WindowHandle<FloatingDockWindow>)>,
@@ -18170,6 +18184,131 @@ impl Workspace {
         self.aux_tab_order.insert(insert.min(self.aux_tab_order.len()), tab);
     }
 
+    fn shift_tab(&mut self, group: TabGroup, tab: CaptureTab, delta: isize) {
+        let order = match group {
+            TabGroup::Main => &mut self.main_tab_order,
+            TabGroup::Aux => &mut self.aux_tab_order,
+        };
+        let Some(index) = order.iter().position(|item| *item == tab) else {
+            return;
+        };
+        let target = if delta < 0 {
+            index.saturating_sub(1)
+        } else {
+            (index + 1).min(order.len().saturating_sub(1))
+        };
+        if target != index {
+            order.swap(index, target);
+        }
+    }
+
+    fn tab_context_item(
+        &self,
+        id: &'static str,
+        en: &'static str,
+        zh: &'static str,
+        action: impl Fn(&mut Workspace, &mut Context<Workspace>) + 'static,
+        cx: &mut Context<Workspace>,
+    ) -> gpui::AnyElement {
+        div()
+            .id(id)
+            .test_support()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .cursor_pointer()
+            .text_sm()
+            .hover(|view| view.bg(rgb(0x262626)))
+            .child(self.t(en, zh))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                action(this, cx);
+                this.tab_context = None;
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
+    fn tab_context_overlay(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        let Some(menu) = self.tab_context else {
+            return Vec::new();
+        };
+        let order = match menu.group {
+            TabGroup::Main => self.main_tab_order.clone(),
+            TabGroup::Aux => self.aux_tab_order.clone(),
+        };
+        let index = order.iter().position(|tab| *tab == menu.tab);
+        let can_left = index.is_some_and(|index| index > 0);
+        let can_right = index.is_some_and(|index| index + 1 < order.len());
+        let mut items: Vec<gpui::AnyElement> = Vec::new();
+        if can_left {
+            items.push(self.tab_context_item(
+                "tab-context-move-left",
+                "Move Left",
+                "左移",
+                move |this, _cx| this.shift_tab(menu.group, menu.tab, -1),
+                cx,
+            ));
+        }
+        if can_right {
+            items.push(self.tab_context_item(
+                "tab-context-move-right",
+                "Move Right",
+                "右移",
+                move |this, _cx| this.shift_tab(menu.group, menu.tab, 1),
+                cx,
+            ));
+        }
+        items.push(self.tab_context_item(
+            "tab-context-reset-order",
+            "Reset Tab Order",
+            "重置标签顺序",
+            move |this, _cx| match menu.group {
+                TabGroup::Main => this.main_tab_order = standard_main_tab_order(),
+                TabGroup::Aux => this.aux_tab_order = standard_aux_tab_order(),
+            },
+            cx,
+        ));
+        let x = menu.position.0.clamp(20.0, 1180.0);
+        let y = menu.position.1.clamp(70.0, 760.0);
+        vec![div()
+            .id("tab-context-backdrop")
+            .test_support()
+            .absolute()
+            .top(px(0.))
+            .left(px(0.))
+            .size_full()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.tab_context = None;
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .id("tab-context-menu")
+                    .test_support()
+                    .absolute()
+                    .left(px(x))
+                    .top(px(y))
+                    .w(px(200.))
+                    .p_1()
+                    .rounded_lg()
+                    .bg(rgb(0x0a0a0a))
+                    .border_1()
+                    .border_color(rgb(0x333333))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                    )
+                    .children(items),
+            )
+            .into_any_element()]
+    }
+
     fn aux_tab_button(&self, tab: CaptureTab, cx: &mut Context<Self>) -> gpui::AnyElement {
         let id = match tab {
             CaptureTab::Events => "events-tab",
@@ -18202,6 +18341,18 @@ impl Workspace {
             .hover(|view| view.bg(rgb(0x262626)))
             .child(label)
             .on_click(cx.listener(move |this, _, _, cx| this.activate_aux_tab(tab, cx)))
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                    this.tab_context = Some(TabContextMenu {
+                        group: TabGroup::Aux,
+                        tab,
+                        position: (f32::from(event.position.x), f32::from(event.position.y)),
+                    });
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
             .on_drag(tab, move |_, _, _, cx| {
                 cx.new(|_| TabDragPreview { label })
             })
@@ -18281,6 +18432,18 @@ impl Workspace {
             .hover(|view| view.bg(rgb(0x262626)))
             .child(label)
             .on_click(cx.listener(move |this, _, _, cx| this.activate_main_tab(tab, cx)))
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                    this.tab_context = Some(TabContextMenu {
+                        group: TabGroup::Main,
+                        tab,
+                        position: (f32::from(event.position.x), f32::from(event.position.y)),
+                    });
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
             .on_drag(tab, move |_, _, _, cx| {
                 cx.new(|_| TabDragPreview { label })
             })
@@ -18459,6 +18622,7 @@ impl Workspace {
                             self.snapshot = None;
                             self.texture_saved_selection.clear();
                             self.pending_texture_autoselect = false;
+                            self.tab_context = None;
                             self.message_generation += 1;
                             self.message_poll_pending = false;
                             self.message_visible.clear();
@@ -25231,6 +25395,7 @@ impl Workspace {
             )
             .child(self.menu_bar_view(cx))
             .child(self.menu_overlay_view(cx))
+            .children(self.tab_context_overlay(cx))
     }
 }
 
@@ -27112,6 +27277,7 @@ fn main() {
                         aux_tab_order: standard_aux_tab_order(),
                         menu_open: None,
                         submenu_open: None,
+                        tab_context: None,
                         process_inject: false,
                         floating_docks: Vec::new(),
                         floating_windows: Vec::new(),
@@ -28031,6 +28197,7 @@ mod ui_tests {
                         aux_tab_order: standard_aux_tab_order(),
                         menu_open: None,
                         submenu_open: None,
+                        tab_context: None,
                         process_inject: false,
                         floating_docks: Vec::new(),
                         floating_windows: Vec::new(),
@@ -28890,6 +29057,7 @@ mod ui_tests {
                         aux_tab_order: standard_aux_tab_order(),
                         menu_open: None,
                         submenu_open: None,
+                        tab_context: None,
                         process_inject: false,
                         floating_docks: Vec::new(),
                         floating_windows: Vec::new(),
@@ -36113,6 +36281,28 @@ mod ui_tests {
                 "dragging a main tab must reorder it"
             );
         });
+        let before_context_order = cx.update(|cx| view.read(cx).main_tab_order.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.right_click("pipeline-tab", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("tab-context-menu").visible());
+            window.click("tab-context-move-left", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_ne!(
+                view.read(cx).main_tab_order,
+                before_context_order,
+                "tab context move-left must reorder the main tabs"
+            );
+            assert!(view.read(cx).tab_context.is_none());
+        });
         cx.update(|cx| {
             view.update(cx, |view, cx| {
                 view.timeline.shown = true;
@@ -36176,6 +36366,27 @@ mod ui_tests {
                 view.read(cx).aux_tab_order,
                 before_aux,
                 "dragging an auxiliary tab must reorder it"
+            );
+        });
+        let before_aux_context = cx.update(|cx| view.read(cx).aux_tab_order.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.right_click("buffers-tab", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("tab-context-menu").visible());
+            window.click("tab-context-move-right", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_ne!(
+                view.read(cx).aux_tab_order,
+                before_aux_context,
+                "tab context move-right must reorder the auxiliary tabs"
             );
         });
         // Global shortcut: Ctrl+F returns to the event browser.
