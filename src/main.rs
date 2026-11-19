@@ -16990,20 +16990,8 @@ impl Workspace {
         right_docked: bool,
         bottom_docked: bool,
     ) -> gpui::AnyElement {
-        let rows: Vec<(usize, String, String)> = {
-            let Some(snapshot) = self.snapshot.as_ref() else {
-                return div().into_any_element();
-            };
-            self.event_tree
-                .visible
-                .iter()
-                .filter_map(|&index| {
-                    snapshot
-                        .actions
-                        .get(index)
-                        .map(|action| (index, action.event_id.to_string(), action.name.clone()))
-                })
-                .collect()
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return div().into_any_element();
         };
         let (root_id, rows_id, row_prefix) = if floating {
             (
@@ -17018,49 +17006,48 @@ impl Workspace {
                 "dock-event-",
             )
         };
-        let mut list = div()
-            .id(rows_id)
-            .test_support()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .flex()
-            .flex_col();
-        for (index, event, name) in rows {
-            let selected = self.selected == Some(index);
-            list = list.child(
-                div()
-                    .id(SharedString::from(format!("{row_prefix}{index}")))
-                    .test_support()
-                    .h(px(28.))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .cursor_pointer()
-                    .bg(rgb(if selected { 0x1f1f1f } else { 0x0a0a0a }))
-                    .hover(|row| row.bg(rgb(0x262626)))
-                    .child(
-                        div()
-                            .w(px(52.))
-                            .flex_none()
-                            .text_color(rgb(0xa1a1aa))
-                            .child(event.to_string()),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(name),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.select_event(index, None, cx);
-                    })),
-            );
-        }
+        let bookmarked: std::collections::HashSet<u32> = self
+            .annotations
+            .bookmarks
+            .as_ref()
+            .and_then(|(_, doc)| renderdocx::annotations::bookmarks(doc).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(event, _)| event)
+            .collect();
+        let controls_label = self.t("Controls", "控制");
+        let find_label = self.t("Find Event", "查找事件");
+        let filter_label = self.t("Filter", "筛选");
+        let bookmarks_label = self.t("Bookmarks", "书签");
+        let eid_label = self.t("EID", "事件 ID");
+        let event_header = self.t("Event", "事件");
+        let api_header = self.t("API Calls", "API 调用");
+        let duration_header = self.t("Duration", "耗时");
+        let previous_action = self.t("Previous Action", "上一个动作");
+        let next_action = self.t("Next Action", "下一个动作");
+        let bookmark_action = self.t("Toggle Bookmark", "切换书签");
+        let export_action = self.t("Export event list", "导出事件列表");
+        let find_id = if floating {
+            "floating-event-find"
+        } else {
+            "dock-event-find"
+        };
+        let find_prev_id = if floating {
+            "floating-event-find-prev"
+        } else {
+            "dock-event-find-prev"
+        };
+        let find_next_id = if floating {
+            "floating-event-find-next"
+        } else {
+            "dock-event-find-next"
+        };
+        let filter_id = if floating {
+            "floating-event-filter"
+        } else {
+            "dock-event-filter"
+        };
+
         let mut root = div()
             .id(root_id)
             .test_support()
@@ -17082,6 +17069,292 @@ impl Workspace {
                 bottom_docked,
                 cx,
             ));
+        }
+
+        // RenderDoc's Event Browser starts with a Controls strip.
+        root = root
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(rgb(0x1f1f1f))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0xa1a1aa))
+                            .child(controls_label),
+                    )
+                    .child(toolbar_separator())
+                    .child(button(
+                        "dock-event-prev-action",
+                        previous_action,
+                        false,
+                        |this, cx| this.step_event(false, cx),
+                        cx,
+                    ))
+                    .child(button(
+                        "dock-event-next-action",
+                        next_action,
+                        false,
+                        |this, cx| this.step_event(true, cx),
+                        cx,
+                    ))
+                    .child(toolbar_separator())
+                    .child(button(
+                        "dock-event-toggle-bookmark",
+                        bookmark_action,
+                        false,
+                        |this, cx| this.toggle_event_bookmark(cx),
+                        cx,
+                    ))
+                    .child(button(
+                        "dock-event-export",
+                        export_action,
+                        false,
+                        |this, cx| this.export_events(cx),
+                        cx,
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .child(
+                        div()
+                            .w(px(72.))
+                            .flex_none()
+                            .text_xs()
+                            .text_color(rgb(0xa1a1aa))
+                            .child(find_label),
+                    )
+                    .child(
+                        Input::new(&self.event_find)
+                            .id(find_id)
+                            .aria_label(find_label)
+                            .w_full(),
+                    )
+                    .child(button(
+                        find_prev_id,
+                        "◀",
+                        false,
+                        |this, cx| this.find_event(false, cx),
+                        cx,
+                    ))
+                    .child(button(
+                        find_next_id,
+                        "▶",
+                        false,
+                        |this, cx| this.find_event(true, cx),
+                        cx,
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .pb_1()
+                    .child(
+                        div()
+                            .w(px(72.))
+                            .flex_none()
+                            .text_xs()
+                            .text_color(rgb(0xa1a1aa))
+                            .child(filter_label),
+                    )
+                    .child(
+                        Input::new(&self.event_search)
+                            .id(filter_id)
+                            .aria_label(filter_label)
+                            .w_full(),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(rgb(0x1f1f1f))
+                    .text_xs()
+                    .text_color(rgb(0xa1a1aa))
+                    .child(div().w(px(18.)).flex_none().child("★"))
+                    .child(div().w(px(18.)).flex_none())
+                    .child(div().w(px(72.)).flex_none().child(eid_label))
+                    .child(div().flex_1().min_w_0().child(event_header))
+                    .child(div().w(px(120.)).flex_none().child(api_header))
+                    .when(self.event_tree.has_durations(), |row| {
+                        row.child(div().w(px(70.)).flex_none().child(duration_header))
+                    }),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(rgb(0x1f1f1f))
+                    .text_xs()
+                    .text_color(rgb(0xf5a623))
+                    .child(bookmarks_label),
+            );
+
+        let mut list = div()
+            .id(rows_id)
+            .test_support()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        for node in self.event_tree.visible.clone() {
+            let (action_index, api_index) = match self.event_tree.row(node) {
+                Some(EventRow::Action(index)) => (index, None),
+                Some(EventRow::Api { action, event }) => (action, Some(event)),
+                None => continue,
+            };
+            let Some(action) = snapshot.actions.get(action_index) else {
+                continue;
+            };
+            let event = match api_index {
+                Some(api_index) => match action.api_events.get(api_index) {
+                    Some(api) => api.event_id,
+                    None => continue,
+                },
+                None => action.event_id,
+            };
+            let name = self
+                .event_tree
+                .display_name(node)
+                .unwrap_or(&action.name)
+                .to_owned();
+            let selected = self.selected == Some(action_index)
+                && self.selected_event_id() == Some(event);
+            let has_children = self.event_tree.has_children(node);
+            let collapsed = self.event_tree.is_collapsed(node);
+            let eid = self
+                .event_tree
+                .event_label(node)
+                .unwrap_or_else(|| event.to_string());
+            let depth = match api_index {
+                Some(_) => action.depth + 1,
+                None => action.depth,
+            };
+            let api_calls = match api_index {
+                Some(_) => String::new(),
+                None => action
+                    .api_events
+                    .iter()
+                    .map(|api| {
+                        if api.name.is_empty() {
+                            format!("E{}", api.event_id)
+                        } else {
+                            api.name.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            };
+            let duration = self
+                .event_tree
+                .duration(event)
+                .map(|seconds| format!("{:.3} ms", seconds * 1000.0))
+                .unwrap_or_else(|| "—".to_owned());
+            let bookmark = if bookmarked.contains(&event) {
+                "★"
+            } else {
+                ""
+            };
+            let indent = depth as f32 * 12.0;
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("{row_prefix}{node}")))
+                    .test_support()
+                    .h(px(28.))
+                    .pl_1()
+                    .pr_2()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .cursor_pointer()
+                    .bg(rgb(if selected { 0x1f1f1f } else { 0x0a0a0a }))
+                    .hover(|row| row.bg(rgb(0x262626)))
+                    .child(
+                        div()
+                            .w(px(18.))
+                            .flex_none()
+                            .text_color(rgb(0xf5a623))
+                            .child(bookmark),
+                    )
+                    .child(if has_children {
+                        div()
+                            .id(SharedString::from(format!(
+                                "{row_prefix}toggle-{node}"
+                            )))
+                            .test_support()
+                            .w(px(18.))
+                            .flex_none()
+                            .cursor_pointer()
+                            .child(if collapsed { "▸" } else { "▾" })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.event_tree.toggle(node);
+                                cx.notify();
+                            }))
+                            .into_any_element()
+                    } else {
+                        div().w(px(18.)).flex_none().into_any_element()
+                    })
+                    .child(
+                        div()
+                            .w(px(72.))
+                            .flex_none()
+                            .text_color(rgb(0xa1a1aa))
+                            .child(eid),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .pl(px(indent))
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .w(px(120.))
+                            .flex_none()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_xs()
+                            .text_color(rgb(0x6b6b6b))
+                            .child(api_calls),
+                    )
+                    .when(self.event_tree.has_durations(), |row| {
+                        row.child(
+                            div()
+                                .w(px(70.))
+                                .flex_none()
+                                .text_xs()
+                                .text_color(rgb(0xa1a1aa))
+                                .child(duration),
+                        )
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_event(action_index, api_index, cx);
+                    })),
+            );
         }
         root.child(list).into_any_element()
     }
