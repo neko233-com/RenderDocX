@@ -1097,6 +1097,8 @@ struct Workspace {
     texture_raw_page: Option<renderdocx::replay::RawTexturePage>,
     texture_raw_seek: Entity<InputState>,
     texture_raw_search: Entity<InputState>,
+    texture_list_filter: Entity<InputState>,
+    _texture_filter_subscription: gpui::Subscription,
     texture_raw_last: Option<RawTextureSearchHit>,
     pixel_x: Entity<InputState>,
     pixel_y: Entity<InputState>,
@@ -3489,6 +3491,17 @@ impl Workspace {
             if matches!(event, InputEvent::Change) {
                 let expression = input.read(cx).value().to_string();
                 this.apply_event_filter(expression, cx);
+            }
+        })
+    }
+
+    fn watch_texture_filter(
+        input: &Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Subscription {
+        cx.subscribe(input, |_, _, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
             }
         })
     }
@@ -15032,18 +15045,50 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let texture_label = self.t("Texture", "纹理");
-        let count = self
+        let filter = self.texture_list_filter.read(cx).value().to_lowercase();
+        let indices: Vec<usize> = self
             .snapshot
             .as_ref()
-            .map(|snapshot| snapshot.textures.len())
-            .unwrap_or(0);
+            .map(|snapshot| {
+                snapshot
+                    .textures
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, texture)| {
+                        if filter.is_empty() {
+                            return true;
+                        }
+                        let display_name =
+                            self.resource_display_name(texture.resource_index, &texture.name);
+                        display_name.to_lowercase().contains(&filter)
+                            || texture.name.to_lowercase().contains(&filter)
+                            || texture.format_name.to_lowercase().contains(&filter)
+                            || format!(
+                                "{}x{}x{}",
+                                texture.width, texture.height, texture.depth
+                            )
+                            .contains(&filter)
+                            || format!(
+                                "{} {} {}",
+                                texture.width, texture.height, texture.depth
+                            )
+                            .contains(&filter)
+                            || index.to_string() == filter
+                    })
+                    .map(|(index, _)| index)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let count = indices.len();
+        let indices = std::sync::Arc::new(indices);
         let preview_path = self.preview.as_ref().map(|preview| preview.path.clone());
         let rows = uniform_list(
             "capture-textures",
             count,
             cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                 range
-                    .filter_map(|index| {
+                    .filter_map(|row| {
+                        let index = *indices.get(row)?;
                         let texture = this.snapshot.as_ref()?.textures.get(index)?;
                         let display_name =
                             this.resource_display_name(texture.resource_index, &texture.name);
@@ -15097,7 +15142,16 @@ impl Workspace {
                     .flex_none()
                     .min_h_0()
                     .flex()
-                    .child(rows),
+                    .flex_col()
+                    .child(
+                        div().px_2().py_1().child(
+                            Input::new(&self.texture_list_filter)
+                                .id("texture-list-filter")
+                                .aria_label(self.t("Filter textures", "筛选纹理"))
+                                .w_full(),
+                        ),
+                    )
+                    .child(div().flex_1().min_h_0().flex().child(rows)),
             );
         if let Some(path) = preview_path {
             viewer = viewer.child(
@@ -28690,6 +28744,7 @@ fn main() {
                     let texture_raw_seek =
                         cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let texture_raw_search = cx.new(|cx| InputState::new(window, cx));
+                    let texture_list_filter = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
                     let message_search = cx.new(|cx| InputState::new(window, cx));
@@ -28870,6 +28925,11 @@ fn main() {
                         texture_raw_page: None,
                         texture_raw_seek,
                         texture_raw_search,
+                        _texture_filter_subscription: Workspace::watch_texture_filter(
+                            &texture_list_filter,
+                            cx,
+                        ),
+                        texture_list_filter,
                         texture_raw_last: None,
                         pixel_x,
                         pixel_y,
@@ -29597,6 +29657,7 @@ mod ui_tests {
                     let texture_raw_seek =
                         cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let texture_raw_search = cx.new(|cx| InputState::new(window, cx));
+                    let texture_list_filter = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
                     let message_search = cx.new(|cx| InputState::new(window, cx));
@@ -29796,6 +29857,11 @@ mod ui_tests {
                         texture_raw_page: None,
                         texture_raw_seek,
                         texture_raw_search,
+                        _texture_filter_subscription: Workspace::watch_texture_filter(
+                            &texture_list_filter,
+                            cx,
+                        ),
+                        texture_list_filter,
                         texture_raw_last: None,
                         pixel_x,
                         pixel_y,
@@ -30341,6 +30407,7 @@ mod ui_tests {
                     let texture_raw_seek =
                         cx.new(|cx| InputState::new(window, cx).default_value("0"));
                     let texture_raw_search = cx.new(|cx| InputState::new(window, cx));
+                    let texture_list_filter = cx.new(|cx| InputState::new(window, cx));
                     let resource_search = cx.new(|cx| InputState::new(window, cx));
                     let resource_rename = cx.new(|cx| InputState::new(window, cx));
                     let message_search = cx.new(|cx| InputState::new(window, cx));
@@ -30662,6 +30729,11 @@ mod ui_tests {
                         texture_raw_page: None,
                         texture_raw_seek,
                         texture_raw_search,
+                        _texture_filter_subscription: Workspace::watch_texture_filter(
+                            &texture_list_filter,
+                            cx,
+                        ),
+                        texture_list_filter,
                         texture_raw_last: None,
                         pixel_x,
                         pixel_y,
@@ -38019,6 +38091,7 @@ mod ui_tests {
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(window.find("texture-viewer-panel").visible());
+            assert!(window.find("texture-list-filter").visible());
             assert!(window.find("texture-viewer-flip").visible());
             assert!(window.find("texture-viewer-gamma").visible());
             assert!(window.find("texture-viewer-save").visible());
