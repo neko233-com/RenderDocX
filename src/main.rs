@@ -834,6 +834,7 @@ enum FloatingDock {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FloatingMainPanel {
+    TextureViewer,
     Pipeline,
     CaptureDialog,
 }
@@ -1306,6 +1307,7 @@ impl FloatingMainPanelWindow {
         cx: &mut Context<Self>,
     ) -> Self {
         let title = match panel {
+            FloatingMainPanel::TextureViewer => "Texture Viewer — RenderDocX",
             FloatingMainPanel::Pipeline => "Pipeline State — RenderDocX",
             FloatingMainPanel::CaptureDialog => "Capture Dialog — RenderDocX",
         };
@@ -1332,12 +1334,17 @@ impl Render for FloatingMainPanelWindow {
         let (title, dock_label) = {
             let workspace = self.workspace.read(cx);
             let title = match self.panel {
+                FloatingMainPanel::TextureViewer => workspace.t("Texture Viewer", "纹理查看器"),
                 FloatingMainPanel::Pipeline => workspace.t("Pipeline State", "管线状态"),
                 FloatingMainPanel::CaptureDialog => workspace.t("Capture Dialog", "捕获对话框"),
             };
             (title, workspace.t("Dock", "停靠"))
         };
         let content = match self.panel {
+            FloatingMainPanel::TextureViewer => self
+                .workspace
+                .update(cx, |workspace, cx| workspace.texture_viewer_content(false, cx))
+                .into_any_element(),
             FloatingMainPanel::Pipeline => self
                 .workspace
                 .update(cx, |workspace, cx| workspace.pipeline_state_panel(cx))
@@ -1350,6 +1357,7 @@ impl Render for FloatingMainPanelWindow {
         let dock_workspace = self.workspace.clone();
         let panel = self.panel;
         let dock_id = match panel {
+            FloatingMainPanel::TextureViewer => "floating-texture-viewer-dock",
             FloatingMainPanel::Pipeline => "floating-pipeline-dock",
             FloatingMainPanel::CaptureDialog => "floating-capture-dialog-dock",
         };
@@ -15006,6 +15014,150 @@ impl Workspace {
         cx.notify();
     }
 
+    fn texture_viewer_content(
+        &self,
+        include_header: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let texture_label = self.t("Texture", "纹理");
+        let count = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.textures.len())
+            .unwrap_or(0);
+        let preview_path = self.preview.as_ref().map(|preview| preview.path.clone());
+        let rows = uniform_list(
+            "capture-textures",
+            count,
+            cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                range
+                    .filter_map(|index| {
+                        let texture = this.snapshot.as_ref()?.textures.get(index)?;
+                        let display_name =
+                            this.resource_display_name(texture.resource_index, &texture.name);
+                        let name = if display_name.is_empty() {
+                            format!("{texture_label} {index}")
+                        } else {
+                            display_name.to_owned()
+                        };
+                        let dimensions = format!(
+                            "{} × {} × {}",
+                            texture.width, texture.height, texture.depth
+                        );
+                        Some(
+                            div()
+                                .id(SharedString::from(format!("texture-{index}")))
+                                .test_support()
+                                .h(px(32.))
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_3()
+                                .cursor_pointer()
+                                .bg(rgb(if this.selected_texture == Some(index) {
+                                    0x1f1f1f
+                                } else {
+                                    0x0a0a0a
+                                }))
+                                .hover(|row| row.bg(rgb(0x262626)))
+                                .child(div().overflow_hidden().child(name))
+                                .child(div().text_color(rgb(0xa1a1aa)).child(dimensions))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.switch_texture(index, None, window, cx);
+                                })),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .flex_1();
+        let mut viewer = div()
+            .id("texture-viewer")
+            .test_support()
+            .flex()
+            .flex_1()
+            .min_h_0()
+            .gap_3()
+            .child(
+                div()
+                    .w(px(300.))
+                    .flex_none()
+                    .min_h_0()
+                    .flex()
+                    .child(rows),
+            );
+        if let Some(path) = preview_path {
+            viewer = viewer.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(self.texture_preview_image(
+                        "texture-preview-image-center",
+                        360.0,
+                        path,
+                        cx,
+                    )),
+            );
+        } else {
+            viewer = viewer.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(rgb(0xa1a1aa))
+                    .child(self.t("Select a texture to preview.", "选择纹理以预览。")),
+            );
+        }
+        if !include_header {
+            return viewer.into_any_element();
+        }
+        div()
+            .id("texture-viewer-panel")
+            .test_support()
+            .size_full()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_lg()
+                            .child(self.t("Texture Viewer", "纹理查看器")),
+                    )
+                    .when(
+                        !self
+                            .floating_main_panels
+                            .contains(&FloatingMainPanel::TextureViewer),
+                        |row| {
+                            row.child(button(
+                                "texture-viewer-float",
+                                self.t("Float", "浮动"),
+                                false,
+                                |this, cx| {
+                                    this.float_main_panel(FloatingMainPanel::TextureViewer, cx)
+                                },
+                                cx,
+                            ))
+                        },
+                    ),
+            )
+            .child(viewer)
+            .into_any_element()
+    }
+
     fn timeline_view(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         const WIDTH: f64 = 768.0;
         let start = self.timeline.start;
@@ -17286,22 +17438,58 @@ impl Workspace {
         cx.notify();
     }
 
+    fn main_panel_floating(&self, tab: CaptureTab) -> bool {
+        match tab {
+            CaptureTab::Textures => self
+                .floating_main_panels
+                .contains(&FloatingMainPanel::TextureViewer),
+            CaptureTab::Pipeline => self
+                .floating_main_panels
+                .contains(&FloatingMainPanel::Pipeline),
+            CaptureTab::CaptureDialog => self
+                .floating_main_panels
+                .contains(&FloatingMainPanel::CaptureDialog),
+            _ => false,
+        }
+    }
+
+    fn fallback_main_tab(&mut self, exclude: CaptureTab) -> CaptureTab {
+        for tab in [
+            CaptureTab::Pipeline,
+            CaptureTab::Mesh,
+            CaptureTab::CaptureDialog,
+            CaptureTab::Textures,
+        ] {
+            if tab != exclude && self.main_tab_visible(tab) && !self.main_panel_floating(tab) {
+                return tab;
+            }
+        }
+        self.show_pipeline_tab = true;
+        CaptureTab::Pipeline
+    }
+
     fn float_main_panel(&mut self, panel: FloatingMainPanel, cx: &mut Context<Self>) {
         if self.floating_main_panels.contains(&panel) {
             return;
         }
         self.floating_main_panels.push(panel);
         match panel {
+            FloatingMainPanel::TextureViewer => {
+                self.show_textures_tab = true;
+                if self.tab == CaptureTab::Textures {
+                    self.tab = self.fallback_main_tab(CaptureTab::Textures);
+                }
+            }
             FloatingMainPanel::Pipeline => {
                 self.show_pipeline_tab = true;
                 if self.tab == CaptureTab::Pipeline {
-                    self.tab = CaptureTab::Textures;
+                    self.tab = self.fallback_main_tab(CaptureTab::Pipeline);
                 }
             }
             FloatingMainPanel::CaptureDialog => {
                 self.show_capture_dialog_tab = true;
                 if self.tab == CaptureTab::CaptureDialog {
-                    self.tab = CaptureTab::Textures;
+                    self.tab = self.fallback_main_tab(CaptureTab::CaptureDialog);
                 }
             }
         }
@@ -17375,6 +17563,10 @@ impl Workspace {
             });
         }
         match panel {
+            FloatingMainPanel::TextureViewer => {
+                self.show_textures_tab = true;
+                self.tab = CaptureTab::Textures;
+            }
             FloatingMainPanel::Pipeline => {
                 self.show_pipeline_tab = true;
                 self.tab = CaptureTab::Pipeline;
@@ -17391,6 +17583,10 @@ impl Workspace {
         self.floating_main_panels.retain(|item| *item != panel);
         self.floating_main_windows.retain(|(item, _)| *item != panel);
         match panel {
+            FloatingMainPanel::TextureViewer => {
+                self.show_textures_tab = true;
+                self.tab = CaptureTab::Textures;
+            }
             FloatingMainPanel::Pipeline => {
                 self.show_pipeline_tab = true;
                 self.tab = CaptureTab::Pipeline;
@@ -18815,6 +19011,9 @@ impl Workspace {
     }
 
     fn main_tab_visible(&self, tab: CaptureTab) -> bool {
+        if self.main_panel_floating(tab) {
+            return false;
+        }
         match tab {
             CaptureTab::Textures => self.show_textures_tab,
             CaptureTab::Pipeline => self.show_pipeline_tab,
@@ -19595,7 +19794,6 @@ impl Workspace {
             "Select a buffer to inspect its bytes.",
             "选择缓冲区查看字节。",
         );
-        let texture_label = self.t("Texture", "纹理");
         let array_label = self.t("Array", "数组");
         let samples_label = self.t("Samples", "采样");
         let bytes_label = self.t("Bytes", "字节");
@@ -20374,97 +20572,7 @@ impl Workspace {
             .flex_1()
             .into_any_element()
         } else if self.tab == CaptureTab::Textures {
-            let preview_path = self.preview.as_ref().map(|preview| preview.path.clone());
-            let rows = uniform_list(
-                "capture-textures",
-                count,
-                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                    range
-                        .filter_map(|index| {
-                            let texture = this.snapshot.as_ref()?.textures.get(index)?;
-                            let display_name =
-                                this.resource_display_name(texture.resource_index, &texture.name);
-                            let name = if display_name.is_empty() {
-                                format!("{texture_label} {index}")
-                            } else {
-                                display_name.to_owned()
-                            };
-                            let dimensions = format!(
-                                "{} × {} × {}",
-                                texture.width, texture.height, texture.depth
-                            );
-                            Some(
-                                div()
-                                    .id(SharedString::from(format!("texture-{index}")))
-                                    .test_support()
-                                    .h(px(32.))
-                                    .px_3()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_3()
-                                    .cursor_pointer()
-                                    .bg(rgb(if this.selected_texture == Some(index) {
-                                        0x1f1f1f
-                                    } else {
-                                        0x0a0a0a
-                                    }))
-                                    .hover(|row| row.bg(rgb(0x262626)))
-                                    .child(div().overflow_hidden().child(name))
-                                    .child(div().text_color(rgb(0xa1a1aa)).child(dimensions))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.switch_texture(index, None, window, cx);
-                                    })),
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                }),
-            )
-            .flex_1();
-            let mut viewer = div()
-                .id("texture-viewer")
-                .test_support()
-                .flex()
-                .flex_1()
-                .min_h_0()
-                .gap_3()
-                .child(
-                    div()
-                        .w(px(300.))
-                        .flex_none()
-                        .min_h_0()
-                        .flex()
-                        .child(rows),
-                );
-            if let Some(path) = preview_path {
-                viewer = viewer.child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .min_h_0()
-                        .flex()
-                        .flex_col()
-                        .child(self.texture_preview_image(
-                            "texture-preview-image-center",
-                            360.0,
-                            path,
-                            cx,
-                        )),
-                );
-            } else {
-                viewer = viewer.child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .min_h_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_color(rgb(0xa1a1aa))
-                        .child(self.t("Select a texture to preview.", "选择纹理以预览。")),
-                );
-            }
-            viewer.into_any_element()
+            self.texture_viewer_content(true, cx)
         } else if self.tab == CaptureTab::Pipeline || self.tab == CaptureTab::CaptureDialog {
             div().flex_1().into_any_element()
         } else {
@@ -36911,6 +37019,48 @@ mod ui_tests {
                     .contains(&FloatingMainPanel::CaptureDialog)
             );
             assert_eq!(view.read(cx).tab, CaptureTab::CaptureDialog);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("textures-tab", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("texture-viewer-panel").visible());
+            window.click("texture-viewer-float", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                view.read(cx)
+                    .floating_main_panels
+                    .contains(&FloatingMainPanel::TextureViewer)
+            );
+        });
+        let texture_window = cx.update(|cx| {
+            view.read(cx)
+                .floating_main_windows
+                .iter()
+                .find(|(panel, _)| *panel == FloatingMainPanel::TextureViewer)
+                .map(|(_, handle)| *handle)
+                .expect("texture viewer float must open a window")
+        });
+        let _ = cx.update_window(texture_window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("texture-viewer").visible());
+            window.click("floating-texture-viewer-dock", cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                !view.read(cx)
+                    .floating_main_panels
+                    .contains(&FloatingMainPanel::TextureViewer)
+            );
+            assert_eq!(view.read(cx).tab, CaptureTab::Textures);
         });
         cx.update(|cx| {
             view.update(cx, |view, cx| {
