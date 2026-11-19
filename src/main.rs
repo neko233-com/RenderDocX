@@ -761,6 +761,20 @@ enum ViewerDialog {
     Camera,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuBar {
+    File,
+    Edit,
+    Window,
+    Help,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FloatingDock {
+    EventBrowser,
+    ApiInspector,
+}
+
 /// Independent BufferViewer window for a shader constant block.
 #[derive(Clone, Debug, Default)]
 struct ConstantBufferViewer {
@@ -959,6 +973,10 @@ struct Workspace {
     dock_api_inspector: bool,
     dock_drag_x: Option<f32>,
     show_aux_tabs: bool,
+    menu_open: Option<MenuBar>,
+    floating_docks: Vec<FloatingDock>,
+    floating_positions: [(f32, f32); 2],
+    floating_drag: Option<(FloatingDock, f32, f32, f32, f32)>,
     selected_texture: Option<usize>,
     texture_selection: TextureSelection,
     texture_saved_selection: std::collections::HashMap<usize, (TextureSelection, u64)>,
@@ -5262,7 +5280,7 @@ impl Workspace {
             .test_support()
             .w_full()
             .h(px(460.))
-            .bg(rgb(0x101722))
+            .bg(rgb(0x000000))
             .rounded_lg()
             .flex()
             .flex_col()
@@ -5273,7 +5291,7 @@ impl Workspace {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(div().text_sm().text_color(rgb(0x82aaff)).child(label))
+                            .child(div().text_sm().text_color(rgb(0x3291ff)).child(label))
                             .child(
                                 Input::new(&self.log_filter)
                                     .id("log-filter")
@@ -5310,8 +5328,8 @@ impl Workspace {
                             .children(rows.into_iter().take(500).enumerate().map(|(index, message)| {
                                 let color = match message.level {
                                     LogLevel::Error | LogLevel::Fatal => 0xff6b6b,
-                                    LogLevel::Warning => 0xd4b77c,
-                                    _ => 0xc3cedd,
+                                    LogLevel::Warning => 0xf5a623,
+                                    _ => 0xa1a1aa,
                                 };
                                 let source = match message.source.as_str() {
                                     "ADRD" => self.t("Android", "Android"),
@@ -5397,7 +5415,7 @@ impl Workspace {
             .test_support()
             .absolute()
             .size_full()
-            .bg(rgb(0x050a12))
+            .bg(rgb(0x000000))
             .flex()
             .items_center()
             .justify_center()
@@ -5406,7 +5424,7 @@ impl Workspace {
                     .max_w(px(560.))
                     .p_8()
                     .rounded_lg()
-                    .bg(rgb(0x192332))
+                    .bg(rgb(0x0a0a0a))
                     .flex()
                     .flex_col()
                     .gap_3()
@@ -5445,14 +5463,14 @@ impl Workspace {
         if viewer.pending {
             body.push(
                 div()
-                    .text_color(rgb(0x91a7c0))
+                    .text_color(rgb(0xa1a1aa))
                     .child(self.t("Loading constant buffer…", "正在加载常量缓冲…"))
                     .into_any_element(),
             );
         } else if let Some(error) = &viewer.error {
             body.push(
                 div()
-                    .text_color(rgb(0xe08a8a))
+                    .text_color(rgb(0xff6161))
                     .child(error.clone())
                     .into_any_element(),
             );
@@ -5463,10 +5481,10 @@ impl Workspace {
                         .flex()
                         .gap_2()
                         .child(div().w(px(220.)).child(row.name.clone()))
-                        .child(div().text_color(rgb(0xd4b77c)).child(row.value.clone()))
+                        .child(div().text_color(rgb(0xf5a623)).child(row.value.clone()))
                         .child(
                             div()
-                                .text_color(rgb(0x91a7c0))
+                                .text_color(rgb(0xa1a1aa))
                                 .child(format!("type {}", row.type_id)),
                         )
                         .into_any_element(),
@@ -5478,7 +5496,7 @@ impl Workspace {
             .test_support()
             .absolute()
             .inset_0()
-            .bg(rgb(0x050a12))
+            .bg(rgb(0x000000))
             .flex()
             .items_center()
             .justify_center()
@@ -5487,7 +5505,7 @@ impl Workspace {
                     .max_w(px(680.))
                     .p_6()
                     .rounded_lg()
-                    .bg(rgb(0x192332))
+                    .bg(rgb(0x0a0a0a))
                     .flex()
                     .flex_col()
                     .gap_2()
@@ -5849,7 +5867,7 @@ impl Workspace {
             ViewerDialog::Axis => {
                 let mapping = self.settings.axis_mapping;
                 let title = self.t("Axis mapping", "轴映射");
-                children.push(div().text_sm().text_color(rgb(0x82aaff)).child(title).into_any_element());
+                children.push(div().text_sm().text_color(rgb(0x3291ff)).child(title).into_any_element());
                 for (index, label, direction) in [
                     (0usize, self.t("X axis", "X 轴"), mapping.x),
                     (1, self.t("Y axis", "Y 轴"), mapping.y),
@@ -5872,7 +5890,7 @@ impl Workspace {
                 }
             }
             ViewerDialog::Projection => {
-                children.push(div().text_sm().text_color(rgb(0x82aaff)).child(self.t("Projection guess", "投影推测")).into_any_element());
+                children.push(div().text_sm().text_color(rgb(0x3291ff)).child(self.t("Projection guess", "投影推测")).into_any_element());
                 let projection = self.settings.projection;
                 children.push(Button::new("viewer-projection-kind")
                     .label(if projection.orthographic { self.t("Orthographic", "正交") } else { self.t("Perspective", "透视") })
@@ -5897,7 +5915,7 @@ impl Workspace {
                 let unproject_preview = renderdocx::viewer_settings::projection_matrix(&self.settings.projection)
                     .and_then(|matrix| matrix.inverse())
                     .map(|inv| renderdocx::projection::unproject([0.0, 0.0, 0.5], inv));
-                children.push(div().text_sm().text_color(rgb(0x91a7c0)).child(match unproject_preview {
+                children.push(div().text_sm().text_color(rgb(0xa1a1aa)).child(match unproject_preview {
                     Some(point) => format!(
                         "{}: ({:.2}, {:.2}, {:.2})",
                         self.t("Unproject center", "反投影中心"),
@@ -5907,7 +5925,7 @@ impl Workspace {
                 }).into_any_element());
             }
             ViewerDialog::Camera => {
-                children.push(div().text_sm().text_color(rgb(0x82aaff)).child(self.t("Camera controls", "相机控制")).into_any_element());
+                children.push(div().text_sm().text_color(rgb(0x3291ff)).child(self.t("Camera controls", "相机控制")).into_any_element());
                 children.push(div().flex().flex_wrap().gap_2()
                     .child(Input::new(&self.camera_near).id("viewer-camera-near").aria_label(self.t("Near plane", "近平面")).w(px(80.)))
                     .child(Input::new(&self.camera_far).id("viewer-camera-far").aria_label(self.t("Far plane", "远平面")).w(px(100.)))
@@ -5985,7 +6003,7 @@ impl Workspace {
             .gap_2()
             .p_4()
             .rounded_lg()
-            .bg(rgb(0x192332))
+            .bg(rgb(0x0a0a0a))
             .children(children)
             .into_any_element()]
     }
@@ -13468,7 +13486,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_3()
-            .child(div().text_sm().text_color(rgb(0x82aaff)).child(self.t(
+            .child(div().text_sm().text_color(rgb(0x3291ff)).child(self.t(
                 "SHADER DEBUG TRACE",
                 "着色器调试轨迹",
             )))
@@ -13761,7 +13779,7 @@ impl Workspace {
                         div()
                             .id("shader-debug-current-instruction")
                             .test_support()
-                            .text_color(rgb(0x91cfff))
+                            .text_color(rgb(0xededed))
                             .child(format!(
                                 "{} {}: {line}",
                                 self.t(
@@ -13791,7 +13809,7 @@ impl Workspace {
                                     div()
                                         .id("shader-debug-current-source")
                                         .test_support()
-                                        .text_color(rgb(0x91cfff))
+                                        .text_color(rgb(0xededed))
                                         .child(format!(
                                             "{}:{}:{}–{}:{}",
                                             file.filename,
@@ -13887,7 +13905,7 @@ impl Workspace {
                             }))
                     }),
             )
-            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
+            .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(self.t(
                 "Unsupported value types are shown as native-endian bytes.",
                 "未解码的类型显示原生字节序的原始字节。",
             )))
@@ -14171,7 +14189,7 @@ impl Workspace {
             .relative()
             .w(px(WIDTH as f32))
             .h(px(height))
-            .bg(rgb(0x182434))
+            .bg(rgb(0x111111))
             .on_prepaint(move |bounds, _, _| graph_paint.set(bounds))
             .on_scroll(cx.listener(move |this, event: &gpui::ScrollEvent, _, cx| {
                 let bounds = graph_scroll.get();
@@ -14246,7 +14264,7 @@ impl Workspace {
                     .h(px(12.))
                     .cursor_pointer()
                     .block_mouse_except_scroll()
-                    .bg(rgb(0x82aaff))
+                    .bg(rgb(0x3291ff))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.jump_to_usage(event, window, cx)
                     })),
@@ -14334,7 +14352,7 @@ impl Workspace {
                     .h(px(6.))
                     .cursor_pointer()
                     .block_mouse_except_scroll()
-                    .bg(rgb(0xc3e88d))
+                    .bg(rgb(0x50e3c2))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.jump_to_usage(event, window, cx)
                     })),
@@ -14362,7 +14380,7 @@ impl Workspace {
             .relative()
             .w(px(WIDTH as f32))
             .h(px(20.))
-            .bg(rgb(0x30445b))
+            .bg(rgb(0x333333))
             .cursor_pointer()
             .on_prepaint(move |bounds, _, _| paint_bounds.set(bounds))
             .on_mouse_down(
@@ -14422,10 +14440,10 @@ impl Workspace {
             .child(self.t("Click the highlight band to jump to the nearest history or usage event.", "点击高亮区域可跳转到最近的像素历史或资源使用事件。"))
             .child(div().flex().flex_wrap().gap_2()
                 .child(format!("{}:", self.t("Resource usage", "资源使用")))
-                .child(div().text_color(rgb(0xe69f00)).child(self.t("Read", "读取")))
-                .child(div().text_color(rgb(0x56b4e9)).child(self.t("Write", "写入")))
-                .child(div().text_color(rgb(0xf0e442)).child(self.t("Read/write", "读写")))
-                .child(div().bg(rgb(0xdddddd)).text_color(rgb(0x000000)).child(self.t("Clear/discard", "清除/丢弃")))
+                .child(div().text_color(rgb(0xf5a623)).child(self.t("Read", "读取")))
+                .child(div().text_color(rgb(0x3291ff)).child(self.t("Write", "写入")))
+                .child(div().text_color(rgb(0xf5a623)).child(self.t("Read/write", "读写")))
+                .child(div().bg(rgb(0xededed)).text_color(rgb(0x000000)).child(self.t("Clear/discard", "清除/丢弃")))
                 .child(div().text_color(rgb(0xcc79a7)).child(self.t("Barrier", "屏障"))))
             .child(format!("{}: {} · {}: {}", self.t("Resource usage", "资源使用"), if full_usage.is_some() { self.t("complete", "完整") } else { self.t("loaded page", "已加载页") }, self.t("Pixel history", "像素历史"), if self.timeline.history.is_some() { self.t("complete", "完整") } else { self.t("loaded page", "已加载页") }))
             .child(div().id("timeline-scroll").test_support().max_h(px(180.)).overflow_scroll().child(graph))
@@ -14465,7 +14483,7 @@ impl Workspace {
 
     fn texture_range_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div().flex().flex_col().gap_2()
-            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(format!("{}: {:?}", self.t("Preview/export black and white points", "预览与导出黑白点"), self.texture_selection.display_range.unwrap_or([0.0, 1.0]))))
+            .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(format!("{}: {:?}", self.t("Preview/export black and white points", "预览与导出黑白点"), self.texture_selection.display_range.unwrap_or([0.0, 1.0]))))
             .child(div().flex().flex_wrap().gap_2()
                 .child(Input::new(&self.texture_black_point).id("texture-black-point").aria_label(self.t("Black point", "黑点")).w(px(90.)))
                 .child(Input::new(&self.texture_white_point).id("texture-white-point").aria_label(self.t("White point", "白点")).w(px(90.)))
@@ -14474,7 +14492,7 @@ impl Workspace {
                 .child(Button::new("texture-fit-range").label(self.t("Fit range", "自适应范围")).secondary().on_click(cx.listener(|this, _, window, cx| { this.disable_auto_texture_fit(); this.fit_texture_range(window, false, cx); })))
                 .child(button("texture-auto-fit", self.t("Continuous auto-fit", "持续自动拟合"), self.texture_auto_fit, |this, cx| { if this.texture_auto_fit { this.disable_auto_texture_fit(); } else { this.texture_auto_fit = true; this.texture_auto_fit_generation = this.texture_auto_fit_generation.wrapping_add(1); this.texture_auto_fit_last = None; } cx.notify(); }, cx))
                 .child(button("texture-reset-range-on-switch", self.t("Reset range on texture change", "切换纹理时重置范围"), self.settings.texture_reset_range, |this, cx| { this.settings.texture_reset_range = !this.settings.texture_reset_range; this.save(); cx.notify(); }, cx)))
-            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t("Preview uses native texture display. Export applies the range only when RenderDoc converts the data.", "预览使用原生纹理显示；导出仅在 RenderDoc 转换数据时应用范围。")))
+            .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(self.t("Preview uses native texture display. Export applies the range only when RenderDoc converts the data.", "预览使用原生纹理显示；导出仅在 RenderDoc 转换数据时应用范围。")))
     }
 
     fn texture_export_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -14484,7 +14502,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
+            .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(self.t(
                 "Export mapping",
                 "导出映射",
             )))
@@ -14616,7 +14634,7 @@ impl Workspace {
                         cx,
                     )),
             )
-            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
+            .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(self.t(
                 "RenderDoc may adapt mapping to the texture and output format.",
                 "RenderDoc 可能根据纹理和输出格式调整映射。",
             )))
@@ -14741,7 +14759,7 @@ impl Workspace {
                     ),
                     self.texture_custom_encodings
                 ))
-                .child(div().text_sm().text_color(rgb(0x9eacc0)).child("1 DXBC · 2 GLSL · 3 SPIR-V · 4 SPIR-V ASM · 5 HLSL · 6 DXIL · 7 OpenGL SPIR-V · 8 OpenGL SPIR-V ASM · 9 Slang"))
+                .child(div().text_sm().text_color(rgb(0xa1a1aa)).child("1 DXBC · 2 GLSL · 3 SPIR-V · 4 SPIR-V ASM · 5 HLSL · 6 DXIL · 7 OpenGL SPIR-V · 8 OpenGL SPIR-V ASM · 9 Slang"))
                 .child(div().text_sm().child(self.t("Binary encodings use hexadecimal bytes.", "二进制编码使用十六进制字节。")))
                 .child(div().flex().flex_wrap().gap_2()
                     .child(Input::new(&self.texture_custom_name).id("texture-custom-name").aria_label(self.t("Shader name", "着色器名称")).w(px(160.)))
@@ -14888,7 +14906,7 @@ impl Workspace {
                         cx,
                     )),
             )
-            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
+            .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(self.t(
                 "Preview channels and display",
                 "预览通道与显示",
             )))
@@ -14978,14 +14996,14 @@ impl Workspace {
                         .disabled(forced_gamma.is_some()),
                     ),
             )
-            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
+            .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(self.t(
                 "Channel combinations, flip and gamma affect the preview only.",
                 "通道组合、翻转和 Gamma 仅影响预览。",
             )))
             .child(self.texture_preview_modes(cx))
             .child(self.texture_custom_shader_panel(cx))
             .child(self.texture_background_controls(cx))
-            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
+            .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(self.t(
                 "Preview zoom and pan (output pixels)",
                 "预览缩放与平移（输出像素）",
             )))
@@ -15014,9 +15032,9 @@ impl Workspace {
                             .rounded_md()
                             .bg(rgb(
                                 if self.texture_selection.preview_scale == Some(scale) {
-                                    0x4169e1
+                                    0x0070f3
                                 } else {
-                                    0x252f40
+                                    0x1f1f1f
                                 },
                             ))
                             .child(format!("{}%", (scale * 100.0) as u32))
@@ -15041,7 +15059,7 @@ impl Workspace {
                                 .px_2()
                                 .py_1()
                                 .rounded_md()
-                                .bg(rgb(0x252f40))
+                                .bg(rgb(0x1f1f1f))
                                 .child(label)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     let [old_x, old_y] = this.texture_selection.preview_offset;
@@ -15055,7 +15073,7 @@ impl Workspace {
                         }),
                     ),
             )
-            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
+            .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(self.t(
                 "Debug overlay (may replay the capture)",
                 "调试叠加层（可能重新回放捕获）",
             )))
@@ -15075,9 +15093,9 @@ impl Workspace {
                                 .py_1()
                                 .rounded_md()
                                 .bg(rgb(if self.texture_selection.preview_overlay == overlay {
-                                    0x4169e1
+                                    0x0070f3
                                 } else {
-                                    0x252f40
+                                    0x1f1f1f
                                 }))
                                 .child(overlay.label(self.settings.language))
                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -15191,7 +15209,7 @@ impl Workspace {
             .relative()
             .w(px(160.))
             .h(px(160.))
-            .bg(rgb(0x1b2430))
+            .bg(rgb(0x111111))
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -15352,17 +15370,44 @@ impl Workspace {
         )
     }
 
-    fn dock_header(&self, title: &str) -> impl IntoElement {
-        div()
+    fn dock_header(
+        &self,
+        title: &'static str,
+        float_id: Option<&'static str>,
+        float_dock: Option<FloatingDock>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let mut header = div()
+            .flex()
+            .items_center()
+            .justify_between()
             .px_2()
             .py_1()
-            .bg(rgb(0x101827))
+            .bg(rgb(0x111111))
             .text_sm()
-            .text_color(rgb(0x9ecbff))
-            .child(title.to_owned())
+            .text_color(rgb(0xededed))
+            .child(title.to_owned());
+        if let (Some(id), Some(dock)) = (float_id, float_dock) {
+            header = header.child(
+                div()
+                    .id(id)
+                    .test_support()
+                    .cursor_pointer()
+                    .px_1()
+                    .rounded_md()
+                    .hover(|view| view.bg(rgb(0x262626)))
+                    .child("⧉")
+                    .on_click(cx.listener(move |this, _, _, cx| this.float_dock(dock, cx))),
+            );
+        }
+        header
     }
 
-    fn dock_event_browser_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn dock_event_browser_panel(
+        &self,
+        cx: &mut Context<Self>,
+        floating: bool,
+    ) -> gpui::AnyElement {
         let rows: Vec<(usize, u32, String)> = {
             let Some(snapshot) = self.snapshot.as_ref() else {
                 return div().into_any_element();
@@ -15378,8 +15423,21 @@ impl Workspace {
                 })
                 .collect()
         };
+        let (root_id, rows_id, row_prefix) = if floating {
+            (
+                "floating-event-browser",
+                "floating-event-browser-rows",
+                "floating-event-",
+            )
+        } else {
+            (
+                "dock-event-browser",
+                "dock-event-browser-rows",
+                "dock-event-",
+            )
+        };
         let mut list = div()
-            .id("dock-event-browser-rows")
+            .id(rows_id)
             .test_support()
             .flex_1()
             .min_h_0()
@@ -15390,7 +15448,7 @@ impl Workspace {
             let selected = self.selected == Some(index);
             list = list.child(
                 div()
-                    .id(SharedString::from(format!("dock-event-{index}")))
+                    .id(SharedString::from(format!("{row_prefix}{index}")))
                     .test_support()
                     .h(px(28.))
                     .px_2()
@@ -15398,13 +15456,13 @@ impl Workspace {
                     .items_center()
                     .gap_2()
                     .cursor_pointer()
-                    .bg(rgb(if selected { 0x304c7c } else { 0x192332 }))
-                    .hover(|row| row.bg(rgb(0x263950)))
+                    .bg(rgb(if selected { 0x1f1f1f } else { 0x0a0a0a }))
+                    .hover(|row| row.bg(rgb(0x262626)))
                     .child(
                         div()
                             .w(px(52.))
                             .flex_none()
-                            .text_color(rgb(0x91a7c0))
+                            .text_color(rgb(0xa1a1aa))
                             .child(event.to_string()),
                     )
                     .child(div().flex_1().min_w_0().overflow_hidden().child(name))
@@ -15413,21 +15471,32 @@ impl Workspace {
                     })),
             );
         }
-        div()
-            .id("dock-event-browser")
+        let mut root = div()
+            .id(root_id)
             .test_support()
             .flex()
             .flex_col()
             .min_h_0()
-            .bg(rgb(0x192332))
+            .flex_1()
+            .bg(rgb(0x0a0a0a))
             .rounded_lg()
-            .overflow_hidden()
-            .child(self.dock_header(self.t("Event Browser", "事件浏览器")))
-            .child(list)
-            .into_any_element()
+            .overflow_hidden();
+        if !floating {
+            root = root.child(self.dock_header(
+                self.t("Event Browser", "事件浏览器"),
+                Some("dock-float-event-browser"),
+                Some(FloatingDock::EventBrowser),
+                cx,
+            ));
+        }
+        root.child(list).into_any_element()
     }
 
-    fn dock_api_inspector_panel(&self) -> gpui::AnyElement {
+    fn dock_api_inspector_panel(
+        &self,
+        cx: &mut Context<Self>,
+        floating: bool,
+    ) -> gpui::AnyElement {
         let mut rows: Vec<(String, String)> = Vec::new();
         if let Some(page) = &self.structure.page {
             for child in &page.children {
@@ -15457,8 +15526,13 @@ impl Workspace {
                 }
             }
         }
+        let (root_id, rows_id) = if floating {
+            ("floating-api-inspector", "floating-api-inspector-rows")
+        } else {
+            ("dock-api-inspector", "dock-api-inspector-rows")
+        };
         let mut list = div()
-            .id("dock-api-inspector-rows")
+            .id(rows_id)
             .test_support()
             .flex_1()
             .min_h_0()
@@ -15479,29 +15553,41 @@ impl Workspace {
                             .flex_1()
                             .min_w_0()
                             .overflow_hidden()
-                            .text_color(rgb(0xd4b77c))
+                            .text_color(rgb(0xf5a623))
                             .child(value),
                     ),
             );
         }
-        div()
-            .id("dock-api-inspector")
+        let mut root = div()
+            .id(root_id)
             .test_support()
             .flex()
             .flex_col()
             .flex_1()
             .min_h_0()
-            .bg(rgb(0x192332))
+            .bg(rgb(0x0a0a0a))
             .rounded_lg()
-            .overflow_hidden()
-            .child(self.dock_header(self.t("API Inspector", "API 检查器")))
-            .child(list)
-            .into_any_element()
+            .overflow_hidden();
+        if !floating {
+            root = root.child(self.dock_header(
+                self.t("API Inspector", "API 检查器"),
+                Some("dock-float-api-inspector"),
+                Some(FloatingDock::ApiInspector),
+                cx,
+            ));
+        }
+        root.child(list).into_any_element()
     }
 
     fn dock_left_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let event_browser = self.dock_event_browser;
-        let api_inspector = self.dock_api_inspector;
+        let event_browser = self.dock_event_browser
+            && !self
+                .floating_docks
+                .contains(&FloatingDock::EventBrowser);
+        let api_inspector = self.dock_api_inspector
+            && !self
+                .floating_docks
+                .contains(&FloatingDock::ApiInspector);
         if !event_browser && !api_inspector {
             return div().into_any_element();
         }
@@ -15516,7 +15602,7 @@ impl Workspace {
             .flex_col()
             .gap_2();
         if event_browser {
-            let panel = self.dock_event_browser_panel(cx);
+            let panel = self.dock_event_browser_panel(cx, false);
             column = if api_inspector {
                 column.child(
                     div()
@@ -15530,10 +15616,536 @@ impl Workspace {
             };
         }
         if api_inspector {
-            let panel = self.dock_api_inspector_panel();
+            let panel = self.dock_api_inspector_panel(cx, false);
             column = column.child(div().flex_1().min_h_0().flex().child(panel));
         }
         column.into_any_element()
+    }
+
+    fn floating_index(dock: FloatingDock) -> usize {
+        match dock {
+            FloatingDock::EventBrowser => 0,
+            FloatingDock::ApiInspector => 1,
+        }
+    }
+
+    fn float_dock(&mut self, dock: FloatingDock, cx: &mut Context<Self>) {
+        if !self.floating_docks.contains(&dock) {
+            self.floating_docks.push(dock);
+        }
+        match dock {
+            FloatingDock::EventBrowser => self.dock_event_browser = true,
+            FloatingDock::ApiInspector => self.dock_api_inspector = true,
+        }
+        self.menu_open = None;
+        self.status = Some(
+            self.t(
+                "Panel is floating; drag its title bar or dock it again.",
+                "面板已浮动；可拖动标题栏或重新停靠。",
+            )
+            .to_owned(),
+        );
+        cx.notify();
+    }
+
+    fn dock_dock(&mut self, dock: FloatingDock, cx: &mut Context<Self>) {
+        self.floating_docks.retain(|item| *item != dock);
+        self.floating_drag = None;
+        match dock {
+            FloatingDock::EventBrowser => self.dock_event_browser = true,
+            FloatingDock::ApiInspector => self.dock_api_inspector = true,
+        }
+        cx.notify();
+    }
+
+    fn floating_dock_panel(
+        &self,
+        dock: FloatingDock,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let index = Self::floating_index(dock);
+        let (x, y) = self.floating_positions[index];
+        let (title, root_id, return_id) = match dock {
+            FloatingDock::EventBrowser => (
+                self.t("Event Browser", "事件浏览器"),
+                "floating-dock-event-browser",
+                "floating-dock-return-event-browser",
+            ),
+            FloatingDock::ApiInspector => (
+                self.t("API Inspector", "API 检查器"),
+                "floating-dock-api-inspector",
+                "floating-dock-return-api-inspector",
+            ),
+        };
+        let content = match dock {
+            FloatingDock::EventBrowser => self.dock_event_browser_panel(cx, true),
+            FloatingDock::ApiInspector => self.dock_api_inspector_panel(cx, true),
+        };
+        let drag_dock = dock;
+        div()
+            .id(root_id)
+            .test_support()
+            .absolute()
+            .left(px(x))
+            .top(px(y))
+            .w(px(360.))
+            .h(px(380.))
+            .bg(rgb(0x0a0a0a))
+            .border_1()
+            .border_color(rgb(0x333333))
+            .rounded_lg()
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .id(("floating-dock-header", index))
+                    .test_support()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_2()
+                    .py_1()
+                    .bg(rgb(0x111111))
+                    .text_sm()
+                    .text_color(rgb(0xededed))
+                    .cursor_pointer()
+                    .child(title)
+                    .child(
+                        div()
+                            .id(return_id)
+                            .test_support()
+                            .cursor_pointer()
+                            .px_1()
+                            .rounded_md()
+                            .hover(|view| view.bg(rgb(0x262626)))
+                            .child(self.t("Dock", "停靠"))
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.dock_dock(drag_dock, cx);
+                                }),
+                            ),
+                    )
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                            let index = Self::floating_index(drag_dock);
+                            let (origin_x, origin_y) = this.floating_positions[index];
+                            this.floating_drag = Some((
+                                drag_dock,
+                                f32::from(event.position.x),
+                                f32::from(event.position.y),
+                                origin_x,
+                                origin_y,
+                            ));
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    ),
+            )
+            .child(content)
+            .on_mouse_move(cx.listener(
+                |this, event: &gpui::MouseMoveEvent, _, cx| {
+                    if event.dragging() {
+                        if let Some((dock, start_x, start_y, origin_x, origin_y)) =
+                            this.floating_drag
+                        {
+                            let index = Self::floating_index(dock);
+                            let next_x =
+                                origin_x + (f32::from(event.position.x) - start_x);
+                            let next_y =
+                                origin_y + (f32::from(event.position.y) - start_y);
+                            this.floating_positions[index] =
+                                (next_x.max(0.0), next_y.max(0.0));
+                            cx.notify();
+                        }
+                    } else {
+                        this.floating_drag = None;
+                    }
+                },
+            ))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.floating_drag = None;
+                    cx.notify();
+                }),
+            )
+            .into_any_element()
+    }
+
+    fn floating_docks_overlay(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        self.floating_docks
+            .iter()
+            .map(|dock| self.floating_dock_panel(*dock, cx))
+            .collect()
+    }
+
+    fn menu_item(
+        &self,
+        id: &'static str,
+        en: &'static str,
+        zh: &'static str,
+        checked: bool,
+        action: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+        cx: &mut Context<Workspace>,
+    ) -> gpui::AnyElement {
+        let label = self.t(en, zh);
+        let text = if checked {
+            format!("✓ {label}")
+        } else {
+            label.to_owned()
+        };
+        div()
+            .id(id)
+            .test_support()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .cursor_pointer()
+            .text_sm()
+            .hover(|view| view.bg(rgb(0x262626)))
+            .child(text)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.menu_open = None;
+                action(this, window, cx);
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
+    fn menu_dropdown(&self, menu: MenuBar, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let mut dropdown = div()
+            .id(("menu-dropdown", menu as usize))
+            .test_support()
+            .w(px(250.))
+            .bg(rgb(0x0a0a0a))
+            .border_1()
+            .border_color(rgb(0x333333))
+            .rounded_lg()
+            .p_1()
+            .flex()
+            .flex_col()
+            .gap_1();
+        match menu {
+            MenuBar::File => {
+                dropdown = dropdown
+                    .child(self.menu_item(
+                        "menu-file-open",
+                        "Open Capture…",
+                        "打开捕获…",
+                        false,
+                        |this, _, cx| {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("RenderDoc", &["rdc", "cap"])
+                                .pick_file()
+                            {
+                                this.open(path, cx);
+                            }
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-file-save",
+                        "Save",
+                        "保存",
+                        false,
+                        |this, _, cx| this.save_capture_inplace(cx),
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-file-save-as",
+                        "Save As…",
+                        "另存为…",
+                        false,
+                        |this, _, cx| this.save_capture_as(cx),
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-file-close",
+                        "Close Capture",
+                        "关闭捕获",
+                        false,
+                        |this, _, cx| this.close_capture(cx),
+                        cx,
+                    ));
+            }
+            MenuBar::Edit => {
+                dropdown = dropdown
+                    .child(self.menu_item(
+                        "menu-edit-find",
+                        "Find Events",
+                        "查找事件",
+                        false,
+                        |this, window, cx| {
+                            this.tab = CaptureTab::Events;
+                            this.event_search
+                                .update(cx, |input, cx| input.focus(window, cx));
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-edit-clear-filter",
+                        "Clear Event Filter",
+                        "清除事件过滤",
+                        false,
+                        |this, window, cx| {
+                            this.event_search
+                                .update(cx, |input, cx| input.set_value("", window, cx));
+                            this.apply_event_filter(String::new(), cx);
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-edit-reset-layout",
+                        "Reset Window Layout",
+                        "重置窗口布局",
+                        false,
+                        |this, _, cx| this.reset_dock_layout(cx),
+                        cx,
+                    ));
+            }
+            MenuBar::Window => {
+                let event_floating = self
+                    .floating_docks
+                    .contains(&FloatingDock::EventBrowser);
+                let api_floating = self
+                    .floating_docks
+                    .contains(&FloatingDock::ApiInspector);
+                dropdown = dropdown
+                    .child(self.menu_item(
+                        "menu-window-event-browser",
+                        "Event Browser",
+                        "事件浏览器",
+                        self.dock_event_browser && !event_floating,
+                        |this, _, cx| {
+                            if this
+                                .floating_docks
+                                .contains(&FloatingDock::EventBrowser)
+                            {
+                                this.dock_dock(FloatingDock::EventBrowser, cx);
+                            } else {
+                                this.dock_event_browser = !this.dock_event_browser;
+                                cx.notify();
+                            }
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-window-api-inspector",
+                        "API Inspector",
+                        "API 检查器",
+                        self.dock_api_inspector && !api_floating,
+                        |this, _, cx| {
+                            if this
+                                .floating_docks
+                                .contains(&FloatingDock::ApiInspector)
+                            {
+                                this.dock_dock(FloatingDock::ApiInspector, cx);
+                            } else {
+                                this.dock_api_inspector = !this.dock_api_inspector;
+                                cx.notify();
+                            }
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-window-timeline",
+                        "Timeline",
+                        "时间线",
+                        self.timeline.shown,
+                        |this, _, cx| {
+                            this.timeline.shown = !this.timeline.shown;
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-window-aux-panels",
+                        "Auxiliary Panels",
+                        "辅助面板",
+                        self.show_aux_tabs,
+                        |this, _, cx| {
+                            this.show_aux_tabs = !this.show_aux_tabs;
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-window-float-event-browser",
+                        "Float Event Browser",
+                        "浮动事件浏览器",
+                        event_floating,
+                        |this, _, cx| this.float_dock(FloatingDock::EventBrowser, cx),
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-window-float-api-inspector",
+                        "Float API Inspector",
+                        "浮动 API 检查器",
+                        api_floating,
+                        |this, _, cx| this.float_dock(FloatingDock::ApiInspector, cx),
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-window-reset-layout",
+                        "Reset Window Layout",
+                        "重置窗口布局",
+                        false,
+                        |this, _, cx| this.reset_dock_layout(cx),
+                        cx,
+                    ));
+            }
+            MenuBar::Help => {
+                dropdown = dropdown
+                    .child(self.menu_item(
+                        "menu-help-about",
+                        "About RenderDocX",
+                        "关于 RenderDocX",
+                        false,
+                        |this, _, cx| {
+                            this.status = Some(format!(
+                                "RenderDocX {} · Rust + GPUI · RenderDoc-compatible replay",
+                                env!("CARGO_PKG_VERSION")
+                            ));
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-help-log",
+                        "Open Log",
+                        "打开日志",
+                        false,
+                        |this, _, cx| this.open_log(cx),
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-help-docs",
+                        "RenderDoc Documentation",
+                        "RenderDoc 文档",
+                        false,
+                        |this, _, cx| {
+                            this.status = Some(
+                                "https://renderdoc.org/docs/".to_owned(),
+                            );
+                            cx.notify();
+                        },
+                        cx,
+                    ));
+            }
+        }
+        dropdown.into_any_element()
+    }
+
+    fn menu_overlay_view(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(menu) = self.menu_open else {
+            return div().into_any_element();
+        };
+        let left = match menu {
+            MenuBar::File => 112.0,
+            MenuBar::Edit => 153.0,
+            MenuBar::Window => 194.0,
+            MenuBar::Help => 254.0,
+        };
+        div()
+            .absolute()
+            .top(px(0.))
+            .left(px(0.))
+            .size_full()
+            .child(
+                div()
+                    .id("menu-backdrop")
+                    .test_support()
+                    .absolute()
+                    .top(px(46.))
+                    .left(px(0.))
+                    .size_full()
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.menu_open = None;
+                            cx.notify();
+                        }),
+                    ),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(44.))
+                    .left(px(left))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                    )
+                    .child(self.menu_dropdown(menu, cx)),
+            )
+            .into_any_element()
+    }
+
+    fn menu_bar_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let menus = [
+            (MenuBar::File, "File", "文件"),
+            (MenuBar::Edit, "Edit", "编辑"),
+            (MenuBar::Window, "Window", "窗口"),
+            (MenuBar::Help, "Help", "帮助"),
+        ];
+        let mut bar = div()
+            .id("menu-bar")
+            .test_support()
+            .absolute()
+            .top(px(0.))
+            .left(px(0.))
+            .w_full()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_5()
+            .py_2()
+            .bg(rgb(0x000000))
+            .border_b_1()
+            .border_color(rgb(0x1f1f1f))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgb(0x3291ff))
+                    .child("RenderDocX"),
+            )
+            .child(div().w(px(1.)).h(px(14.)).bg(rgb(0x1f1f1f)).mx_2());
+        for (menu, en, zh) in menus {
+            let active = self.menu_open == Some(menu);
+            let menu_id = match menu {
+                MenuBar::File => "menu-file",
+                MenuBar::Edit => "menu-edit",
+                MenuBar::Window => "menu-window",
+                MenuBar::Help => "menu-help",
+            };
+            let item = div().relative().child(
+                div()
+                    .id(menu_id)
+                    .test_support()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_sm()
+                    .when(active, |view| view.bg(rgb(0x1f1f1f)))
+                    .hover(|view| view.bg(rgb(0x262626)))
+                    .child(self.t(en, zh))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.menu_open = if this.menu_open == Some(menu) {
+                            None
+                        } else {
+                            Some(menu)
+                        };
+                        cx.notify();
+                    })),
+            );
+            bar = bar.child(item);
+        }
+        bar
     }
 
     fn dock_splitter(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -15544,8 +16156,8 @@ impl Workspace {
             .flex_none()
             .h_full()
             .cursor_pointer()
-            .bg(rgb(0x101827))
-            .hover(|bar| bar.bg(rgb(0x304c7c)))
+            .bg(rgb(0x111111))
+            .hover(|bar| bar.bg(rgb(0x1f1f1f)))
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
@@ -15566,6 +16178,78 @@ impl Workspace {
         self.tab = CaptureTab::Textures;
         self.status = Some(self.t("Reset window layout to RenderDoc defaults", "已恢复 RenderDoc 默认窗口布局").to_owned());
         cx.notify();
+    }
+
+    fn close_capture(&mut self, cx: &mut Context<Self>) {
+                            if self.resource_pending || self.replay_pending || self.export_pending {
+                                self.status = Some(self.t("Wait for the current operation.", "请等待当前操作完成。").to_owned());
+                                cx.notify();
+                                return;
+                            }
+                            if self.protect_shader_draft(cx) { return; }
+                            if self.annotation_dirty(cx) {
+                                self.status = Some(self.t("Save or discard the comment draft first.", "请先保存或放弃注释草稿。").to_owned());
+                                self.tab = CaptureTab::Annotations;
+                                cx.notify();
+                                return;
+                            }
+                            self.open_revision += 1;
+                            self.event_name_worker = false;
+                            self.requested_event = None;
+                            self.queued_event_key = None;
+                            self.event_filter_revision.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            self.event_annotation_revision.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            self.event_annotation_values.clear();
+                            self.session = None;
+                            renderdocx::python_embed::set_active_session(None);
+                            self.snapshot = None;
+                            self.texture_saved_selection.clear();
+                            self.message_generation += 1;
+                            self.message_poll_pending = false;
+                            self.message_visible.clear();
+                            self.show_hidden_messages = false;
+                            self.shader_message_page = None;
+                            self.selected_shader_message = None;
+                        self.selected_shader_messages.clear();
+                        self.shader_message_selection_anchor = None;
+                            self.pending_shader_messages_event = None;
+                            self.shader_vertex_resolution = None;
+                            self.shader_vertex_lookup_pending = false;
+                            self.selected_message = None;
+                        self.selected_messages.clear();
+                        self.message_selection_anchor = None;
+                            self.event_tree.reset(&[]);
+                            self.capture = None;
+                            self.selected = None;
+                            self.selected_event_id = None;
+                        self.selected_events.clear();
+                        self.event_selection_anchor = None;
+                            self.replay_pending = false;
+                            self.export_pending = false;
+                            self.resource_pending = false;
+                            self.buffer_data = None;
+                        self.buffer_fixed_data = None;
+                            self.shader_data = None; self.shader_constants = None; self.shader_bindings = None;
+                            self.shader_editor = None;
+                            self.structure = StructureView::default();
+                            self.timeline = TimelineView::default();
+                            self.mesh = MeshView::default();
+                            self.input_page = None;
+                            self.debug_vertex_selection = None;
+                            self.debug_view = None;
+                            self.selected_resource = None;
+                            self.selected_counters.clear();
+                            self.counter_page = None;
+                            self.usage_page = None;
+                            self.preview = None;
+                        self.texture_raw_page = None;
+                        self.texture_raw_last = None;
+                            self.pixel = None;
+                            self.pixel_history = None;
+                            self.history_selected = None;
+                            self.statistics = None;
+                            self.status = None;
+                            cx.notify();
     }
 
     fn capture_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -16108,9 +16792,9 @@ impl Workspace {
                                     .overflow_hidden()
                                     .cursor_pointer()
                                     .bg(rgb(if this.descriptor_store == store {
-                                        0x304c7c
+                                        0x1f1f1f
                                     } else {
-                                        0x192332
+                                        0x0a0a0a
                                     }))
                                     .child(name)
                                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -16193,9 +16877,9 @@ impl Workspace {
                                 .px_3()
                                 .cursor_pointer()
                                 .bg(rgb(if this.frame_stats_category == index {
-                                    0x304c7c
+                                    0x1f1f1f
                                 } else {
-                                    0x192332
+                                    0x0a0a0a
                                 }))
                                 .child(label)
                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -16240,9 +16924,9 @@ impl Workspace {
                                     .bg(rgb(if this.selected_shader_messages.contains(&index)
                                         || this.selected_shader_message == Some(index)
                                     {
-                                        0x304c7c
+                                        0x1f1f1f
                                     } else {
-                                        0x192332
+                                        0x0a0a0a
                                     }))
                                     .child(label)
                                     .on_click(cx.listener(move |this, click: &gpui::ClickEvent, _, cx| {
@@ -16308,9 +16992,9 @@ impl Workspace {
                                     .bg(rgb(if this.selected_messages.contains(&index)
                                         || this.selected_message == Some(index)
                                     {
-                                        0x304c7c
+                                        0x1f1f1f
                                     } else {
-                                        0x192332
+                                        0x0a0a0a
                                     }))
                                     .on_click(cx.listener(move |this, click: &gpui::ClickEvent, window, cx| {
                                         let modifiers = match click {
@@ -16364,14 +17048,14 @@ impl Workspace {
                                     .gap_3()
                                     .cursor_pointer()
                                     .bg(rgb(if this.selected_resource == Some(index) {
-                                        0x304c7c
+                                        0x1f1f1f
                                     } else {
-                                        0x192332
+                                        0x0a0a0a
                                     }))
-                                    .hover(|row| row.bg(rgb(0x263950)))
+                                    .hover(|row| row.bg(rgb(0x262626)))
                                     .child(
                                         div()
-                                            .text_color(rgb(0x91a7c0))
+                                            .text_color(rgb(0xa1a1aa))
                                             .child(format!("#{index} · {kind}")),
                                     )
                                     .child(div().overflow_hidden().child(name))
@@ -16436,9 +17120,9 @@ impl Workspace {
                                         if selection.is_some()
                                             && selection == this.debug_vertex_selection
                                         {
-                                            0x304c7c
+                                            0x1f1f1f
                                         } else {
-                                            0x192332
+                                            0x0a0a0a
                                         },
                                     ))
                                     .child(display)
@@ -16491,7 +17175,7 @@ impl Workspace {
                                     .test_support()
                                     .h(px(32.))
                                     .px_3()
-                                    .bg(rgb(if highlighted { 0x304c7c } else { 0x192332 }))
+                                    .bg(rgb(if highlighted { 0x1f1f1f } else { 0x0a0a0a }))
                                     .when(highlighted, |row| {
                                         row.aria_label(format!(
                                             "{}: {line}",
@@ -16544,13 +17228,13 @@ impl Workspace {
                                     .items_center()
                                     .gap_3()
                                     .cursor_pointer()
-                                    .hover(|row| row.bg(rgb(0x263950)))
+                                    .hover(|row| row.bg(rgb(0x262626)))
                                     .child(div().w(px(150.)).overflow_hidden().child(name))
                                     .child(
                                         div()
                                             .w(px(120.))
                                             .overflow_hidden()
-                                            .text_color(rgb(0x91a7c0))
+                                            .text_color(rgb(0xa1a1aa))
                                             .child(kind),
                                     )
                                     .child(div().flex_1().overflow_hidden().child(value))
@@ -16579,7 +17263,7 @@ impl Workspace {
             div()
                 .p_3()
                 .flex_1()
-                .text_color(rgb(0x9eacc0))
+                .text_color(rgb(0xa1a1aa))
                 .child(message)
                 .into_any_element()
         } else if self.tab == CaptureTab::ApiCalls {
@@ -16621,13 +17305,13 @@ impl Workspace {
                                     .items_center()
                                     .gap_3()
                                     .cursor_pointer()
-                                    .bg(rgb(if selected { 0x304c7c } else { 0x192332 }))
-                                    .hover(|row| row.bg(rgb(0x263950)))
+                                    .bg(rgb(if selected { 0x1f1f1f } else { 0x0a0a0a }))
+                                    .hover(|row| row.bg(rgb(0x262626)))
                                     .child(
                                         div()
                                             .w(px(64.))
                                             .flex_none()
-                                            .text_color(rgb(0x91a7c0))
+                                            .text_color(rgb(0xa1a1aa))
                                             .child(event_id.to_string()),
                                     )
                                     .child(div().overflow_hidden().child(name))
@@ -16673,11 +17357,11 @@ impl Workspace {
                                     .gap_3()
                                     .cursor_pointer()
                                     .bg(rgb(if this.selected_shader == Some(index) {
-                                        0x304c7c
+                                        0x1f1f1f
                                     } else {
-                                        0x192332
+                                        0x0a0a0a
                                     }))
-                                    .hover(|row| row.bg(rgb(0x263950)))
+                                    .hover(|row| row.bg(rgb(0x262626)))
                                     .child(format!(
                                         "{stage} · {}",
                                         if bound { bound_label } else { unbound_label }
@@ -16721,13 +17405,13 @@ impl Workspace {
                                     .gap_3()
                                     .cursor_pointer()
                                     .bg(rgb(if this.selected_buffer == Some(index) {
-                                        0x304c7c
+                                        0x1f1f1f
                                     } else {
-                                        0x192332
+                                        0x0a0a0a
                                     }))
-                                    .hover(|row| row.bg(rgb(0x263950)))
+                                    .hover(|row| row.bg(rgb(0x262626)))
                                     .child(div().overflow_hidden().child(name))
-                                    .child(div().text_color(rgb(0x91a7c0)).child(size))
+                                    .child(div().text_color(rgb(0xa1a1aa)).child(size))
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         if this.replay_pending
                                             || this.export_pending
@@ -16776,13 +17460,13 @@ impl Workspace {
                                     .gap_3()
                                     .cursor_pointer()
                                     .bg(rgb(if this.selected_texture == Some(index) {
-                                        0x304c7c
+                                        0x1f1f1f
                                     } else {
-                                        0x192332
+                                        0x0a0a0a
                                     }))
-                                    .hover(|row| row.bg(rgb(0x263950)))
+                                    .hover(|row| row.bg(rgb(0x262626)))
                                     .child(div().overflow_hidden().child(name))
-                                    .child(div().text_color(rgb(0x91a7c0)).child(dimensions))
+                                    .child(div().text_color(rgb(0xa1a1aa)).child(dimensions))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.switch_texture(index, None, window, cx);
                                     })),
@@ -16864,8 +17548,8 @@ impl Workspace {
                                                 .flex()
                                                 .items_center()
                                                 .cursor_pointer()
-                                                .bg(rgb(if selected { 0x304c7c } else { 0x192332 }))
-                                                .hover(|row| row.bg(rgb(0x263950)))
+                                                .bg(rgb(if selected { 0x1f1f1f } else { 0x0a0a0a }))
+                                                .hover(|row| row.bg(rgb(0x262626)))
                                                 .child(div().w(px(22.)).flex_none())
                                                 .child(
                                                     div()
@@ -16987,8 +17671,8 @@ impl Workspace {
                                             .pr_3()
                                             .flex()
                                             .items_center()
-                                            .bg(rgb(if selected { 0x304c7c } else { 0x192332 }))
-                                            .hover(|row| row.bg(rgb(0x263950)))
+                                            .bg(rgb(if selected { 0x1f1f1f } else { 0x0a0a0a }))
+                                            .hover(|row| row.bg(rgb(0x262626)))
                                             .child(if this.event_tree.has_children(node) {
                                                 div()
                                                     .id(SharedString::from(format!(
@@ -17033,7 +17717,7 @@ impl Workspace {
                                                                     .test_support()
                                                                     .w(px(108.))
                                                                     .flex_none()
-                                                                    .text_color(rgb(0x91a7c0))
+                                                                    .text_color(rgb(0xa1a1aa))
                                                                     .child(
                                                                         this.event_tree
                                                                             .event_label(node)
@@ -17057,7 +17741,7 @@ impl Workspace {
                                                                     .test_support()
                                                                     .w(px(76.))
                                                                     .flex_none()
-                                                                    .text_color(rgb(0x91a7c0))
+                                                                    .text_color(rgb(0xa1a1aa))
                                                                     .child(
                                                                         this.event_tree
                                                                             .action_label(node)
@@ -17095,7 +17779,7 @@ impl Workspace {
                                                             .flex_none()
                                                             .overflow_hidden()
                                                             .text_sm()
-                                                            .text_color(rgb(0xb9dca8))
+                                                            .text_color(rgb(0x50e3c2))
                                                             .child(
                                                                 this.event_annotation_values
                                                                     .get(&event)
@@ -17114,7 +17798,7 @@ impl Workspace {
                                                                     .w(px(80.))
                                                                     .flex_none()
                                                                     .text_sm()
-                                                                    .text_color(rgb(0x9eacc0))
+                                                                    .text_color(rgb(0xa1a1aa))
                                                                     .child(
                                                                         this.event_tree
                                                                             .duration(event)
@@ -17405,7 +18089,7 @@ impl Workspace {
                             .test_support()
                             .aria_label(heading.clone())
                             .text_sm()
-                            .text_color(rgb(0x82aaff))
+                            .text_color(rgb(0x3291ff))
                             .child(heading),
                     );
                     if let Some(access) = access {
@@ -17529,7 +18213,7 @@ impl Workspace {
                                     .id(("descriptor-buffer", index))
                                     .test_support()
                                     .cursor_pointer()
-                                    .text_color(rgb(0x91cfff))
+                                    .text_color(rgb(0xededed))
                                     .child(self.t(
                                         "Open bound buffer range",
                                         "打开绑定的缓冲区范围",
@@ -17564,7 +18248,7 @@ impl Workspace {
                                     .id(("descriptor-texture", index))
                                     .test_support()
                                     .cursor_pointer()
-                                    .text_color(rgb(0x91cfff))
+                                    .text_color(rgb(0xededed))
                                     .child(self.t(
                                         "Open texture view",
                                         "打开纹理视图",
@@ -17603,7 +18287,7 @@ impl Workspace {
                                 .id(("descriptor-resource", index))
                                 .test_support()
                                 .cursor_pointer()
-                                .text_color(rgb(0x91cfff))
+                                .text_color(rgb(0xededed))
                                 .child(self.t(
                                     "Inspect resource",
                                     "检查资源",
@@ -17885,7 +18569,7 @@ impl Workspace {
                                         .child(div().w(px(120.)).child(label))
                                         .child(
                                             div().w(px(160.)).child(
-                                                div().h(px(8.)).w(px(width)).bg(rgb(0x699cdb)),
+                                                div().h(px(8.)).w(px(width)).bg(rgb(0x3291ff)),
                                             ),
                                         )
                                         .child(count.to_string())
@@ -18215,7 +18899,7 @@ impl Workspace {
                     .map(|link| link.range.clone())
                     .collect();
                 let style = gpui::HighlightStyle {
-                    color: Some(rgb(0x91cfff).into()),
+                    color: Some(rgb(0xededed).into()),
                     ..Default::default()
                 };
                 let styled = gpui::StyledText::new(rendered.text.clone())
@@ -18262,7 +18946,7 @@ impl Workspace {
                                     .id(("message-resource-link", link_index))
                                     .test_support()
                                     .cursor_pointer()
-                                    .text_color(rgb(0x91cfff))
+                                    .text_color(rgb(0xededed))
                                     .child(format!(
                                         "{}: {name}",
                                         self.t(
@@ -18283,7 +18967,7 @@ impl Workspace {
                                     .id(("message-inline-event", link_index))
                                     .test_support()
                                     .cursor_pointer()
-                                    .text_color(rgb(0x91cfff))
+                                    .text_color(rgb(0xededed))
                                     .child(format!(
                                         "{}: E{event}",
                                         self.t(
@@ -18302,7 +18986,7 @@ impl Workspace {
                                     .id(("message-shader-messages", link_index))
                                     .test_support()
                                     .cursor_pointer()
-                                    .text_color(rgb(0x91cfff))
+                                    .text_color(rgb(0xededed))
                                     .child(format!(
                                         "{}: E{event}",
                                         self.t(
@@ -18325,7 +19009,7 @@ impl Workspace {
                                     .id(("message-gpu-address", link_index))
                                     .test_support()
                                     .cursor_pointer()
-                                    .text_color(rgb(0x91cfff))
+                                    .text_color(rgb(0xededed))
                                     .child(format!(
                                         "{}: #{index} + {offset}",
                                         self.t(
@@ -18465,7 +19149,7 @@ impl Workspace {
                             .id("message-event")
                             .test_support()
                             .cursor_pointer()
-                            .text_color(rgb(0x91cfff))
+                            .text_color(rgb(0xededed))
                             .child(self.t(
                                 "Go to event",
                                 "跳转到事件",
@@ -18516,7 +19200,7 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .gap_3()
-                .child(div().text_sm().text_color(rgb(0x82aaff)).child(heading));
+                .child(div().text_sm().text_color(rgb(0x3291ff)).child(heading));
             if let Some((index, resource)) = self.selected_resource.and_then(|index| {
                 snapshot
                     .resources
@@ -18534,7 +19218,7 @@ impl Workspace {
                         )
                     ))
                     .when_some(self.resource_detail(index), |detail_view, detail| {
-                        detail_view.child(div().text_sm().text_color(rgb(0x9eacc0)).child(detail))
+                        detail_view.child(div().text_sm().text_color(rgb(0xa1a1aa)).child(detail))
                     })
                     .child(
                         if resource
@@ -18591,7 +19275,7 @@ impl Workspace {
                 view = view
                     .child(
                         div().id("resource-preview").test_support().flex().flex_col().gap_1()
-                            .child(div().text_sm().text_color(rgb(0x82aaff)).child(self.t("Preview", "预览")))
+                            .child(div().text_sm().text_color(rgb(0x3291ff)).child(self.t("Preview", "预览")))
                             .when_some(
                                 self.selected_resource
                                     .and_then(|index| self.thumbnail_dir.as_ref().map(move |dir| (index, dir)))
@@ -18617,7 +19301,7 @@ impl Workspace {
                                     )
                                 },
                             )
-                            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(
+                            .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(
                                 if self.selected_texture.is_some() {
                                     self.t("Texture preview available", "纹理预览可用")
                                 } else {
@@ -18651,7 +19335,7 @@ impl Workspace {
                                         ordinal,
                                     ))
                                     .test_support()
-                                    .text_color(rgb(0x82aaff))
+                                    .text_color(rgb(0x3291ff))
                                     .cursor_pointer()
                                     .child(format!("#{target} · {name}"))
                                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -18663,7 +19347,7 @@ impl Workspace {
                         }
                     }
                 }
-                view = view.child(div().text_sm().text_color(rgb(0x82aaff)).child(usage_label));
+                view = view.child(div().text_sm().text_color(rgb(0x3291ff)).child(usage_label));
                 if let Some(page) = &self.usage_page {
                     if !page.tracked {
                         view = view.child(untracked);
@@ -18733,7 +19417,7 @@ impl Workspace {
                                     .id(("resource-usage", ordinal))
                                     .test_support()
                                     .cursor_pointer()
-                                    .text_color(rgb(0x82aaff))
+                                    .text_color(rgb(0x3291ff))
                                     .child(format!(
                                         "{event_label} {event} · {} ({})",
                                         resource_usage_name(entry.usage),
@@ -18757,7 +19441,7 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .gap_3()
-                .child(div().text_sm().text_color(rgb(0x82aaff)).child(heading))
+                .child(div().text_sm().text_color(rgb(0x3291ff)).child(heading))
                 .child(note);
             if self
                 .shader_vertex_resolution
@@ -18839,7 +19523,7 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .gap_3()
-                .child(div().text_sm().text_color(rgb(0x82aaff)).child(heading));
+                .child(div().text_sm().text_color(rgb(0x3291ff)).child(heading));
             if self.mesh.geometry_message_handoff {
                 view = view.child(div().id("geometry-message-approximation").test_support().child(self.t(
                     "Geometry messages omit the instance; instance 0 is shown. The row follows RenderDoc's input-topology offset and may differ when geometry output counts vary.",
@@ -18988,7 +19672,7 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .gap_3()
-                .child(div().text_sm().text_color(rgb(0x82aaff)).child(heading))
+                .child(div().text_sm().text_color(rgb(0x3291ff)).child(heading))
                 .child(button(
                     "event-format",
                     self.t(
@@ -19038,7 +19722,7 @@ impl Workspace {
                                 .id("structured-gpu-address")
                                 .test_support()
                                 .cursor_pointer()
-                                .text_color(rgb(0x91cfff))
+                                .text_color(rgb(0xededed))
                                 .child(format!(
                                     "{}: {name}+{offset}",
                                     self.t(
@@ -19064,7 +19748,7 @@ impl Workspace {
                         "No call stack for this event.",
                         "此事件没有调用栈。",
                     );
-                    view.child(div().text_sm().text_color(rgb(0x82aaff)).child(title))
+                    view.child(div().text_sm().text_color(rgb(0x3291ff)).child(title))
                         .when(stack.frames.is_empty(), |v| v.child(empty))
                         .children(stack.frames.iter().enumerate().map(|(index, frame)| {
                             let address = frame
@@ -19156,7 +19840,7 @@ impl Workspace {
                 .child(
                     div()
                         .text_sm()
-                        .text_color(rgb(0x82aaff))
+                        .text_color(rgb(0x3291ff))
                         .child(shader_details),
                 )
                 .when(compute_selected, |view| {
@@ -19277,7 +19961,7 @@ impl Workspace {
                             self.t("space", "空间"), sampler.space, sampler.array_size));
                     }
                     let constant_buttons = shader.constant_block_details.iter().enumerate().map(|(index, block)| {
-                        div().id(("shader-constants", index)).test_support().cursor_pointer().text_color(rgb(0x91cfff))
+                        div().id(("shader-constants", index)).test_support().cursor_pointer().text_color(rgb(0xededed))
                             .child(format!("{}: {} [0]", self.t("Read values", "读取值"), block.name))
                             .on_click(cx.listener(move |this, _, _, cx| this.inspect_shader_constants(index as u32, 0, cx)))
                     }).collect::<Vec<_>>();
@@ -19340,7 +20024,7 @@ impl Workspace {
                                 let unused = entry.get("statically_unused").and_then(|v| v.as_bool()).unwrap_or(false);
                                 let line = format!("{name} #{binding}[{element}] · {display}{}", if unused { self.t(" · unused", " · 未使用") } else { "" });
                                 view = view.child(div().id(("shader-binding", row_index)).test_support().text_sm().child(line)
-                                    .when_some(resource, |row, resource| row.cursor_pointer().text_color(rgb(0x91cfff)).on_click(cx.listener(move |this, _, _, cx| {
+                                    .when_some(resource, |row, resource| row.cursor_pointer().text_color(rgb(0xededed)).on_click(cx.listener(move |this, _, _, cx| {
                                         this.tab = CaptureTab::Resources; this.refresh_resources(); this.read_resource_usage(resource, 0, cx);
                                     }))));
                                 if let Some(descriptor) = entry.get("descriptor").filter(|value| value.is_object()) {
@@ -19354,7 +20038,7 @@ impl Workspace {
                                     }
                                     if let Some(resource) = resource {
                                         if let Ok(range) = renderdocx::buffer_binding::resolve(descriptor, &snapshot.buffers) {
-                                                view = view.child(div().id(("shader-binding-buffer", row_index)).test_support().cursor_pointer().text_color(rgb(0x91cfff))
+                                                view = view.child(div().id(("shader-binding-buffer", row_index)).test_support().cursor_pointer().text_color(rgb(0xededed))
                                                     .child(self.t("Open bound buffer range", "打开绑定的缓冲区范围"))
                                                     .on_click(cx.listener(move |this, _, _, cx| this.open_bound_buffer(range, cx))));
                                         }
@@ -19363,7 +20047,7 @@ impl Workspace {
                                             let slice = descriptor.get("first_slice").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok());
                                             let cast = descriptor.get("format_component_type").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok()).unwrap_or(0);
                                             if let (Some(mip), Some(slice)) = (mip, slice) {
-                                                view = view.child(div().id(("shader-binding-texture", row_index)).test_support().cursor_pointer().text_color(rgb(0x91cfff))
+                                                view = view.child(div().id(("shader-binding-texture", row_index)).test_support().cursor_pointer().text_color(rgb(0xededed))
                                                     .child(self.t("Open texture view", "打开纹理视图"))
                                                     .on_click(cx.listener(move |this, _, window, cx| this.open_attachment_texture(texture_index, mip, slice, cast, window, cx))));
                                             }
@@ -19413,9 +20097,9 @@ impl Workspace {
                                 .py_2()
                                 .rounded_md()
                                 .bg(rgb(if self.shader_source == Some(index) {
-                                    0x4169e1
+                                    0x0070f3
                                 } else {
-                                    0x252f40
+                                    0x1f1f1f
                                 }))
                                 .child(label)
                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -19437,7 +20121,7 @@ impl Workspace {
                     ));
                     let edit_label = self.t("Edit source", "编辑源码");
                     view = view.child(div().flex().flex_wrap().gap_2()
-                        .child(div().id("shader-edit-begin").test_support().cursor_pointer().px_3().py_2().rounded_md().bg(rgb(0x252f40)).child(edit_label).on_click(cx.listener(|this, _, window, cx| this.begin_shader_edit(window, cx))))
+                        .child(div().id("shader-edit-begin").test_support().cursor_pointer().px_3().py_2().rounded_md().bg(rgb(0x1f1f1f)).child(edit_label).on_click(cx.listener(|this, _, window, cx| this.begin_shader_edit(window, cx))))
                         .child(button("shader-edit-revert", self.t("Revert replacement", "还原替换"), false, |this, cx| this.edit_shader(true, cx), cx)));
                     if let Some(editor) = &self.shader_editor {
                         let entry_label = self.t("Entry point", "入口函数");
@@ -19446,7 +20130,7 @@ impl Workspace {
                         let mut editor_files = div().flex().flex_wrap().gap_2();
                         for (index, file) in editor.files.iter().enumerate() {
                             let name = file.get("name").and_then(serde_json::Value::as_str).unwrap_or("").to_owned();
-                            editor_files = editor_files.child(div().id(("shader-edit-file", index)).test_support().cursor_pointer().px_3().py_2().rounded_md().bg(rgb(if editor.file_index == index { 0x4169e1 } else { 0x252f40 })).child(name).on_click(cx.listener(move |this, _, window, cx| this.switch_shader_editor_file(index, window, cx))));
+                            editor_files = editor_files.child(div().id(("shader-edit-file", index)).test_support().cursor_pointer().px_3().py_2().rounded_md().bg(rgb(if editor.file_index == index { 0x0070f3 } else { 0x1f1f1f })).child(name).on_click(cx.listener(move |this, _, window, cx| this.switch_shader_editor_file(index, window, cx))));
                         }
                         let mut processor_buttons = div().flex().flex_wrap().gap_2()
                             .child(button("shader-processor-builtin", self.t("Built-in compiler", "内置编译器"), editor.tool == "Builtin", |this, cx| { if !this.resource_pending { if let Some(editor) = &mut this.shader_editor { editor.tool = "Builtin".into(); cx.notify(); } } }, cx))
@@ -19455,7 +20139,7 @@ impl Workspace {
                             let name = config.name.clone();
                             let remove_name = name.clone();
                             processor_buttons = processor_buttons.child(div().flex().gap_1()
-                                .child(div().id(("shader-processor-select", index)).test_support().cursor_pointer().px_3().py_2().rounded_md().bg(rgb(if editor.tool == name { 0x4169e1 } else { 0x252f40 })).child(name.clone()).on_click(cx.listener(move |this, _, _, cx| { if !this.resource_pending { if let Some(editor) = &mut this.shader_editor { editor.tool = name.clone(); cx.notify(); } } })))
+                                .child(div().id(("shader-processor-select", index)).test_support().cursor_pointer().px_3().py_2().rounded_md().bg(rgb(if editor.tool == name { 0x0070f3 } else { 0x1f1f1f })).child(name.clone()).on_click(cx.listener(move |this, _, _, cx| { if !this.resource_pending { if let Some(editor) = &mut this.shader_editor { editor.tool = name.clone(); cx.notify(); } } })))
                                 .child(div().id(("shader-processor-remove", index)).test_support().cursor_pointer().px_2().py_2().child("×").on_click(cx.listener(move |this, _, _, cx| this.remove_shader_processor(&remove_name, cx)))));
                         }
                         view = view.child(format!("{}: {}", edit_label, editor.filename))
@@ -19589,7 +20273,7 @@ impl Workspace {
                     }
                 })
                 .when(self.shader_data.is_none(), |view| {
-                    view.child(div().text_color(rgb(0x9eacc0)).child(shader_empty))
+                    view.child(div().text_color(rgb(0xa1a1aa)).child(shader_empty))
                 })
         } else if self.tab == CaptureTab::Buffers {
             let rows = self.buffer_data.as_ref().map(|data| {
@@ -19769,9 +20453,9 @@ impl Workspace {
                         .rounded_md()
                         .bg(rgb(
                             if self.buffer_format.is_none() && self.buffer_layout.is_none() {
-                                0x4169e1
+                                0x0070f3
                             } else {
-                                0x252f40
+                                0x1f1f1f
                             },
                         ))
                         .child(self.t("Raw", "原始"))
@@ -19794,9 +20478,9 @@ impl Workspace {
                         .py_1()
                         .rounded_md()
                         .bg(rgb(if self.buffer_format == Some(format) {
-                            0x4169e1
+                            0x0070f3
                         } else {
-                            0x252f40
+                            0x1f1f1f
                         }))
                         .child(format.name())
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -19897,7 +20581,7 @@ impl Workspace {
                 .child(
                     div()
                         .text_sm()
-                        .text_color(rgb(0x82aaff))
+                        .text_color(rgb(0x3291ff))
                         .child(buffer_details),
                 )
                 .when_some(buffer_detail, |view, buffer| {
@@ -19950,7 +20634,7 @@ impl Workspace {
                         .child(button("buffer-format-refresh", self.t("Refresh formats", "刷新格式"), false, |this, cx| this.refresh_buffer_formats(cx), cx)))
                     .child(div().flex().flex_wrap().gap_2().children(self.saved_buffer_formats.iter().enumerate().map(|(index, format)| {
                         let name = format.name.clone();
-                        div().id(("saved-buffer-format", index)).test_support().cursor_pointer().px_2().py_1().bg(rgb(0x252f40)).child(name.clone())
+                        div().id(("saved-buffer-format", index)).test_support().cursor_pointer().px_2().py_1().bg(rgb(0x1f1f1f)).child(name.clone())
                             .on_click(cx.listener(move |this, _, window, cx| this.load_buffer_format(&name, window, cx)))
                     })))
                     .when(self.buffer_format.is_some() || self.buffer_layout.is_some(), |view| view.child(self.t("Typed offsets are decimal; values start at the current byte offset.", "类型视图的偏移为十进制；值从当前字节偏移开始解码。")))
@@ -20051,7 +20735,7 @@ impl Workspace {
                     )
                 })
                 .when(self.selected_buffer.is_none(), |view| {
-                    view.child(div().text_color(rgb(0x9eacc0)).child(buffer_empty))
+                    view.child(div().text_color(rgb(0xa1a1aa)).child(buffer_empty))
                 })
         } else if self.tab == CaptureTab::Textures {
             let selection = self.texture_selection;
@@ -20191,7 +20875,7 @@ impl Workspace {
                 .child(
                     div()
                         .text_sm()
-                        .text_color(rgb(0x82aaff))
+                        .text_color(rgb(0x3291ff))
                         .child(texture_details),
                 )
                 .when_some(texture_detail, |view, texture| {
@@ -20273,7 +20957,7 @@ impl Workspace {
                     .child(self.texture_export_controls(cx))
                     .child(self.texture_preview_controls(cx))
                     .child(self.texture_raw_panel(cx))
-                    .child(div().text_sm().text_color(rgb(0x91a7c0)).child(pixel_title))
+                    .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(pixel_title))
                     .child(
                         div()
                             .flex()
@@ -20316,7 +21000,7 @@ impl Workspace {
                         .child(Input::new(&self.pixel_debug_primitive).id("pixel-debug-primitive").aria_label(self.t("Primitive", "图元")).w(px(100.)))
                         .child(self.t("View", "视图"))
                         .child(Input::new(&self.pixel_debug_view).id("pixel-debug-view").aria_label(self.t("View", "视图")).w(px(100.))))
-                    .child(div().text_sm().text_color(rgb(0x91a7c0)).child(self.t("Leave primitive and view blank for RenderDoc's default. Fragment history uses its own primitive and the selected view. The selected texture need not be bound to the draw.", "图元和视图留空时由 RenderDoc 选择。片元历史使用该记录的图元和所选视图。所选纹理不一定绑定到当前绘制。")))
+                    .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(self.t("Leave primitive and view blank for RenderDoc's default. Fragment history uses its own primitive and the selected view. The selected texture need not be bound to the draw.", "图元和视图留空时由 RenderDoc 选择。片元历史使用该记录的图元和所选视图。所选纹理不一定绑定到当前绘制。")))
                     .when_some(pixel_debug_panel, |view, panel| view.child(panel))
                     .when(self.selected_texture.is_some(), |view| view.child(self.pixel_context_view(cx)))
                     .when_some(pixel, |view, pixel| {
@@ -20326,7 +21010,7 @@ impl Workspace {
                             .map(|v| format!("{v:08X}"))
                             .collect::<Vec<_>>()
                             .join(" ");
-                        view.child(div().text_sm().text_color(rgb(0x91a7c0)).child(if pixel.overlay {
+                        view.child(div().text_sm().text_color(rgb(0xa1a1aa)).child(if pixel.overlay {
                             self.t("Overlay pixel", "叠加层像素")
                         } else {
                             self.t("Texture pixel", "纹理像素")
@@ -20345,7 +21029,7 @@ impl Workspace {
                         .when_some(pixel.alpha.as_ref(), |view, alpha| view.child(div().id("pixel-alpha").test_support().child(format!("{}: {alpha}", self.t("Alpha", "透明度")))))
                         .child(format!("{float_label}: {}", pixel.float_values.join(", ")))
                         .when_some(pixel.custom, |view, custom| view
-                            .child(div().id("custom-pixel-result").test_support().text_sm().text_color(rgb(0x82aaff)).child(self.t("Custom shader output", "自定义着色器输出")))
+                            .child(div().id("custom-pixel-result").test_support().text_sm().text_color(rgb(0x3291ff)).child(self.t("Custom shader output", "自定义着色器输出")))
                             .child(format!("{float_label}: {}", custom.float_values.join(", ")))
                             .child(format!("{uint_label}: {:?}", custom.uint_values))
                             .child(format!("{int_label}: {:?}", custom.int_values)))
@@ -20355,10 +21039,10 @@ impl Workspace {
                     })
                     .when_some(history, |view, page| {
                         let history_sample = if page.sample == u32::MAX { backend_default.to_owned() } else { page.sample.to_string() };
-                        let mut view = view.child(div().id("pixel-history-result").test_support().text_color(rgb(0x82aaff))
+                        let mut view = view.child(div().id("pixel-history-result").test_support().text_color(rgb(0x3291ff))
                             .child(format!("{history_label} · {event_label} {} · ({}, {}) · {samples_label}: {history_sample} · {} / {}", page.event_id, page.x, page.y, page.offset, page.total)))
-                            .child(div().text_sm().text_color(rgb(0x91a7c0)).child(history_note));
-                        if page.sample == u32::MAX { view = view.child(div().text_sm().text_color(rgb(0x91a7c0)).child(history_sample_note)); }
+                            .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(history_note));
+                        if page.sample == u32::MAX { view = view.child(div().text_sm().text_color(rgb(0xa1a1aa)).child(history_sample_note)); }
                         if page.total == "0" { view = view.child(history_empty); }
                         else {
                             view = view.child(div().flex().gap_2()
@@ -20374,7 +21058,7 @@ impl Workspace {
                                 }, cx)));
                             for (row, entry) in page.entries.iter().enumerate() {
                                 view = view.child(div().id(("pixel-history-row", row)).test_support().cursor_pointer().px_2().py_1()
-                                    .bg(rgb(if history_selected == Some(row) { 0x304c7c } else { 0x192332 }))
+                                    .bg(rgb(if history_selected == Some(row) { 0x1f1f1f } else { 0x0a0a0a }))
                                     .child(format!("{event_label} {} · {fragment_label} {} · {}", entry.event_id, entry.fragment, if entry.passed { passed_label } else { failed_label }))
                                     .on_click(cx.listener(move |this, _, _, cx| { this.history_selected = Some(row); cx.notify(); })));
                             }
@@ -20396,7 +21080,7 @@ impl Workspace {
                                 let event = entry.event_id;
                                 let primitive = if entry.primitive == u32::MAX { unavailable_history.to_owned() } else { entry.primitive.to_string() };
                                 view = view.child(div().id("pixel-history-detail").test_support().child(format!("{event_label} {event} · {primitive_label} {primitive} · {}", if failures.is_empty() { passed_label.to_owned() } else { failures.join(", ") })))
-                                    .child(div().id("pixel-history-jump").test_support().text_color(rgb(0x82aaff)).cursor_pointer().child(jump_label)
+                                    .child(div().id("pixel-history-jump").test_support().text_color(rgb(0x3291ff)).cursor_pointer().child(jump_label)
                                         .on_click(cx.listener(move |this, _, window, cx| this.jump_to_usage(event, window, cx))));
                                 if entry.event_id == page.event_id {
                                     let selection = PixelDebugSelection { x: page.x, y: page.y, sample: (page.sample != u32::MAX).then_some(page.sample), primitive: (entry.primitive != u32::MAX).then_some(entry.primitive), view: None };
@@ -20419,13 +21103,13 @@ impl Workspace {
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(0x91a7c0))
+                            .text_color(rgb(0xa1a1aa))
                             .child(histogram_label),
                     )
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(0x91a7c0))
+                            .text_color(rgb(0xa1a1aa))
                             .child(channels_note),
                     )
                     .child(
@@ -20465,7 +21149,7 @@ impl Workspace {
                             .collect::<Vec<_>>()
                             .join(" ");
                         let mut view = view
-                            .when(stats.custom_shader, |view| view.child(div().text_sm().text_color(rgb(0x91a7c0)).child(self.t("Custom shader output statistics", "自定义着色器输出统计"))))
+                            .when(stats.custom_shader, |view| view.child(div().text_sm().text_color(rgb(0xa1a1aa)).child(self.t("Custom shader output statistics", "自定义着色器输出统计"))))
                             .child(div().id("texture-statistics").test_support().child(format!(
                                 "{event_label} {} · {} — {} · {channel_label}: {channels}",
                                 stats.event_id, stats.request.min, stats.request.max
@@ -20494,7 +21178,7 @@ impl Workspace {
                                 "{maximum_label} · {int_label}: {:?}",
                                 stats.max.int_values
                             ))
-                            .child(div().text_sm().text_color(rgb(0x91a7c0)).child(stats_note));
+                            .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(stats_note));
                         if stats.histogram.is_empty() {
                             view = view.child(no_histogram);
                         } else {
@@ -20513,13 +21197,13 @@ impl Workspace {
                                         } else {
                                             80.0 * (*count as f32 / highest as f32)
                                         };
-                                        div().flex_1().min_w_0().h(px(height)).bg(rgb(0x82aaff))
+                                        div().flex_1().min_w_0().h(px(height)).bg(rgb(0x3291ff))
                                     })),
                             );
                         }
                         view
                     })
-                    .child(div().text_sm().text_color(rgb(0x91a7c0)).child(export_note))
+                    .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(export_note))
                     .when(!self.thumbnail_history.is_empty(), |view| {
                         view.child(
                             div().id("thumbnail-strip").test_support().flex().flex_wrap().gap_1()
@@ -20543,7 +21227,7 @@ impl Workspace {
                                         .px_2()
                                         .py_1()
                                         .rounded_md()
-                                        .bg(rgb(0x252f40))
+                                        .bg(rgb(0x1f1f1f))
                                         .when_some(thumb, |tile, path| {
                                             tile.child(
                                                 img(path)
@@ -20566,17 +21250,17 @@ impl Workspace {
                     })
                     .when_some(preview_path, |view, path| {
                         view.child(self.texture_preview_image(path, cx))
-                        .child(div().text_sm().text_color(rgb(0x91a7c0)).child(self.t("Click the preview or pixel context, then use the arrow keys to move the selected pixel.", "点击预览或像素上下文后使用方向键移动所选像素。")))
+                        .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(self.t("Click the preview or pixel context, then use the arrow keys to move the selected pixel.", "点击预览或像素上下文后使用方向键移动所选像素。")))
                         .child(
                             div()
                                 .text_sm()
-                                .text_color(rgb(0x91a7c0))
+                                .text_color(rgb(0xa1a1aa))
                                 .child(preview_note),
                         )
                     })
                 })
                 .when(self.selected_texture.is_none(), |view| {
-                    view.child(div().text_color(rgb(0x9eacc0)).child(texture_empty))
+                    view.child(div().text_color(rgb(0xa1a1aa)).child(texture_empty))
                 })
         } else if self.tab == CaptureTab::Pipeline {
             self.pipeline_state_panel()
@@ -20587,7 +21271,7 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .gap_3()
-                .child(div().text_sm().text_color(rgb(0x82aaff)).child(details))
+                .child(div().text_sm().text_color(rgb(0x3291ff)).child(details))
                 .when_some(detail, |view, action| {
                     view.child(div().font_weight(gpui::FontWeight::BOLD).child(action.name))
                         .child(format!("{event_label}: {}", action.event_id))
@@ -20604,7 +21288,7 @@ impl Workspace {
                         return view.child(
                             div()
                                 .text_sm()
-                                .text_color(rgb(0x82aaff))
+                                .text_color(rgb(0x3291ff))
                                 .child(pipeline_unavailable),
                         );
                     }
@@ -20986,7 +21670,7 @@ impl Workspace {
                     view.child(
                         div()
                             .text_sm()
-                            .text_color(rgb(0x82aaff))
+                            .text_color(rgb(0x3291ff))
                             .child(pipeline_label),
                     )
                     .child(format!("{topology_label}: {topology}"))
@@ -21008,7 +21692,7 @@ impl Workspace {
                                     .text_sm()
                                     .child(line)
                                     .when_some(target, |row, index| {
-                                        row.cursor_pointer().text_color(rgb(0x91cfff)).on_click(
+                                        row.cursor_pointer().text_color(rgb(0xededed)).on_click(
                                             cx.listener(move |this, _, window, cx| {
                                                 this.open_attachment_texture(
                                                     index, mip, slice, cast, window, cx,
@@ -21035,7 +21719,7 @@ impl Workspace {
                                         )
                                     ))
                                     .when_some(target, |row, index| {
-                                        row.cursor_pointer().text_color(rgb(0x91cfff)).on_click(
+                                        row.cursor_pointer().text_color(rgb(0xededed)).on_click(
                                             cx.listener(move |this, _, window, cx| {
                                                 this.open_attachment_texture(
                                                     index, mip, slice, cast, window, cx,
@@ -21060,7 +21744,7 @@ impl Workspace {
                                     )
                                 ))
                                 .when_some(target, |row, index| {
-                                    row.cursor_pointer().text_color(rgb(0x91cfff)).on_click(
+                                    row.cursor_pointer().text_color(rgb(0xededed)).on_click(
                                         cx.listener(move |this, _, window, cx| {
                                             this.open_attachment_texture(
                                                 index, mip, slice, cast, window, cx,
@@ -21137,18 +21821,21 @@ impl Workspace {
                     )
                 })
                 .when(self.selected.is_none(), |view| {
-                    view.child(div().text_color(rgb(0x9eacc0)).child(empty))
+                    view.child(div().text_color(rgb(0xa1a1aa)).child(empty))
                 })
         };
 
         div()
+            .relative()
             .size_full()
-            .bg(rgb(0x101722))
-            .text_color(rgb(0xe6edf6))
+            .bg(rgb(0x000000))
+            .text_color(rgb(0xededed))
             .flex()
             .flex_col()
             .gap_4()
-            .p_5()
+            .px_5()
+            .pb_5()
+            .pt(px(56.))
             .child(
                 div()
                     .flex()
@@ -21158,77 +21845,7 @@ impl Workspace {
                         "capture-back",
                         back,
                         false,
-                        |this, cx| {
-                            if this.resource_pending || this.replay_pending || this.export_pending {
-                                this.status = Some(this.t("Wait for the current operation.", "请等待当前操作完成。").to_owned());
-                                cx.notify();
-                                return;
-                            }
-                            if this.protect_shader_draft(cx) { return; }
-                            if this.annotation_dirty(cx) {
-                                this.status = Some(this.t("Save or discard the comment draft first.", "请先保存或放弃注释草稿。").to_owned());
-                                this.tab = CaptureTab::Annotations;
-                                cx.notify();
-                                return;
-                            }
-                            this.open_revision += 1;
-                            this.event_name_worker = false;
-                            this.requested_event = None;
-                            this.queued_event_key = None;
-                            this.event_filter_revision.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            this.event_annotation_revision.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            this.event_annotation_values.clear();
-                            this.session = None;
-                            renderdocx::python_embed::set_active_session(None);
-                            this.snapshot = None;
-                            this.texture_saved_selection.clear();
-                            this.message_generation += 1;
-                            this.message_poll_pending = false;
-                            this.message_visible.clear();
-                            this.show_hidden_messages = false;
-                            this.shader_message_page = None;
-                            this.selected_shader_message = None;
-                        this.selected_shader_messages.clear();
-                        this.shader_message_selection_anchor = None;
-                            this.pending_shader_messages_event = None;
-                            this.shader_vertex_resolution = None;
-                            this.shader_vertex_lookup_pending = false;
-                            this.selected_message = None;
-                        this.selected_messages.clear();
-                        this.message_selection_anchor = None;
-                            this.event_tree.reset(&[]);
-                            this.capture = None;
-                            this.selected = None;
-                            this.selected_event_id = None;
-                        this.selected_events.clear();
-                        this.event_selection_anchor = None;
-                            this.replay_pending = false;
-                            this.export_pending = false;
-                            this.resource_pending = false;
-                            this.buffer_data = None;
-                        this.buffer_fixed_data = None;
-                            this.shader_data = None; this.shader_constants = None; this.shader_bindings = None;
-                            this.shader_editor = None;
-                            this.structure = StructureView::default();
-                            this.timeline = TimelineView::default();
-                            this.mesh = MeshView::default();
-                            this.input_page = None;
-                            this.debug_vertex_selection = None;
-                            this.debug_view = None;
-                            this.selected_resource = None;
-                            this.selected_counters.clear();
-                            this.counter_page = None;
-                            this.usage_page = None;
-                            this.preview = None;
-                        this.texture_raw_page = None;
-                        this.texture_raw_last = None;
-                            this.pixel = None;
-                            this.pixel_history = None;
-                            this.history_selected = None;
-                            this.statistics = None;
-                            this.status = None;
-                            cx.notify();
-                        },
+                        |this, cx| this.close_capture(cx),
                         cx,
                     ))
                     .child(button("capture-replay-loop", self.t("Replay loop", "重放循环"), self.replay_loop.as_ref().is_some_and(|state| state.playing), |this, cx| this.toggle_replay_loop(cx), cx))
@@ -21272,16 +21889,16 @@ impl Workspace {
                     )),
             )
             .when(self.show_remote_browser && self.session.as_ref().and_then(Session::remote_server_url).is_some(), |view| view.child(self.remote_browser_view(true, cx)))
-            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(title))
+            .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(title))
             .child(
                 div()
                     .flex()
                     .justify_between()
                     .child(div().text_xl().child(frame))
-                    .child(div().text_sm().text_color(rgb(0x9eacc0)).child(counts)),
+                    .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(counts)),
             )
             .when_some(status, |view, text| {
-                view.child(div().text_color(rgb(0xd4b77c)).child(text))
+                view.child(div().text_color(rgb(0xf5a623)).child(text))
             })
             .when(self.timeline.shown, |view| {
                 view.child(self.timeline_view(cx))
@@ -21307,16 +21924,24 @@ impl Workspace {
                         },
                     ))
                     .child(self.dock_left_panel(cx))
-                    .when(self.dock_event_browser || self.dock_api_inspector, |view| {
-                        view.child(self.dock_splitter(cx))
-                    })
+                    .when(
+                        (self.dock_event_browser
+                            && !self
+                                .floating_docks
+                                .contains(&FloatingDock::EventBrowser))
+                            || (self.dock_api_inspector
+                                && !self
+                                    .floating_docks
+                                    .contains(&FloatingDock::ApiInspector)),
+                        |view| view.child(self.dock_splitter(cx)),
+                    )
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .flex_1()
                             .min_w_0()
-                            .bg(rgb(0x192332))
+                            .bg(rgb(0x0a0a0a))
                             .rounded_lg()
                             .overflow_hidden()
                             .child(
@@ -21384,7 +22009,7 @@ impl Workspace {
                                         div()
                                             .self_center()
                                             .text_sm()
-                                            .text_color(rgb(0x91a7c0))
+                                            .text_color(rgb(0xa1a1aa))
                                             .child(count.to_string()),
                                     ),
                             )
@@ -21556,7 +22181,7 @@ impl Workspace {
                                         .px_3()
                                         .pb_2()
                                         .child(
-                                            div().text_sm().text_color(rgb(0x9eacc0)).child(label),
+                                            div().text_sm().text_color(rgb(0xa1a1aa)).child(label),
                                         )
                                         .child(
                                             Input::new(&self.resource_search)
@@ -21845,20 +22470,20 @@ impl Workspace {
                                 view.child(
                                     div()
                                         .px_3()
-                                        .child(div().text_sm().text_color(rgb(0x9eacc0)).child(
+                                        .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(
                                             self.t("Find name or @EID", "查找名称或 @事件 ID")
                                         ))
                                         .child(Input::new(&self.event_find).id("event-find").aria_label(
                                             self.t("Find name or @EID", "查找名称或 @事件 ID")
                                         ).w_full())
-                                        .when(self.event_find_pending.is_some(), |view| view.child(div().id("event-find-loading").test_support().text_sm().text_color(rgb(0x91a7c0)).child(self.t("Searching event names…", "正在搜索事件名称…"))))
+                                        .when(self.event_find_pending.is_some(), |view| view.child(div().id("event-find-loading").test_support().text_sm().text_color(rgb(0xa1a1aa)).child(self.t("Searching event names…", "正在搜索事件名称…"))))
                                         .child(div().flex().gap_2()
                                             .child(button("event-find-prev", self.t("Previous match", "上一个匹配"), false, |this, cx| this.find_event(false, cx), cx))
                                             .child(button("event-find-next", self.t("Next match", "下一个匹配"), false, |this, cx| this.find_event(true, cx), cx)))
                                         .child(
                                             div()
                                                 .text_sm()
-                                                .text_color(rgb(0x9eacc0))
+                                                .text_color(rgb(0xa1a1aa))
                                                 .child(event_filter_label),
                                         )
                                         .child(
@@ -21867,7 +22492,7 @@ impl Workspace {
                                                 .aria_label(event_filter_label)
                                                 .w_full(),
                                         )
-                                        .when(self.event_filter_pending.is_some(), |view| view.child(div().id("event-filter-loading").test_support().text_sm().text_color(rgb(0x91a7c0)).child(self.t("Searching event details…", "正在搜索事件详情…"))))
+                                        .when(self.event_filter_pending.is_some(), |view| view.child(div().id("event-filter-loading").test_support().text_sm().text_color(rgb(0xa1a1aa)).child(self.t("Searching event details…", "正在搜索事件详情…"))))
                                         .child(div().flex().flex_wrap().gap_2()
                                             .child(Input::new(&self.event_filter_name).id("event-filter-name").aria_label(self.t("Saved filter name", "已保存筛选名称")).w(px(180.)))
                                             .child(button("event-filter-save", self.t("Save filter", "保存筛选"), false, |this, cx| this.save_event_filter(cx), cx))
@@ -21875,14 +22500,14 @@ impl Workspace {
                                             .child(button("event-filter-refresh", self.t("Refresh filters", "刷新筛选"), false, |this, cx| this.refresh_event_filters(cx), cx)))
                                         .child(div().flex().flex_wrap().gap_2().children(self.saved_event_filters.iter().enumerate().map(|(index, filter)| {
                                             let name = filter.name.clone();
-                                            div().id(("saved-event-filter", index)).test_support().cursor_pointer().px_2().py_1().bg(rgb(0x252f40)).child(name.clone())
+                                            div().id(("saved-event-filter", index)).test_support().cursor_pointer().px_2().py_1().bg(rgb(0x1f1f1f)).child(name.clone())
                                                 .on_click(cx.listener(move |this, _, window, cx| this.load_event_filter(&name, window, cx)))
                                         })))
-                                        .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t("Annotation column key (empty hides column)", "注释列键路径（留空隐藏）")))
+                                        .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(self.t("Annotation column key (empty hides column)", "注释列键路径（留空隐藏）")))
                                         .child(Input::new(&self.event_annotation_key).id("event-annotation-key").aria_label(self.t("Annotation column key", "注释列键路径")).w_full())
                                         .when(self.event_tree.filter_error(), |view| {
                                             view.child(
-                                                div().text_sm().text_color(rgb(0xef7777)).child(self.t(
+                                                div().text_sm().text_color(rgb(0xff6161)).child(self.t(
                                                     "Invalid or unsupported filter; showing the last valid result.",
                                                     "筛选表达式无效或尚不支持；显示上一次有效结果。",
                                                 )),
@@ -21904,7 +22529,7 @@ impl Workspace {
                                         self.annotations.bookmarks.as_ref().and_then(|(_, doc)| annotations::bookmarks(doc).ok()).unwrap_or_default().into_iter().enumerate().map(|(index, (event, text))| {
                                             let label = if text.is_empty() { format!("E{event}") } else { text };
                                             div().id(("event-bookmark", index)).test_support().aria_label(label.clone()).flex_none().cursor_pointer().px_2().py_1()
-                                                .bg(rgb(if self.selected_event_id() == Some(event) { 0x4169e1 } else { 0x252f40 }))
+                                                .bg(rgb(if self.selected_event_id() == Some(event) { 0x0070f3 } else { 0x1f1f1f }))
                                                 .child(label).on_click(cx.listener(move |this, _, _, cx| this.jump_to_bookmark(event, cx)))
                                         })
                                     )))
@@ -22063,7 +22688,7 @@ impl Workspace {
                                 },
                             )
                             .when(self.tab == CaptureTab::Events, |view| view.child(
-                                div().id("event-columns-header").test_support().h(px(24.)).px_3().flex().items_center().text_sm().text_color(rgb(0x9eacc0)).bg(rgb(0x202d3e))
+                                div().id("event-columns-header").test_support().h(px(24.)).px_3().flex().items_center().text_sm().text_color(rgb(0xa1a1aa)).bg(rgb(0x1a1a1a))
                                     .child(div().w(px(22.)).flex_none())
                                     .child(div().flex_1().min_w_0().flex().items_center().gap_3()
                                         .when(self.settings.event_columns.event_id, |row| row.child(div().id("event-header-eid").test_support().w(px(108.)).flex_none().child("EID")))
@@ -22082,21 +22707,21 @@ impl Workspace {
                             .flex_none()
                             .min_h_0()
                             .overflow_y_scroll()
-                            .bg(rgb(0x192332))
+                            .bg(rgb(0x0a0a0a))
                             .rounded_lg()
                             .p_4()
                             .child(detail_view)
                             .when(self.tab == CaptureTab::Events, |view| view.child(
                                 div().id("event-breadcrumbs").test_support().flex().flex_wrap().items_center().gap_2()
-                                    .child(div().id("event-breadcrumb-root").test_support().cursor_pointer().text_color(rgb(0x8dbbff))
+                                    .child(div().id("event-breadcrumb-root").test_support().cursor_pointer().text_color(rgb(0x3291ff))
                                         .child(self.t("Capture start", "捕获开始"))
                                         .on_click(cx.listener(|this, _, _, cx| this.select_capture_start(cx))))
                                     .children(breadcrumbs.into_iter().map(|(index, label)| {
                                         div().flex().items_center().gap_2().child("/")
-                                            .child(div().id(("event-breadcrumb", index)).test_support().cursor_pointer().text_color(rgb(0x8dbbff)).child(label)
+                                            .child(div().id(("event-breadcrumb", index)).test_support().cursor_pointer().text_color(rgb(0x3291ff)).child(label)
                                                 .on_click(cx.listener(move |this, _, _, cx| this.select_event(index, None, cx))))
                                     }))
-                                    .child(div().id("event-path-edit").test_support().cursor_pointer().px_2().text_color(rgb(0x8dbbff))
+                                    .child(div().id("event-path-edit").test_support().cursor_pointer().px_2().text_color(rgb(0x3291ff))
                                         .child(self.t("Edit path", "编辑路径"))
                                         .on_click(cx.listener(|this, _, window, cx| this.edit_event_path(window, cx))))
                                     .when(self.event_path_editing, |view| view.child(div().w_full().flex().flex_wrap().gap_2()
@@ -22105,7 +22730,7 @@ impl Workspace {
                                         .child(button("event-path-cancel", self.t("Cancel", "取消"), false, |this, cx| { this.event_path_editing = false; cx.notify(); }, cx))))
                             ))
                             .when(self.tab == CaptureTab::Events, |view| view.child(div().id("event-column-settings").test_support().flex().flex_col().gap_2()
-                                .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t("Event columns", "事件列")))
+                                .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(self.t("Event columns", "事件列")))
                                 .child(div().flex().flex_wrap().gap_2()
                                     .child(button("event-column-name", self.t("Name", "名称"), self.settings.event_columns.name, |this, cx| { this.settings.event_columns.name = !this.settings.event_columns.name; this.save(); cx.notify(); }, cx))
                                     .child(button("event-column-eid", "EID", self.settings.event_columns.event_id, |this, cx| { this.settings.event_columns.event_id = !this.settings.event_columns.event_id; this.save(); cx.notify(); }, cx))
@@ -22139,6 +22764,9 @@ impl Workspace {
                                 .child(button("event-show-empty", self.t("Show empty regions", "显示空分组"), self.event_tree.show_empty_regions(), |this, cx| { this.event_tree.set_show_empty_regions(!this.event_tree.show_empty_regions()); cx.notify(); }, cx)))),
                     ),
             )
+            .children(self.floating_docks_overlay(cx))
+            .child(self.menu_bar_view(cx))
+            .child(self.menu_overlay_view(cx))
     }
 }
 
@@ -22419,8 +23047,8 @@ impl Render for Workspace {
             .test_support()
             .size_full()
             .overflow_y_scroll()
-            .bg(rgb(0x101722))
-            .text_color(rgb(0xe6edf6))
+            .bg(rgb(0x000000))
+            .text_color(rgb(0xededed))
             .flex()
             .flex_col()
             .p_8()
@@ -22428,7 +23056,7 @@ impl Render for Workspace {
             .child(
                 div()
                     .text_sm()
-                    .text_color(rgb(0x82aaff))
+                    .text_color(rgb(0x3291ff))
                     .child("RENDERDOCX  /  WORKSPACE"),
             )
             .child(
@@ -22437,7 +23065,7 @@ impl Render for Workspace {
                     .font_weight(gpui::FontWeight::BOLD)
                     .child(title),
             )
-            .child(div().text_color(rgb(0x9eacc0)).child(intro))
+            .child(div().text_color(rgb(0xa1a1aa)).child(intro))
             .child(
                 div()
                     .flex()
@@ -22526,7 +23154,7 @@ impl Render for Workspace {
             )
             .when_some(self.core_info.clone(), |view, info| {
                 view.child(
-                    div().text_sm().text_color(rgb(0x91a7c0)).child(format!(
+                    div().text_sm().text_color(rgb(0xa1a1aa)).child(format!(
                         "RenderDoc core: {} · {} · {} · {}: {}",
                         info.version.as_deref().unwrap_or("?"),
                         info.commit_hash.as_deref().unwrap_or("?"),
@@ -22569,7 +23197,7 @@ impl Render for Workspace {
                 )
             })
             .when_some(renderdocx::global_hook::hook_dll(self.settings.renderdoc_core.as_deref()), |view, dll| {
-                view.child(div().text_sm().text_color(rgb(0x91a7c0)).child(format!(
+                view.child(div().text_sm().text_color(rgb(0xa1a1aa)).child(format!(
                     "{}: {} · {}: {}",
                     self.t("Global hook DLL", "全局 hook DLL"),
                     dll.display(),
@@ -22580,7 +23208,7 @@ impl Render for Workspace {
             .when(self.show_launch_config, |view| {
                 view.child(
                     div()
-                        .bg(rgb(0x192332))
+                        .bg(rgb(0x0a0a0a))
                         .rounded_lg()
                         .p_5()
                         .flex()
@@ -22589,10 +23217,10 @@ impl Render for Workspace {
                         .child(
                             div()
                                 .text_sm()
-                                .text_color(rgb(0x82aaff))
+                                .text_color(rgb(0x3291ff))
                                 .child(launch_config_label),
                         )
-                        .when_some(status.clone(), |view, message| view.child(div().text_color(rgb(0xd4b77c)).child(message)))
+                        .when_some(status.clone(), |view, message| view.child(div().text_color(rgb(0xf5a623)).child(message)))
                         .child(arguments_label)
                         .child(
                             Input::new(&self.launch_arguments)
@@ -22667,7 +23295,7 @@ impl Render for Workspace {
                                         .px_3()
                                         .py_2()
                                         .rounded_md()
-                                        .bg(rgb(if enabled { 0x4169e1 } else { 0x252f40 }))
+                                        .bg(rgb(if enabled { 0x0070f3 } else { 0x1f1f1f }))
                                         .child(format!(
                                             "{} {label}",
                                             if enabled { "☑" } else { "☐" }
@@ -22704,7 +23332,7 @@ impl Render for Workspace {
                             .child(button("launch-env-separator", separator_label, false, |this, cx| {
                                 this.launch_env_separator = match this.launch_env_separator { EnvSeparator::Platform => EnvSeparator::SemiColon, EnvSeparator::SemiColon => EnvSeparator::Colon, EnvSeparator::Colon => EnvSeparator::NoSep, EnvSeparator::NoSep => EnvSeparator::Platform }; cx.notify();
                             }, cx))
-                            .child(div().id("launch-env-add").test_support().cursor_pointer().px_3().py_2().rounded_md().bg(rgb(0x4169e1)).child(environment_add)
+                            .child(div().id("launch-env-add").test_support().cursor_pointer().px_3().py_2().rounded_md().bg(rgb(0x0070f3)).child(environment_add)
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     let entry = EnvironmentModification { name: this.launch_env_name.read(cx).value().to_string(), value: this.launch_env_value.read(cx).value().to_string(), operation: this.launch_env_operation, separator: this.launch_env_separator };
                                     let validation = LaunchConfiguration { environment: vec![entry.clone()], ..Default::default() }.validate();
@@ -22720,7 +23348,7 @@ impl Render for Workspace {
                                 }))))
                         .children(environment_rows.into_iter().enumerate().map(|(index, label)| {
                             div().flex().items_center().gap_3().child(label)
-                                .child(div().id(SharedString::from(format!("launch-env-remove-{index}"))).test_support().cursor_pointer().px_3().py_2().rounded_md().bg(rgb(0x252f40)).child(environment_remove)
+                                .child(div().id(SharedString::from(format!("launch-env-remove-{index}"))).test_support().cursor_pointer().px_3().py_2().rounded_md().bg(rgb(0x1f1f1f)).child(environment_remove)
                                     .on_click(cx.listener(move |this, _, _, cx| { if index < this.launch_environment.len() { this.launch_environment.remove(index); cx.notify(); } })))
                         }))
                         .child(div().flex().flex_wrap().gap_2()
@@ -22776,7 +23404,7 @@ impl Render for Workspace {
                             .test_support()
                             .cursor_pointer()
                             .text_sm()
-                            .px_2().py_1().rounded_md().bg(rgb(0x252f40))
+                            .px_2().py_1().rounded_md().bg(rgb(0x1f1f1f))
                             .child(host.display_name().to_owned())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.status = Some(format!("{}: {hostname}", this.t("Remote host", "远程主机")));
@@ -22833,7 +23461,7 @@ impl Render for Workspace {
                     }))))
             .child(div().flex().flex_col().gap_1()
                 .child(self.t("Extensions", "扩展"))
-                .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
+                .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(self.t(
                     "UI extensions discovered from extension.json manifests. Script execution uses the embedded CPython interpreter.",
                     "从 extension.json 清单发现的 UI 扩展。脚本执行使用嵌入式 CPython 解释器。",
                 )))
@@ -22860,7 +23488,7 @@ impl Render for Workspace {
                         .test_support()
                         .cursor_pointer()
                         .text_sm()
-                        .px_2().py_1().rounded_md().bg(rgb(0x252f40))
+                        .px_2().py_1().rounded_md().bg(rgb(0x1f1f1f))
                         .child(label)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let name = this.installed_extensions.get(index).map(|e| e.manifest.name.clone());
@@ -22872,7 +23500,7 @@ impl Render for Workspace {
                 .child(self.t("Capture file inspector (native .rdc reader)", "捕获文件检查器（原生 .rdc 读取）"))
                 .child(button("inspect-rdc", self.t("Inspect .rdc…", "检查 .rdc…"), false, |this, cx| this.inspect_rdc_file(cx), cx))
                 .when_some(self.rdc_inspect.as_ref(), |view, (path, file)| {
-                    view.child(div().text_sm().text_color(rgb(0x91a7c0)).child(path.display().to_string()))
+                    view.child(div().text_sm().text_color(rgb(0xa1a1aa)).child(path.display().to_string()))
                         .child(div().id("rdc-meta").test_support().text_sm().child(format!(
                             "{} · {}: {} · {}: {} · {}: {}×{}",
                             self.t("Metadata", "元数据"),
@@ -22982,7 +23610,7 @@ impl Render for Workspace {
                             this.save();
                             cx.notify();
                         }))))
-                .child(div().text_sm().text_color(rgb(0x91a7c0)).child(format!(
+                .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(format!(
                     "{}: {} · {}: {}",
                     self.t("Recorded crashes", "已记录崩溃"),
                     self.crash_reports.len(),
@@ -22990,7 +23618,7 @@ impl Render for Workspace {
                     renderdocx::analytics::Consent::parse(&self.settings.analytics_consent).as_str(),
                 )))
                 .when_some(self.crash_reports.last().cloned(), |view, report| {
-                    view.child(div().text_sm().text_color(rgb(0xd08b8b)).child(format!(
+                    view.child(div().text_sm().text_color(rgb(0xff6161)).child(format!(
                         "{}: {} ({})",
                         report.timestamp,
                         report.message,
@@ -23052,9 +23680,9 @@ impl Render for Workspace {
             .when_some(self.suggest_remote.clone(), |view, dialog| {
                 let remote_enabled = dialog.remote_enabled();
                 view.child(
-                    div().id("suggest-remote").test_support().flex().flex_col().gap_2().p_3().rounded_lg().bg(rgb(0x192332))
+                    div().id("suggest-remote").test_support().flex().flex_col().gap_2().p_3().rounded_lg().bg(rgb(0x0a0a0a))
                         .child(div().text_sm().child(format!("{} · {}", dialog.driver, dialog.machine_ident)))
-                        .child(div().text_sm().text_color(rgb(0xd4b77c)).child(self.t(
+                        .child(div().text_sm().text_color(rgb(0xf5a623)).child(self.t(
                             "This capture may need remote replay. Load it locally, replay remotely, or cancel to configure a remote server.",
                             "此捕获可能需要远程回放。可本地加载、远程回放，或取消后配置远程服务器。",
                         )))
@@ -23104,7 +23732,7 @@ impl Render for Workspace {
                                     .id(("local-process", index))
                                     .test_support()
                                     .flex().items_center().gap_1()
-                                    .px_2().py_1().rounded_md().bg(rgb(0x252f40))
+                                    .px_2().py_1().rounded_md().bg(rgb(0x1f1f1f))
                                     .child(
                                         div()
                                             .id(("local-process-click", index))
@@ -23128,7 +23756,7 @@ impl Render for Workspace {
             })
             .child(div().flex().flex_col().gap_1()
                 .child(self.t("Python scripting", "Python 脚本"))
-                .child(div().text_sm().text_color(rgb(0x9eacc0)).child(self.t(
+                .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(self.t(
                     "Embedded CPython: scripts can access the open capture as the renderdocx module (frame, api_name, action_count, actions, textures, help()). State persists between entries.",
                     "嵌入式 CPython：脚本可通过 renderdocx 模块访问已打开捕获（frame、api_name、action_count、actions、textures、help()）。变量在多次执行间保留。",
                 )))
@@ -23160,7 +23788,7 @@ impl Render for Workspace {
                         .collect();
                     let matched = lines.len();
                     div().id("python-output").test_support().flex().flex_col().gap_0().text_sm()
-                        .child(div().id("python-find-count").test_support().text_color(rgb(0x91a7c0)).child(format!(
+                        .child(div().id("python-find-count").test_support().text_color(rgb(0xa1a1aa)).child(format!(
                             "{}: {matched}",
                             self.t("matching lines", "匹配行")
                         )))
@@ -23248,7 +23876,7 @@ impl Render for Workspace {
                 .child(format!("{}: {}", self.t("GPU list source", "GPU 列表来源"), self.replay_gpu_source.as_deref().unwrap_or(self.t("Local", "本地"))))
                 .children(self.replay_gpus.clone().into_iter().filter(|_| self.replay_gpu_source.as_ref().is_none_or(|url| self.remote_target_url.read(cx).value().as_ref() == url)).enumerate().map(|(index, gpu)| {
                     let label = format!("{} · {} / {} · {} · {:?}", gpu.name, gpu.vendor, gpu.device_id, gpu.driver, gpu.apis);
-                    div().id(("replay-gpu", index)).test_support().cursor_pointer().px_3().py_2().bg(rgb(0x252f40)).child(label)
+                    div().id(("replay-gpu", index)).test_support().cursor_pointer().px_3().py_2().bg(rgb(0x1f1f1f)).child(label)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.settings.replay_options.gpu_vendor = gpu.vendor; this.settings.replay_options.gpu_device_id = gpu.device_id;
                             this.settings.replay_options.gpu_driver = gpu.driver.clone(); this.save(); cx.notify();
@@ -23269,7 +23897,7 @@ impl Render for Workspace {
                                 .px_3()
                                 .py_2()
                                 .rounded_md()
-                                .bg(rgb(0x252f40))
+                                .bg(rgb(0x1f1f1f))
                                 .child(format!("{connect_target} {ident}"))
                                 .on_click(
                                     cx.listener(move |this, _, _, cx| this.connect_live(ident, cx)),
@@ -23356,13 +23984,13 @@ impl Render for Workspace {
                     );
                     view.child(
                         div()
-                            .bg(rgb(0x192332))
+                            .bg(rgb(0x0a0a0a))
                             .rounded_lg()
                             .p_5()
                             .flex()
                             .flex_col()
                             .gap_3()
-                            .child(div().text_sm().text_color(rgb(0x82aaff)).child(live_title))
+                            .child(div().text_sm().text_color(rgb(0x3291ff)).child(live_title))
                             .when_some(live_status, |view, text| view.child(text))
                             .when(active, |view| {
                                 view.child(
@@ -23423,14 +24051,14 @@ impl Render for Workspace {
             )
             .child(
                 div()
-                    .bg(rgb(0x192332))
+                    .bg(rgb(0x0a0a0a))
                     .rounded_lg()
                     .p_5()
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .child(div().text_sm().text_color(rgb(0x82aaff)).child(integration))
-                    .child(div().text_color(rgb(0xc3cedd)).child(integration_text)),
+                    .child(div().text_sm().text_color(rgb(0x3291ff)).child(integration))
+                    .child(div().text_color(rgb(0xa1a1aa)).child(integration_text)),
             )
             .child(div().flex().flex_wrap().gap_3().child(button(
                 "configure-ui",
@@ -23445,7 +24073,7 @@ impl Render for Workspace {
                 },
                 cx,
             )))
-            .child(div().text_sm().text_color(rgb(0x9eacc0)).child(language))
+            .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(language))
             .child(div().flex().flex_wrap().gap_2().children(
                 Language::ALL.into_iter().enumerate().map(|(i, lang)| {
                     div()
@@ -23455,9 +24083,9 @@ impl Render for Workspace {
                         .rounded_md()
                         .cursor_pointer()
                         .bg(rgb(if self.settings.language == lang {
-                            0x4169e1
+                            0x0070f3
                         } else {
-                            0x252f40
+                            0x1f1f1f
                         }))
                         .child(lang.label())
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -23474,7 +24102,7 @@ impl Render for Workspace {
                 }),
             ))
             .when_some(status, |s, status| {
-                s.child(div().text_color(rgb(0xd4b77c)).child(status))
+                s.child(div().text_color(rgb(0xf5a623)).child(status))
             })
             .children(self.info_overlay(cx))
             .children(self.constant_buffer_overlay(cx))
@@ -23694,6 +24322,10 @@ fn main() {
                         dock_api_inspector: true,
                         dock_drag_x: None,
                         show_aux_tabs: cfg!(test),
+                        menu_open: None,
+                        floating_docks: Vec::new(),
+                        floating_positions: [(420.0, 160.0), (520.0, 320.0)],
+                        floating_drag: None,
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
@@ -24588,6 +25220,10 @@ mod ui_tests {
                         dock_api_inspector: true,
                         dock_drag_x: None,
                         show_aux_tabs: cfg!(test),
+                        menu_open: None,
+                        floating_docks: Vec::new(),
+                        floating_positions: [(420.0, 160.0), (520.0, 320.0)],
+                        floating_drag: None,
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
@@ -25422,6 +26058,10 @@ mod ui_tests {
                         dock_api_inspector: true,
                         dock_drag_x: None,
                         show_aux_tabs: cfg!(test),
+                        menu_open: None,
+                        floating_docks: Vec::new(),
+                        floating_positions: [(420.0, 160.0), (520.0, 320.0)],
+                        floating_drag: None,
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
@@ -32474,6 +33114,89 @@ mod ui_tests {
             assert!(window.find("shaders-tab").visible());
         })
         .unwrap();
+        // Real menu bar: File/Edit/Window/Help with dropdown actions.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("menu-file").visible());
+            assert!(window.find("menu-edit").visible());
+            assert!(window.find("menu-window").visible());
+            assert!(window.find("menu-help").visible());
+            window.click("menu-file", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("menu-file-open").visible());
+            assert!(window.find("menu-file-save").visible());
+            assert!(window.find("menu-file-save-as").visible());
+            window.click("menu-file", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("menu-file-open").is_none());
+            window.click("menu-window", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("menu-window-float-event-browser").visible());
+            window.click("menu-window-float-event-browser", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                view.read(cx)
+                    .floating_docks
+                    .contains(&FloatingDock::EventBrowser),
+                "Window > Float Event Browser must add a floating dock"
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("floating-dock-event-browser").visible());
+            assert!(window.try_find("dock-event-browser").is_none());
+            window.click("floating-dock-return-event-browser", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                !view
+                    .read(cx)
+                    .floating_docks
+                    .contains(&FloatingDock::EventBrowser),
+                "Dock button must remove the floating dock"
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("dock-event-browser").visible());
+            window.click("menu-help", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("menu-help-about").visible());
+            window.click("menu-help-about", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                view.read(cx)
+                    .status
+                    .as_deref()
+                    .is_some_and(|status| status.contains("RenderDocX")),
+                "Help > About must report the application identity"
+            );
+        });
+
         cx.update(|cx| {
             view.update(cx, |view, cx| {
                 view.show_aux_tabs = true;
