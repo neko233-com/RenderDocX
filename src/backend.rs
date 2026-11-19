@@ -67,6 +67,10 @@ pub struct WindowLayout {
     /// Fraction of the capture row used by the bottom dock row.
     #[serde(default = "default_bottom_ratio")]
     pub bottom_ratio: f32,
+    /// Fraction of the API Inspector used by the API event list; the rest is
+    /// the callstack list, mirroring qrenderdoc's vertical splitter.
+    #[serde(default = "default_api_stack_ratio")]
+    pub api_stack_ratio: f32,
     /// Stable serialization names of the main tab order.
     #[serde(default)]
     pub main_tab_order: Vec<String>,
@@ -108,6 +112,7 @@ impl Default for WindowLayout {
             timeline_ratio: default_timeline_ratio(),
             right_ratio: default_right_ratio(),
             bottom_ratio: default_bottom_ratio(),
+            api_stack_ratio: default_api_stack_ratio(),
             main_tab_order: Vec::new(),
             aux_tab_order: Vec::new(),
             dock_right: Vec::new(),
@@ -144,6 +149,10 @@ fn default_right_ratio() -> f32 {
 
 fn default_bottom_ratio() -> f32 {
     0.30
+}
+
+fn default_api_stack_ratio() -> f32 {
+    0.68
 }
 
 fn default_true() -> bool {

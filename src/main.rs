@@ -1037,6 +1037,7 @@ struct Workspace {
     dock_timeline_ratio: f32,
     dock_right_ratio: f32,
     dock_bottom_ratio: f32,
+    dock_api_stack_ratio: f32,
     dock_event_browser: bool,
     dock_api_inspector: bool,
     dock_drag_x: Option<f32>,
@@ -1044,6 +1045,7 @@ struct Workspace {
     timeline_drag_y: Option<(f32, f32)>,
     right_drag_y: Option<(f32, f32)>,
     bottom_drag_y: Option<(f32, f32)>,
+    api_stack_drag_y: Option<(f32, f32)>,
     show_aux_tabs: bool,
     show_textures_tab: bool,
     show_pipeline_tab: bool,
@@ -4990,6 +4992,7 @@ impl Workspace {
             timeline_ratio: self.dock_timeline_ratio,
             right_ratio: self.dock_right_ratio,
             bottom_ratio: self.dock_bottom_ratio,
+            api_stack_ratio: self.dock_api_stack_ratio,
             textures_shown: self.show_textures_tab,
             pipeline_shown: self.show_pipeline_tab,
             mesh_shown: self.show_mesh_tab,
@@ -5037,6 +5040,7 @@ impl Workspace {
         self.dock_timeline_ratio = layout.timeline_ratio.clamp(0.12, 0.5);
         self.dock_right_ratio = layout.right_ratio.clamp(0.15, 0.75);
         self.dock_bottom_ratio = layout.bottom_ratio.clamp(0.15, 0.6);
+        self.dock_api_stack_ratio = layout.api_stack_ratio.clamp(0.3, 0.85);
         self.show_textures_tab = layout.textures_shown;
         self.show_pipeline_tab = layout.pipeline_shown;
         self.show_mesh_tab = layout.mesh_shown;
@@ -17429,19 +17433,41 @@ impl Workspace {
                 .to_owned(),
             ));
         }
-        let (root_id, rows_id) = if floating {
-            ("floating-api-inspector", "floating-api-inspector-rows")
+        let (root_id, rows_id, callstack_id) = if floating {
+            (
+                "floating-api-inspector",
+                "floating-api-inspector-rows",
+                "floating-api-callstack",
+            )
         } else {
-            ("dock-api-inspector", "dock-api-inspector-rows")
+            (
+                "dock-api-inspector",
+                "dock-api-inspector-rows",
+                "dock-api-callstack",
+            )
         };
         let mut list = div()
             .id(rows_id)
             .test_support()
             .flex_1()
             .min_h_0()
-            .overflow_hidden()
+            .overflow_y_scroll()
             .flex()
-            .flex_col();
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(rgb(0x1f1f1f))
+                    .text_xs()
+                    .text_color(rgb(0xa1a1aa))
+                    .child(div().flex_1().min_w_0().child(self.t("API Call", "API 调用")))
+                    .child(div().w(px(160.)).flex_none().child("Chunk / Offset")),
+            );
         for (name, value) in rows {
             list = list.child(
                 div()
@@ -17450,17 +17476,127 @@ impl Workspace {
                     .flex()
                     .gap_2()
                     .text_sm()
-                    .child(div().w(px(150.)).flex_none().child(name))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .overflow_hidden()
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .w(px(160.))
+                            .flex_none()
+                            .overflow_hidden()
+                            .text_xs()
                             .text_color(rgb(0xf5a623))
                             .child(value),
                     ),
             );
         }
+
+        let selected_event = self.selected_event_id();
+        let stack = self
+            .structure
+            .callstack
+            .as_ref()
+            .filter(|stack| Some(stack.event_id) == selected_event);
+        let callstack_label = self.t("Callstack", "调用栈");
+        let load_label = self.t("Load", "加载");
+        let resolve_label = self.t("Resolve symbols", "解析符号");
+        let mut callstack = div()
+            .id(callstack_id)
+            .test_support()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(rgb(0x1f1f1f))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(rgb(0xa1a1aa))
+                            .child(callstack_label),
+                    )
+                    .child(button(
+                        "api-callstack-load",
+                        load_label,
+                        false,
+                        |this, cx| this.read_event_callstack(false, cx),
+                        cx,
+                    ))
+                    .child(button(
+                        "api-callstack-resolve",
+                        resolve_label,
+                        false,
+                        |this, cx| this.read_event_callstack(true, cx),
+                        cx,
+                    )),
+            );
+        if let Some(stack) = stack {
+            if stack.frames.is_empty() {
+                callstack = callstack.child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_sm()
+                        .text_color(rgb(0x6b6b6b))
+                        .child(self.t(
+                            "Callstack unavailable for this event.",
+                            "此事件没有调用栈。",
+                        )),
+                );
+            } else {
+                for (index, frame) in stack.frames.iter().enumerate() {
+                    let symbol = frame
+                        .symbol
+                        .clone()
+                        .filter(|symbol| !symbol.is_empty())
+                        .unwrap_or_else(|| self.t("<unresolved>", "<未解析>").to_owned());
+                    callstack = callstack.child(
+                        div()
+                            .id(("api-callstack-frame", index))
+                            .test_support()
+                            .px_2()
+                            .py_1()
+                            .text_xs()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .w(px(140.))
+                                    .flex_none()
+                                    .text_color(rgb(0xa1a1aa))
+                                    .child(frame.address.clone()),
+                            )
+                            .child(div().flex_1().min_w_0().overflow_hidden().child(symbol)),
+                    );
+                }
+            }
+        } else {
+            callstack = callstack.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_sm()
+                    .text_color(rgb(0x6b6b6b))
+                    .child(self.t(
+                        "Select an event and load its callstack.",
+                        "选择事件并加载调用栈。",
+                    )),
+            );
+        }
+
         let mut root = div()
             .id(root_id)
             .test_support()
@@ -17483,7 +17619,24 @@ impl Workspace {
                 cx,
             ));
         }
-        root.child(list).into_any_element()
+        root.child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    div()
+                        .flex_none()
+                        .h(gpui::relative(self.dock_api_stack_ratio))
+                        .min_h(px(80.))
+                        .flex()
+                        .child(list),
+                )
+                .child(self.api_stack_splitter(cx))
+                .child(div().flex_1().min_h_0().flex().child(callstack)),
+        )
+        .into_any_element()
     }
 
     fn dock_left_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -19489,6 +19642,28 @@ impl Workspace {
             .into_any_element()
     }
 
+    fn api_stack_splitter(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
+            .id("api-stack-splitter")
+            .test_support()
+            .h(px(6.))
+            .w_full()
+            .flex_none()
+            .cursor_pointer()
+            .bg(rgb(0x111111))
+            .hover(|bar| bar.bg(rgb(0x1f1f1f)))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                    this.api_stack_drag_y =
+                        Some((f32::from(event.position.y), this.dock_api_stack_ratio));
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .into_any_element()
+    }
+
     fn reset_dock_layout(&mut self, cx: &mut Context<Self>) {
         self.dock_left_ratio = 0.25;
         self.dock_api_ratio = 0.7;
@@ -19496,9 +19671,11 @@ impl Workspace {
         self.dock_timeline_ratio = 0.20;
         self.dock_right_ratio = 0.45;
         self.dock_bottom_ratio = 0.30;
+        self.dock_api_stack_ratio = 0.68;
         self.timeline_drag_y = None;
         self.right_drag_y = None;
         self.bottom_drag_y = None;
+        self.api_stack_drag_y = None;
         self.show_textures_tab = true;
         self.show_pipeline_tab = true;
         self.show_mesh_tab = true;
@@ -25237,11 +25414,21 @@ impl Workspace {
                                     .clamp(0.15, 0.6);
                                 cx.notify();
                             }
+                        } else if let Some((start_y, start_ratio)) = this.api_stack_drag_y {
+                            let inspector_height = height * this.dock_api_ratio;
+                            if inspector_height > 0.0 {
+                                this.dock_api_stack_ratio = (start_ratio
+                                    + (f32::from(event.position.y) - start_y)
+                                        / inspector_height)
+                                    .clamp(0.3, 0.85);
+                                cx.notify();
+                            }
                         }
                     } else {
                         this.timeline_drag_y = None;
                         this.right_drag_y = None;
                         this.bottom_drag_y = None;
+                        this.api_stack_drag_y = None;
                     }
                 },
             ))
@@ -28106,6 +28293,7 @@ fn main() {
                         dock_timeline_ratio: 0.20,
                         dock_right_ratio: 0.45,
                         dock_bottom_ratio: 0.30,
+                        dock_api_stack_ratio: 0.68,
                         dock_event_browser: true,
                         dock_api_inspector: true,
                         dock_drag_x: None,
@@ -28113,6 +28301,7 @@ fn main() {
                         timeline_drag_y: None,
                         right_drag_y: None,
                         bottom_drag_y: None,
+                        api_stack_drag_y: None,
                         show_aux_tabs: cfg!(test),
                         show_textures_tab: true,
                         show_pipeline_tab: true,
@@ -29030,6 +29219,7 @@ mod ui_tests {
                         dock_timeline_ratio: 0.20,
                         dock_right_ratio: 0.45,
                         dock_bottom_ratio: 0.30,
+                        dock_api_stack_ratio: 0.68,
                         dock_event_browser: true,
                         dock_api_inspector: true,
                         dock_drag_x: None,
@@ -29037,6 +29227,7 @@ mod ui_tests {
                         timeline_drag_y: None,
                         right_drag_y: None,
                         bottom_drag_y: None,
+                        api_stack_drag_y: None,
                         show_aux_tabs: cfg!(test),
                         show_textures_tab: true,
                         show_pipeline_tab: true,
@@ -29894,6 +30085,7 @@ mod ui_tests {
                         dock_timeline_ratio: 0.20,
                         dock_right_ratio: 0.45,
                         dock_bottom_ratio: 0.30,
+                        dock_api_stack_ratio: 0.68,
                         dock_event_browser: true,
                         dock_api_inspector: true,
                         dock_drag_x: None,
@@ -29901,6 +30093,7 @@ mod ui_tests {
                         timeline_drag_y: None,
                         right_drag_y: None,
                         bottom_drag_y: None,
+                        api_stack_drag_y: None,
                         show_aux_tabs: cfg!(test),
                         show_textures_tab: true,
                         show_pipeline_tab: true,
@@ -36858,6 +37051,7 @@ mod ui_tests {
             assert!(window.find("dock-left").visible());
             assert!(window.find("dock-event-browser").visible());
             assert!(window.find("dock-api-inspector").visible());
+            assert!(window.find("api-stack-splitter").visible());
             let splitter = window.find("dock-splitter").bounds();
             let from = point(
                 splitter.origin.x + splitter.size.width / 2.0,
@@ -36945,6 +37139,7 @@ mod ui_tests {
             assert!((view.dock_timeline_ratio - 0.20).abs() < f32::EPSILON);
             assert!((view.dock_right_ratio - 0.45).abs() < f32::EPSILON);
             assert!((view.dock_bottom_ratio - 0.30).abs() < f32::EPSILON);
+            assert!((view.dock_api_stack_ratio - 0.68).abs() < f32::EPSILON);
         });
 
         // Drag Event Browser to the right details column and back.
@@ -37052,6 +37247,7 @@ mod ui_tests {
                 view.dock_timeline_ratio = 0.34;
                 view.dock_right_ratio = 0.52;
                 view.dock_bottom_ratio = 0.36;
+                view.dock_api_stack_ratio = 0.74;
                 view.dock_bottom = vec![FloatingDock::ApiInspector];
                 view.dock_event_browser = false;
                 view.dock_api_inspector = false;
@@ -37064,6 +37260,7 @@ mod ui_tests {
                 view.dock_timeline_ratio = 0.40;
                 view.dock_right_ratio = 0.45;
                 view.dock_bottom_ratio = 0.30;
+                view.dock_api_stack_ratio = 0.68;
                 view.dock_bottom.clear();
                 view.dock_event_browser = true;
                 view.dock_api_inspector = true;
@@ -37076,6 +37273,7 @@ mod ui_tests {
                 assert!((view.dock_timeline_ratio - 0.34).abs() < f32::EPSILON);
                 assert!((view.dock_right_ratio - 0.52).abs() < f32::EPSILON);
                 assert!((view.dock_bottom_ratio - 0.36).abs() < f32::EPSILON);
+                assert!((view.dock_api_stack_ratio - 0.74).abs() < f32::EPSILON);
                 assert!(view.dock_bottom.contains(&FloatingDock::ApiInspector));
                 view.dock_bottom.clear();
                 assert!(!view.dock_event_browser);
