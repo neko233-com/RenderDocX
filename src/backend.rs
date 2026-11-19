@@ -54,6 +54,10 @@ pub struct WindowLayout {
     /// Inspector), matching qrenderdoc's default 0.7/0.3 split.
     #[serde(default = "default_api_ratio")]
     pub api_ratio: f32,
+    /// Fraction of the capture row used by the central panel; the remainder is
+    /// the action-details panel on the right.
+    #[serde(default = "default_details_ratio")]
+    pub details_ratio: f32,
     #[serde(default = "default_true")]
     pub event_browser_shown: bool,
     #[serde(default = "default_true")]
@@ -71,6 +75,7 @@ impl Default for WindowLayout {
             texture_auto_fit: false,
             left_ratio: default_left_ratio(),
             api_ratio: default_api_ratio(),
+            details_ratio: default_details_ratio(),
             event_browser_shown: true,
             api_inspector_shown: true,
         }
@@ -83,6 +88,10 @@ fn default_left_ratio() -> f32 {
 
 fn default_api_ratio() -> f32 {
     0.7
+}
+
+fn default_details_ratio() -> f32 {
+    0.72
 }
 
 fn default_true() -> bool {

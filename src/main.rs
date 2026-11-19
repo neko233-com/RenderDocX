@@ -969,9 +969,11 @@ struct Workspace {
     tab: CaptureTab,
     dock_left_ratio: f32,
     dock_api_ratio: f32,
+    dock_details_ratio: f32,
     dock_event_browser: bool,
     dock_api_inspector: bool,
     dock_drag_x: Option<f32>,
+    details_drag_x: Option<f32>,
     show_aux_tabs: bool,
     menu_open: Option<MenuBar>,
     floating_docks: Vec<FloatingDock>,
@@ -4703,6 +4705,7 @@ impl Workspace {
             texture_auto_fit: self.texture_auto_fit,
             left_ratio: self.dock_left_ratio,
             api_ratio: self.dock_api_ratio,
+            details_ratio: self.dock_details_ratio,
             event_browser_shown: self.dock_event_browser,
             api_inspector_shown: self.dock_api_inspector,
         };
@@ -4738,6 +4741,7 @@ impl Workspace {
         self.texture_auto_fit = layout.texture_auto_fit;
         self.dock_left_ratio = layout.left_ratio.clamp(0.15, 0.5);
         self.dock_api_ratio = layout.api_ratio.clamp(0.3, 0.85);
+        self.dock_details_ratio = layout.details_ratio.clamp(0.5, 0.9);
         self.dock_event_browser = layout.event_browser_shown;
         self.dock_api_inspector = layout.api_inspector_shown;
         self.status = Some(format!("{} {slot}", self.t("Loaded window layout", "已加载窗口布局")));
@@ -16580,11 +16584,35 @@ impl Workspace {
             .into_any_element()
     }
 
+    fn details_splitter(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
+            .id("details-splitter")
+            .test_support()
+            .w(px(6.))
+            .flex_none()
+            .h_full()
+            .cursor_pointer()
+            .bg(rgb(0x111111))
+            .hover(|bar| bar.bg(rgb(0x1f1f1f)))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                    this.details_drag_x = Some(f32::from(event.position.x));
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .into_any_element()
+    }
+
     fn reset_dock_layout(&mut self, cx: &mut Context<Self>) {
         self.dock_left_ratio = 0.25;
         self.dock_api_ratio = 0.7;
+        self.dock_details_ratio = 0.72;
         self.dock_event_browser = true;
         self.dock_api_inspector = true;
+        self.dock_drag_x = None;
+        self.details_drag_x = None;
         self.timeline.shown = true;
         self.tab = CaptureTab::Textures;
         self.status = Some(self.t("Reset window layout to RenderDoc defaults", "已恢复 RenderDoc 默认窗口布局").to_owned());
@@ -22322,15 +22350,22 @@ impl Workspace {
                     .gap_4()
                     .on_mouse_move(cx.listener(
                         |this, event: &gpui::MouseMoveEvent, window, cx| {
+                            let width = f32::from(window.viewport_size().width) - 40.0;
                             if event.dragging() && this.dock_drag_x.is_some() {
-                                let width = f32::from(window.viewport_size().width) - 40.0;
                                 if width > 0.0 {
                                     let x = f32::from(event.position.x) - 20.0;
                                     this.dock_left_ratio = (x / width).clamp(0.15, 0.5);
                                     cx.notify();
                                 }
+                            } else if event.dragging() && this.details_drag_x.is_some() {
+                                if width > 0.0 {
+                                    let x = f32::from(event.position.x) - 20.0;
+                                    this.dock_details_ratio = (x / width).clamp(0.5, 0.9);
+                                    cx.notify();
+                                }
                             } else if !event.dragging() {
                                 this.dock_drag_x = None;
+                                this.details_drag_x = None;
                             }
                         },
                     ))
@@ -23110,11 +23145,12 @@ impl Workspace {
                             ))
                             .child(list),
                     )
+                    .child(self.details_splitter(cx))
                     .child(
                         div()
                             .id("capture-details-scroll")
                             .test_support()
-                            .w(px(300.))
+                            .w(gpui::relative(1.0 - self.dock_details_ratio))
                             .flex_none()
                             .min_h_0()
                             .overflow_y_scroll()
@@ -24728,9 +24764,11 @@ fn main() {
                         tab: CaptureTab::Events,
                         dock_left_ratio: 0.25,
                         dock_api_ratio: 0.7,
+                        dock_details_ratio: 0.72,
                         dock_event_browser: true,
                         dock_api_inspector: true,
                         dock_drag_x: None,
+                        details_drag_x: None,
                         show_aux_tabs: cfg!(test),
                         menu_open: None,
                         floating_docks: Vec::new(),
@@ -25625,9 +25663,11 @@ mod ui_tests {
                         tab: CaptureTab::Events,
                         dock_left_ratio: 0.25,
                         dock_api_ratio: 0.7,
+                        dock_details_ratio: 0.72,
                         dock_event_browser: true,
                         dock_api_inspector: true,
                         dock_drag_x: None,
+                        details_drag_x: None,
                         show_aux_tabs: cfg!(test),
                         menu_open: None,
                         floating_docks: Vec::new(),
@@ -26462,9 +26502,11 @@ mod ui_tests {
                         tab: CaptureTab::Events,
                         dock_left_ratio: 0.25,
                         dock_api_ratio: 0.7,
+                        dock_details_ratio: 0.72,
                         dock_event_browser: true,
                         dock_api_inspector: true,
                         dock_drag_x: None,
+                        details_drag_x: None,
                         show_aux_tabs: cfg!(test),
                         menu_open: None,
                         floating_docks: Vec::new(),
@@ -33411,6 +33453,17 @@ mod ui_tests {
             );
             window.drag(from, point(from.x + px(60.), from.y), cx);
             window.render_frame(cx);
+            let details = window.find("details-splitter").bounds();
+            let details_from = point(
+                details.origin.x + details.size.width / 2.0,
+                details.origin.y + px(120.),
+            );
+            window.drag(
+                details_from,
+                point(details_from.x - px(60.), details_from.y),
+                cx,
+            );
+            window.render_frame(cx);
             window.click("dock-event-2", cx);
         })
         .unwrap();
@@ -33419,6 +33472,10 @@ mod ui_tests {
             assert!(
                 view.read(cx).dock_left_ratio > 0.25,
                 "dock splitter drag must widen the left dock"
+            );
+            assert!(
+                view.read(cx).dock_details_ratio < 0.72,
+                "details splitter drag must widen the action-details panel"
             );
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -33472,6 +33529,7 @@ mod ui_tests {
             assert!(view.dock_api_inspector);
             assert!((view.dock_left_ratio - 0.25).abs() < f32::EPSILON);
             assert!((view.dock_api_ratio - 0.7).abs() < f32::EPSILON);
+            assert!((view.dock_details_ratio - 0.72).abs() < f32::EPSILON);
         });
 
         // Layout slots persist dock visibility and split ratios.
@@ -33479,16 +33537,19 @@ mod ui_tests {
             view.update(cx, |view, cx| {
                 view.dock_left_ratio = 0.31;
                 view.dock_api_ratio = 0.55;
+                view.dock_details_ratio = 0.66;
                 view.dock_event_browser = false;
                 view.dock_api_inspector = false;
                 view.save_layout(1, cx);
                 view.dock_left_ratio = 0.25;
                 view.dock_api_ratio = 0.7;
+                view.dock_details_ratio = 0.72;
                 view.dock_event_browser = true;
                 view.dock_api_inspector = true;
                 view.load_layout(1, cx);
                 assert!((view.dock_left_ratio - 0.31).abs() < f32::EPSILON);
                 assert!((view.dock_api_ratio - 0.55).abs() < f32::EPSILON);
+                assert!((view.dock_details_ratio - 0.66).abs() < f32::EPSILON);
                 assert!(!view.dock_event_browser);
                 assert!(!view.dock_api_inspector);
             })
