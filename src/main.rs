@@ -15583,20 +15583,13 @@ impl Workspace {
         title: &'static str,
         float_id: Option<&'static str>,
         float_dock: Option<FloatingDock>,
+        close_id: Option<&'static str>,
+        close_dock: Option<FloatingDock>,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let mut header = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .px_2()
-            .py_1()
-            .bg(rgb(0x111111))
-            .text_sm()
-            .text_color(rgb(0xededed))
-            .child(title.to_owned());
+        let mut actions = div().flex().items_center().gap_1();
         if let (Some(id), Some(dock)) = (float_id, float_dock) {
-            header = header.child(
+            actions = actions.child(
                 div()
                     .id(id)
                     .test_support()
@@ -15608,7 +15601,36 @@ impl Workspace {
                     .on_click(cx.listener(move |this, _, _, cx| this.float_dock(dock, cx))),
             );
         }
-        header
+        if let (Some(id), Some(dock)) = (close_id, close_dock) {
+            actions = actions.child(
+                div()
+                    .id(id)
+                    .test_support()
+                    .cursor_pointer()
+                    .px_1()
+                    .rounded_md()
+                    .hover(|view| view.bg(rgb(0x262626)))
+                    .child("×")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        match dock {
+                            FloatingDock::EventBrowser => this.dock_event_browser = false,
+                            FloatingDock::ApiInspector => this.dock_api_inspector = false,
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .px_2()
+            .py_1()
+            .bg(rgb(0x111111))
+            .text_sm()
+            .text_color(rgb(0xededed))
+            .child(title.to_owned())
+            .child(actions)
     }
 
     fn dock_event_browser_panel(
@@ -15702,6 +15724,8 @@ impl Workspace {
                 self.t("Event Browser", "事件浏览器"),
                 Some("dock-float-event-browser"),
                 Some(FloatingDock::EventBrowser),
+                Some("dock-close-event-browser"),
+                Some(FloatingDock::EventBrowser),
                 cx,
             ));
         }
@@ -15788,6 +15812,8 @@ impl Workspace {
             root = root.child(self.dock_header(
                 self.t("API Inspector", "API 检查器"),
                 Some("dock-float-api-inspector"),
+                Some(FloatingDock::ApiInspector),
+                Some("dock-close-api-inspector"),
                 Some(FloatingDock::ApiInspector),
                 cx,
             ));
@@ -24521,7 +24547,7 @@ fn main() {
                 None,
                 cx,
             );
-            let bounds = Bounds::centered(None, size(px(1040.), px(760.)), cx);
+            let bounds = Bounds::centered(None, size(px(1400.), px(900.)), cx);
             let initial_capture = std::env::var_os("RENDERDOCX_OPEN_CAPTURE")
                 .or_else(|| std::env::args_os().nth(1))
                 .map(std::path::PathBuf::from);
@@ -33418,6 +33444,21 @@ mod ui_tests {
             assert!(!view.dock_event_browser);
             assert!(view.dock_api_inspector);
         });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("dock-close-api-inspector", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(!view.read(cx).dock_api_inspector);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("dock-toggle-api-inspector", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             window.click("dock-toggle-event-browser", cx);
