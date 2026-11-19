@@ -127,7 +127,7 @@ fn default_details_ratio() -> f32 {
 }
 
 fn default_timeline_ratio() -> f32 {
-    0.40
+    0.20
 }
 
 fn default_true() -> bool {

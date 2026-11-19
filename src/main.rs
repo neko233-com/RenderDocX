@@ -15169,25 +15169,64 @@ impl Workspace {
                 cx.stop_propagation();
                 cx.notify();
             }));
-        div().flex().flex_col().gap_2()
-            .child(div().flex().flex_wrap().gap_2()
-                .child(button("timeline-previous", self.t("Previous range", "上一范围"), false, |this, cx| { this.timeline.pan(false); cx.notify(); }, cx))
-                .child(button("timeline-next", self.t("Next range", "下一范围"), false, |this, cx| { this.timeline.pan(true); cx.notify(); }, cx))
-                .child(button("timeline-zoom-in", self.t("Zoom in", "放大"), false, |this, cx| { this.timeline.zoom(true, this.pipeline.as_ref().map(|p| p.event_id)); cx.notify(); }, cx))
-                .child(button("timeline-zoom-out", self.t("Zoom out", "缩小"), false, |this, cx| { this.timeline.zoom(false, this.pipeline.as_ref().map(|p| p.event_id)); cx.notify(); }, cx))
-                .child(button("timeline-load-usage", self.t("Highlight all resource usage", "高亮全部资源使用"), false, |this, cx| this.load_timeline_usage(cx), cx)))
-            .child(format!("{}: {start}–{end} / {}", self.t("Event IDs", "事件 ID"), self.timeline.model.max_event))
-            .child(self.t("Drag the axis or graph background to select actions; Alt-drag pans, scroll zooms. Green: passed · orange-red: failed pixel history · light green: bookmarks.", "拖动坐标轴或图表背景选择操作；Alt 拖动平移，滚轮缩放。绿：像素通过 · 橙红：像素失败 · 浅绿：书签。"))
-            .child(self.t("Click the highlight band to jump to the nearest history or usage event.", "点击高亮区域可跳转到最近的像素历史或资源使用事件。"))
-            .child(div().flex().flex_wrap().gap_2()
-                .child(format!("{}:", self.t("Resource usage", "资源使用")))
-                .child(div().text_color(rgb(0xf5a623)).child(self.t("Read", "读取")))
-                .child(div().text_color(rgb(0x3291ff)).child(self.t("Write", "写入")))
-                .child(div().text_color(rgb(0xf5a623)).child(self.t("Read/write", "读写")))
-                .child(div().bg(rgb(0xededed)).text_color(rgb(0x000000)).child(self.t("Clear/discard", "清除/丢弃")))
-                .child(div().text_color(rgb(0xcc79a7)).child(self.t("Barrier", "屏障"))))
-            .child(format!("{}: {} · {}: {}", self.t("Resource usage", "资源使用"), if full_usage.is_some() { self.t("complete", "完整") } else { self.t("loaded page", "已加载页") }, self.t("Pixel history", "像素历史"), if self.timeline.history.is_some() { self.t("complete", "完整") } else { self.t("loaded page", "已加载页") }))
-            .child(div().id("timeline-scroll").test_support().max_h(px(180.)).overflow_scroll().child(graph))
+        let usage_status = format!(
+            "{}: {} · {}: {}",
+            self.t("Resource usage", "资源使用"),
+            if full_usage.is_some() {
+                self.t("complete", "完整")
+            } else {
+                self.t("loaded page", "已加载页")
+            },
+            self.t("Pixel history", "像素历史"),
+            if self.timeline.history.is_some() {
+                self.t("complete", "完整")
+            } else {
+                self.t("loaded page", "已加载页")
+            }
+        );
+        div()
+            .id("timeline-panel")
+            .test_support()
+            .size_full()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child(button("timeline-previous", self.t("Previous range", "上一范围"), false, |this, cx| { this.timeline.pan(false); cx.notify(); }, cx))
+                    .child(button("timeline-next", self.t("Next range", "下一范围"), false, |this, cx| { this.timeline.pan(true); cx.notify(); }, cx))
+                    .child(button("timeline-zoom-in", self.t("Zoom in", "放大"), false, |this, cx| { this.timeline.zoom(true, this.pipeline.as_ref().map(|p| p.event_id)); cx.notify(); }, cx))
+                    .child(button("timeline-zoom-out", self.t("Zoom out", "缩小"), false, |this, cx| { this.timeline.zoom(false, this.pipeline.as_ref().map(|p| p.event_id)); cx.notify(); }, cx))
+                    .child(button("timeline-load-usage", self.t("Highlight all resource usage", "高亮全部资源使用"), false, |this, cx| this.load_timeline_usage(cx), cx))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0xa1a1aa))
+                            .child(format!(
+                                "{}: {start}–{end} / {} · {usage_status}",
+                                self.t("Event IDs", "事件 ID"),
+                                self.timeline.model.max_event
+                            )),
+                    ),
+            )
+            .child(div().text_xs().text_color(rgb(0xa1a1aa)).child(self.t(
+                "Drag to select · Alt-drag pan · scroll zoom · green passed / orange-red failed / light green bookmark · click a highlight band to jump.",
+                "拖动选择 · Alt 拖动平移 · 滚轮缩放 · 绿：通过 / 橙红：失败 / 浅绿：书签 · 点击高亮区域跳转。",
+            )))
+            .child(
+                div()
+                    .id("timeline-scroll")
+                    .test_support()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_scroll()
+                    .child(graph),
+            )
             .child(div().id("timeline-axis-scroll").test_support().overflow_x_scroll().child(axis))
             .into_any_element()
     }
@@ -18038,7 +18077,7 @@ impl Workspace {
         self.dock_left_ratio = 0.25;
         self.dock_api_ratio = 0.7;
         self.dock_details_ratio = 0.72;
-        self.dock_timeline_ratio = 0.40;
+        self.dock_timeline_ratio = 0.20;
         self.timeline_drag_y = None;
         self.show_textures_tab = true;
         self.show_pipeline_tab = true;
@@ -23906,7 +23945,7 @@ impl Workspace {
                         .flex()
                         .flex_col()
                         .h(gpui::relative(self.dock_timeline_ratio))
-                        .min_h(px(300.))
+                        .min_h(px(160.))
                         .flex_none()
                         .child(
                             div()
@@ -26365,7 +26404,7 @@ fn main() {
                         dock_left_ratio: 0.25,
                         dock_api_ratio: 0.7,
                         dock_details_ratio: 0.72,
-                        dock_timeline_ratio: 0.40,
+                        dock_timeline_ratio: 0.20,
                         dock_event_browser: true,
                         dock_api_inspector: true,
                         dock_drag_x: None,
@@ -27279,7 +27318,7 @@ mod ui_tests {
                         dock_left_ratio: 0.25,
                         dock_api_ratio: 0.7,
                         dock_details_ratio: 0.72,
-                        dock_timeline_ratio: 0.40,
+                        dock_timeline_ratio: 0.20,
                         dock_event_browser: true,
                         dock_api_inspector: true,
                         dock_drag_x: None,
@@ -28133,7 +28172,7 @@ mod ui_tests {
                         dock_left_ratio: 0.25,
                         dock_api_ratio: 0.7,
                         dock_details_ratio: 0.72,
-                        dock_timeline_ratio: 0.40,
+                        dock_timeline_ratio: 0.20,
                         dock_event_browser: true,
                         dock_api_inspector: true,
                         dock_drag_x: None,
@@ -35174,7 +35213,7 @@ mod ui_tests {
             assert!((view.dock_left_ratio - 0.25).abs() < f32::EPSILON);
             assert!((view.dock_api_ratio - 0.7).abs() < f32::EPSILON);
             assert!((view.dock_details_ratio - 0.72).abs() < f32::EPSILON);
-            assert!((view.dock_timeline_ratio - 0.40).abs() < f32::EPSILON);
+            assert!((view.dock_timeline_ratio - 0.20).abs() < f32::EPSILON);
         });
 
         // Drag Event Browser to the right details column and back.
