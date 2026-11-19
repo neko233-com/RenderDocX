@@ -5043,12 +5043,12 @@ impl Workspace {
         self.frame_stats_raw = layout.frame_stats_raw;
         self.texture_auto_fit = layout.texture_auto_fit;
         self.dock_left_ratio = layout.left_ratio.clamp(0.15, 0.5);
-        self.dock_api_ratio = layout.api_ratio.clamp(0.3, 0.85);
+        self.dock_api_ratio = layout.api_ratio.clamp(0.3, 0.8);
         self.dock_details_ratio = layout.details_ratio.clamp(0.5, 0.9);
         self.dock_timeline_ratio = layout.timeline_ratio.clamp(0.12, 0.5);
         self.dock_right_ratio = layout.right_ratio.clamp(0.15, 0.75);
         self.dock_bottom_ratio = layout.bottom_ratio.clamp(0.15, 0.6);
-        self.dock_api_stack_ratio = layout.api_stack_ratio.clamp(0.3, 0.85);
+        self.dock_api_stack_ratio = layout.api_stack_ratio.clamp(0.3, 0.8);
         self.show_textures_tab = layout.textures_shown;
         self.show_pipeline_tab = layout.pipeline_shown;
         self.show_mesh_tab = layout.mesh_shown;
@@ -20466,7 +20466,7 @@ impl Workspace {
         self.dock_timeline_ratio = 0.20;
         self.dock_right_ratio = 0.45;
         self.dock_bottom_ratio = 0.30;
-        self.dock_api_stack_ratio = 0.68;
+        self.dock_api_stack_ratio = 0.55;
         self.timeline_drag_y = None;
         self.right_drag_y = None;
         self.bottom_drag_y = None;
@@ -26000,7 +26000,7 @@ impl Workspace {
                                 this.dock_api_stack_ratio = (start_ratio
                                     + (f32::from(event.position.y) - start_y)
                                         / inspector_height)
-                                    .clamp(0.3, 0.85);
+                                    .clamp(0.3, 0.8);
                                 cx.notify();
                             }
                         }
@@ -28784,7 +28784,7 @@ fn main() {
                         dock_timeline_ratio: 0.20,
                         dock_right_ratio: 0.45,
                         dock_bottom_ratio: 0.30,
-                        dock_api_stack_ratio: 0.68,
+                        dock_api_stack_ratio: 0.55,
                         dock_event_browser: true,
                         dock_api_inspector: true,
                         dock_drag_x: None,
@@ -29710,7 +29710,7 @@ mod ui_tests {
                         dock_timeline_ratio: 0.20,
                         dock_right_ratio: 0.45,
                         dock_bottom_ratio: 0.30,
-                        dock_api_stack_ratio: 0.68,
+                        dock_api_stack_ratio: 0.55,
                         dock_event_browser: true,
                         dock_api_inspector: true,
                         dock_drag_x: None,
@@ -30576,7 +30576,7 @@ mod ui_tests {
                         dock_timeline_ratio: 0.20,
                         dock_right_ratio: 0.45,
                         dock_bottom_ratio: 0.30,
-                        dock_api_stack_ratio: 0.68,
+                        dock_api_stack_ratio: 0.55,
                         dock_event_browser: true,
                         dock_api_inspector: true,
                         dock_drag_x: None,
@@ -37543,6 +37543,7 @@ mod ui_tests {
             assert!(window.find("dock-event-browser").visible());
             assert!(window.find("dock-api-inspector").visible());
             assert!(window.find("api-stack-splitter").visible());
+            assert!(window.find("dock-api-callstack").bounds().size.height >= px(60.));
             let splitter = window.find("dock-splitter").bounds();
             let from = point(
                 splitter.origin.x + splitter.size.width / 2.0,
@@ -37630,7 +37631,7 @@ mod ui_tests {
             assert!((view.dock_timeline_ratio - 0.20).abs() < f32::EPSILON);
             assert!((view.dock_right_ratio - 0.45).abs() < f32::EPSILON);
             assert!((view.dock_bottom_ratio - 0.30).abs() < f32::EPSILON);
-            assert!((view.dock_api_stack_ratio - 0.68).abs() < f32::EPSILON);
+            assert!((view.dock_api_stack_ratio - 0.55).abs() < f32::EPSILON);
         });
 
         // Drag Event Browser to the right details column and back.

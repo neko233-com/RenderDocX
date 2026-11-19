@@ -152,7 +152,7 @@ fn default_bottom_ratio() -> f32 {
 }
 
 fn default_api_stack_ratio() -> f32 {
-    0.68
+    0.55
 }
 
 fn default_true() -> bool {
