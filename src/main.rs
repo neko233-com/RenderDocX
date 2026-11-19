@@ -976,6 +976,7 @@ struct Workspace {
     details_drag_x: Option<f32>,
     show_aux_tabs: bool,
     menu_open: Option<MenuBar>,
+    layout_submenu_open: bool,
     floating_docks: Vec<FloatingDock>,
     floating_windows: Vec<(FloatingDock, gpui::WindowHandle<FloatingDockWindow>)>,
     selected_texture: Option<usize>,
@@ -15878,6 +15879,7 @@ impl Workspace {
             FloatingDock::ApiInspector => self.dock_api_inspector = true,
         }
         self.menu_open = None;
+        self.layout_submenu_open = false;
         self.status = Some(
             self.t(
                 "Panel is floating; use Dock to return it.",
@@ -15992,6 +15994,39 @@ impl Workspace {
             .child(text)
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.menu_open = None;
+                this.layout_submenu_open = false;
+                action(this, window, cx);
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
+    fn menu_submenu_item(
+        &self,
+        id: &'static str,
+        en: &'static str,
+        zh: &'static str,
+        checked: bool,
+        action: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+        cx: &mut Context<Workspace>,
+    ) -> gpui::AnyElement {
+        let label = self.t(en, zh);
+        let text = if checked {
+            format!("✓ {label} ▸")
+        } else {
+            format!("{label} ▸")
+        };
+        div()
+            .id(id)
+            .test_support()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .cursor_pointer()
+            .text_sm()
+            .hover(|view| view.bg(rgb(0x262626)))
+            .child(text)
+            .on_click(cx.listener(move |this, _, window, cx| {
                 action(this, window, cx);
                 cx.notify();
             }))
@@ -16004,6 +16039,97 @@ impl Workspace {
             .w_full()
             .my_1()
             .bg(rgb(0x1f1f1f))
+            .into_any_element()
+    }
+
+    fn layout_submenu(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        const SAVE: [(&str, &str, &str); 6] = [
+            ("menu-layout-save-1", "Save Layout 1", "保存布局 1"),
+            ("menu-layout-save-2", "Save Layout 2", "保存布局 2"),
+            ("menu-layout-save-3", "Save Layout 3", "保存布局 3"),
+            ("menu-layout-save-4", "Save Layout 4", "保存布局 4"),
+            ("menu-layout-save-5", "Save Layout 5", "保存布局 5"),
+            ("menu-layout-save-6", "Save Layout 6", "保存布局 6"),
+        ];
+        const LOAD: [(&str, &str, &str); 6] = [
+            ("menu-layout-load-1", "Load Layout 1", "加载布局 1"),
+            ("menu-layout-load-2", "Load Layout 2", "加载布局 2"),
+            ("menu-layout-load-3", "Load Layout 3", "加载布局 3"),
+            ("menu-layout-load-4", "Load Layout 4", "加载布局 4"),
+            ("menu-layout-load-5", "Load Layout 5", "加载布局 5"),
+            ("menu-layout-load-6", "Load Layout 6", "加载布局 6"),
+        ];
+        let mut dropdown = div()
+            .id("layout-submenu")
+            .test_support()
+            .w(px(230.))
+            .bg(rgb(0x0a0a0a))
+            .border_1()
+            .border_color(rgb(0x333333))
+            .rounded_lg()
+            .p_1()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_sm()
+                    .text_color(rgb(0xa1a1aa))
+                    .child(self.t("Save Layout", "保存布局")),
+            );
+        for (index, (id, en, zh)) in SAVE.iter().enumerate() {
+            let slot = index + 1;
+            dropdown = dropdown.child(self.menu_item(
+                id,
+                en,
+                zh,
+                false,
+                move |this, _, cx| {
+                    this.save_layout(slot, cx);
+                    this.layout_submenu_open = false;
+                },
+                cx,
+            ));
+        }
+        dropdown = dropdown
+            .child(self.menu_separator())
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_sm()
+                    .text_color(rgb(0xa1a1aa))
+                    .child(self.t("Load Layout", "加载布局")),
+            );
+        for (index, (id, en, zh)) in LOAD.iter().enumerate() {
+            let slot = index + 1;
+            dropdown = dropdown.child(self.menu_item(
+                id,
+                en,
+                zh,
+                false,
+                move |this, _, cx| {
+                    this.load_layout(slot, cx);
+                    this.layout_submenu_open = false;
+                },
+                cx,
+            ));
+        }
+        dropdown
+            .child(self.menu_separator())
+            .child(self.menu_item(
+                "menu-layout-reset",
+                "Reset Window Layout",
+                "重置窗口布局",
+                false,
+                |this, _, cx| {
+                    this.reset_dock_layout(cx);
+                    this.layout_submenu_open = false;
+                },
+                cx,
+            ))
             .into_any_element()
     }
 
@@ -16371,6 +16497,17 @@ impl Workspace {
                         cx,
                     ))
                     .child(self.menu_separator())
+                    .child(self.menu_submenu_item(
+                        "menu-window-layouts",
+                        "Layouts",
+                        "布局",
+                        self.layout_submenu_open,
+                        |this, _, cx| {
+                            this.layout_submenu_open = !this.layout_submenu_open;
+                            cx.notify();
+                        },
+                        cx,
+                    ))
                     .child(self.menu_item(
                         "menu-window-reset-layout",
                         "Reset Window Layout",
@@ -16481,6 +16618,7 @@ impl Workspace {
                         gpui::MouseButton::Left,
                         cx.listener(|this, _, _, cx| {
                             this.menu_open = None;
+                            this.layout_submenu_open = false;
                             cx.notify();
                         }),
                     ),
@@ -16496,6 +16634,19 @@ impl Workspace {
                     )
                     .child(self.menu_dropdown(menu, cx)),
             )
+            .when(menu == MenuBar::Window && self.layout_submenu_open, |view| {
+                view.child(
+                    div()
+                        .absolute()
+                        .top(px(44.))
+                        .left(px(left + 260.))
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                        )
+                        .child(self.layout_submenu(cx)),
+                )
+            })
             .into_any_element()
     }
 
@@ -16555,6 +16706,7 @@ impl Workspace {
                         } else {
                             Some(menu)
                         };
+                        this.layout_submenu_open = false;
                         cx.notify();
                     })),
             );
@@ -24771,6 +24923,7 @@ fn main() {
                         details_drag_x: None,
                         show_aux_tabs: cfg!(test),
                         menu_open: None,
+                        layout_submenu_open: false,
                         floating_docks: Vec::new(),
                         floating_windows: Vec::new(),
                         selected_texture: None,
@@ -25670,6 +25823,7 @@ mod ui_tests {
                         details_drag_x: None,
                         show_aux_tabs: cfg!(test),
                         menu_open: None,
+                        layout_submenu_open: false,
                         floating_docks: Vec::new(),
                         floating_windows: Vec::new(),
                         selected_texture: None,
@@ -26509,6 +26663,7 @@ mod ui_tests {
                         details_drag_x: None,
                         show_aux_tabs: cfg!(test),
                         menu_open: None,
+                        layout_submenu_open: false,
                         floating_docks: Vec::new(),
                         floating_windows: Vec::new(),
                         selected_texture: None,
@@ -33645,6 +33800,35 @@ mod ui_tests {
             assert!(window.find("menu-window-events").visible());
             assert!(window.find("menu-window-buffers").visible());
             assert!(window.find("menu-window-annotations").visible());
+            assert!(window.find("menu-window-layouts").visible());
+            window.click("menu-window-layouts", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("menu-layout-save-1").visible());
+            assert!(window.find("menu-layout-load-1").visible());
+            window.click("menu-layout-save-1", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let status = view.read(cx).status.clone().unwrap_or_default();
+            assert!(
+                status.contains("Saved window layout")
+                    || status.contains("已保存窗口布局"),
+                "Window > Layouts > Save Layout 1 must save the layout, got {status:?}"
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("menu-window", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
             window.click("menu-window-buffers", cx);
         })
         .unwrap();
