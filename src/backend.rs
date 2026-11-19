@@ -245,12 +245,13 @@ fn record_recent(list: &mut Vec<PathBuf>, path: &Path) {
 }
 
 pub(crate) fn find_tool(configured: &Option<PathBuf>, name: &str) -> Result<PathBuf, String> {
+    // A stale configured path (for example a developer checkout that has moved)
+    // must not make the packaged application unusable. Fall through to the
+    // version-matched runtime installed next to the executable.
     if let Some(path) = configured {
-        return if path.is_file() {
-            Ok(path.clone())
-        } else {
-            Err(format!("{}: {}", name, path.display()))
-        };
+        if path.is_file() {
+            return Ok(path.clone());
+        }
     }
     let executable = if cfg!(windows) {
         format!("{name}.exe")

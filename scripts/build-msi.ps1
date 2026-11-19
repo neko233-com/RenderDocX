@@ -54,6 +54,16 @@ if (-not (Test-Path -LiteralPath (Join-Path $pythonSite 'debugpy') -PathType Con
   if ($LASTEXITCODE -ne 0) { throw 'Could not install debugpy for the packaged MSI.' }
 }
 
+# The GUI shells out to the version-matched replay bridge. Package it beside
+# renderdocx.exe; otherwise the installed app cannot open a capture.
+$runtimeDir = Join-Path $repo 'target/renderdocx-runtime'
+foreach ($required in @('renderdocx-replay.exe', 'renderdoc.dll')) {
+  $path = Join-Path $runtimeDir $required
+  if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+    throw "Replay runtime missing: $path. Run scripts/build-replay-bridge.ps1 -CoreConfiguration Release first."
+  }
+}
+
 $outDir = Join-Path $repo 'target/msi'
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $msi = Join-Path $outDir "RenderDocX-$semver-x64.msi"
@@ -63,6 +73,7 @@ Write-Host "Building MSI version $msiVersion with $wix ..."
   -arch x64 `
   -d "Version=$msiVersion" `
   -d "BinDir=$targetDir" `
+  -d "RuntimeDir=$runtimeDir" `
   -d "RepoDir=$repo" `
   -out $msi `
   (Join-Path $repo 'installer/RenderDocX.wxs')

@@ -21,17 +21,25 @@ pwsh -File scripts/build-msi.ps1 -SkipBuild   # reuse binaries already built
 The script reads the version from `Cargo.toml`, runs `cargo build --release
 --bins`, and produces `target/msi/RenderDocX-<version>-x64.msi`. It prints the
 SHA-256 of the output. Contents: `renderdocx.exe`, `renderdocx-cli.exe`, the
-README and the feature-matrix/roadmap documents, plus Start-menu shortcuts.
+version-matched replay runtime (`renderdocx-replay.exe`, `renderdoc.dll`,
+`renderdocx-target.exe`, `renderdocx-vulkan.json`, `vulkan-layer/`, and the
+D3D compiler/DbgHelp/SymSrv DLLs), the README and the
+feature-matrix/roadmap documents, the vendored `python-site/debugpy` package,
+plus Start-menu shortcuts. Without the replay runtime the installed GUI could
+launch but could not open a capture, so it is now a required part of the
+package.
 
 Verified in this checkout with WiX 5.0.2: a `0.1.0.0` x64 MSI was produced from
-the release binaries (16.38 MB, SHA-256
-`F494E68E0D2F52D9D04B7E51A60368AF730A286EA4F28959AADB593807DD9111`). Its contents were verified
+the release binaries (25.57 MB, SHA-256
+`9B4F4D2D7B627EB409F920E2B52B6D8C7FE251C8EFD9E76ED22B2ECEB911E44D`). Its contents were verified
 non-interactively with an administrative install
 (`msiexec /a RenderDocX-0.1.0-x64.msi /qn TARGETDIR=<dir>`), which exited 0 and
 extracted exactly: `PFiles64/RenderDocX/renderdocx.exe` (34.7 MB),
-`renderdocx-cli.exe` (5.5 MB), `README.md`, `renderdocx-feature-matrix.md`,
-`renderdocx-roadmap.md`, plus the vendored `python-site/debugpy` package used
-by the embedded CPython debugger attach path.
+`renderdocx-cli.exe` (5.5 MB), `renderdocx-replay.exe`, `renderdoc.dll`,
+`renderdocx-target.exe`, `renderdocx-vulkan.json`, `vulkan-layer/renderdocx.json`,
+`README.md`, `renderdocx-feature-matrix.md`, `renderdocx-roadmap.md`, plus the
+vendored `python-site/debugpy` package used by the embedded CPython debugger
+attach path.
 
 **Full install → run → screenshot → uninstall** was also executed with
 `scripts/verify-msi.ps1` (per-user silent install, no elevation needed):
@@ -49,6 +57,28 @@ The installed binary's real window was captured at 1056×799 through UI
 Automation + BitBlt (the screenshot shows the Chinese workspace UI and the
 embedded-CPython extension description), and uninstall removed the payload.
 Logs are written to `target/visual/msi-install.log` / `msi-uninstall.log`.
+
+**Installed capture replay verification** was also executed against the
+packaged replay runtime:
+
+```
+install exit: 0
+payload renderdocx-replay.exe: True
+payload renderdoc.dll: True
+payload renderdocx-target.exe: True
+payload renderdocx-vulkan.json: True
+payload vulkan-layer\renderdocx.json: True
+captured PrintWindow=True 1056x799 -> target/visual/installed-capture-view.png
+uninstall exit: 0
+payload removed: True
+```
+
+The installed GUI opened
+`target/d3d12-fixture/captures/session-E3TibS/capture_frame2745.rdc` and showed
+the RenderDoc layout: the File/Edit/Window/Help menu bar, Event Browser and API
+Inspector in the left dock, Texture Viewer / Pipeline State / Mesh Preview /
+Capture Dialog main tabs, and the action-details panel, using the Vercel-style
+dark palette. Screenshot: `target/visual/installed-capture-view.png`.
 
 ## Visual verification
 

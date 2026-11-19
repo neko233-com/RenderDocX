@@ -14,6 +14,7 @@
 
     <Feature Id="Main" Title="RenderDocX" Level="1" ConfigurableDirectory="INSTALLFOLDER">
       <ComponentGroupRef Id="ApplicationFiles" />
+      <ComponentGroupRef Id="ReplayRuntime" />
       <ComponentGroupRef Id="Documentation" />
       <ComponentRef Id="StartMenuShortcut" />
     </Feature>
@@ -22,6 +23,7 @@
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="RenderDocX">
         <Directory Id="PythonSiteDir" Name="python-site" />
+        <Directory Id="VulkanLayerDir" Name="vulkan-layer" />
       </Directory>
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder">
@@ -37,6 +39,13 @@
       </Component>
       <!-- Vendored debugpy for the embedded CPython debugger attach path. -->
       <Files Include="$(var.BinDir)\python-site\**" Directory="PythonSiteDir" />
+    </ComponentGroup>
+
+    <!-- Version-matched RenderDoc core and replay bridge. Without these files
+         the installed GUI can launch but cannot replay a capture. -->
+    <ComponentGroup Id="ReplayRuntime">
+      <Files Include="$(var.RuntimeDir)\*.*" Directory="INSTALLFOLDER" />
+      <Files Include="$(var.RuntimeDir)\vulkan-layer\**" Directory="VulkanLayerDir" />
     </ComponentGroup>
 
     <ComponentGroup Id="Documentation">

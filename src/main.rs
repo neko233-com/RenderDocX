@@ -1296,7 +1296,15 @@ impl Render for FloatingDockWindow {
                                 .text_color(rgb(0xa1a1aa))
                                 .child(left.to_string()),
                         )
-                        .child(div().flex_1().min_w_0().overflow_hidden().child(right))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .child(right),
+                        )
                         .on_click(cx.listener(move |_, _, _, cx| {
                             workspace_entity.update(cx, |workspace, cx| {
                                 workspace.select_event(index, None, cx);
@@ -15665,7 +15673,15 @@ impl Workspace {
                             .text_color(rgb(0xa1a1aa))
                             .child(event.to_string()),
                     )
-                    .child(div().flex_1().min_w_0().overflow_hidden().child(name))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(name),
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.select_event(index, None, cx);
                     })),
