@@ -15166,12 +15166,83 @@ impl Workspace {
                         },
                     ),
             )
+            .child(self.texture_viewer_toolbar(cx))
             .child(viewer)
             .into_any_element()
     }
 
+    fn texture_viewer_toolbar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let selected = self
+            .selected_texture
+            .and_then(|index| self.snapshot.as_ref()?.textures.get(index));
+        let info = selected
+            .map(|texture| {
+                format!(
+                    "{} × {} × {} · {}",
+                    texture.width, texture.height, texture.depth, texture.format_name
+                )
+            })
+            .unwrap_or_else(|| self.t("No texture selected", "未选择纹理").to_owned());
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(rgb(0x1f1f1f))
+            .child(toggle_button(
+                "texture-viewer-flip",
+                self.t("Flip Y", "翻转 Y"),
+                self.texture_selection.preview_flip_y,
+                |this, cx| this.change_preview_flip(cx),
+                cx,
+            ))
+            .child(toggle_button(
+                "texture-viewer-gamma",
+                self.t("Gamma", "伽马"),
+                self.texture_selection
+                    .preview_linear_as_gamma
+                    .unwrap_or(false),
+                |this, cx| this.change_preview_gamma(cx),
+                cx,
+            ))
+            .child(toggle_button(
+                "texture-viewer-auto-fit",
+                self.t("Continuous auto-fit", "持续自动拟合"),
+                self.texture_auto_fit,
+                |this, cx| {
+                    if this.texture_auto_fit {
+                        this.disable_auto_texture_fit();
+                    } else {
+                        this.texture_auto_fit = true;
+                        this.texture_auto_fit_generation =
+                            this.texture_auto_fit_generation.wrapping_add(1);
+                        this.texture_auto_fit_last = None;
+                    }
+                    cx.notify();
+                },
+                cx,
+            ))
+            .child(button(
+                "texture-viewer-save",
+                self.t("Save PNG", "保存 PNG"),
+                false,
+                |this, cx| this.export_texture(cx),
+                cx,
+            ))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0xa1a1aa))
+                    .child(info),
+            )
+            .into_any_element()
+    }
+
     fn mesh_lines(&self) -> Vec<String> {
-if let Some(page) = &self.mesh.draw {
+        if let Some(page) = &self.mesh.draw {
             page.rows
                 .iter()
                 .map(|row| {
@@ -37920,6 +37991,9 @@ mod ui_tests {
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(window.find("texture-viewer-panel").visible());
+            assert!(window.find("texture-viewer-flip").visible());
+            assert!(window.find("texture-viewer-gamma").visible());
+            assert!(window.find("texture-viewer-save").visible());
             window.click("texture-viewer-float", cx);
         })
         .unwrap();
