@@ -15162,6 +15162,188 @@ impl Workspace {
             .into_any_element()
     }
 
+    fn mesh_toolbar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let previous_bytes = self.t("Previous bytes", "上一段字节");
+        let next_bytes = self.t("Next bytes", "下一段字节");
+        let instance_label = self.t("Instance", "实例");
+        let view_label = self.t("View", "视图");
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(rgb(0x1f1f1f))
+            .child(instance_label)
+            .child(
+                Input::new(&self.vertex_instance)
+                    .id("mesh-instance")
+                    .aria_label(instance_label)
+                    .w(px(80.)),
+            )
+            .child(view_label)
+            .child(
+                Input::new(&self.vertex_view)
+                    .id("mesh-view")
+                    .aria_label(view_label)
+                    .w(px(80.)),
+            )
+            .child(button(
+                "mesh-selection-apply",
+                self.t("Load selection", "加载选择"),
+                false,
+                |this, cx| this.load_mesh_selection(cx),
+                cx,
+            ))
+            .child(button(
+                "mesh-buffer-vertex",
+                self.t("Vertices", "顶点"),
+                self.mesh.kind == MeshBufferKind::Vertex,
+                |this, cx| this.read_mesh(this.mesh.selection, MeshBufferKind::Vertex, 0, cx),
+                cx,
+            ))
+            .child(button(
+                "mesh-buffer-index",
+                self.t("Indices", "索引"),
+                self.mesh.kind == MeshBufferKind::Index,
+                |this, cx| this.read_mesh(this.mesh.selection, MeshBufferKind::Index, 0, cx),
+                cx,
+            ))
+            .child(button(
+                "mesh-buffer-draw",
+                self.t("Draw order", "绘制顺序"),
+                self.mesh.kind == MeshBufferKind::Draw,
+                |this, cx| this.read_mesh(this.mesh.selection, MeshBufferKind::Draw, 0, cx),
+                cx,
+            ))
+            .when(
+                self.mesh.selection.stage == 4 && self.mesh.kind == MeshBufferKind::Draw,
+                |view| {
+                    view.when(
+                        self.mesh
+                            .info
+                            .as_ref()
+                            .is_some_and(|info| !info.meshlets.is_empty()),
+                        |view| {
+                            view.child(button(
+                                "mesh-filter-meshlet",
+                                self.t("Next meshlet", "下一个网格组"),
+                                matches!(self.mesh.filter, renderdocx::mesh_draw::MeshFilter::Meshlet(_)),
+                                |this, cx| this.cycle_mesh_filter(false, cx),
+                                cx,
+                            ))
+                        },
+                    )
+                    .when(!self.mesh.task_sizes.is_empty(), |view| {
+                        view.child(button(
+                            "mesh-filter-task",
+                            self.t("Next task group", "下一个任务组"),
+                            matches!(self.mesh.filter, renderdocx::mesh_draw::MeshFilter::Task(_)),
+                            |this, cx| this.cycle_mesh_filter(true, cx),
+                            cx,
+                        ))
+                    })
+                },
+            )
+            .child(button(
+                "mesh-export-csv",
+                self.t("Export positions CSV", "导出位置 CSV"),
+                false,
+                |this, cx| this.export_mesh_draw_csv(false, cx),
+                cx,
+            ))
+            .child(button(
+                "mesh-export-attributes",
+                self.t("Export attributes CSV", "导出属性 CSV"),
+                false,
+                |this, cx| this.export_mesh_draw_csv(true, cx),
+                cx,
+            ))
+            .child(button(
+                "mesh-stage",
+                self.t("Next stage", "切换阶段"),
+                false,
+                |this, cx| {
+                    let mut selection = this.mesh.selection;
+                    selection.stage = selection.stage % 4 + 1;
+                    this.read_mesh(selection, this.mesh.kind, 0, cx);
+                },
+                cx,
+            ))
+            .child(button(
+                "mesh-previous",
+                previous_bytes,
+                false,
+                |this, cx| {
+                    if this.mesh.offset > 0 {
+                        let step = this
+                            .mesh
+                            .info
+                            .as_ref()
+                            .map(|info| {
+                                if this.mesh.kind == MeshBufferKind::Vertex {
+                                    mesh_page_size(info)
+                                } else if this.mesh.kind == MeshBufferKind::Draw {
+                                    u64::from(renderdocx::mesh_draw::PAGE_LIMIT)
+                                } else {
+                                    BUFFER_VIEW_PAGE
+                                }
+                            })
+                            .unwrap_or(BUFFER_VIEW_PAGE);
+                        this.read_mesh(
+                            this.mesh.selection,
+                            this.mesh.kind,
+                            this.mesh.offset.saturating_sub(step),
+                            cx,
+                        );
+                    }
+                },
+                cx,
+            ))
+            .child(button(
+                "mesh-next",
+                next_bytes,
+                false,
+                |this, cx| {
+                    let step = this
+                        .mesh
+                        .info
+                        .as_ref()
+                        .map(|info| {
+                            if this.mesh.kind == MeshBufferKind::Vertex {
+                                mesh_page_size(info)
+                            } else if this.mesh.kind == MeshBufferKind::Draw {
+                                u64::from(renderdocx::mesh_draw::PAGE_LIMIT)
+                            } else {
+                                BUFFER_VIEW_PAGE
+                            }
+                        })
+                        .unwrap_or(BUFFER_VIEW_PAGE);
+                    if this
+                        .mesh
+                        .draw
+                        .as_ref()
+                        .is_some_and(|page| {
+                            u64::from(page.offset) + (page.rows.len() as u64) < u64::from(page.total)
+                        })
+                        || this
+                            .mesh
+                            .bytes
+                            .as_ref()
+                            .is_some_and(|bytes| bytes.len() == step as usize)
+                    {
+                        if let Some(offset) = this.mesh.offset.checked_add(step) {
+                            this.read_mesh(this.mesh.selection, this.mesh.kind, offset, cx);
+                        }
+                    }
+                },
+                cx,
+            ))
+            .into_any_element()
+    }
+
     fn timeline_view(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         const WIDTH: f64 = 768.0;
         let start = self.timeline.start;
@@ -20739,7 +20921,7 @@ impl Workspace {
             .into_any_element()
         } else if self.tab == CaptureTab::Mesh {
             let lines = std::sync::Arc::new(mesh_lines);
-            uniform_list(
+            let list = uniform_list(
                 "capture-mesh",
                 count,
                 cx.processor(move |this, range: std::ops::Range<usize>, _, _| {
@@ -20790,8 +20972,56 @@ impl Workspace {
                         .collect::<Vec<_>>()
                 }),
             )
-            .flex_1()
-            .into_any_element()
+            .flex_1();
+            div()
+                .id("mesh-preview-panel")
+                .test_support()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .px_3()
+                        .pt_2()
+                        .child(div().text_lg().child(self.t("Mesh Preview", "网格预览")))
+                        .when_some(self.mesh.info.as_ref(), |row, info| {
+                            row.child(self.pipeline_badge(format!(
+                                "{} {} · {}",
+                                self.t("Event", "事件"),
+                                info.event_id,
+                                match info.stage {
+                                    1 => "VSOut",
+                                    2 => "GSOut",
+                                    3 => "TaskOut",
+                                    4 => "MeshOut",
+                                    _ => "?",
+                                }
+                            )))
+                        }),
+                )
+                .child(self.mesh_toolbar(cx))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .px_3()
+                        .py_1()
+                        .bg(rgb(0x111111))
+                        .border_b_1()
+                        .border_color(rgb(0x1f1f1f))
+                        .text_xs()
+                        .text_color(rgb(0xa1a1aa))
+                        .child(div().w(px(72.)).flex_none().child(self.t("Row", "行")))
+                        .child(div().flex_1().child(self.t("Values", "值"))),
+                )
+                .child(list)
+                .into_any_element()
         } else if self.tab == CaptureTab::Parameters {
             uniform_list(
                 "capture-structured-children",
@@ -25927,95 +26157,6 @@ impl Workspace {
                                                         if next < page.total {
                                                             this.read_vertex_input(page.instance, next, cx);
                                                         }
-                                                    }
-                                                }
-                                            },
-                                            cx,
-                                        )),
-                                )
-                            })
-                            .when(self.tab == CaptureTab::Mesh, |view| {
-                                let instance_label = self.t("Instance", "实例");
-                                let view_label = self.t("View", "视图");
-                                view.child(
-                                    div()
-                                        .flex()
-                                        .flex_wrap()
-                                        .gap_2()
-                                        .px_3()
-                                        .pb_2()
-                                        .child(instance_label)
-                                        .child(Input::new(&self.vertex_instance).id("mesh-instance").aria_label(instance_label).w(px(80.)))
-                                        .child(view_label)
-                                        .child(Input::new(&self.vertex_view).id("mesh-view").aria_label(view_label).w(px(80.)))
-                                        .child(button("mesh-selection-apply", self.t("Load selection", "加载选择"), false, |this, cx| this.load_mesh_selection(cx), cx))
-                                        .child(button("mesh-buffer-vertex", self.t("Vertices", "顶点"), self.mesh.kind == MeshBufferKind::Vertex, |this, cx| this.read_mesh(this.mesh.selection, MeshBufferKind::Vertex, 0, cx), cx))
-                                        .child(button("mesh-buffer-index", self.t("Indices", "索引"), self.mesh.kind == MeshBufferKind::Index, |this, cx| this.read_mesh(this.mesh.selection, MeshBufferKind::Index, 0, cx), cx))
-                                        .child(button("mesh-buffer-draw", self.t("Draw order", "绘制顺序"), self.mesh.kind == MeshBufferKind::Draw, |this, cx| this.read_mesh(this.mesh.selection, MeshBufferKind::Draw, 0, cx), cx))
-                                        .when(self.mesh.selection.stage == 4 && self.mesh.kind == MeshBufferKind::Draw, |view| view
-                                            .when(self.mesh.info.as_ref().is_some_and(|info| !info.meshlets.is_empty()), |view| view.child(button("mesh-filter-meshlet", self.t("Next meshlet", "下一个网格组"), matches!(self.mesh.filter, renderdocx::mesh_draw::MeshFilter::Meshlet(_)), |this, cx| this.cycle_mesh_filter(false, cx), cx)))
-                                            .when(!self.mesh.task_sizes.is_empty(), |view| view.child(button("mesh-filter-task", self.t("Next task group", "下一个任务组"), matches!(self.mesh.filter, renderdocx::mesh_draw::MeshFilter::Task(_)), |this, cx| this.cycle_mesh_filter(true, cx), cx))))
-                                        .child(button("mesh-export-csv", self.t("Export positions CSV", "导出位置 CSV"), false, |this, cx| this.export_mesh_draw_csv(false, cx), cx))
-                                        .child(button("mesh-export-attributes", self.t("Export attributes CSV", "导出属性 CSV"), false, |this, cx| this.export_mesh_draw_csv(true, cx), cx))
-                                        .child(button(
-                                            "mesh-stage",
-                                            self.t(
-                                                "Next stage",
-                                                "切换阶段",
-                                            ),
-                                            false,
-                                            |this, cx| {
-                                                let mut selection = this.mesh.selection;
-                                                selection.stage = selection.stage % 4 + 1;
-                                                this.read_mesh(selection, this.mesh.kind, 0, cx);
-                                            },
-                                            cx,
-                                        ))
-                                        .child(button(
-                                            "mesh-previous",
-                                            previous_bytes,
-                                            false,
-                                            |this, cx| {
-                                                if this.mesh.offset > 0 {
-                                                    let step = this
-                                                        .mesh
-                                                        .info
-                                                        .as_ref()
-                                                        .map(|info| if this.mesh.kind == MeshBufferKind::Vertex { mesh_page_size(info) } else if this.mesh.kind == MeshBufferKind::Draw { u64::from(renderdocx::mesh_draw::PAGE_LIMIT) } else { BUFFER_VIEW_PAGE })
-                                                        .unwrap_or(BUFFER_VIEW_PAGE);
-                                                    this.read_mesh(
-                                                        this.mesh.selection,
-                                                        this.mesh.kind,
-                                                        this.mesh.offset.saturating_sub(step),
-                                                        cx,
-                                                    );
-                                                }
-                                            },
-                                            cx,
-                                        ))
-                                        .child(button(
-                                            "mesh-next",
-                                            next_bytes,
-                                            false,
-                                            |this, cx| {
-                                                let step = this
-                                                    .mesh
-                                                    .info
-                                                    .as_ref()
-                                                    .map(|info| if this.mesh.kind == MeshBufferKind::Vertex { mesh_page_size(info) } else if this.mesh.kind == MeshBufferKind::Draw { u64::from(renderdocx::mesh_draw::PAGE_LIMIT) } else { BUFFER_VIEW_PAGE })
-                                                    .unwrap_or(BUFFER_VIEW_PAGE);
-                                                if this.mesh.draw.as_ref().is_some_and(|page| u64::from(page.offset) + (page.rows.len() as u64) < u64::from(page.total)) || this.mesh.bytes.as_ref().is_some_and(|bytes| {
-                                                    bytes.len() == step as usize
-                                                }) {
-                                                    if let Some(offset) =
-                                                        this.mesh.offset.checked_add(step)
-                                                    {
-                                                        this.read_mesh(
-                                                            this.mesh.selection,
-                                                            this.mesh.kind,
-                                                            offset,
-                                                            cx,
-                                                        );
                                                     }
                                                 }
                                             },

@@ -31,7 +31,7 @@ package.
 
 Verified in this checkout with WiX 5.0.2: a `0.1.0.0` x64 MSI was produced from
 the release binaries (25.73 MB, SHA-256
-`DB66BF075B96D4A8E326879007929FE4E6D95AB94E0BD49178F1498FF5E9D10C`). Its contents were verified
+`2309061CCFB8A96B8FC8B6659B0C37A90CB7258D457EE830429FFDDF1AAA4E4D`). Its contents were verified
 non-interactively with an administrative install
 (`msiexec /a RenderDocX-0.1.0-x64.msi /qn TARGETDIR=<dir>`), which exited 0 and
 extracted exactly: `PFiles64/RenderDocX/renderdocx.exe` (34.7 MB),
