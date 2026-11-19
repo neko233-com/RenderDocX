@@ -970,10 +970,12 @@ struct Workspace {
     dock_left_ratio: f32,
     dock_api_ratio: f32,
     dock_details_ratio: f32,
+    dock_timeline_ratio: f32,
     dock_event_browser: bool,
     dock_api_inspector: bool,
     dock_drag_x: Option<f32>,
     details_drag_x: Option<f32>,
+    timeline_drag_y: Option<(f32, f32)>,
     show_aux_tabs: bool,
     show_textures_tab: bool,
     show_pipeline_tab: bool,
@@ -4716,6 +4718,7 @@ impl Workspace {
             left_ratio: self.dock_left_ratio,
             api_ratio: self.dock_api_ratio,
             details_ratio: self.dock_details_ratio,
+            timeline_ratio: self.dock_timeline_ratio,
             textures_shown: self.show_textures_tab,
             pipeline_shown: self.show_pipeline_tab,
             mesh_shown: self.show_mesh_tab,
@@ -4757,6 +4760,7 @@ impl Workspace {
         self.dock_left_ratio = layout.left_ratio.clamp(0.15, 0.5);
         self.dock_api_ratio = layout.api_ratio.clamp(0.3, 0.85);
         self.dock_details_ratio = layout.details_ratio.clamp(0.5, 0.9);
+        self.dock_timeline_ratio = layout.timeline_ratio.clamp(0.12, 0.5);
         self.show_textures_tab = layout.textures_shown;
         self.show_pipeline_tab = layout.pipeline_shown;
         self.show_mesh_tab = layout.mesh_shown;
@@ -17093,10 +17097,34 @@ impl Workspace {
             .into_any_element()
     }
 
+    fn timeline_splitter(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
+            .id("timeline-splitter")
+            .test_support()
+            .h(px(6.))
+            .w_full()
+            .flex_none()
+            .cursor_pointer()
+            .bg(rgb(0x111111))
+            .hover(|bar| bar.bg(rgb(0x1f1f1f)))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                    this.timeline_drag_y =
+                        Some((f32::from(event.position.y), this.dock_timeline_ratio));
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .into_any_element()
+    }
+
     fn reset_dock_layout(&mut self, cx: &mut Context<Self>) {
         self.dock_left_ratio = 0.25;
         self.dock_api_ratio = 0.7;
         self.dock_details_ratio = 0.72;
+        self.dock_timeline_ratio = 0.40;
+        self.timeline_drag_y = None;
         self.show_textures_tab = true;
         self.show_pipeline_tab = true;
         self.show_mesh_tab = true;
@@ -22788,6 +22816,23 @@ impl Workspace {
             .pb_5()
             .pt(px(56.))
             .track_focus(&self.capture_focus)
+            .on_mouse_move(cx.listener(
+                |this, event: &gpui::MouseMoveEvent, window, cx| {
+                    if event.dragging() {
+                        if let Some((start_y, start_ratio)) = this.timeline_drag_y {
+                            let height = f32::from(window.viewport_size().height) - 200.0;
+                            if height > 0.0 {
+                                this.dock_timeline_ratio = (start_ratio
+                                    + (f32::from(event.position.y) - start_y) / height)
+                                    .clamp(0.12, 0.5);
+                                cx.notify();
+                            }
+                        }
+                    } else {
+                        this.timeline_drag_y = None;
+                    }
+                },
+            ))
             .on_key_down(cx.listener(
                 |this, event: &gpui::KeyDownEvent, window, cx| {
                     let modifiers = event.keystroke.modifiers;
@@ -22898,7 +22943,22 @@ impl Workspace {
                 view.child(div().text_color(rgb(0xf5a623)).child(text))
             })
             .when(self.timeline.shown, |view| {
-                view.child(self.timeline_view(cx))
+                view.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .h(gpui::relative(self.dock_timeline_ratio))
+                        .min_h(px(300.))
+                        .flex_none()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_hidden()
+                                .child(self.timeline_view(cx)),
+                        )
+                        .child(self.timeline_splitter(cx)),
+                )
             })
             .child(
                 div()
@@ -25359,10 +25419,12 @@ fn main() {
                         dock_left_ratio: 0.25,
                         dock_api_ratio: 0.7,
                         dock_details_ratio: 0.72,
+                        dock_timeline_ratio: 0.40,
                         dock_event_browser: true,
                         dock_api_inspector: true,
                         dock_drag_x: None,
                         details_drag_x: None,
+                        timeline_drag_y: None,
                         show_aux_tabs: cfg!(test),
                         show_textures_tab: true,
                         show_pipeline_tab: true,
@@ -26268,10 +26330,12 @@ mod ui_tests {
                         dock_left_ratio: 0.25,
                         dock_api_ratio: 0.7,
                         dock_details_ratio: 0.72,
+                        dock_timeline_ratio: 0.40,
                         dock_event_browser: true,
                         dock_api_inspector: true,
                         dock_drag_x: None,
                         details_drag_x: None,
+                        timeline_drag_y: None,
                         show_aux_tabs: cfg!(test),
                         show_textures_tab: true,
                         show_pipeline_tab: true,
@@ -27117,10 +27181,12 @@ mod ui_tests {
                         dock_left_ratio: 0.25,
                         dock_api_ratio: 0.7,
                         dock_details_ratio: 0.72,
+                        dock_timeline_ratio: 0.40,
                         dock_event_browser: true,
                         dock_api_inspector: true,
                         dock_drag_x: None,
                         details_drag_x: None,
+                        timeline_drag_y: None,
                         show_aux_tabs: cfg!(test),
                         show_textures_tab: true,
                         show_pipeline_tab: true,
@@ -34154,6 +34220,7 @@ mod ui_tests {
             assert!((view.dock_left_ratio - 0.25).abs() < f32::EPSILON);
             assert!((view.dock_api_ratio - 0.7).abs() < f32::EPSILON);
             assert!((view.dock_details_ratio - 0.72).abs() < f32::EPSILON);
+            assert!((view.dock_timeline_ratio - 0.40).abs() < f32::EPSILON);
         });
 
         // Layout slots persist dock visibility and split ratios.
@@ -34162,6 +34229,7 @@ mod ui_tests {
                 view.dock_left_ratio = 0.31;
                 view.dock_api_ratio = 0.55;
                 view.dock_details_ratio = 0.66;
+                view.dock_timeline_ratio = 0.34;
                 view.dock_event_browser = false;
                 view.dock_api_inspector = false;
                 view.show_textures_tab = false;
@@ -34170,6 +34238,7 @@ mod ui_tests {
                 view.dock_left_ratio = 0.25;
                 view.dock_api_ratio = 0.7;
                 view.dock_details_ratio = 0.72;
+                view.dock_timeline_ratio = 0.40;
                 view.dock_event_browser = true;
                 view.dock_api_inspector = true;
                 view.show_textures_tab = true;
@@ -34178,6 +34247,7 @@ mod ui_tests {
                 assert!((view.dock_left_ratio - 0.31).abs() < f32::EPSILON);
                 assert!((view.dock_api_ratio - 0.55).abs() < f32::EPSILON);
                 assert!((view.dock_details_ratio - 0.66).abs() < f32::EPSILON);
+                assert!((view.dock_timeline_ratio - 0.34).abs() < f32::EPSILON);
                 assert!(!view.dock_event_browser);
                 assert!(!view.dock_api_inspector);
                 assert!(!view.show_textures_tab);
@@ -34249,6 +34319,30 @@ mod ui_tests {
                 view.read(cx).main_tab_order,
                 before_order,
                 "dragging a main tab must reorder it"
+            );
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.timeline.shown = true;
+                cx.notify();
+            });
+        });
+        let timeline_before = cx.update(|cx| view.read(cx).dock_timeline_ratio);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let splitter = window.find("timeline-splitter").bounds();
+            let from = point(
+                splitter.origin.x + px(200.),
+                splitter.origin.y + splitter.size.height / 2.0,
+            );
+            window.drag(from, point(from.x, from.y + px(50.)), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                view.read(cx).dock_timeline_ratio > timeline_before,
+                "timeline splitter drag must increase the timeline height"
             );
         });
         cx.update_window(handle.into(), |_, window, cx| {

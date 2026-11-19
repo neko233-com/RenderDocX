@@ -58,6 +58,9 @@ pub struct WindowLayout {
     /// the action-details panel on the right.
     #[serde(default = "default_details_ratio")]
     pub details_ratio: f32,
+    /// Fraction of the capture window used by the Timeline top dock.
+    #[serde(default = "default_timeline_ratio")]
+    pub timeline_ratio: f32,
     /// Stable serialization names of the main tab order.
     #[serde(default)]
     pub main_tab_order: Vec<String>,
@@ -87,6 +90,7 @@ impl Default for WindowLayout {
             left_ratio: default_left_ratio(),
             api_ratio: default_api_ratio(),
             details_ratio: default_details_ratio(),
+            timeline_ratio: default_timeline_ratio(),
             main_tab_order: Vec::new(),
             textures_shown: true,
             pipeline_shown: true,
@@ -108,6 +112,10 @@ fn default_api_ratio() -> f32 {
 
 fn default_details_ratio() -> f32 {
     0.72
+}
+
+fn default_timeline_ratio() -> f32 {
+    0.40
 }
 
 fn default_true() -> bool {
