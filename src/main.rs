@@ -1050,6 +1050,8 @@ struct Workspace {
     process_inject: bool,
     floating_docks: Vec<FloatingDock>,
     floating_windows: Vec<(FloatingDock, gpui::WindowHandle<FloatingDockWindow>)>,
+    timeline_floating: bool,
+    timeline_window: Option<gpui::WindowHandle<FloatingTimelineWindow>>,
     dock_right: Vec<FloatingDock>,
     dock_bottom: Vec<FloatingDock>,
     selected_texture: Option<usize>,
@@ -1278,6 +1280,88 @@ impl FloatingDockWindow {
             _observe: observe,
             _release: release,
         }
+    }
+}
+
+struct FloatingTimelineWindow {
+    workspace: Entity<Workspace>,
+    _observe: gpui::Subscription,
+    _release: gpui::Subscription,
+}
+
+impl FloatingTimelineWindow {
+    fn new(
+        workspace: Entity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        window.set_window_title("Timeline — RenderDocX");
+        let observe = cx.observe(&workspace, |_, _, cx| cx.notify());
+        let release = cx.on_release(|this, cx| {
+            let workspace = this.workspace.clone();
+            workspace.update(cx, |workspace, cx| {
+                workspace.timeline_floating = false;
+                workspace.timeline.shown = true;
+                workspace.timeline_window = None;
+                cx.notify();
+            });
+        });
+        Self {
+            workspace,
+            _observe: observe,
+            _release: release,
+        }
+    }
+}
+
+impl Render for FloatingTimelineWindow {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (title, dock_label) = {
+            let workspace = self.workspace.read(cx);
+            (workspace.t("Timeline", "时间线"), workspace.t("Dock", "停靠"))
+        };
+        let content = self
+            .workspace
+            .update(cx, |workspace, cx| workspace.timeline_view(cx));
+        let dock_workspace = self.workspace.clone();
+        div()
+            .size_full()
+            .bg(rgb(0x0a0a0a))
+            .text_color(rgb(0xededed))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_2()
+                    .py_1()
+                    .bg(rgb(0x111111))
+                    .border_b_1()
+                    .border_color(rgb(0x1f1f1f))
+                    .text_sm()
+                    .child(title)
+                    .child(
+                        div()
+                            .id("floating-timeline-dock")
+                            .test_support()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(0x1f1f1f))
+                            .hover(|view| view.bg(rgb(0x262626)))
+                            .child(dock_label)
+                            .on_click(cx.listener(move |_, _, window, cx| {
+                                dock_workspace.update(cx, |workspace, cx| {
+                                    workspace.dock_timeline(cx);
+                                });
+                                window.remove_window();
+                            })),
+                    ),
+            )
+            .child(div().flex_1().min_h_0().child(content))
     }
 }
 
@@ -15255,6 +15339,15 @@ impl Workspace {
                     .child(button("timeline-zoom-in", self.t("Zoom in", "放大"), false, |this, cx| { this.timeline.zoom(true, this.pipeline.as_ref().map(|p| p.event_id)); cx.notify(); }, cx))
                     .child(button("timeline-zoom-out", self.t("Zoom out", "缩小"), false, |this, cx| { this.timeline.zoom(false, this.pipeline.as_ref().map(|p| p.event_id)); cx.notify(); }, cx))
                     .child(button("timeline-load-usage", self.t("Highlight all resource usage", "高亮全部资源使用"), false, |this, cx| this.load_timeline_usage(cx), cx))
+                    .when(!self.timeline_floating, |row| {
+                        row.child(button(
+                            "timeline-float",
+                            self.t("Float", "浮动"),
+                            false,
+                            |this, cx| this.float_timeline(cx),
+                            cx,
+                        ))
+                    })
                     .child(
                         div()
                             .text_xs()
@@ -16977,6 +17070,73 @@ impl Workspace {
         cx.notify();
     }
 
+    fn float_timeline(&mut self, cx: &mut Context<Self>) {
+        if self.timeline_floating {
+            return;
+        }
+        self.timeline_floating = true;
+        self.timeline.shown = false;
+        self.status = Some(
+            self.t(
+                "Timeline is floating; use Dock to return it.",
+                "时间线已浮动；使用“停靠”可返回。",
+            )
+            .to_owned(),
+        );
+        let workspace = cx.entity();
+        cx.defer(move |cx| {
+            let workspace_for_window = workspace.clone();
+            let bounds = Bounds::new(
+                gpui::point(px(240.), px(160.)),
+                size(px(980.), px(380.)),
+            );
+            match cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    focus: true,
+                    show: true,
+                    ..Default::default()
+                },
+                move |window, cx| {
+                    cx.new(|cx| FloatingTimelineWindow::new(workspace_for_window, window, cx))
+                },
+            ) {
+                Ok(handle) => {
+                    workspace.update(cx, |workspace, cx| {
+                        workspace.timeline_window = Some(handle);
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    workspace.update(cx, |workspace, cx| {
+                        workspace.timeline_floating = false;
+                        workspace.timeline.shown = true;
+                        workspace.status = Some(format!(
+                            "{}: {error}",
+                            workspace.t(
+                                "Could not open floating timeline",
+                                "无法打开浮动时间线"
+                            )
+                        ));
+                        cx.notify();
+                    });
+                }
+            }
+        });
+        cx.notify();
+    }
+
+    fn dock_timeline(&mut self, cx: &mut Context<Self>) {
+        self.timeline_floating = false;
+        self.timeline.shown = true;
+        if let Some(handle) = self.timeline_window.take() {
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            });
+        }
+        cx.notify();
+    }
+
     fn menu_item(
         &self,
         id: &'static str,
@@ -17746,10 +17906,14 @@ impl Workspace {
                         "menu-window-timeline",
                         "Timeline",
                         "时间线",
-                        self.timeline.shown,
+                        self.timeline.shown || self.timeline_floating,
                         |this, _, cx| {
-                            this.timeline.shown = !this.timeline.shown;
-                            cx.notify();
+                            if this.timeline_floating {
+                                this.dock_timeline(cx);
+                            } else {
+                                this.timeline.shown = !this.timeline.shown;
+                                cx.notify();
+                            }
                         },
                         cx,
                     ));
@@ -27315,6 +27479,8 @@ fn main() {
                         process_inject: false,
                         floating_docks: Vec::new(),
                         floating_windows: Vec::new(),
+                        timeline_floating: false,
+                        timeline_window: None,
                         dock_right: Vec::new(),
                         dock_bottom: Vec::new(),
                         selected_texture: None,
@@ -28235,6 +28401,8 @@ mod ui_tests {
                         process_inject: false,
                         floating_docks: Vec::new(),
                         floating_windows: Vec::new(),
+                        timeline_floating: false,
+                        timeline_window: None,
                         dock_right: Vec::new(),
                         dock_bottom: Vec::new(),
                         selected_texture: None,
@@ -29095,6 +29263,8 @@ mod ui_tests {
                         process_inject: false,
                         floating_docks: Vec::new(),
                         floating_windows: Vec::new(),
+                        timeline_floating: false,
+                        timeline_window: None,
                         dock_right: Vec::new(),
                         dock_bottom: Vec::new(),
                         selected_texture: None,
@@ -36360,6 +36530,31 @@ mod ui_tests {
                 view.read(cx).dock_timeline_ratio > timeline_before,
                 "timeline splitter drag must increase the timeline height"
             );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("timeline-float", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(view.read(cx).timeline_floating);
+            assert!(!view.read(cx).timeline.shown);
+        });
+        let timeline_handle = cx.update(|cx| {
+            view.read(cx)
+                .timeline_window
+                .expect("timeline float must open a window")
+        });
+        let _ = cx.update_window(timeline_handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("timeline-panel").visible());
+            window.click("floating-timeline-dock", cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(!view.read(cx).timeline_floating);
+            assert!(view.read(cx).timeline.shown);
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
