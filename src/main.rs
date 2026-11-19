@@ -5117,14 +5117,20 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Check GitHub releases for a newer version (explicit, user-triggered).
-    fn check_for_updates(&mut self, cx: &mut Context<Self>) {
+    /// Check GitHub releases for a newer version.
+    ///
+    /// The startup auto-check is silent: a private build with no published
+    /// release (HTTP 404) or an offline machine must not paint an error banner
+    /// over the capture view. An actual available update is still surfaced.
+    fn check_for_updates(&mut self, silent: bool, cx: &mut Context<Self>) {
         if self.update_pending {
             return;
         }
         self.update_pending = true;
-        self.status = Some(self.t("Checking for updates…", "正在检查更新…").to_owned());
-        cx.notify();
+        if !silent {
+            self.status = Some(self.t("Checking for updates…", "正在检查更新…").to_owned());
+            cx.notify();
+        }
         let current = renderdocx::update_check::parse_version(env!("CARGO_PKG_VERSION"));
         let task = cx.background_executor().spawn(async move {
             (
@@ -5136,30 +5142,41 @@ impl Workspace {
             let (result, current) = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.update_pending = false;
-                this.status = Some(match (result, current) {
+                match (result, current) {
                     (Ok((latest, url)), Some(current)) => {
                         if renderdocx::update_check::is_newer(latest, current) {
-                            format!(
+                            this.status = Some(format!(
                                 "{} {} → {} ({url})",
                                 this.t("Update available:", "有更新："),
                                 current.to_string(),
                                 latest.to_string()
-                            )
-                        } else {
-                            format!(
+                            ));
+                        } else if !silent {
+                            this.status = Some(format!(
                                 "{} {}",
                                 this.t("Up to date:", "已是最新："),
                                 current.to_string()
-                            )
+                            ));
                         }
                     }
-                    (Ok((latest, _)), None) => format!(
-                        "{} {}",
-                        this.t("Latest release:", "最新版本："),
-                        latest.to_string()
-                    ),
-                    (Err(error), _) => format!("{}: {error}", this.t("Update check failed", "更新检查失败")),
-                });
+                    (Ok((latest, _)), None) => {
+                        if !silent {
+                            this.status = Some(format!(
+                                "{} {}",
+                                this.t("Latest release:", "最新版本："),
+                                latest.to_string()
+                            ));
+                        }
+                    }
+                    (Err(error), _) => {
+                        if !silent {
+                            this.status = Some(format!(
+                                "{}: {error}",
+                                this.t("Update check failed", "更新检查失败")
+                            ));
+                        }
+                    }
+                }
                 cx.notify();
             });
         })
@@ -24493,7 +24510,7 @@ impl Render for Workspace {
                         }
                         cx.notify();
                     }, cx))
-                    .child(button("update-check", self.t("Check for updates", "检查更新"), false, |this, cx| this.check_for_updates(cx), cx))
+                    .child(button("update-check", self.t("Check for updates", "检查更新"), false, |this, cx| this.check_for_updates(false, cx), cx))
                     .child(Button::new("auto-update-toggle")
                         .label(format!(
                             "{}: {}",
@@ -25464,7 +25481,7 @@ fn main() {
                     // Automatic update check at startup (read-only, no download).
                     entity.update(cx, |view, cx| {
                         if view.settings.auto_check_updates {
-                            view.check_for_updates(cx);
+                            view.check_for_updates(true, cx);
                         }
                     });
                     if let Some(path) = initial_capture {
