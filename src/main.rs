@@ -832,6 +832,12 @@ enum FloatingDock {
     ApiInspector,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FloatingMainPanel {
+    Pipeline,
+    CaptureDialog,
+}
+
 /// Independent BufferViewer window for a shader constant block.
 #[derive(Clone, Debug, Default)]
 struct ConstantBufferViewer {
@@ -1052,6 +1058,8 @@ struct Workspace {
     floating_windows: Vec<(FloatingDock, gpui::WindowHandle<FloatingDockWindow>)>,
     timeline_floating: bool,
     timeline_window: Option<gpui::WindowHandle<FloatingTimelineWindow>>,
+    floating_main_panels: Vec<FloatingMainPanel>,
+    floating_main_windows: Vec<(FloatingMainPanel, gpui::WindowHandle<FloatingMainPanelWindow>)>,
     dock_right: Vec<FloatingDock>,
     dock_bottom: Vec<FloatingDock>,
     selected_texture: Option<usize>,
@@ -1280,6 +1288,109 @@ impl FloatingDockWindow {
             _observe: observe,
             _release: release,
         }
+    }
+}
+
+struct FloatingMainPanelWindow {
+    workspace: Entity<Workspace>,
+    panel: FloatingMainPanel,
+    _observe: gpui::Subscription,
+    _release: gpui::Subscription,
+}
+
+impl FloatingMainPanelWindow {
+    fn new(
+        workspace: Entity<Workspace>,
+        panel: FloatingMainPanel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let title = match panel {
+            FloatingMainPanel::Pipeline => "Pipeline State — RenderDocX",
+            FloatingMainPanel::CaptureDialog => "Capture Dialog — RenderDocX",
+        };
+        window.set_window_title(title);
+        let observe = cx.observe(&workspace, |_, _, cx| cx.notify());
+        let release = cx.on_release(|this, cx| {
+            let workspace = this.workspace.clone();
+            let panel = this.panel;
+            workspace.update(cx, |workspace, cx| {
+                workspace.dock_main_panel_from_window(panel, cx);
+            });
+        });
+        Self {
+            workspace,
+            panel,
+            _observe: observe,
+            _release: release,
+        }
+    }
+}
+
+impl Render for FloatingMainPanelWindow {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (title, dock_label) = {
+            let workspace = self.workspace.read(cx);
+            let title = match self.panel {
+                FloatingMainPanel::Pipeline => workspace.t("Pipeline State", "管线状态"),
+                FloatingMainPanel::CaptureDialog => workspace.t("Capture Dialog", "捕获对话框"),
+            };
+            (title, workspace.t("Dock", "停靠"))
+        };
+        let content = match self.panel {
+            FloatingMainPanel::Pipeline => self
+                .workspace
+                .update(cx, |workspace, cx| workspace.pipeline_state_panel(cx))
+                .into_any_element(),
+            FloatingMainPanel::CaptureDialog => self
+                .workspace
+                .update(cx, |workspace, cx| workspace.capture_dialog_panel(cx))
+                .into_any_element(),
+        };
+        let dock_workspace = self.workspace.clone();
+        let panel = self.panel;
+        let dock_id = match panel {
+            FloatingMainPanel::Pipeline => "floating-pipeline-dock",
+            FloatingMainPanel::CaptureDialog => "floating-capture-dialog-dock",
+        };
+        div()
+            .size_full()
+            .bg(rgb(0x0a0a0a))
+            .text_color(rgb(0xededed))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_2()
+                    .py_1()
+                    .bg(rgb(0x111111))
+                    .border_b_1()
+                    .border_color(rgb(0x1f1f1f))
+                    .text_sm()
+                    .child(title)
+                    .child(
+                        div()
+                            .id(dock_id)
+                            .test_support()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(0x1f1f1f))
+                            .hover(|view| view.bg(rgb(0x262626)))
+                            .child(dock_label)
+                            .on_click(cx.listener(move |_, _, window, cx| {
+                                dock_workspace.update(cx, |workspace, cx| {
+                                    workspace.dock_main_panel(panel, cx);
+                                });
+                                window.remove_window();
+                            })),
+                    ),
+            )
+            .child(div().flex_1().min_h_0().child(content))
     }
 }
 
@@ -16241,7 +16352,23 @@ impl Workspace {
                             "{} {count}",
                             self.t("Multiview", "多视图")
                         )))
-                    }),
+                    })
+                    .when(
+                        !self
+                            .floating_main_panels
+                            .contains(&FloatingMainPanel::Pipeline),
+                        |row| {
+                            row.child(button(
+                                "pipeline-float",
+                                self.t("Float", "浮动"),
+                                false,
+                                |this, cx| {
+                                    this.float_main_panel(FloatingMainPanel::Pipeline, cx)
+                                },
+                                cx,
+                            ))
+                        },
+                    ),
             );
 
             content = content.child(self.pipeline_section_title("Stages", "着色阶段"));
@@ -16490,7 +16617,7 @@ impl Workspace {
             )
     }
 
-    fn capture_dialog_panel(&self) -> gpui::Div {
+    fn capture_dialog_panel(&self, cx: &mut Context<Self>) -> gpui::Div {
         let capture = self
             .capture
             .as_ref()
@@ -16533,8 +16660,30 @@ impl Workspace {
                 .gap_2()
                 .child(
                     div()
-                        .text_lg()
-                        .child(self.t("Capture Dialog", "捕获对话框")),
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(div().text_lg().child(self.t("Capture Dialog", "捕获对话框")))
+                        .when(
+                            !self
+                                .floating_main_panels
+                                .contains(&FloatingMainPanel::CaptureDialog),
+                            |row| {
+                                row.child(button(
+                                    "capture-dialog-float",
+                                    self.t("Float", "浮动"),
+                                    false,
+                                    |this, cx| {
+                                        this.float_main_panel(
+                                            FloatingMainPanel::CaptureDialog,
+                                            cx,
+                                        )
+                                    },
+                                    cx,
+                                ))
+                            },
+                        ),
                 )
                 .children(rows.into_iter().map(|line| div().text_sm().child(line))),
         )
@@ -17133,6 +17282,123 @@ impl Workspace {
             cx.defer(move |cx| {
                 let _ = handle.update(cx, |_, window, _| window.remove_window());
             });
+        }
+        cx.notify();
+    }
+
+    fn float_main_panel(&mut self, panel: FloatingMainPanel, cx: &mut Context<Self>) {
+        if self.floating_main_panels.contains(&panel) {
+            return;
+        }
+        self.floating_main_panels.push(panel);
+        match panel {
+            FloatingMainPanel::Pipeline => {
+                self.show_pipeline_tab = true;
+                if self.tab == CaptureTab::Pipeline {
+                    self.tab = CaptureTab::Textures;
+                }
+            }
+            FloatingMainPanel::CaptureDialog => {
+                self.show_capture_dialog_tab = true;
+                if self.tab == CaptureTab::CaptureDialog {
+                    self.tab = CaptureTab::Textures;
+                }
+            }
+        }
+        self.menu_open = None;
+        self.submenu_open = None;
+        self.status = Some(
+            self.t(
+                "Panel is floating; use Dock to return it.",
+                "面板已浮动；使用“停靠”可返回。",
+            )
+            .to_owned(),
+        );
+        let workspace = cx.entity();
+        cx.defer(move |cx| {
+            if !workspace.read(cx).floating_main_panels.contains(&panel) {
+                return;
+            }
+            let offset = workspace.read(cx).floating_main_windows.len() as f32 * 40.0;
+            let bounds = Bounds::new(
+                gpui::point(px(260. + offset), px(180. + offset)),
+                size(px(760.), px(560.)),
+            );
+            let workspace_for_window = workspace.clone();
+            match cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    focus: true,
+                    show: true,
+                    ..Default::default()
+                },
+                move |window, cx| {
+                    cx.new(|cx| {
+                        FloatingMainPanelWindow::new(workspace_for_window, panel, window, cx)
+                    })
+                },
+            ) {
+                Ok(handle) => {
+                    workspace.update(cx, |workspace, cx| {
+                        workspace.floating_main_windows.push((panel, handle));
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    workspace.update(cx, |workspace, cx| {
+                        workspace.floating_main_panels.retain(|item| *item != panel);
+                        workspace.status = Some(format!(
+                            "{}: {error}",
+                            workspace.t(
+                                "Could not open floating panel",
+                                "无法打开浮动面板"
+                            )
+                        ));
+                        cx.notify();
+                    });
+                }
+            }
+        });
+        cx.notify();
+    }
+
+    fn dock_main_panel(&mut self, panel: FloatingMainPanel, cx: &mut Context<Self>) {
+        self.floating_main_panels.retain(|item| *item != panel);
+        if let Some(position) = self
+            .floating_main_windows
+            .iter()
+            .position(|(item, _)| *item == panel)
+        {
+            let (_, handle) = self.floating_main_windows.remove(position);
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            });
+        }
+        match panel {
+            FloatingMainPanel::Pipeline => {
+                self.show_pipeline_tab = true;
+                self.tab = CaptureTab::Pipeline;
+            }
+            FloatingMainPanel::CaptureDialog => {
+                self.show_capture_dialog_tab = true;
+                self.tab = CaptureTab::CaptureDialog;
+            }
+        }
+        cx.notify();
+    }
+
+    fn dock_main_panel_from_window(&mut self, panel: FloatingMainPanel, cx: &mut Context<Self>) {
+        self.floating_main_panels.retain(|item| *item != panel);
+        self.floating_main_windows.retain(|(item, _)| *item != panel);
+        match panel {
+            FloatingMainPanel::Pipeline => {
+                self.show_pipeline_tab = true;
+                self.tab = CaptureTab::Pipeline;
+            }
+            FloatingMainPanel::CaptureDialog => {
+                self.show_capture_dialog_tab = true;
+                self.tab = CaptureTab::CaptureDialog;
+            }
         }
         cx.notify();
     }
@@ -23993,7 +24259,7 @@ impl Workspace {
         } else if self.tab == CaptureTab::Pipeline {
             self.pipeline_state_panel(cx)
         } else if self.tab == CaptureTab::CaptureDialog {
-            self.capture_dialog_panel()
+            self.capture_dialog_panel(cx)
         } else {
             div()
                 .flex()
@@ -27481,6 +27747,8 @@ fn main() {
                         floating_windows: Vec::new(),
                         timeline_floating: false,
                         timeline_window: None,
+                        floating_main_panels: Vec::new(),
+                        floating_main_windows: Vec::new(),
                         dock_right: Vec::new(),
                         dock_bottom: Vec::new(),
                         selected_texture: None,
@@ -28403,6 +28671,8 @@ mod ui_tests {
                         floating_windows: Vec::new(),
                         timeline_floating: false,
                         timeline_window: None,
+                        floating_main_panels: Vec::new(),
+                        floating_main_windows: Vec::new(),
                         dock_right: Vec::new(),
                         dock_bottom: Vec::new(),
                         selected_texture: None,
@@ -29265,6 +29535,8 @@ mod ui_tests {
                         floating_windows: Vec::new(),
                         timeline_floating: false,
                         timeline_window: None,
+                        floating_main_panels: Vec::new(),
+                        floating_main_windows: Vec::new(),
                         dock_right: Vec::new(),
                         dock_bottom: Vec::new(),
                         selected_texture: None,
@@ -36565,6 +36837,41 @@ mod ui_tests {
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(window.find("pipeline-state-panel").visible());
+            window.click("pipeline-float", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                view.read(cx)
+                    .floating_main_panels
+                    .contains(&FloatingMainPanel::Pipeline)
+            );
+        });
+        let pipeline_window = cx.update(|cx| {
+            view.read(cx)
+                .floating_main_windows
+                .iter()
+                .find(|(panel, _)| *panel == FloatingMainPanel::Pipeline)
+                .map(|(_, handle)| *handle)
+                .expect("pipeline float must open a window")
+        });
+        let _ = cx.update_window(pipeline_window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("pipeline-state-panel").visible());
+            window.click("floating-pipeline-dock", cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                !view.read(cx)
+                    .floating_main_panels
+                    .contains(&FloatingMainPanel::Pipeline)
+            );
+            assert_eq!(view.read(cx).tab, CaptureTab::Pipeline);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
             window.click("capture-dialog-tab", cx);
         })
         .unwrap();
@@ -36572,8 +36879,39 @@ mod ui_tests {
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(window.find("capture-dialog-panel").visible());
+            window.click("capture-dialog-float", cx);
         })
         .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                view.read(cx)
+                    .floating_main_panels
+                    .contains(&FloatingMainPanel::CaptureDialog)
+            );
+        });
+        let dialog_window = cx.update(|cx| {
+            view.read(cx)
+                .floating_main_windows
+                .iter()
+                .find(|(panel, _)| *panel == FloatingMainPanel::CaptureDialog)
+                .map(|(_, handle)| *handle)
+                .expect("capture dialog float must open a window")
+        });
+        let _ = cx.update_window(dialog_window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("capture-dialog-panel").visible());
+            window.click("floating-capture-dialog-dock", cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                !view.read(cx)
+                    .floating_main_panels
+                    .contains(&FloatingMainPanel::CaptureDialog)
+            );
+            assert_eq!(view.read(cx).tab, CaptureTab::CaptureDialog);
+        });
         cx.update(|cx| {
             view.update(cx, |view, cx| {
                 view.show_aux_tabs = true;
