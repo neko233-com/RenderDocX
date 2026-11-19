@@ -24301,6 +24301,7 @@ impl Workspace {
                 div()
                     .flex()
                     .flex_wrap()
+                    .items_center()
                     .gap_2()
                     .child(button(
                         "capture-back",
@@ -24309,11 +24310,45 @@ impl Workspace {
                         |this, cx| this.close_capture(cx),
                         cx,
                     ))
-                    .child(button("capture-replay-loop", self.t("Replay loop", "重放循环"), self.replay_loop.as_ref().is_some_and(|state| state.playing), |this, cx| this.toggle_replay_loop(cx), cx))
-                    .child(Input::new(&self.replay_loop_delay).id("replay-loop-delay").aria_label(self.t("Loop interval in milliseconds", "循环间隔（毫秒）")).w(px(90.)))
-                    .child(button("capture-recompress", self.t("Recompress", "重压缩"), false, |this, cx| this.recompress_capture(cx), cx))
-                    .child(button("capture-save", self.t("Save", "保存"), false, |this, cx| this.save_capture_inplace(cx), cx))
-                    .child(button("capture-save-as", self.t("Save as…", "另存为…"), false, |this, cx| this.save_capture_as(cx), cx))
+                    .child(toggle_button(
+                        "capture-replay-loop",
+                        self.t("Replay loop", "重放循环"),
+                        self.replay_loop
+                            .as_ref()
+                            .is_some_and(|state| state.playing),
+                        |this, cx| this.toggle_replay_loop(cx),
+                        cx,
+                    ))
+                    .child(
+                        Input::new(&self.replay_loop_delay)
+                            .id("replay-loop-delay")
+                            .aria_label(
+                                self.t("Loop interval in milliseconds", "循环间隔（毫秒）"),
+                            )
+                            .w(px(90.)),
+                    )
+                    .child(toolbar_separator())
+                    .child(button(
+                        "capture-recompress",
+                        self.t("Recompress", "重压缩"),
+                        false,
+                        |this, cx| this.recompress_capture(cx),
+                        cx,
+                    ))
+                    .child(button(
+                        "capture-save",
+                        self.t("Save", "保存"),
+                        false,
+                        |this, cx| this.save_capture_inplace(cx),
+                        cx,
+                    ))
+                    .child(button(
+                        "capture-save-as",
+                        self.t("Save as…", "另存为…"),
+                        false,
+                        |this, cx| this.save_capture_as(cx),
+                        cx,
+                    ))
                     .child(button(
                         "capture-open",
                         open,
@@ -24328,14 +24363,77 @@ impl Workspace {
                         },
                         cx,
                     ))
-                    .when(self.session.as_ref().and_then(Session::remote_server_url).is_some(), |row| row.child(button(
-                        "capture-remote-browser", self.t("Remote files", "远程文件"), self.show_remote_browser,
-                        |this, cx| { this.show_remote_browser = !this.show_remote_browser; cx.notify(); }, cx)))
-                    .child(button("capture-timeline", self.t("Timeline", "时间线"), self.timeline.shown, |this, cx| { this.timeline.shown = !this.timeline.shown; cx.notify(); }, cx))
-                    .child(button("capture-log", self.t("Log", "日志"), self.show_log, |this, cx| { if this.show_log { this.show_log = false; cx.notify(); } else { this.open_log(cx); } }, cx))
-                    .child(button("dock-toggle-event-browser", self.t("Event browser", "事件浏览器"), self.dock_event_browser, |this, cx| { this.dock_event_browser = !this.dock_event_browser; cx.notify(); }, cx))
-                    .child(button("dock-toggle-api-inspector", self.t("API inspector", "API 检查器"), self.dock_api_inspector, |this, cx| { this.dock_api_inspector = !this.dock_api_inspector; cx.notify(); }, cx))
-                    .child(button("dock-reset-layout", self.t("Reset layout", "重置布局"), false, |this, cx| this.reset_dock_layout(cx), cx))
+                    .when(
+                        self.session
+                            .as_ref()
+                            .and_then(Session::remote_server_url)
+                            .is_some(),
+                        |row| {
+                            row.child(toggle_button(
+                                "capture-remote-browser",
+                                self.t("Remote files", "远程文件"),
+                                self.show_remote_browser,
+                                |this, cx| {
+                                    this.show_remote_browser = !this.show_remote_browser;
+                                    cx.notify();
+                                },
+                                cx,
+                            ))
+                        },
+                    )
+                    .child(toolbar_separator())
+                    .child(toggle_button(
+                        "capture-timeline",
+                        self.t("Timeline", "时间线"),
+                        self.timeline.shown,
+                        |this, cx| {
+                            this.timeline.shown = !this.timeline.shown;
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(toggle_button(
+                        "capture-log",
+                        self.t("Log", "日志"),
+                        self.show_log,
+                        |this, cx| {
+                            if this.show_log {
+                                this.show_log = false;
+                                cx.notify();
+                            } else {
+                                this.open_log(cx);
+                            }
+                        },
+                        cx,
+                    ))
+                    .child(toggle_button(
+                        "dock-toggle-event-browser",
+                        self.t("Event browser", "事件浏览器"),
+                        self.dock_event_browser,
+                        |this, cx| {
+                            this.dock_event_browser = !this.dock_event_browser;
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(toggle_button(
+                        "dock-toggle-api-inspector",
+                        self.t("API inspector", "API 检查器"),
+                        self.dock_api_inspector,
+                        |this, cx| {
+                            this.dock_api_inspector = !this.dock_api_inspector;
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(button(
+                        "dock-reset-layout",
+                        self.t("Reset layout", "重置布局"),
+                        false,
+                        |this, cx| this.reset_dock_layout(cx),
+                        cx,
+                    ))
+                    .child(toolbar_separator())
                     .child(button(
                         "capture-upstream",
                         upstream,
@@ -25151,6 +25249,48 @@ fn button(
     } else {
         button.secondary()
     }
+}
+
+fn toolbar_separator() -> gpui::Div {
+    div()
+        .w(px(1.))
+        .h(px(20.))
+        .mx_1()
+        .bg(rgb(0x1f1f1f))
+}
+
+fn toggle_button(
+    id: &'static str,
+    title: &'static str,
+    active: bool,
+    callback: impl Fn(&mut Workspace, &mut Context<Workspace>) + 'static,
+    cx: &mut Context<Workspace>,
+) -> gpui::AnyElement {
+    div()
+        .id(id)
+        .test_support()
+        .px_3()
+        .py_2()
+        .rounded_md()
+        .cursor_pointer()
+        .border_1()
+        .border_color(rgb(if active { 0x333333 } else { 0x1f1f1f }))
+        .bg(rgb(if active { 0x1f1f1f } else { 0x0a0a0a }))
+        .text_sm()
+        .text_color(rgb(if active { 0x3291ff } else { 0xededed }))
+        .hover(|view| view.bg(rgb(0x262626)))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(title)
+                .when(active, |view| {
+                    view.child(div().w(px(5.)).h(px(5.)).rounded_full().bg(rgb(0x3291ff)))
+                }),
+        )
+        .on_click(cx.listener(move |this, _, _, cx| callback(this, cx)))
+        .into_any_element()
 }
 
 fn normalize_right_docks(names: &[String]) -> Vec<FloatingDock> {
