@@ -16955,76 +16955,291 @@ impl Workspace {
             )
     }
 
+    fn capture_dialog_group(&self, title: String, content: gpui::Div) -> gpui::Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .rounded_lg()
+            .bg(rgb(0x0a0a0a))
+            .border_1()
+            .border_color(rgb(0x1f1f1f))
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgb(0x3291ff))
+                    .child(title.to_uppercase()),
+            )
+            .child(content)
+    }
+
     fn capture_dialog_panel(&self, cx: &mut Context<Self>) -> gpui::Div {
         let capture = self
             .capture
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_default();
-        let snapshot = self.snapshot.as_ref();
-        let mut rows = vec![format!("{}: {capture}", self.t("Capture", "捕获"))];
-        if let Some(snapshot) = snapshot {
-            rows.push(format!(
-                "{}: {} / {} / {}",
-                self.t("Counts", "计数"),
-                snapshot.resource_count,
-                snapshot.texture_count,
-                snapshot.buffer_count
-            ));
-            rows.push(format!(
+        let executable = self
+            .launch_executable
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| self.t("No executable selected.", "未选择可执行文件。").to_owned());
+        let working_directory = self
+            .launch_working_directory
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| self.t("Default", "默认").to_owned());
+        let arguments = self.launch_arguments.read(cx).value().to_string();
+
+        let mut capture_info = div().flex().flex_col().gap_1().text_sm();
+        capture_info = capture_info
+            .child(format!("{}: {capture}", self.t("Capture", "捕获")))
+            .when_some(self.snapshot.as_ref(), |view, snapshot| {
+                view.child(format!(
+                    "{}: {} / {} / {}",
+                    self.t("Counts", "计数"),
+                    snapshot.resource_count,
+                    snapshot.texture_count,
+                    snapshot.buffer_count
+                ))
+                .child(format!("{}: {}", self.t("Frame", "帧"), snapshot.frame))
+                .child(format!("{}: {}", self.t("API", "API"), snapshot.api))
+            });
+
+        let application = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .text_sm()
+            .child(format!(
+                "{}: {executable}",
+                self.t("Executable Path", "可执行文件路径")
+            ))
+            .child(format!(
+                "{}: {working_directory}",
+                self.t("Working Directory", "工作目录")
+            ))
+            .child(format!(
                 "{}: {}",
-                self.t("Frame", "帧"),
-                snapshot.frame
+                self.t("Command Line", "命令行"),
+                if arguments.is_empty() {
+                    self.t("<none>", "<无>")
+                } else {
+                    arguments.as_str()
+                }
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .pt_1()
+                    .child(button(
+                        "capture-dialog-launch",
+                        self.t("Launch", "启动"),
+                        true,
+                        |this, cx| {
+                            if let Some(path) = rfd::FileDialog::new().pick_file() {
+                                this.launch_executable = Some(path.clone());
+                                this.launch_live(path, cx);
+                            }
+                        },
+                        cx,
+                    ))
+                    .child(button(
+                        "capture-dialog-attach",
+                        self.t("Attach to Running Instance", "附加到运行实例"),
+                        false,
+                        |this, cx| {
+                            this.process_inject = false;
+                            this.refresh_local_processes(cx);
+                            this.info_dialog = Some(InfoDialog::Processes);
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(button(
+                        "capture-dialog-inject",
+                        self.t("Inject into Process", "注入到进程"),
+                        false,
+                        |this, cx| {
+                            this.process_inject = true;
+                            this.refresh_local_processes(cx);
+                            this.info_dialog = Some(InfoDialog::Processes);
+                            cx.notify();
+                        },
+                        cx,
+                    )),
+            );
+
+        let option_labels = vec![
+            (self.t("Allow VSync", "允许垂直同步"), self.capture_options.allow_vsync),
+            (
+                self.t("Allow Fullscreen", "允许全屏"),
+                self.capture_options.allow_fullscreen,
+            ),
+            (
+                self.t("API Validation", "API 验证"),
+                self.capture_options.api_validation,
+            ),
+            (
+                self.t("Capture Callstacks", "捕获调用栈"),
+                self.capture_options.capture_callstacks,
+            ),
+            (
+                self.t("Callstacks Only Actions", "仅捕获操作调用栈"),
+                self.capture_options.capture_callstacks_only_actions,
+            ),
+            (
+                self.t("Verify Buffer Access", "验证缓冲访问"),
+                self.capture_options.verify_buffer_access,
+            ),
+            (
+                self.t("Hook Into Children", "接入子进程"),
+                self.capture_options.hook_into_children,
+            ),
+            (
+                self.t("Ref All Resources", "包含全部资源"),
+                self.capture_options.ref_all_resources,
+            ),
+            (
+                self.t("Capture All Cmd Lists", "捕获全部命令列表"),
+                self.capture_options.capture_all_cmd_lists,
+            ),
+            (
+                self.t("Mute Debug Output", "静音调试输出"),
+                self.capture_options.debug_output_mute,
+            ),
+        ];
+        let options = div()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .children(option_labels.into_iter().enumerate().map(
+                |(index, (label, enabled))| {
+                    toggle_button(
+                        match index {
+                            0 => "capture-dialog-option-0",
+                            1 => "capture-dialog-option-1",
+                            2 => "capture-dialog-option-2",
+                            3 => "capture-dialog-option-3",
+                            4 => "capture-dialog-option-4",
+                            5 => "capture-dialog-option-5",
+                            6 => "capture-dialog-option-6",
+                            7 => "capture-dialog-option-7",
+                            8 => "capture-dialog-option-8",
+                            _ => "capture-dialog-option-9",
+                        },
+                        label,
+                        enabled,
+                        move |this, cx| {
+                            let opts = &mut this.capture_options;
+                            let field = match index {
+                                0 => &mut opts.allow_vsync,
+                                1 => &mut opts.allow_fullscreen,
+                                2 => &mut opts.api_validation,
+                                3 => &mut opts.capture_callstacks,
+                                4 => &mut opts.capture_callstacks_only_actions,
+                                5 => &mut opts.verify_buffer_access,
+                                6 => &mut opts.hook_into_children,
+                                7 => &mut opts.ref_all_resources,
+                                8 => &mut opts.capture_all_cmd_lists,
+                                _ => &mut opts.debug_output_mute,
+                            };
+                            *field = !*field;
+                            cx.notify();
+                        },
+                        cx,
+                    )
+                },
             ));
-            rows.push(format!(
-                "{}: {}",
-                self.t("API", "API"),
-                snapshot.api
-            ));
-        }
-        rows.push(
-            self.t(
-                "Capture launch settings are edited on the Workspace page.",
-                "捕获启动设置在 Workspace 页面编辑。",
+
+        let action = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .text_sm()
+            .child(self.t("Queue Frame Cap", "队列帧上限"))
+            .child(
+                Input::new(&self.queued_frame_cap)
+                    .id("capture-dialog-queued-frame-cap")
+                    .aria_label(self.t("Queue Frame Cap", "队列帧上限"))
+                    .w(px(120.)),
             )
-            .to_owned(),
-        );
-        div().p_3().flex().flex_col().gap_2().child(
-            div()
-                .id("capture-dialog-panel")
-                .test_support()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .child(div().text_lg().child(self.t("Capture Dialog", "捕获对话框")))
-                        .when(
-                            !self
-                                .floating_main_panels
-                                .contains(&FloatingMainPanel::CaptureDialog),
-                            |row| {
-                                row.child(button(
-                                    "capture-dialog-float",
-                                    self.t("Float", "浮动"),
-                                    false,
-                                    |this, cx| {
-                                        this.float_main_panel(
-                                            FloatingMainPanel::CaptureDialog,
-                                            cx,
-                                        )
-                                    },
-                                    cx,
-                                ))
-                            },
-                        ),
-                )
-                .children(rows.into_iter().map(|line| div().text_sm().child(line))),
-        )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x6b6b6b))
+                    .child(self.t(
+                        "Capture the queued frame when the limit is reached.",
+                        "达到上限时捕获排队的帧。",
+                    )),
+            );
+
+        div()
+            .size_full()
+            .min_h_0()
+            .child(
+                div()
+                    .id("capture-dialog-panel")
+                    .test_support()
+                    .p_3()
+                    .size_full()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .child(self.t("Capture Dialog", "捕获对话框")),
+                            )
+                            .when(
+                                !self
+                                    .floating_main_panels
+                                    .contains(&FloatingMainPanel::CaptureDialog),
+                                |row| {
+                                    row.child(button(
+                                        "capture-dialog-float",
+                                        self.t("Float", "浮动"),
+                                        false,
+                                        |this, cx| {
+                                            this.float_main_panel(
+                                                FloatingMainPanel::CaptureDialog,
+                                                cx,
+                                            )
+                                        },
+                                        cx,
+                                    ))
+                                },
+                            ),
+                    )
+                    .child(self.capture_dialog_group(
+                        self.t("Capture", "捕获").to_owned(),
+                        capture_info,
+                    ))
+                    .child(self.capture_dialog_group(
+                        self.t("Application", "应用程序").to_owned(),
+                        application,
+                    ))
+                    .child(self.capture_dialog_group(
+                        self.t("Options", "选项").to_owned(),
+                        options,
+                    ))
+                    .child(self.capture_dialog_group(
+                        self.t("Action", "操作").to_owned(),
+                        action,
+                    )),
+            )
     }
 
     fn dock_header(
