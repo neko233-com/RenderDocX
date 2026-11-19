@@ -59,6 +59,14 @@ pub struct WindowLayout {
     #[serde(default = "default_details_ratio")]
     pub details_ratio: f32,
     #[serde(default = "default_true")]
+    pub textures_shown: bool,
+    #[serde(default = "default_true")]
+    pub pipeline_shown: bool,
+    #[serde(default = "default_true")]
+    pub mesh_shown: bool,
+    #[serde(default = "default_true")]
+    pub capture_dialog_shown: bool,
+    #[serde(default = "default_true")]
     pub event_browser_shown: bool,
     #[serde(default = "default_true")]
     pub api_inspector_shown: bool,
@@ -76,6 +84,10 @@ impl Default for WindowLayout {
             left_ratio: default_left_ratio(),
             api_ratio: default_api_ratio(),
             details_ratio: default_details_ratio(),
+            textures_shown: true,
+            pipeline_shown: true,
+            mesh_shown: true,
+            capture_dialog_shown: true,
             event_browser_shown: true,
             api_inspector_shown: true,
         }

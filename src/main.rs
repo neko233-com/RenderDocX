@@ -975,6 +975,10 @@ struct Workspace {
     dock_drag_x: Option<f32>,
     details_drag_x: Option<f32>,
     show_aux_tabs: bool,
+    show_textures_tab: bool,
+    show_pipeline_tab: bool,
+    show_mesh_tab: bool,
+    show_capture_dialog_tab: bool,
     menu_open: Option<MenuBar>,
     layout_submenu_open: bool,
     floating_docks: Vec<FloatingDock>,
@@ -4710,6 +4714,10 @@ impl Workspace {
             left_ratio: self.dock_left_ratio,
             api_ratio: self.dock_api_ratio,
             details_ratio: self.dock_details_ratio,
+            textures_shown: self.show_textures_tab,
+            pipeline_shown: self.show_pipeline_tab,
+            mesh_shown: self.show_mesh_tab,
+            capture_dialog_shown: self.show_capture_dialog_tab,
             event_browser_shown: self.dock_event_browser,
             api_inspector_shown: self.dock_api_inspector,
         };
@@ -4746,6 +4754,10 @@ impl Workspace {
         self.dock_left_ratio = layout.left_ratio.clamp(0.15, 0.5);
         self.dock_api_ratio = layout.api_ratio.clamp(0.3, 0.85);
         self.dock_details_ratio = layout.details_ratio.clamp(0.5, 0.9);
+        self.show_textures_tab = layout.textures_shown;
+        self.show_pipeline_tab = layout.pipeline_shown;
+        self.show_mesh_tab = layout.mesh_shown;
+        self.show_capture_dialog_tab = layout.capture_dialog_shown;
         self.dock_event_browser = layout.event_browser_shown;
         self.dock_api_inspector = layout.api_inspector_shown;
         self.status = Some(format!("{} {slot}", self.t("Loaded window layout", "已加载窗口布局")));
@@ -16430,6 +16442,55 @@ impl Workspace {
                         cx,
                     ))
                     .child(self.menu_separator())
+                    .child(self.menu_item(
+                        "menu-window-textures",
+                        "Texture Viewer",
+                        "纹理查看器",
+                        self.show_textures_tab,
+                        |this, _, cx| {
+                            this.show_textures_tab = !this.show_textures_tab;
+                            this.ensure_visible_main_tab();
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-window-pipeline",
+                        "Pipeline State",
+                        "管线状态",
+                        self.show_pipeline_tab,
+                        |this, _, cx| {
+                            this.show_pipeline_tab = !this.show_pipeline_tab;
+                            this.ensure_visible_main_tab();
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-window-mesh-preview",
+                        "Mesh Preview",
+                        "网格预览",
+                        self.show_mesh_tab,
+                        |this, _, cx| {
+                            this.show_mesh_tab = !this.show_mesh_tab;
+                            this.ensure_visible_main_tab();
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_item(
+                        "menu-window-capture-dialog",
+                        "Capture Dialog",
+                        "捕获对话框",
+                        self.show_capture_dialog_tab,
+                        |this, _, cx| {
+                            this.show_capture_dialog_tab = !this.show_capture_dialog_tab;
+                            this.ensure_visible_main_tab();
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_separator())
                     .child(self.menu_panel_item(
                         "menu-window-events",
                         "Events",
@@ -16761,6 +16822,31 @@ impl Workspace {
             .into_any_element()
     }
 
+    fn ensure_visible_main_tab(&mut self) {
+        let visible = match self.tab {
+            CaptureTab::Textures => self.show_textures_tab,
+            CaptureTab::Pipeline => self.show_pipeline_tab,
+            CaptureTab::Mesh => self.show_mesh_tab,
+            CaptureTab::CaptureDialog => self.show_capture_dialog_tab,
+            _ => true,
+        };
+        if visible {
+            return;
+        }
+        if self.show_textures_tab {
+            self.tab = CaptureTab::Textures;
+        } else if self.show_pipeline_tab {
+            self.tab = CaptureTab::Pipeline;
+        } else if self.show_mesh_tab {
+            self.tab = CaptureTab::Mesh;
+        } else if self.show_capture_dialog_tab {
+            self.tab = CaptureTab::CaptureDialog;
+        } else {
+            self.show_textures_tab = true;
+            self.tab = CaptureTab::Textures;
+        }
+    }
+
     fn details_splitter(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         div()
             .id("details-splitter")
@@ -16786,6 +16872,10 @@ impl Workspace {
         self.dock_left_ratio = 0.25;
         self.dock_api_ratio = 0.7;
         self.dock_details_ratio = 0.72;
+        self.show_textures_tab = true;
+        self.show_pipeline_tab = true;
+        self.show_mesh_tab = true;
+        self.show_capture_dialog_tab = true;
         self.dock_event_browser = true;
         self.dock_api_inspector = true;
         self.dock_drag_x = None;
@@ -22633,49 +22723,57 @@ impl Workspace {
                                     .gap_2()
                                     .px_3()
                                     .py_2()
-                                    .child(button(
-                                        "textures-tab",
-                                        textures_label,
-                                        self.tab == CaptureTab::Textures,
-                                        |this, cx| {
-                                            this.tab = CaptureTab::Textures;
-                                            cx.notify();
-                                        },
-                                        cx,
-                                    ))
-                                    .child(button(
-                                        "pipeline-tab",
-                                        self.t("Pipeline State", "管线状态"),
-                                        self.tab == CaptureTab::Pipeline,
-                                        |this, cx| {
-                                            this.tab = CaptureTab::Pipeline;
-                                            cx.notify();
-                                        },
-                                        cx,
-                                    ))
-                                    .child(button(
-                                        "mesh-tab",
-                                        self.t("Mesh Preview", "网格预览"),
-                                        self.tab == CaptureTab::Mesh,
-                                        |this, cx| {
-                                            this.tab = CaptureTab::Mesh;
-                                            if this.mesh.info.is_none() {
-                                                this.read_mesh(this.mesh.selection, this.mesh.kind, 0, cx);
-                                            }
-                                            cx.notify();
-                                        },
-                                        cx,
-                                    ))
-                                    .child(button(
-                                        "capture-dialog-tab",
-                                        self.t("Capture Dialog", "捕获对话框"),
-                                        self.tab == CaptureTab::CaptureDialog,
-                                        |this, cx| {
-                                            this.tab = CaptureTab::CaptureDialog;
-                                            cx.notify();
-                                        },
-                                        cx,
-                                    ))
+                                    .when(self.show_textures_tab, |view| {
+                                        view.child(button(
+                                            "textures-tab",
+                                            textures_label,
+                                            self.tab == CaptureTab::Textures,
+                                            |this, cx| {
+                                                this.tab = CaptureTab::Textures;
+                                                cx.notify();
+                                            },
+                                            cx,
+                                        ))
+                                    })
+                                    .when(self.show_pipeline_tab, |view| {
+                                        view.child(button(
+                                            "pipeline-tab",
+                                            self.t("Pipeline State", "管线状态"),
+                                            self.tab == CaptureTab::Pipeline,
+                                            |this, cx| {
+                                                this.tab = CaptureTab::Pipeline;
+                                                cx.notify();
+                                            },
+                                            cx,
+                                        ))
+                                    })
+                                    .when(self.show_mesh_tab, |view| {
+                                        view.child(button(
+                                            "mesh-tab",
+                                            self.t("Mesh Preview", "网格预览"),
+                                            self.tab == CaptureTab::Mesh,
+                                            |this, cx| {
+                                                this.tab = CaptureTab::Mesh;
+                                                if this.mesh.info.is_none() {
+                                                    this.read_mesh(this.mesh.selection, this.mesh.kind, 0, cx);
+                                                }
+                                                cx.notify();
+                                            },
+                                            cx,
+                                        ))
+                                    })
+                                    .when(self.show_capture_dialog_tab, |view| {
+                                        view.child(button(
+                                            "capture-dialog-tab",
+                                            self.t("Capture Dialog", "捕获对话框"),
+                                            self.tab == CaptureTab::CaptureDialog,
+                                            |this, cx| {
+                                                this.tab = CaptureTab::CaptureDialog;
+                                                cx.notify();
+                                            },
+                                            cx,
+                                        ))
+                                    })
                                     .child(button(
                                         "window-menu",
                                         self.t("Window", "窗口"),
@@ -25038,6 +25136,10 @@ fn main() {
                         dock_drag_x: None,
                         details_drag_x: None,
                         show_aux_tabs: cfg!(test),
+                        show_textures_tab: true,
+                        show_pipeline_tab: true,
+                        show_mesh_tab: true,
+                        show_capture_dialog_tab: true,
                         menu_open: None,
                         layout_submenu_open: false,
                         floating_docks: Vec::new(),
@@ -25941,6 +26043,10 @@ mod ui_tests {
                         dock_drag_x: None,
                         details_drag_x: None,
                         show_aux_tabs: cfg!(test),
+                        show_textures_tab: true,
+                        show_pipeline_tab: true,
+                        show_mesh_tab: true,
+                        show_capture_dialog_tab: true,
                         menu_open: None,
                         layout_submenu_open: false,
                         floating_docks: Vec::new(),
@@ -26784,6 +26890,10 @@ mod ui_tests {
                         dock_drag_x: None,
                         details_drag_x: None,
                         show_aux_tabs: cfg!(test),
+                        show_textures_tab: true,
+                        show_pipeline_tab: true,
+                        show_mesh_tab: true,
+                        show_capture_dialog_tab: true,
                         menu_open: None,
                         layout_submenu_open: false,
                         floating_docks: Vec::new(),
@@ -33820,18 +33930,24 @@ mod ui_tests {
                 view.dock_details_ratio = 0.66;
                 view.dock_event_browser = false;
                 view.dock_api_inspector = false;
+                view.show_textures_tab = false;
+                view.show_pipeline_tab = false;
                 view.save_layout(1, cx);
                 view.dock_left_ratio = 0.25;
                 view.dock_api_ratio = 0.7;
                 view.dock_details_ratio = 0.72;
                 view.dock_event_browser = true;
                 view.dock_api_inspector = true;
+                view.show_textures_tab = true;
+                view.show_pipeline_tab = true;
                 view.load_layout(1, cx);
                 assert!((view.dock_left_ratio - 0.31).abs() < f32::EPSILON);
                 assert!((view.dock_api_ratio - 0.55).abs() < f32::EPSILON);
                 assert!((view.dock_details_ratio - 0.66).abs() < f32::EPSILON);
                 assert!(!view.dock_event_browser);
                 assert!(!view.dock_api_inspector);
+                assert!(!view.show_textures_tab);
+                assert!(!view.show_pipeline_tab);
             })
         });
 
@@ -33842,6 +33958,10 @@ mod ui_tests {
                 view.dock_event_browser = true;
                 view.dock_api_inspector = true;
                 view.show_aux_tabs = false;
+                view.show_textures_tab = true;
+                view.show_pipeline_tab = true;
+                view.show_mesh_tab = true;
+                view.show_capture_dialog_tab = true;
                 view.tab = CaptureTab::Textures;
                 cx.notify();
             })
@@ -33853,6 +33973,38 @@ mod ui_tests {
             assert!(window.find("mesh-tab").visible());
             assert!(window.find("capture-dialog-tab").visible());
             assert!(window.find("window-menu").visible());
+            window.click("menu-window", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("menu-window-textures").visible());
+            window.click("menu-window-textures", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(!view.read(cx).show_textures_tab);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("textures-tab").is_none());
+            window.click("menu-window", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("menu-window-textures", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(view.read(cx).show_textures_tab);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
             window.click("pipeline-tab", cx);
         })
         .unwrap();
