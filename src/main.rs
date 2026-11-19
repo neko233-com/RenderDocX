@@ -1003,11 +1003,15 @@ struct Workspace {
     dock_api_ratio: f32,
     dock_details_ratio: f32,
     dock_timeline_ratio: f32,
+    dock_right_ratio: f32,
+    dock_bottom_ratio: f32,
     dock_event_browser: bool,
     dock_api_inspector: bool,
     dock_drag_x: Option<f32>,
     details_drag_x: Option<f32>,
     timeline_drag_y: Option<(f32, f32)>,
+    right_drag_y: Option<(f32, f32)>,
+    bottom_drag_y: Option<(f32, f32)>,
     show_aux_tabs: bool,
     show_textures_tab: bool,
     show_pipeline_tab: bool,
@@ -4755,6 +4759,8 @@ impl Workspace {
             api_ratio: self.dock_api_ratio,
             details_ratio: self.dock_details_ratio,
             timeline_ratio: self.dock_timeline_ratio,
+            right_ratio: self.dock_right_ratio,
+            bottom_ratio: self.dock_bottom_ratio,
             textures_shown: self.show_textures_tab,
             pipeline_shown: self.show_pipeline_tab,
             mesh_shown: self.show_mesh_tab,
@@ -4800,6 +4806,8 @@ impl Workspace {
         self.dock_api_ratio = layout.api_ratio.clamp(0.3, 0.85);
         self.dock_details_ratio = layout.details_ratio.clamp(0.5, 0.9);
         self.dock_timeline_ratio = layout.timeline_ratio.clamp(0.12, 0.5);
+        self.dock_right_ratio = layout.right_ratio.clamp(0.15, 0.75);
+        self.dock_bottom_ratio = layout.bottom_ratio.clamp(0.15, 0.6);
         self.show_textures_tab = layout.textures_shown;
         self.show_pipeline_tab = layout.pipeline_shown;
         self.show_mesh_tab = layout.mesh_shown;
@@ -18087,12 +18095,60 @@ impl Workspace {
             .into_any_element()
     }
 
+    fn right_splitter(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
+            .id("right-splitter")
+            .test_support()
+            .h(px(6.))
+            .w_full()
+            .flex_none()
+            .cursor_pointer()
+            .bg(rgb(0x111111))
+            .hover(|bar| bar.bg(rgb(0x1f1f1f)))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                    this.right_drag_y =
+                        Some((f32::from(event.position.y), this.dock_right_ratio));
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .into_any_element()
+    }
+
+    fn bottom_splitter(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
+            .id("bottom-splitter")
+            .test_support()
+            .h(px(6.))
+            .w_full()
+            .flex_none()
+            .cursor_pointer()
+            .bg(rgb(0x111111))
+            .hover(|bar| bar.bg(rgb(0x1f1f1f)))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                    this.bottom_drag_y =
+                        Some((f32::from(event.position.y), this.dock_bottom_ratio));
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .into_any_element()
+    }
+
     fn reset_dock_layout(&mut self, cx: &mut Context<Self>) {
         self.dock_left_ratio = 0.25;
         self.dock_api_ratio = 0.7;
         self.dock_details_ratio = 0.72;
         self.dock_timeline_ratio = 0.20;
+        self.dock_right_ratio = 0.45;
+        self.dock_bottom_ratio = 0.30;
         self.timeline_drag_y = None;
+        self.right_drag_y = None;
+        self.bottom_drag_y = None;
         self.show_textures_tab = true;
         self.show_pipeline_tab = true;
         self.show_mesh_tab = true;
@@ -18279,8 +18335,8 @@ impl Workspace {
                     }
                 };
                 div()
-                    .h(px(260.))
-                    .flex_none()
+                    .flex_1()
+                    .min_h_0()
                     .flex()
                     .child(panel)
                     .into_any_element()
@@ -23898,18 +23954,34 @@ impl Workspace {
             .track_focus(&self.capture_focus)
             .on_mouse_move(cx.listener(
                 |this, event: &gpui::MouseMoveEvent, window, cx| {
+                    let height = f32::from(window.viewport_size().height) - 200.0;
                     if event.dragging() {
                         if let Some((start_y, start_ratio)) = this.timeline_drag_y {
-                            let height = f32::from(window.viewport_size().height) - 200.0;
                             if height > 0.0 {
                                 this.dock_timeline_ratio = (start_ratio
                                     + (f32::from(event.position.y) - start_y) / height)
                                     .clamp(0.12, 0.5);
                                 cx.notify();
                             }
+                        } else if let Some((start_y, start_ratio)) = this.right_drag_y {
+                            if height > 0.0 {
+                                this.dock_right_ratio = (start_ratio
+                                    + (f32::from(event.position.y) - start_y) / height)
+                                    .clamp(0.15, 0.75);
+                                cx.notify();
+                            }
+                        } else if let Some((start_y, start_ratio)) = this.bottom_drag_y {
+                            if height > 0.0 {
+                                this.dock_bottom_ratio = (start_ratio
+                                    - (f32::from(event.position.y) - start_y) / height)
+                                    .clamp(0.15, 0.6);
+                                cx.notify();
+                            }
                         }
                     } else {
                         this.timeline_drag_y = None;
+                        this.right_drag_y = None;
+                        this.bottom_drag_y = None;
                     }
                 },
             ))
@@ -24668,7 +24740,22 @@ impl Workspace {
                                     cx.notify();
                                 });
                             })
-                            .children(right_dock_panels)
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .min_h_0()
+                                    .flex_none()
+                                    .when(!self.dock_right.is_empty(), |view| {
+                                        view.h(gpui::relative(self.dock_right_ratio))
+                                    })
+                                    .when(self.dock_right.is_empty(), |view| view.h(px(0.)))
+                                    .children(right_dock_panels),
+                            )
+                            .when(!self.dock_right.is_empty(), |view| {
+                                view.child(self.right_splitter(cx))
+                            })
                             .child(
                                 div()
                                     .id("capture-details-scroll")
@@ -24734,6 +24821,9 @@ impl Workspace {
                         ),
                     ),
             )
+            .when(!self.dock_bottom.is_empty(), |view| {
+                view.child(self.bottom_splitter(cx))
+            })
             .child(
                 div()
                     .id("dock-bottom")
@@ -24751,7 +24841,8 @@ impl Workspace {
                             .bg(rgb(0x000000))
                     })
                     .when(!self.dock_bottom.is_empty(), |view| {
-                        view.h(px(220.))
+                        view.h(gpui::relative(self.dock_bottom_ratio))
+                            .min_h(px(140.))
                     })
                     .on_drop::<FloatingDock>(move |dock, _, cx| {
                         let dock = *dock;
@@ -26596,11 +26687,15 @@ fn main() {
                         dock_api_ratio: 0.7,
                         dock_details_ratio: 0.72,
                         dock_timeline_ratio: 0.20,
+                        dock_right_ratio: 0.45,
+                        dock_bottom_ratio: 0.30,
                         dock_event_browser: true,
                         dock_api_inspector: true,
                         dock_drag_x: None,
                         details_drag_x: None,
                         timeline_drag_y: None,
+                        right_drag_y: None,
+                        bottom_drag_y: None,
                         show_aux_tabs: cfg!(test),
                         show_textures_tab: true,
                         show_pipeline_tab: true,
@@ -27511,11 +27606,15 @@ mod ui_tests {
                         dock_api_ratio: 0.7,
                         dock_details_ratio: 0.72,
                         dock_timeline_ratio: 0.20,
+                        dock_right_ratio: 0.45,
+                        dock_bottom_ratio: 0.30,
                         dock_event_browser: true,
                         dock_api_inspector: true,
                         dock_drag_x: None,
                         details_drag_x: None,
                         timeline_drag_y: None,
+                        right_drag_y: None,
+                        bottom_drag_y: None,
                         show_aux_tabs: cfg!(test),
                         show_textures_tab: true,
                         show_pipeline_tab: true,
@@ -28366,11 +28465,15 @@ mod ui_tests {
                         dock_api_ratio: 0.7,
                         dock_details_ratio: 0.72,
                         dock_timeline_ratio: 0.20,
+                        dock_right_ratio: 0.45,
+                        dock_bottom_ratio: 0.30,
                         dock_event_browser: true,
                         dock_api_inspector: true,
                         dock_drag_x: None,
                         details_drag_x: None,
                         timeline_drag_y: None,
+                        right_drag_y: None,
+                        bottom_drag_y: None,
                         show_aux_tabs: cfg!(test),
                         show_textures_tab: true,
                         show_pipeline_tab: true,
@@ -35408,6 +35511,8 @@ mod ui_tests {
             assert!((view.dock_api_ratio - 0.7).abs() < f32::EPSILON);
             assert!((view.dock_details_ratio - 0.72).abs() < f32::EPSILON);
             assert!((view.dock_timeline_ratio - 0.20).abs() < f32::EPSILON);
+            assert!((view.dock_right_ratio - 0.45).abs() < f32::EPSILON);
+            assert!((view.dock_bottom_ratio - 0.30).abs() < f32::EPSILON);
         });
 
         // Drag Event Browser to the right details column and back.
@@ -35422,6 +35527,24 @@ mod ui_tests {
                 view.read(cx)
                     .dock_right
                     .contains(&FloatingDock::EventBrowser)
+            );
+        });
+        let right_before = cx.update(|cx| view.read(cx).dock_right_ratio);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let splitter = window.find("right-splitter").bounds();
+            let from = point(
+                splitter.origin.x + splitter.size.width / 2.0,
+                splitter.origin.y + splitter.size.height / 2.0,
+            );
+            window.drag(from, point(from.x, from.y + px(40.)), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                view.read(cx).dock_right_ratio > right_before,
+                "right splitter drag must grow the right-docked panel area"
             );
         });
         cx.update_window(handle.into(), |_, window, cx| {
@@ -35454,6 +35577,24 @@ mod ui_tests {
                     .contains(&FloatingDock::EventBrowser)
             );
         });
+        let bottom_before = cx.update(|cx| view.read(cx).dock_bottom_ratio);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let splitter = window.find("bottom-splitter").bounds();
+            let from = point(
+                splitter.origin.x + splitter.size.width / 2.0,
+                splitter.origin.y + splitter.size.height / 2.0,
+            );
+            window.drag(from, point(from.x, from.y - px(40.)), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                view.read(cx).dock_bottom_ratio > bottom_before,
+                "bottom splitter drag upward must grow the bottom dock row"
+            );
+        });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(window.find("dock-event-browser").visible());
@@ -35477,6 +35618,8 @@ mod ui_tests {
                 view.dock_api_ratio = 0.55;
                 view.dock_details_ratio = 0.66;
                 view.dock_timeline_ratio = 0.34;
+                view.dock_right_ratio = 0.52;
+                view.dock_bottom_ratio = 0.36;
                 view.dock_bottom = vec![FloatingDock::ApiInspector];
                 view.dock_event_browser = false;
                 view.dock_api_inspector = false;
@@ -35487,6 +35630,8 @@ mod ui_tests {
                 view.dock_api_ratio = 0.7;
                 view.dock_details_ratio = 0.72;
                 view.dock_timeline_ratio = 0.40;
+                view.dock_right_ratio = 0.45;
+                view.dock_bottom_ratio = 0.30;
                 view.dock_bottom.clear();
                 view.dock_event_browser = true;
                 view.dock_api_inspector = true;
@@ -35497,6 +35642,8 @@ mod ui_tests {
                 assert!((view.dock_api_ratio - 0.55).abs() < f32::EPSILON);
                 assert!((view.dock_details_ratio - 0.66).abs() < f32::EPSILON);
                 assert!((view.dock_timeline_ratio - 0.34).abs() < f32::EPSILON);
+                assert!((view.dock_right_ratio - 0.52).abs() < f32::EPSILON);
+                assert!((view.dock_bottom_ratio - 0.36).abs() < f32::EPSILON);
                 assert!(view.dock_bottom.contains(&FloatingDock::ApiInspector));
                 view.dock_bottom.clear();
                 assert!(!view.dock_event_browser);
