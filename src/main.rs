@@ -797,9 +797,11 @@ enum CaptureTab {
     Counters,
     Descriptors,
     Annotations,
+    Pipeline,
+    CaptureDialog,
 }
 
-const CAPTURE_TABS: [CaptureTab; 15] = [
+const CAPTURE_TABS: [CaptureTab; 17] = [
     CaptureTab::Events,
     CaptureTab::ApiCalls,
     CaptureTab::Parameters,
@@ -815,11 +817,13 @@ const CAPTURE_TABS: [CaptureTab; 15] = [
     CaptureTab::Counters,
     CaptureTab::Descriptors,
     CaptureTab::Annotations,
+    CaptureTab::Pipeline,
+    CaptureTab::CaptureDialog,
 ];
 
 impl CaptureTab {
     fn name(self) -> &'static str {
-        const NAMES: [&str; 15] = [
+        const NAMES: [&str; 17] = [
             "Events",
             "ApiCalls",
             "Parameters",
@@ -835,6 +839,8 @@ impl CaptureTab {
             "Counters",
             "Descriptors",
             "Annotations",
+            "Pipeline",
+            "CaptureDialog",
         ];
         NAMES[self as usize]
     }
@@ -952,6 +958,7 @@ struct Workspace {
     dock_event_browser: bool,
     dock_api_inspector: bool,
     dock_drag_x: Option<f32>,
+    show_aux_tabs: bool,
     selected_texture: Option<usize>,
     texture_selection: TextureSelection,
     texture_saved_selection: std::collections::HashMap<usize, (TextureSelection, u64)>,
@@ -15205,6 +15212,146 @@ impl Workspace {
     }
 
     /// RenderDoc-style dock header used by the left Event Browser/API Inspector.
+    fn pipeline_state_panel(&self) -> gpui::Div {
+        let mut rows: Vec<String> = Vec::new();
+        if let Some(pipeline) = &self.pipeline {
+            rows.push(format!(
+                "{}: {}",
+                self.t("Event", "事件"),
+                pipeline.event_id
+            ));
+            rows.push(format!(
+                "{}: {}",
+                self.t("Topology", "拓扑"),
+                pipeline.topology
+            ));
+            rows.push(format!(
+                "{}: {} / {}",
+                self.t("Multiview", "多视图"),
+                pipeline.multiview_count.unwrap_or(1),
+                self.t("restart", "重启")
+            ));
+            for shader in &pipeline.shaders {
+                let name = if shader.resource.bound {
+                    shader.resource.name.clone()
+                } else {
+                    self.t("<unbound>", "<未绑定>").to_owned()
+                };
+                rows.push(format!("{}: {name}", shader.stage));
+            }
+            for (index, output) in pipeline.outputs.iter().enumerate() {
+                if output.bound {
+                    rows.push(format!("output {index}: {}", output.name));
+                }
+            }
+            if let Some(attachments) = &pipeline.color_attachments {
+                for (index, attachment) in attachments.iter().enumerate() {
+                    if attachment.resource.bound {
+                        rows.push(format!(
+                            "color {index}: {} · {}",
+                            attachment.resource.name, attachment.format
+                        ));
+                    }
+                }
+            }
+            if let Some(depth) = &pipeline.depth_attachment {
+                if depth.resource.bound {
+                    rows.push(format!(
+                        "depth: {} · {}",
+                        depth.resource.name, depth.format
+                    ));
+                }
+            }
+            if let Some(fixed) = &pipeline.fixed_state {
+                rows.push(format!(
+                    "raster: fill {} · cull {} · front_ccw {}",
+                    fixed.raster.fill, fixed.raster.cull, fixed.raster.front_ccw
+                ));
+                rows.push(format!(
+                    "depth: enabled {} · writes {} · function {}",
+                    fixed.depth.enabled, fixed.depth.writes, fixed.depth.function
+                ));
+                rows.push(format!(
+                    "stencil: enabled {} · blends {}",
+                    fixed.stencil_enabled,
+                    fixed.blends.len()
+                ));
+            }
+        } else {
+            rows.push(
+                self.t(
+                    "Select an event to inspect pipeline state.",
+                    "选择事件以查看看管线状态。",
+                )
+                .to_owned(),
+            );
+        }
+        div().p_3().flex().flex_col().gap_2().child(
+            div()
+                .id("pipeline-state-panel")
+                .test_support()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .text_lg()
+                        .child(self.t("Pipeline State", "管线状态")),
+                )
+                .children(rows.into_iter().map(|line| div().text_sm().child(line))),
+        )
+    }
+
+    fn capture_dialog_panel(&self) -> gpui::Div {
+        let capture = self
+            .capture
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        let snapshot = self.snapshot.as_ref();
+        let mut rows = vec![format!("{}: {capture}", self.t("Capture", "捕获"))];
+        if let Some(snapshot) = snapshot {
+            rows.push(format!(
+                "{}: {} / {} / {}",
+                self.t("Counts", "计数"),
+                snapshot.resource_count,
+                snapshot.texture_count,
+                snapshot.buffer_count
+            ));
+            rows.push(format!(
+                "{}: {}",
+                self.t("Frame", "帧"),
+                snapshot.frame
+            ));
+            rows.push(format!(
+                "{}: {}",
+                self.t("API", "API"),
+                snapshot.api
+            ));
+        }
+        rows.push(
+            self.t(
+                "Capture launch settings are edited on the Workspace page.",
+                "捕获启动设置在 Workspace 页面编辑。",
+            )
+            .to_owned(),
+        );
+        div().p_3().flex().flex_col().gap_2().child(
+            div()
+                .id("capture-dialog-panel")
+                .test_support()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .text_lg()
+                        .child(self.t("Capture Dialog", "捕获对话框")),
+                )
+                .children(rows.into_iter().map(|line| div().text_sm().child(line))),
+        )
+    }
+
     fn dock_header(&self, title: &str) -> impl IntoElement {
         div()
             .px_2()
@@ -15656,6 +15803,7 @@ impl Workspace {
             CaptureTab::Resources => self.resource_visible.len(),
             CaptureTab::VertexInput => self.input_page.as_ref().map_or(0, |page| page.rows.len()),
             CaptureTab::Mesh => mesh_lines.len(),
+            CaptureTab::Pipeline | CaptureTab::CaptureDialog => 0,
             CaptureTab::Textures => snapshot.textures.len(),
             CaptureTab::Buffers => snapshot.buffers.len(),
             CaptureTab::Events => self.event_tree.visible.len() + 1,
@@ -16645,6 +16793,8 @@ impl Workspace {
             )
             .flex_1()
             .into_any_element()
+        } else if self.tab == CaptureTab::Pipeline || self.tab == CaptureTab::CaptureDialog {
+            div().flex_1().into_any_element()
         } else {
             div()
                 .id("event-list")
@@ -20428,6 +20578,10 @@ impl Workspace {
                 .when(self.selected_texture.is_none(), |view| {
                     view.child(div().text_color(rgb(0x9eacc0)).child(texture_empty))
                 })
+        } else if self.tab == CaptureTab::Pipeline {
+            self.pipeline_state_panel()
+        } else if self.tab == CaptureTab::CaptureDialog {
+            self.capture_dialog_panel()
         } else {
             div()
                 .flex()
@@ -21169,42 +21323,10 @@ impl Workspace {
                                 div()
                                     .flex()
                                     .flex_wrap()
+                                    .items_center()
                                     .gap_2()
                                     .px_3()
                                     .py_2()
-                                    .child(button(
-                                        "events-tab",
-                                        events,
-                                        self.tab == CaptureTab::Events,
-                                        |this, cx| {
-                                            this.tab = CaptureTab::Events;
-                                            cx.notify();
-                                        },
-                                        cx,
-                                    ))
-                                    .child(button(
-                                        "api-calls-tab",
-                                        api_calls,
-                                        self.tab == CaptureTab::ApiCalls,
-                                        |this, cx| {
-                                            this.tab = CaptureTab::ApiCalls;
-                                            cx.notify();
-                                        },
-                                        cx,
-                                    ))
-                                    .child(button(
-                                        "parameters-tab",
-                                        parameters_label,
-                                        self.tab == CaptureTab::Parameters,
-                                        |this, cx| {
-                                            this.tab = CaptureTab::Parameters;
-                                            if this.structure.page.is_none() {
-                                                this.read_structure(Vec::new(), 0, cx);
-                                            }
-                                            cx.notify();
-                                        },
-                                        cx,
-                                    ))
                                     .child(button(
                                         "textures-tab",
                                         textures_label,
@@ -21216,29 +21338,18 @@ impl Workspace {
                                         cx,
                                     ))
                                     .child(button(
-                                        "buffers-tab",
-                                        buffers_label,
-                                        self.tab == CaptureTab::Buffers,
+                                        "pipeline-tab",
+                                        self.t("Pipeline State", "管线状态"),
+                                        self.tab == CaptureTab::Pipeline,
                                         |this, cx| {
-                                            this.tab = CaptureTab::Buffers;
-                                            this.refresh_buffer_formats(cx);
-                                            cx.notify();
-                                        },
-                                        cx,
-                                    ))
-                                    .child(button(
-                                        "shaders-tab",
-                                        shaders_tab_label,
-                                        self.tab == CaptureTab::Shaders,
-                                        |this, cx| {
-                                            this.tab = CaptureTab::Shaders;
+                                            this.tab = CaptureTab::Pipeline;
                                             cx.notify();
                                         },
                                         cx,
                                     ))
                                     .child(button(
                                         "mesh-tab",
-                                        self.t("Mesh", "网格"),
+                                        self.t("Mesh Preview", "网格预览"),
                                         self.tab == CaptureTab::Mesh,
                                         |this, cx| {
                                             this.tab = CaptureTab::Mesh;
@@ -21250,71 +21361,25 @@ impl Workspace {
                                         cx,
                                     ))
                                     .child(button(
-                                        "vertex-input-tab",
-                                        self.t("Vertex input", "顶点输入"),
-                                        self.tab == CaptureTab::VertexInput,
+                                        "capture-dialog-tab",
+                                        self.t("Capture Dialog", "捕获对话框"),
+                                        self.tab == CaptureTab::CaptureDialog,
                                         |this, cx| {
-                                            this.tab = CaptureTab::VertexInput;
-                                            if this.input_page.is_none() {
-                                                this.load_vertex_instance(cx);
-                                            }
+                                            this.tab = CaptureTab::CaptureDialog;
                                             cx.notify();
                                         },
                                         cx,
                                     ))
                                     .child(button(
-                                        "resources-tab",
-                                        self.t("Resources", "资源"),
-                                        self.tab == CaptureTab::Resources,
+                                        "window-menu",
+                                        self.t("Window", "窗口"),
+                                        self.show_aux_tabs,
                                         |this, cx| {
-                                            this.tab = CaptureTab::Resources;
-                                            this.refresh_resources();
+                                            this.show_aux_tabs = !this.show_aux_tabs;
                                             cx.notify();
                                         },
                                         cx,
                                     ))
-                                    .child(button(
-                                        "messages-tab",
-                                        self.t(
-                                            "Messages",
-                                            "调试消息",
-                                        ),
-                                        self.tab == CaptureTab::Messages,
-                                        |this, cx| {
-                                            this.tab = CaptureTab::Messages;
-                                            cx.notify();
-                                        },
-                                        cx,
-                                    ))
-                                    .child(button("shader-messages-tab", self.t("Shader messages", "着色器消息"), self.tab == CaptureTab::ShaderMessages,
-                                        |this, cx| { this.tab = CaptureTab::ShaderMessages; if this.shader_message_page.is_none() { this.read_shader_messages(0, cx); } cx.notify(); }, cx))
-                                    .child(button(
-                                        "statistics-tab",
-                                        self.t("Statistics", "统计"),
-                                        self.tab == CaptureTab::Statistics,
-                                        |this, cx| {
-                                            this.tab = CaptureTab::Statistics;
-                                            cx.notify();
-                                        },
-                                        cx,
-                                    ))
-                                    .child(button(
-                                        "counters-tab",
-                                        self.t(
-                                            "GPU counters",
-                                            "GPU 计数器",
-                                        ),
-                                        self.tab == CaptureTab::Counters,
-                                        |this, cx| {
-                                            this.tab = CaptureTab::Counters;
-                                            cx.notify();
-                                        },
-                                        cx,
-                                    ))
-                                    .child(button("descriptors-tab", self.t("Descriptors", "描述符"), self.tab == CaptureTab::Descriptors,
-                                        |this, cx| { this.tab = CaptureTab::Descriptors; if this.descriptor_page.is_none() { this.read_descriptors(this.descriptor_store, 0, cx); } cx.notify(); }, cx))
-                                    .child(button("annotations-tab", self.t("Annotations", "注释与书签"), self.tab == CaptureTab::Annotations,
-                                        |this, cx| { this.tab = CaptureTab::Annotations; if this.annotations.notes.is_none() { this.load_annotations(cx); } cx.notify(); }, cx))
                                     .child(
                                         div()
                                             .self_center()
@@ -21323,6 +21388,164 @@ impl Workspace {
                                             .child(count.to_string()),
                                     ),
                             )
+                            .when(self.show_aux_tabs, |view| {
+                                view.child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .items_center()
+                                        .gap_2()
+                                        .px_3()
+                                        .pb_2()
+                                        .child(button(
+                                            "events-tab",
+                                            events,
+                                            self.tab == CaptureTab::Events,
+                                            |this, cx| {
+                                                this.tab = CaptureTab::Events;
+                                                cx.notify();
+                                            },
+                                            cx,
+                                        ))
+                                        .child(button(
+                                            "api-calls-tab",
+                                            api_calls,
+                                            self.tab == CaptureTab::ApiCalls,
+                                            |this, cx| {
+                                                this.tab = CaptureTab::ApiCalls;
+                                                cx.notify();
+                                            },
+                                            cx,
+                                        ))
+                                        .child(button(
+                                            "parameters-tab",
+                                            parameters_label,
+                                            self.tab == CaptureTab::Parameters,
+                                            |this, cx| {
+                                                this.tab = CaptureTab::Parameters;
+                                                if this.structure.page.is_none() {
+                                                    this.read_structure(Vec::new(), 0, cx);
+                                                }
+                                                cx.notify();
+                                            },
+                                            cx,
+                                        ))
+                                        .child(button(
+                                            "buffers-tab",
+                                            buffers_label,
+                                            self.tab == CaptureTab::Buffers,
+                                            |this, cx| {
+                                                this.tab = CaptureTab::Buffers;
+                                                this.refresh_buffer_formats(cx);
+                                                cx.notify();
+                                            },
+                                            cx,
+                                        ))
+                                        .child(button(
+                                            "shaders-tab",
+                                            shaders_tab_label,
+                                            self.tab == CaptureTab::Shaders,
+                                            |this, cx| {
+                                                this.tab = CaptureTab::Shaders;
+                                                cx.notify();
+                                            },
+                                            cx,
+                                        ))
+                                        .child(button(
+                                            "vertex-input-tab",
+                                            self.t("Vertex input", "顶点输入"),
+                                            self.tab == CaptureTab::VertexInput,
+                                            |this, cx| {
+                                                this.tab = CaptureTab::VertexInput;
+                                                if this.input_page.is_none() {
+                                                    this.load_vertex_instance(cx);
+                                                }
+                                                cx.notify();
+                                            },
+                                            cx,
+                                        ))
+                                        .child(button(
+                                            "resources-tab",
+                                            self.t("Resources", "资源"),
+                                            self.tab == CaptureTab::Resources,
+                                            |this, cx| {
+                                                this.tab = CaptureTab::Resources;
+                                                this.refresh_resources();
+                                                cx.notify();
+                                            },
+                                            cx,
+                                        ))
+                                        .child(button(
+                                            "messages-tab",
+                                            self.t("Messages", "调试消息"),
+                                            self.tab == CaptureTab::Messages,
+                                            |this, cx| {
+                                                this.tab = CaptureTab::Messages;
+                                                cx.notify();
+                                            },
+                                            cx,
+                                        ))
+                                        .child(button(
+                                            "shader-messages-tab",
+                                            self.t("Shader messages", "着色器消息"),
+                                            self.tab == CaptureTab::ShaderMessages,
+                                            |this, cx| {
+                                                this.tab = CaptureTab::ShaderMessages;
+                                                if this.shader_message_page.is_none() {
+                                                    this.read_shader_messages(0, cx);
+                                                }
+                                                cx.notify();
+                                            },
+                                            cx,
+                                        ))
+                                        .child(button(
+                                            "statistics-tab",
+                                            self.t("Statistics", "统计"),
+                                            self.tab == CaptureTab::Statistics,
+                                            |this, cx| {
+                                                this.tab = CaptureTab::Statistics;
+                                                cx.notify();
+                                            },
+                                            cx,
+                                        ))
+                                        .child(button(
+                                            "counters-tab",
+                                            self.t("GPU counters", "GPU 计数器"),
+                                            self.tab == CaptureTab::Counters,
+                                            |this, cx| {
+                                                this.tab = CaptureTab::Counters;
+                                                cx.notify();
+                                            },
+                                            cx,
+                                        ))
+                                        .child(button(
+                                            "descriptors-tab",
+                                            self.t("Descriptors", "描述符"),
+                                            self.tab == CaptureTab::Descriptors,
+                                            |this, cx| {
+                                                this.tab = CaptureTab::Descriptors;
+                                                if this.descriptor_page.is_none() {
+                                                    this.read_descriptors(this.descriptor_store, 0, cx);
+                                                }
+                                                cx.notify();
+                                            },
+                                            cx,
+                                        ))
+                                        .child(button(
+                                            "annotations-tab",
+                                            self.t("Annotations", "注释与书签"),
+                                            self.tab == CaptureTab::Annotations,
+                                            |this, cx| {
+                                                this.tab = CaptureTab::Annotations;
+                                                if this.annotations.notes.is_none() {
+                                                    this.load_annotations(cx);
+                                                }
+                                                cx.notify();
+                                            },
+                                            cx,
+                                        )),
+                                )
+                            })
                             .when(self.tab == CaptureTab::Resources, |view| {
                                 let label = self.t(
                                     "Filter resources by name, type or #index",
@@ -23470,6 +23693,7 @@ fn main() {
                         dock_event_browser: true,
                         dock_api_inspector: true,
                         dock_drag_x: None,
+                        show_aux_tabs: cfg!(test),
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
@@ -24363,6 +24587,7 @@ mod ui_tests {
                         dock_event_browser: true,
                         dock_api_inspector: true,
                         dock_drag_x: None,
+                        show_aux_tabs: cfg!(test),
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
@@ -25196,6 +25421,7 @@ mod ui_tests {
                         dock_event_browser: true,
                         dock_api_inspector: true,
                         dock_drag_x: None,
+                        show_aux_tabs: cfg!(test),
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
@@ -32203,6 +32429,56 @@ mod ui_tests {
                 assert!((view.dock_api_ratio - 0.55).abs() < f32::EPSILON);
                 assert!(!view.dock_event_browser);
                 assert!(!view.dock_api_inspector);
+            })
+        });
+
+        // RenderDoc default main group: Texture Viewer / Pipeline State /
+        // Mesh Preview / Capture Dialog, with auxiliary panels behind Window.
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.dock_event_browser = true;
+                view.dock_api_inspector = true;
+                view.show_aux_tabs = false;
+                view.tab = CaptureTab::Textures;
+                cx.notify();
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("textures-tab").visible());
+            assert!(window.find("pipeline-tab").visible());
+            assert!(window.find("mesh-tab").visible());
+            assert!(window.find("capture-dialog-tab").visible());
+            assert!(window.find("window-menu").visible());
+            window.click("pipeline-tab", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("pipeline-state-panel").visible());
+            window.click("capture-dialog-tab", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("capture-dialog-panel").visible());
+            window.click("window-menu", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("events-tab").visible());
+            assert!(window.find("shaders-tab").visible());
+        })
+        .unwrap();
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.show_aux_tabs = true;
+                view.tab = CaptureTab::Textures;
+                cx.notify();
             })
         });
     }
