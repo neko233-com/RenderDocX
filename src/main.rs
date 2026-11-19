@@ -835,6 +835,7 @@ enum FloatingDock {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FloatingMainPanel {
     TextureViewer,
+    Mesh,
     Pipeline,
     CaptureDialog,
 }
@@ -1310,6 +1311,7 @@ impl FloatingMainPanelWindow {
     ) -> Self {
         let title = match panel {
             FloatingMainPanel::TextureViewer => "Texture Viewer — RenderDocX",
+            FloatingMainPanel::Mesh => "Mesh Preview — RenderDocX",
             FloatingMainPanel::Pipeline => "Pipeline State — RenderDocX",
             FloatingMainPanel::CaptureDialog => "Capture Dialog — RenderDocX",
         };
@@ -1337,6 +1339,7 @@ impl Render for FloatingMainPanelWindow {
             let workspace = self.workspace.read(cx);
             let title = match self.panel {
                 FloatingMainPanel::TextureViewer => workspace.t("Texture Viewer", "纹理查看器"),
+                FloatingMainPanel::Mesh => workspace.t("Mesh Preview", "网格预览"),
                 FloatingMainPanel::Pipeline => workspace.t("Pipeline State", "管线状态"),
                 FloatingMainPanel::CaptureDialog => workspace.t("Capture Dialog", "捕获对话框"),
             };
@@ -1346,6 +1349,10 @@ impl Render for FloatingMainPanelWindow {
             FloatingMainPanel::TextureViewer => self
                 .workspace
                 .update(cx, |workspace, cx| workspace.texture_viewer_content(false, cx))
+                .into_any_element(),
+            FloatingMainPanel::Mesh => self
+                .workspace
+                .update(cx, |workspace, cx| workspace.mesh_preview_content(false, cx))
                 .into_any_element(),
             FloatingMainPanel::Pipeline => self
                 .workspace
@@ -1360,6 +1367,7 @@ impl Render for FloatingMainPanelWindow {
         let panel = self.panel;
         let dock_id = match panel {
             FloatingMainPanel::TextureViewer => "floating-texture-viewer-dock",
+            FloatingMainPanel::Mesh => "floating-mesh-preview-dock",
             FloatingMainPanel::Pipeline => "floating-pipeline-dock",
             FloatingMainPanel::CaptureDialog => "floating-capture-dialog-dock",
         };
@@ -15162,6 +15170,308 @@ impl Workspace {
             .into_any_element()
     }
 
+    fn mesh_lines(&self) -> Vec<String> {
+if let Some(page) = &self.mesh.draw {
+            page.rows
+                .iter()
+                .map(|row| {
+                    let row_label = match (row.meshlet, row.meshlet_row) {
+                        (Some(meshlet), Some(local_row)) => format!("{meshlet}[{local_row}]"),
+                        _ => row.row.to_string(),
+                    };
+                    let index = match (row.raw_index, row.vertex) {
+                        (Some(raw), Some(vertex)) => format!("{raw} → {vertex}"),
+                        (None, Some(vertex)) => vertex.to_string(),
+                        (Some(raw), None) => raw.to_string(),
+                        _ => "—".to_owned(),
+                    };
+                    let attributes = row
+                        .attributes
+                        .iter()
+                        .map(|attr| {
+                            let value = attr
+                                .values
+                                .as_ref()
+                                .map(|v| v.join(", "))
+                                .or_else(|| attr.hex.clone())
+                                .unwrap_or_else(|| "—".into());
+                            format!("{}={value}", attr.name)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" · ");
+                    let attributes = if attributes.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {attributes}")
+                    };
+                    if row.restart {
+                        format!(
+                            "{}: {index} · {}",
+                            row_label,
+                            self.t("Restart", "重启")
+                        )
+                    } else if let Some(position) = &row.position {
+                        format!("{}: {index} → {position:?}{attributes}", row_label)
+                    } else {
+                        format!(
+                            "{}: {index} · {}{attributes}",
+                            row_label,
+                            match row.unavailable {
+                                Some("index_out_of_bounds") => self.t(
+                                    "Index out of bounds",
+                                    "索引越界",
+                                ),
+                                Some("vertex_out_of_bounds") => self.t(
+                                    "Vertex out of bounds",
+                                    "顶点越界",
+                                ),
+                                Some("vertex_buffer_unavailable") => self.t(
+                                    "Vertex buffer unavailable",
+                                    "顶点缓冲区不可用",
+                                ),
+                                Some("unsupported_format") => self.t(
+                                    "Unsupported format",
+                                    "格式暂不支持",
+                                ),
+                                _ => self.t("Unavailable", "不可用"),
+                            }
+                        )
+                    }
+                })
+                .collect()
+        } else {
+            match (&self.mesh.info, &self.mesh.bytes) {
+                (Some(info), Some(bytes)) => {
+                    if self.mesh.kind == MeshBufferKind::Vertex
+                        && info.stage == 3
+                        && info.vertex_stride > 0
+                        && self.mesh.offset % u64::from(info.vertex_stride) == 0
+                        && let Ok(offset) =
+                            u32::try_from(self.mesh.offset / u64::from(info.vertex_stride))
+                    {
+                        match renderdocx::task_payload::page(
+                            info,
+                            offset,
+                            (bytes.len().div_ceil(info.vertex_stride as usize) as u32)
+                                .min(renderdocx::task_payload::PAGE_LIMIT),
+                            |_, _| Ok(bytes.clone()),
+                        ) {
+                            Ok(page) => page
+                                .rows
+                                .into_iter()
+                                .map(|row| {
+                                    let fields = row
+                                        .fields
+                                        .iter()
+                                        .map(|field| {
+                                            format!("{}={}", field.name, field.values.join(", "))
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join(" · ");
+                                    let dispatch = row
+                                        .dispatch
+                                        .map(|v| format!(" [{}, {}, {}]", v[0], v[1], v[2]))
+                                        .unwrap_or_default();
+                                    let error = if row.error.is_some() {
+                                        format!(
+                                            " · {}",
+                                            self.t(
+                                                "Some fields could not be decoded",
+                                                "部分字段无法解码",
+                                            )
+                                        )
+                                    } else {
+                                        String::new()
+                                    };
+                                    format!("{}{dispatch}: {fields}{error}", row.row)
+                                })
+                                .collect(),
+                            Err(_) => vec![
+                                self.t(
+                                    "Task payload could not be decoded",
+                                    "无法解码任务载荷",
+                                )
+                                .to_owned(),
+                            ],
+                        }
+                    } else if self.mesh.kind == MeshBufferKind::Index
+                        && let Some(indices) =
+                            renderdocx::mesh_indices::decode(info, bytes, self.mesh.offset)
+                    {
+                        indices
+                            .into_iter()
+                            .map(|index| match index.vertex {
+                                Some(vertex) => {
+                                    format!("{}: {} → {}", index.row, index.raw, vertex)
+                                }
+                                None => format!(
+                                    "{}: {} ({})",
+                                    index.row,
+                                    index.raw,
+                                    self.t("Restart", "重启")
+                                ),
+                            })
+                            .collect()
+                    } else if self.mesh.kind == MeshBufferKind::Vertex
+                        && let Some(positions) = mesh_positions(info, bytes, self.mesh.offset)
+                    {
+                        positions
+                            .into_iter()
+                            .map(|(index, values)| format!("{index}: {values:?}"))
+                            .collect::<Vec<_>>()
+                    } else {
+                        bytes
+                            .chunks(16)
+                            .enumerate()
+                            .map(|(index, chunk)| {
+                                let hex: String =
+                                    chunk.iter().map(|byte| format!("{byte:02x} ")).collect();
+                                format!("{:08X}: {hex}", self.mesh.offset + (index as u64) * 16)
+                            })
+                            .collect()
+                    }
+                }
+                _ => Vec::new(),
+            }
+        }
+    }
+
+    fn mesh_preview_content(
+        &self,
+        include_header: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let mesh_lines = self.mesh_lines();
+        let count = mesh_lines.len();
+        let lines = std::sync::Arc::new(mesh_lines);
+        let list = uniform_list(
+            "capture-mesh",
+            count,
+            cx.processor(move |this, range: std::ops::Range<usize>, _, _| {
+                range
+                    .filter_map(|index| {
+                        lines.get(index).map(|line| {
+                            let highlighted = this.mesh.highlighted_row.is_some_and(|target| {
+                                this.mesh
+                                    .draw
+                                    .as_ref()
+                                    .and_then(|page| page.rows.get(index))
+                                    .is_some_and(|row| row.row == target)
+                                    || (this.mesh.selection.stage == 3
+                                        && this.mesh.kind == MeshBufferKind::Vertex
+                                        && this.mesh.info.as_ref().is_some_and(|info| {
+                                            info.vertex_stride > 0
+                                                && this.mesh.offset
+                                                    / u64::from(info.vertex_stride)
+                                                    + index as u64
+                                                    == u64::from(target)
+                                        }))
+                            });
+                            div()
+                                .id(("mesh-row", index))
+                                .test_support()
+                                .h(px(32.))
+                                .px_3()
+                                .bg(rgb(if highlighted { 0x1f1f1f } else { 0x0a0a0a }))
+                                .when(highlighted, |row| {
+                                    row.aria_label(format!(
+                                        "{}: {line}",
+                                        if this.mesh.geometry_message_handoff {
+                                            this.t("Approximate output row", "近似输出行")
+                                        } else {
+                                            this.t("Selected invocation row", "已选调用行")
+                                        }
+                                    ))
+                                })
+                                .child(line.clone())
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .flex_1();
+        let body = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(self.mesh_toolbar(cx))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_3()
+                    .py_1()
+                    .bg(rgb(0x111111))
+                    .border_b_1()
+                    .border_color(rgb(0x1f1f1f))
+                    .text_xs()
+                    .text_color(rgb(0xa1a1aa))
+                    .child(div().w(px(72.)).flex_none().child(self.t("Row", "行")))
+                    .child(div().flex_1().child(self.t("Values", "值"))),
+            )
+            .child(list);
+        if !include_header {
+            return body.into_any_element();
+        }
+        div()
+            .id("mesh-preview-panel")
+            .test_support()
+            .size_full()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_3()
+                    .pt_2()
+                    .child(div().text_lg().child(self.t("Mesh Preview", "网格预览")))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .when_some(self.mesh.info.as_ref(), |row, info| {
+                                row.child(self.pipeline_badge(format!(
+                                    "{} {} · {}",
+                                    self.t("Event", "事件"),
+                                    info.event_id,
+                                    match info.stage {
+                                        1 => "VSOut",
+                                        2 => "GSOut",
+                                        3 => "TaskOut",
+                                        4 => "MeshOut",
+                                        _ => "?",
+                                    }
+                                )))
+                            })
+                            .when(
+                                !self
+                                    .floating_main_panels
+                                    .contains(&FloatingMainPanel::Mesh),
+                                |row| {
+                                    row.child(button(
+                                        "mesh-float",
+                                        self.t("Float", "浮动"),
+                                        false,
+                                        |this, cx| {
+                                            this.float_main_panel(FloatingMainPanel::Mesh, cx)
+                                        },
+                                        cx,
+                                    ))
+                                },
+                            ),
+                    ),
+            )
+            .child(body)
+            .into_any_element()
+    }
+
     fn mesh_toolbar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let previous_bytes = self.t("Previous bytes", "上一段字节");
         let next_bytes = self.t("Next bytes", "下一段字节");
@@ -18266,6 +18576,9 @@ impl Workspace {
             CaptureTab::Textures => self
                 .floating_main_panels
                 .contains(&FloatingMainPanel::TextureViewer),
+            CaptureTab::Mesh => self
+                .floating_main_panels
+                .contains(&FloatingMainPanel::Mesh),
             CaptureTab::Pipeline => self
                 .floating_main_panels
                 .contains(&FloatingMainPanel::Pipeline),
@@ -18301,6 +18614,12 @@ impl Workspace {
                 self.show_textures_tab = true;
                 if self.tab == CaptureTab::Textures {
                     self.tab = self.fallback_main_tab(CaptureTab::Textures);
+                }
+            }
+            FloatingMainPanel::Mesh => {
+                self.show_mesh_tab = true;
+                if self.tab == CaptureTab::Mesh {
+                    self.tab = self.fallback_main_tab(CaptureTab::Mesh);
                 }
             }
             FloatingMainPanel::Pipeline => {
@@ -18390,6 +18709,10 @@ impl Workspace {
                 self.show_textures_tab = true;
                 self.tab = CaptureTab::Textures;
             }
+            FloatingMainPanel::Mesh => {
+                self.show_mesh_tab = true;
+                self.tab = CaptureTab::Mesh;
+            }
             FloatingMainPanel::Pipeline => {
                 self.show_pipeline_tab = true;
                 self.tab = CaptureTab::Pipeline;
@@ -18409,6 +18732,10 @@ impl Workspace {
             FloatingMainPanel::TextureViewer => {
                 self.show_textures_tab = true;
                 self.tab = CaptureTab::Textures;
+            }
+            FloatingMainPanel::Mesh => {
+                self.show_mesh_tab = true;
+                self.tab = CaptureTab::Mesh;
             }
             FloatingMainPanel::Pipeline => {
                 self.show_pipeline_tab = true;
@@ -20290,169 +20617,7 @@ impl Workspace {
                     .into_any_element()
             })
             .collect();
-        let mesh_lines = if let Some(page) = &self.mesh.draw {
-            page.rows
-                .iter()
-                .map(|row| {
-                    let row_label = match (row.meshlet, row.meshlet_row) {
-                        (Some(meshlet), Some(local_row)) => format!("{meshlet}[{local_row}]"),
-                        _ => row.row.to_string(),
-                    };
-                    let index = match (row.raw_index, row.vertex) {
-                        (Some(raw), Some(vertex)) => format!("{raw} → {vertex}"),
-                        (None, Some(vertex)) => vertex.to_string(),
-                        (Some(raw), None) => raw.to_string(),
-                        _ => "—".to_owned(),
-                    };
-                    let attributes = row
-                        .attributes
-                        .iter()
-                        .map(|attr| {
-                            let value = attr
-                                .values
-                                .as_ref()
-                                .map(|v| v.join(", "))
-                                .or_else(|| attr.hex.clone())
-                                .unwrap_or_else(|| "—".into());
-                            format!("{}={value}", attr.name)
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" · ");
-                    let attributes = if attributes.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" · {attributes}")
-                    };
-                    if row.restart {
-                        format!(
-                            "{}: {index} · {}",
-                            row_label,
-                            self.t("Restart", "重启")
-                        )
-                    } else if let Some(position) = &row.position {
-                        format!("{}: {index} → {position:?}{attributes}", row_label)
-                    } else {
-                        format!(
-                            "{}: {index} · {}{attributes}",
-                            row_label,
-                            match row.unavailable {
-                                Some("index_out_of_bounds") => self.t(
-                                    "Index out of bounds",
-                                    "索引越界",
-                                ),
-                                Some("vertex_out_of_bounds") => self.t(
-                                    "Vertex out of bounds",
-                                    "顶点越界",
-                                ),
-                                Some("vertex_buffer_unavailable") => self.t(
-                                    "Vertex buffer unavailable",
-                                    "顶点缓冲区不可用",
-                                ),
-                                Some("unsupported_format") => self.t(
-                                    "Unsupported format",
-                                    "格式暂不支持",
-                                ),
-                                _ => self.t("Unavailable", "不可用"),
-                            }
-                        )
-                    }
-                })
-                .collect()
-        } else {
-            match (&self.mesh.info, &self.mesh.bytes) {
-                (Some(info), Some(bytes)) => {
-                    if self.mesh.kind == MeshBufferKind::Vertex
-                        && info.stage == 3
-                        && info.vertex_stride > 0
-                        && self.mesh.offset % u64::from(info.vertex_stride) == 0
-                        && let Ok(offset) =
-                            u32::try_from(self.mesh.offset / u64::from(info.vertex_stride))
-                    {
-                        match renderdocx::task_payload::page(
-                            info,
-                            offset,
-                            (bytes.len().div_ceil(info.vertex_stride as usize) as u32)
-                                .min(renderdocx::task_payload::PAGE_LIMIT),
-                            |_, _| Ok(bytes.clone()),
-                        ) {
-                            Ok(page) => page
-                                .rows
-                                .into_iter()
-                                .map(|row| {
-                                    let fields = row
-                                        .fields
-                                        .iter()
-                                        .map(|field| {
-                                            format!("{}={}", field.name, field.values.join(", "))
-                                        })
-                                        .collect::<Vec<_>>()
-                                        .join(" · ");
-                                    let dispatch = row
-                                        .dispatch
-                                        .map(|v| format!(" [{}, {}, {}]", v[0], v[1], v[2]))
-                                        .unwrap_or_default();
-                                    let error = if row.error.is_some() {
-                                        format!(
-                                            " · {}",
-                                            self.t(
-                                                "Some fields could not be decoded",
-                                                "部分字段无法解码",
-                                            )
-                                        )
-                                    } else {
-                                        String::new()
-                                    };
-                                    format!("{}{dispatch}: {fields}{error}", row.row)
-                                })
-                                .collect(),
-                            Err(_) => vec![
-                                self.t(
-                                    "Task payload could not be decoded",
-                                    "无法解码任务载荷",
-                                )
-                                .to_owned(),
-                            ],
-                        }
-                    } else if self.mesh.kind == MeshBufferKind::Index
-                        && let Some(indices) =
-                            renderdocx::mesh_indices::decode(info, bytes, self.mesh.offset)
-                    {
-                        indices
-                            .into_iter()
-                            .map(|index| match index.vertex {
-                                Some(vertex) => {
-                                    format!("{}: {} → {}", index.row, index.raw, vertex)
-                                }
-                                None => format!(
-                                    "{}: {} ({})",
-                                    index.row,
-                                    index.raw,
-                                    self.t("Restart", "重启")
-                                ),
-                            })
-                            .collect()
-                    } else if self.mesh.kind == MeshBufferKind::Vertex
-                        && let Some(positions) = mesh_positions(info, bytes, self.mesh.offset)
-                    {
-                        positions
-                            .into_iter()
-                            .map(|(index, values)| format!("{index}: {values:?}"))
-                            .collect::<Vec<_>>()
-                    } else {
-                        bytes
-                            .chunks(16)
-                            .enumerate()
-                            .map(|(index, chunk)| {
-                                let hex: String =
-                                    chunk.iter().map(|byte| format!("{byte:02x} ")).collect();
-                                format!("{:08X}: {hex}", self.mesh.offset + (index as u64) * 16)
-                            })
-                            .collect()
-                    }
-                }
-                _ => Vec::new(),
-            }
-        };
+        let mesh_lines = self.mesh_lines();
         let count = match self.tab {
             CaptureTab::Annotations => self
                 .annotations
@@ -21135,108 +21300,7 @@ impl Workspace {
             .flex_1()
             .into_any_element()
         } else if self.tab == CaptureTab::Mesh {
-            let lines = std::sync::Arc::new(mesh_lines);
-            let list = uniform_list(
-                "capture-mesh",
-                count,
-                cx.processor(move |this, range: std::ops::Range<usize>, _, _| {
-                    range
-                        .filter_map(|index| {
-                            lines.get(index).map(|line| {
-                                let highlighted = this.mesh.highlighted_row.is_some_and(|target| {
-                                    this.mesh
-                                        .draw
-                                        .as_ref()
-                                        .and_then(|page| page.rows.get(index))
-                                        .is_some_and(|row| row.row == target)
-                                        || (this.mesh.selection.stage == 3
-                                            && this.mesh.kind == MeshBufferKind::Vertex
-                                            && this.mesh.info.as_ref().is_some_and(|info| {
-                                                info.vertex_stride > 0
-                                                    && this.mesh.offset
-                                                        / u64::from(info.vertex_stride)
-                                                        + index as u64
-                                                        == u64::from(target)
-                                            }))
-                                });
-                                div()
-                                    .id(("mesh-row", index))
-                                    .test_support()
-                                    .h(px(32.))
-                                    .px_3()
-                                    .bg(rgb(if highlighted { 0x1f1f1f } else { 0x0a0a0a }))
-                                    .when(highlighted, |row| {
-                                        row.aria_label(format!(
-                                            "{}: {line}",
-                                            if this.mesh.geometry_message_handoff {
-                                                this.t(
-                                                    "Approximate output row",
-                                                    "近似输出行",
-                                                )
-                                            } else {
-                                                this.t(
-                                                    "Selected invocation row",
-                                                    "已选调用行",
-                                                )
-                                            }
-                                        ))
-                                    })
-                                    .child(line.clone())
-                            })
-                        })
-                        .collect::<Vec<_>>()
-                }),
-            )
-            .flex_1();
-            div()
-                .id("mesh-preview-panel")
-                .test_support()
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .px_3()
-                        .pt_2()
-                        .child(div().text_lg().child(self.t("Mesh Preview", "网格预览")))
-                        .when_some(self.mesh.info.as_ref(), |row, info| {
-                            row.child(self.pipeline_badge(format!(
-                                "{} {} · {}",
-                                self.t("Event", "事件"),
-                                info.event_id,
-                                match info.stage {
-                                    1 => "VSOut",
-                                    2 => "GSOut",
-                                    3 => "TaskOut",
-                                    4 => "MeshOut",
-                                    _ => "?",
-                                }
-                            )))
-                        }),
-                )
-                .child(self.mesh_toolbar(cx))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .px_3()
-                        .py_1()
-                        .bg(rgb(0x111111))
-                        .border_b_1()
-                        .border_color(rgb(0x1f1f1f))
-                        .text_xs()
-                        .text_color(rgb(0xa1a1aa))
-                        .child(div().w(px(72.)).flex_none().child(self.t("Row", "行")))
-                        .child(div().flex_1().child(self.t("Values", "值"))),
-                )
-                .child(list)
-                .into_any_element()
+            self.mesh_preview_content(true, cx)
         } else if self.tab == CaptureTab::Parameters {
             uniform_list(
                 "capture-structured-children",
@@ -37888,6 +37952,48 @@ mod ui_tests {
                     .contains(&FloatingMainPanel::TextureViewer)
             );
             assert_eq!(view.read(cx).tab, CaptureTab::Textures);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("mesh-tab", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("mesh-preview-panel").visible());
+            window.click("mesh-float", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                view.read(cx)
+                    .floating_main_panels
+                    .contains(&FloatingMainPanel::Mesh)
+            );
+        });
+        let mesh_window = cx.update(|cx| {
+            view.read(cx)
+                .floating_main_windows
+                .iter()
+                .find(|(panel, _)| *panel == FloatingMainPanel::Mesh)
+                .map(|(_, handle)| *handle)
+                .expect("mesh preview float must open a window")
+        });
+        let _ = cx.update_window(mesh_window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("mesh-buffer-vertex").visible());
+            window.click("floating-mesh-preview-dock", cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                !view.read(cx)
+                    .floating_main_panels
+                    .contains(&FloatingMainPanel::Mesh)
+            );
+            assert_eq!(view.read(cx).tab, CaptureTab::Mesh);
         });
         cx.update(|cx| {
             view.update(cx, |view, cx| {
