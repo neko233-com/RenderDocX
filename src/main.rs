@@ -1004,6 +1004,7 @@ struct Workspace {
     floating_docks: Vec<FloatingDock>,
     floating_windows: Vec<(FloatingDock, gpui::WindowHandle<FloatingDockWindow>)>,
     dock_right: Vec<FloatingDock>,
+    dock_bottom: Vec<FloatingDock>,
     selected_texture: Option<usize>,
     texture_selection: TextureSelection,
     texture_saved_selection: std::collections::HashMap<usize, (TextureSelection, u64)>,
@@ -4743,6 +4744,7 @@ impl Workspace {
             main_tab_order: self.main_tab_order.iter().map(|tab| tab.name().to_owned()).collect(),
             aux_tab_order: self.aux_tab_order.iter().map(|tab| tab.name().to_owned()).collect(),
             dock_right: self.dock_right.iter().map(|dock| match dock { FloatingDock::EventBrowser => "event_browser".to_owned(), FloatingDock::ApiInspector => "api_inspector".to_owned() }).collect(),
+            dock_bottom: self.dock_bottom.iter().map(|dock| match dock { FloatingDock::EventBrowser => "event_browser".to_owned(), FloatingDock::ApiInspector => "api_inspector".to_owned() }).collect(),
             event_browser_shown: self.dock_event_browser,
             api_inspector_shown: self.dock_api_inspector,
         };
@@ -4787,6 +4789,7 @@ impl Workspace {
         self.main_tab_order = normalize_main_tab_order(&layout.main_tab_order);
         self.aux_tab_order = normalize_aux_tab_order(&layout.aux_tab_order);
         self.dock_right = normalize_right_docks(&layout.dock_right);
+        self.dock_bottom = normalize_right_docks(&layout.dock_bottom);
         self.dock_event_browser = layout.event_browser_shown;
         self.dock_api_inspector = layout.api_inspector_shown;
         self.status = Some(format!("{} {slot}", self.t("Loaded window layout", "已加载窗口布局")));
@@ -15652,6 +15655,7 @@ impl Workspace {
         close_id: Option<&'static str>,
         close_dock: Option<FloatingDock>,
         right_docked: bool,
+        bottom_docked: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let mut actions = div().flex().items_center().gap_1();
@@ -15669,7 +15673,7 @@ impl Workspace {
             );
         }
         if let Some(dock) = float_dock {
-            let (side_id, side_label) = if right_docked {
+            let (side_id, side_label) = if right_docked || bottom_docked {
                 (
                     match dock {
                         FloatingDock::EventBrowser => "dock-left-event-browser",
@@ -15696,10 +15700,14 @@ impl Workspace {
                     .hover(|view| view.bg(rgb(0x262626)))
                     .child(side_label)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if right_docked {
+                        if right_docked || bottom_docked {
                             this.dock_right.retain(|item| *item != dock);
-                        } else if !this.dock_right.contains(&dock) {
-                            this.dock_right.push(dock);
+                            this.dock_bottom.retain(|item| *item != dock);
+                        } else {
+                            this.dock_bottom.retain(|item| *item != dock);
+                            if !this.dock_right.contains(&dock) {
+                                this.dock_right.push(dock);
+                            }
                         }
                         match dock {
                             FloatingDock::EventBrowser => this.dock_event_browser = true,
@@ -15708,6 +15716,33 @@ impl Workspace {
                         cx.notify();
                     })),
             );
+            if !right_docked && !bottom_docked {
+                let bottom_id = match dock {
+                    FloatingDock::EventBrowser => "dock-bottom-event-browser",
+                    FloatingDock::ApiInspector => "dock-bottom-api-inspector",
+                };
+                actions = actions.child(
+                    div()
+                        .id(bottom_id)
+                        .test_support()
+                        .cursor_pointer()
+                        .px_1()
+                        .rounded_md()
+                        .hover(|view| view.bg(rgb(0x262626)))
+                        .child("⇩")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.dock_right.retain(|item| *item != dock);
+                            if !this.dock_bottom.contains(&dock) {
+                                this.dock_bottom.push(dock);
+                            }
+                            match dock {
+                                FloatingDock::EventBrowser => this.dock_event_browser = true,
+                                FloatingDock::ApiInspector => this.dock_api_inspector = true,
+                            }
+                            cx.notify();
+                        })),
+                );
+            }
         }
         if let (Some(id), Some(dock)) = (close_id, close_dock) {
             actions = actions.child(
@@ -15759,6 +15794,7 @@ impl Workspace {
         cx: &mut Context<Self>,
         floating: bool,
         right_docked: bool,
+        bottom_docked: bool,
     ) -> gpui::AnyElement {
         let rows: Vec<(usize, String, String)> = {
             let Some(snapshot) = self.snapshot.as_ref() else {
@@ -15849,6 +15885,7 @@ impl Workspace {
                 Some("dock-close-event-browser"),
                 Some(FloatingDock::EventBrowser),
                 right_docked,
+                bottom_docked,
                 cx,
             ));
         }
@@ -15860,6 +15897,7 @@ impl Workspace {
         cx: &mut Context<Self>,
         floating: bool,
         right_docked: bool,
+        bottom_docked: bool,
     ) -> gpui::AnyElement {
         let mut rows: Vec<(String, String)> = Vec::new();
         if let Some(page) = &self.structure.page {
@@ -15940,6 +15978,7 @@ impl Workspace {
                 Some("dock-close-api-inspector"),
                 Some(FloatingDock::ApiInspector),
                 right_docked,
+                bottom_docked,
                 cx,
             ));
         }
@@ -15951,12 +15990,14 @@ impl Workspace {
             && !self
                 .floating_docks
                 .contains(&FloatingDock::EventBrowser)
-            && !self.dock_right.contains(&FloatingDock::EventBrowser);
+            && !self.dock_right.contains(&FloatingDock::EventBrowser)
+            && !self.dock_bottom.contains(&FloatingDock::EventBrowser);
         let api_inspector = self.dock_api_inspector
             && !self
                 .floating_docks
                 .contains(&FloatingDock::ApiInspector)
-            && !self.dock_right.contains(&FloatingDock::ApiInspector);
+            && !self.dock_right.contains(&FloatingDock::ApiInspector)
+            && !self.dock_bottom.contains(&FloatingDock::ApiInspector);
         if !event_browser && !api_inspector {
             return div().into_any_element();
         }
@@ -15975,6 +16016,7 @@ impl Workspace {
                 let dock = *dock;
                 drop_workspace.update(cx, |workspace, cx| {
                     workspace.dock_right.retain(|item| *item != dock);
+                    workspace.dock_bottom.retain(|item| *item != dock);
                     match dock {
                         FloatingDock::EventBrowser => workspace.dock_event_browser = true,
                         FloatingDock::ApiInspector => workspace.dock_api_inspector = true,
@@ -15983,7 +16025,7 @@ impl Workspace {
                 });
             });
         if event_browser {
-            let panel = self.dock_event_browser_panel(cx, false, false);
+            let panel = self.dock_event_browser_panel(cx, false, false, false);
             column = if api_inspector {
                 column.child(
                     div()
@@ -15997,7 +16039,7 @@ impl Workspace {
             };
         }
         if api_inspector {
-            let panel = self.dock_api_inspector_panel(cx, false, false);
+            let panel = self.dock_api_inspector_panel(cx, false, false, false);
             column = column.child(div().flex_1().min_h_0().flex().child(panel));
         }
         column.into_any_element()
@@ -17341,6 +17383,7 @@ impl Workspace {
         self.main_tab_order = standard_main_tab_order();
         self.aux_tab_order = standard_aux_tab_order();
         self.dock_right.clear();
+        self.dock_bottom.clear();
         self.dock_event_browser = true;
         self.dock_api_inspector = true;
         self.dock_drag_x = None;
@@ -17495,10 +17538,10 @@ impl Workspace {
             .map(|dock| {
                 let panel = match dock {
                     FloatingDock::EventBrowser => {
-                        self.dock_event_browser_panel(cx, false, true)
+                        self.dock_event_browser_panel(cx, false, true, false)
                     }
                     FloatingDock::ApiInspector => {
-                        self.dock_api_inspector_panel(cx, false, true)
+                        self.dock_api_inspector_panel(cx, false, true, false)
                     }
                 };
                 div()
@@ -17510,6 +17553,27 @@ impl Workspace {
             })
             .collect();
         let right_dock_drop = cx.entity();
+        let bottom_dock_panels: Vec<gpui::AnyElement> = self
+            .dock_bottom
+            .iter()
+            .map(|dock| {
+                let panel = match dock {
+                    FloatingDock::EventBrowser => {
+                        self.dock_event_browser_panel(cx, false, false, true)
+                    }
+                    FloatingDock::ApiInspector => {
+                        self.dock_api_inspector_panel(cx, false, false, true)
+                    }
+                };
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .child(panel)
+                    .into_any_element()
+            })
+            .collect();
         let mesh_lines = if let Some(page) = &self.mesh.draw {
             page.rows
                 .iter()
@@ -23226,12 +23290,14 @@ impl Workspace {
                             && !self
                                 .floating_docks
                                 .contains(&FloatingDock::EventBrowser)
-                            && !self.dock_right.contains(&FloatingDock::EventBrowser))
+                            && !self.dock_right.contains(&FloatingDock::EventBrowser)
+                            && !self.dock_bottom.contains(&FloatingDock::EventBrowser))
                             || (self.dock_api_inspector
                                 && !self
                                     .floating_docks
                                     .contains(&FloatingDock::ApiInspector)
-                                && !self.dock_right.contains(&FloatingDock::ApiInspector)),
+                                && !self.dock_right.contains(&FloatingDock::ApiInspector)
+                                && !self.dock_bottom.contains(&FloatingDock::ApiInspector)),
                         |view| view.child(self.dock_splitter(cx)),
                     )
                     .child(
@@ -23824,6 +23890,7 @@ impl Workspace {
                             .on_drop::<FloatingDock>(move |dock, _, cx| {
                                 let dock = *dock;
                                 right_dock_drop.update(cx, |workspace, cx| {
+                                    workspace.dock_bottom.retain(|item| *item != dock);
                                     if !workspace.dock_right.contains(&dock) {
                                         workspace.dock_right.push(dock);
                                     }
@@ -23904,6 +23971,18 @@ impl Workspace {
                         ),
                     ),
             )
+            .when(!self.dock_bottom.is_empty(), |view| {
+                view.child(
+                    div()
+                        .id("dock-bottom")
+                        .test_support()
+                        .flex()
+                        .gap_2()
+                        .h(px(220.))
+                        .flex_none()
+                        .children(bottom_dock_panels),
+                )
+            })
             .child(self.menu_bar_view(cx))
             .child(self.menu_overlay_view(cx))
     }
@@ -25631,6 +25710,7 @@ fn main() {
                         floating_docks: Vec::new(),
                         floating_windows: Vec::new(),
                         dock_right: Vec::new(),
+                        dock_bottom: Vec::new(),
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
@@ -26544,6 +26624,7 @@ mod ui_tests {
                         floating_docks: Vec::new(),
                         floating_windows: Vec::new(),
                         dock_right: Vec::new(),
+                        dock_bottom: Vec::new(),
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
@@ -27397,6 +27478,7 @@ mod ui_tests {
                         floating_docks: Vec::new(),
                         floating_windows: Vec::new(),
                         dock_right: Vec::new(),
+                        dock_bottom: Vec::new(),
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
@@ -34447,6 +34529,36 @@ mod ui_tests {
                 !view
                     .read(cx)
                     .dock_right
+                    .contains(&FloatingDock::EventBrowser)
+            );
+        });
+
+        // Move Event Browser to the bottom row and back.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("dock-bottom-event-browser", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                view.read(cx)
+                    .dock_bottom
+                    .contains(&FloatingDock::EventBrowser)
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("dock-event-browser").visible());
+            window.click("dock-left-event-browser", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                !view
+                    .read(cx)
+                    .dock_bottom
                     .contains(&FloatingDock::EventBrowser)
             );
         });

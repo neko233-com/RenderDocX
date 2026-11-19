@@ -70,6 +70,9 @@ pub struct WindowLayout {
     /// Panels moved from the left dock to the right details column.
     #[serde(default)]
     pub dock_right: Vec<String>,
+    /// Panels moved from the left dock to the bottom row.
+    #[serde(default)]
+    pub dock_bottom: Vec<String>,
     #[serde(default = "default_true")]
     pub textures_shown: bool,
     #[serde(default = "default_true")]
@@ -100,6 +103,7 @@ impl Default for WindowLayout {
             main_tab_order: Vec::new(),
             aux_tab_order: Vec::new(),
             dock_right: Vec::new(),
+            dock_bottom: Vec::new(),
             textures_shown: true,
             pipeline_shown: true,
             mesh_shown: true,
