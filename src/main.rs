@@ -15984,23 +15984,45 @@ impl Workspace {
         } else {
             label.to_owned()
         };
-        div()
+        let shortcut = match id {
+            "menu-file-open" => "Ctrl+O",
+            "menu-file-save" => "Ctrl+S",
+            "menu-file-save-as" => "Ctrl+Shift+S",
+            "menu-file-close" => "Ctrl+W",
+            "menu-edit-find" => "Ctrl+F",
+            "menu-edit-prev-action" => "Ctrl+←",
+            "menu-edit-next-action" => "Ctrl+→",
+            _ => "",
+        };
+        let mut item = div()
             .id(id)
             .test_support()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_4()
             .px_2()
             .py_1()
             .rounded_md()
             .cursor_pointer()
             .text_sm()
             .hover(|view| view.bg(rgb(0x262626)))
-            .child(text)
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.menu_open = None;
-                this.layout_submenu_open = false;
-                action(this, window, cx);
-                cx.notify();
-            }))
-            .into_any_element()
+            .child(text);
+        if !shortcut.is_empty() {
+            item = item.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x6b6b6b))
+                    .child(shortcut),
+            );
+        }
+        item.on_click(cx.listener(move |this, _, window, cx| {
+            this.menu_open = None;
+            this.layout_submenu_open = false;
+            action(this, window, cx);
+            cx.notify();
+        }))
+        .into_any_element()
     }
 
     fn menu_submenu_item(
