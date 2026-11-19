@@ -17553,6 +17553,7 @@ impl Workspace {
             })
             .collect();
         let right_dock_drop = cx.entity();
+        let bottom_dock_drop = cx.entity();
         let bottom_dock_panels: Vec<gpui::AnyElement> = self
             .dock_bottom
             .iter()
@@ -23971,18 +23972,45 @@ impl Workspace {
                         ),
                     ),
             )
-            .when(!self.dock_bottom.is_empty(), |view| {
-                view.child(
-                    div()
-                        .id("dock-bottom")
-                        .test_support()
-                        .flex()
-                        .gap_2()
-                        .h(px(220.))
-                        .flex_none()
-                        .children(bottom_dock_panels),
-                )
-            })
+            .child(
+                div()
+                    .id("dock-bottom")
+                    .test_support()
+                    .flex()
+                    .gap_2()
+                    .w_full()
+                    .flex_none()
+                    .when(self.dock_bottom.is_empty(), |view| {
+                        view.absolute()
+                            .bottom(px(0.))
+                            .left(px(0.))
+                            .h(px(8.))
+                            .w_full()
+                            .bg(rgb(0x000000))
+                    })
+                    .when(!self.dock_bottom.is_empty(), |view| {
+                        view.h(px(220.))
+                    })
+                    .on_drop::<FloatingDock>(move |dock, _, cx| {
+                        let dock = *dock;
+                        bottom_dock_drop.update(cx, |workspace, cx| {
+                            workspace.dock_right.retain(|item| *item != dock);
+                            if !workspace.dock_bottom.contains(&dock) {
+                                workspace.dock_bottom.push(dock);
+                            }
+                            match dock {
+                                FloatingDock::EventBrowser => {
+                                    workspace.dock_event_browser = true
+                                }
+                                FloatingDock::ApiInspector => {
+                                    workspace.dock_api_inspector = true
+                                }
+                            }
+                            cx.notify();
+                        });
+                    })
+                    .children(bottom_dock_panels),
+            )
             .child(self.menu_bar_view(cx))
             .child(self.menu_overlay_view(cx))
     }
@@ -34533,10 +34561,10 @@ mod ui_tests {
             );
         });
 
-        // Move Event Browser to the bottom row and back.
+        // Drag Event Browser to the bottom row and back.
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            window.click("dock-bottom-event-browser", cx);
+            window.drag_to("dock-event-browser-header", "dock-bottom", cx);
         })
         .unwrap();
         cx.run_until_parked();
@@ -34570,6 +34598,7 @@ mod ui_tests {
                 view.dock_api_ratio = 0.55;
                 view.dock_details_ratio = 0.66;
                 view.dock_timeline_ratio = 0.34;
+                view.dock_bottom = vec![FloatingDock::ApiInspector];
                 view.dock_event_browser = false;
                 view.dock_api_inspector = false;
                 view.show_textures_tab = false;
@@ -34579,6 +34608,7 @@ mod ui_tests {
                 view.dock_api_ratio = 0.7;
                 view.dock_details_ratio = 0.72;
                 view.dock_timeline_ratio = 0.40;
+                view.dock_bottom.clear();
                 view.dock_event_browser = true;
                 view.dock_api_inspector = true;
                 view.show_textures_tab = true;
@@ -34588,6 +34618,8 @@ mod ui_tests {
                 assert!((view.dock_api_ratio - 0.55).abs() < f32::EPSILON);
                 assert!((view.dock_details_ratio - 0.66).abs() < f32::EPSILON);
                 assert!((view.dock_timeline_ratio - 0.34).abs() < f32::EPSILON);
+                assert!(view.dock_bottom.contains(&FloatingDock::ApiInspector));
+                view.dock_bottom.clear();
                 assert!(!view.dock_event_browser);
                 assert!(!view.dock_api_inspector);
                 assert!(!view.show_textures_tab);
