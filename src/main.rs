@@ -600,7 +600,19 @@ fn mesh_positions(info: &MeshInfo, bytes: &[u8], offset: u64) -> Option<Vec<(u64
 
 #[cfg(test)]
 mod descriptor_label_tests {
-    use super::{CAPTURE_TABS, CaptureTab, Language, descriptor_stage_label, descriptor_type_label};
+    use super::{
+        CAPTURE_TABS, CaptureTab, Language, descriptor_stage_label, descriptor_type_label,
+        shader_stage_index,
+    };
+
+    #[test]
+    fn shader_stage_abbreviations_map_to_renderdoc_stages() {
+        assert_eq!(shader_stage_index("VS"), Some(0));
+        assert_eq!(shader_stage_index("PS"), Some(4));
+        assert_eq!(shader_stage_index("fragment"), Some(4));
+        assert_eq!(shader_stage_index("CS"), Some(5));
+        assert_eq!(shader_stage_index("unknown"), None);
+    }
 
     #[test]
     fn capture_tab_layout_names_round_trip() {
@@ -16105,7 +16117,7 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn pipeline_state_panel(&self) -> gpui::Div {
+    fn pipeline_state_panel(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut content = div()
             .id("pipeline-state-panel")
             .test_support()
@@ -16149,7 +16161,7 @@ impl Workspace {
                     false,
                 ));
             } else {
-                for shader in &pipeline.shaders {
+                for (slot, shader) in pipeline.shaders.iter().enumerate() {
                     let bound = shader.resource.bound;
                     let name = if bound {
                         self.resource_display_name(
@@ -16160,37 +16172,43 @@ impl Workspace {
                     } else {
                         self.t("<unbound>", "<未绑定>").to_owned()
                     };
-                    stages = stages.child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "pipeline-stage-{}",
-                                shader.stage
-                            )))
-                            .test_support()
-                            .flex_1()
-                            .min_w(px(160.))
-                            .p_3()
-                            .rounded_md()
-                            .bg(rgb(0x111111))
-                            .border_1()
-                            .border_color(rgb(if bound { 0x333333 } else { 0x1f1f1f }))
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(0x3291ff))
-                                    .child(shader.stage.clone()),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(if bound { 0xededed } else { 0x6b6b6b }))
-                                    .child(name),
-                            )
-                            .into_any_element(),
-                    );
+                    let stage_name = shader.stage.clone();
+                    let stage_index = shader_stage_index(&stage_name);
+                    let mut card = div()
+                        .id(SharedString::from(format!("pipeline-stage-{slot}")))
+                        .test_support()
+                        .flex_1()
+                        .min_w(px(160.))
+                        .p_3()
+                        .rounded_md()
+                        .bg(rgb(0x111111))
+                        .border_1()
+                        .border_color(rgb(if bound { 0x333333 } else { 0x1f1f1f }))
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x3291ff))
+                                .child(stage_name),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(if bound { 0xededed } else { 0x6b6b6b }))
+                                .child(name),
+                        );
+                    if let Some(stage_index) = stage_index {
+                        card = card
+                            .cursor_pointer()
+                            .hover(|view| view.bg(rgb(0x1a1a1a)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.activate_aux_tab(CaptureTab::Shaders, cx);
+                                this.read_shader(stage_index, None, cx);
+                            }));
+                    }
+                    stages = stages.child(card.into_any_element());
                 }
             }
             content = content.child(stages);
@@ -23809,7 +23827,7 @@ impl Workspace {
                     view.child(div().text_color(rgb(0xa1a1aa)).child(texture_empty))
                 })
         } else if self.tab == CaptureTab::Pipeline {
-            self.pipeline_state_panel()
+            self.pipeline_state_panel(cx)
         } else if self.tab == CaptureTab::CaptureDialog {
             self.capture_dialog_panel()
         } else {
@@ -25513,6 +25531,22 @@ fn normalize_aux_tab_order(names: &[String]) -> Vec<CaptureTab> {
         }
     }
     order
+}
+
+fn shader_stage_index(stage: &str) -> Option<usize> {
+    let lowered = stage.trim().to_ascii_lowercase();
+    let normalized = match lowered.as_str() {
+        "vs" => "vertex",
+        "hs" => "tess_control",
+        "ds" => "tess_eval",
+        "gs" => "geometry",
+        "ps" | "fs" | "pixel" => "fragment",
+        "cs" => "compute",
+        "ts" => "task",
+        "ms" => "mesh",
+        other => other,
+    };
+    SHADER_STAGES.iter().position(|name| *name == normalized)
 }
 
 fn standard_main_tab_order() -> Vec<CaptureTab> {
