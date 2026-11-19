@@ -1163,6 +1163,8 @@ struct Workspace {
     injected_pids: Vec<u32>,
     recording_key: Option<usize>,
     viewer_focus: gpui::FocusHandle,
+    capture_focus: gpui::FocusHandle,
+    capture_focus_initialized: bool,
     rdc_inspect: Option<(PathBuf, renderdocx::rdc_file::RdcFile)>,
     sd_inspect: Vec<String>,
     sd_hex_input: Entity<TextareaState>,
@@ -16840,6 +16842,7 @@ impl Workspace {
                             self.history_selected = None;
                             self.statistics = None;
                             self.status = None;
+                            self.capture_focus_initialized = false;
                             cx.notify();
     }
 
@@ -16857,6 +16860,16 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        if !self.capture_focus_initialized {
+            self.capture_focus_initialized = true;
+            let focus = self.capture_focus.clone();
+            let window_handle = window.window_handle();
+            cx.defer(move |cx| {
+                let _ = window_handle.update(cx, |_, window, cx| {
+                    window.focus(&focus, cx);
+                });
+            });
+        }
         if self.tab == CaptureTab::Annotations && self.annotations.editor.is_none() {
             if let Some((_, doc)) = &self.annotations.notes {
                 let text = doc
@@ -22427,6 +22440,52 @@ impl Workspace {
             .px_5()
             .pb_5()
             .pt(px(56.))
+            .track_focus(&self.capture_focus)
+            .on_key_down(cx.listener(
+                |this, event: &gpui::KeyDownEvent, window, cx| {
+                    let modifiers = event.keystroke.modifiers;
+                    let key = event.keystroke.key.as_str();
+                    let control =
+                        modifiers.control && !modifiers.alt && !modifiers.platform;
+                    let handled = if control && !modifiers.shift && key == "o" {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("RenderDoc", &["rdc", "cap"])
+                            .pick_file()
+                        {
+                            this.open(path, cx);
+                        }
+                        true
+                    } else if control && !modifiers.shift && key == "s" {
+                        this.save_capture_inplace(cx);
+                        true
+                    } else if control && modifiers.shift && key == "s" {
+                        this.save_capture_as(cx);
+                        true
+                    } else if control && !modifiers.shift && key == "f" {
+                        this.tab = CaptureTab::Events;
+                        this.event_search
+                            .update(cx, |input, cx| input.focus(window, cx));
+                        cx.notify();
+                        true
+                    } else if !modifiers.control
+                        && !modifiers.alt
+                        && !modifiers.platform
+                        && key == "f3"
+                    {
+                        this.find_event(!modifiers.shift, cx);
+                        true
+                    } else if control && !modifiers.shift && key == "w" {
+                        this.close_capture(cx);
+                        true
+                    } else {
+                        false
+                    };
+                    if handled {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                },
+            ))
             .child(
                 div()
                     .flex()
@@ -25108,6 +25167,8 @@ fn main() {
                         injected_pids: Vec::new(),
                         recording_key: None,
                         viewer_focus: cx.focus_handle(),
+                        capture_focus: cx.focus_handle(),
+                        capture_focus_initialized: false,
                         rdc_inspect: None,
                         sd_inspect: Vec::new(),
                         sd_hex_input,
@@ -26008,6 +26069,8 @@ mod ui_tests {
                         injected_pids: Vec::new(),
                         recording_key: None,
                         viewer_focus: cx.focus_handle(),
+                        capture_focus: cx.focus_handle(),
+                        capture_focus_initialized: false,
                         rdc_inspect: None,
                         sd_inspect: Vec::new(),
                         sd_hex_input,
@@ -26848,6 +26911,8 @@ mod ui_tests {
                         injected_pids: Vec::new(),
                         recording_key: None,
                         viewer_focus: cx.focus_handle(),
+                        capture_focus: cx.focus_handle(),
+                        capture_focus_initialized: false,
                         rdc_inspect: None,
                         sd_inspect: Vec::new(),
                         sd_hex_input,
@@ -33752,6 +33817,27 @@ mod ui_tests {
             assert!(window.find("shaders-tab").visible());
         })
         .unwrap();
+        // Global shortcut: Ctrl+F returns to the event browser.
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.tab = CaptureTab::Textures;
+                cx.notify();
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.press("ctrl-f", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                view.read(cx).tab,
+                CaptureTab::Events,
+                "Ctrl+F must switch to the event browser"
+            );
+        });
+
         // Real menu bar: File/Edit/Window/Help with dropdown actions.
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
