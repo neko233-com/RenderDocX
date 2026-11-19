@@ -975,8 +975,7 @@ struct Workspace {
     show_aux_tabs: bool,
     menu_open: Option<MenuBar>,
     floating_docks: Vec<FloatingDock>,
-    floating_positions: [(f32, f32); 2],
-    floating_drag: Option<(FloatingDock, f32, f32, f32, f32)>,
+    floating_windows: Vec<(FloatingDock, gpui::WindowHandle<FloatingDockWindow>)>,
     selected_texture: Option<usize>,
     texture_selection: TextureSelection,
     texture_saved_selection: std::collections::HashMap<usize, (TextureSelection, u64)>,
@@ -1164,6 +1163,207 @@ struct Workspace {
     rdc_inspect: Option<(PathBuf, renderdocx::rdc_file::RdcFile)>,
     sd_inspect: Vec<String>,
     sd_hex_input: Entity<TextareaState>,
+}
+
+struct FloatingDockWindow {
+    workspace: Entity<Workspace>,
+    dock: FloatingDock,
+    _observe: gpui::Subscription,
+    _release: gpui::Subscription,
+}
+
+impl FloatingDockWindow {
+    fn new(
+        workspace: Entity<Workspace>,
+        dock: FloatingDock,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let title = match dock {
+            FloatingDock::EventBrowser => "Event Browser — RenderDocX",
+            FloatingDock::ApiInspector => "API Inspector — RenderDocX",
+        };
+        window.set_window_title(title);
+        let observe = cx.observe(&workspace, |_, _, cx| cx.notify());
+        let release = cx.on_release(|this, cx| {
+            let workspace = this.workspace.clone();
+            let dock = this.dock;
+            workspace.update(cx, |workspace, cx| {
+                workspace.dock_dock_from_window(dock, cx);
+            });
+        });
+        Self {
+            workspace,
+            dock,
+            _observe: observe,
+            _release: release,
+        }
+    }
+}
+
+impl Render for FloatingDockWindow {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let dock = self.dock;
+        let dock_label = self.workspace.read(cx).t("Dock", "停靠");
+        let (title, rows, event_rows) = {
+            let workspace = self.workspace.read(cx);
+            match dock {
+                FloatingDock::EventBrowser => {
+                    let rows = workspace
+                        .snapshot
+                        .as_ref()
+                        .map(|snapshot| {
+                            workspace
+                                .event_tree
+                                .visible
+                                .iter()
+                                .filter_map(|&index| {
+                                    snapshot.actions.get(index).map(|action| {
+                                        (index, action.event_id.to_string(), action.name.clone())
+                                    })
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    (
+                        workspace.t("Event Browser", "事件浏览器"),
+                        rows,
+                        true,
+                    )
+                }
+                FloatingDock::ApiInspector => {
+                    let mut rows: Vec<(usize, String, String)> = Vec::new();
+                    if let Some(page) = &workspace.structure.page {
+                        for (index, child) in page.children.iter().enumerate() {
+                            rows.push((
+                                index,
+                                child.name.clone(),
+                                child
+                                    .value
+                                    .clone()
+                                    .unwrap_or_else(|| child.type_name.clone()),
+                            ));
+                        }
+                    }
+                    if rows.is_empty() {
+                        if let Some(pipeline) = &workspace.pipeline {
+                            for (index, shader) in pipeline.shaders.iter().enumerate() {
+                                if shader.resource.bound {
+                                    rows.push((
+                                        index,
+                                        format!("{} shader", shader.stage),
+                                        shader.resource.name.clone(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    (
+                        workspace.t("API Inspector", "API 检查器"),
+                        rows,
+                        false,
+                    )
+                }
+            }
+        };
+        let workspace_entity = self.workspace.clone();
+        let mut list = div()
+            .id("floating-window-rows")
+            .test_support()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        for (index, left, right) in rows {
+            if event_rows {
+                let workspace_entity = workspace_entity.clone();
+                list = list.child(
+                    div()
+                        .id(SharedString::from(format!("floating-window-event-{index}")))
+                        .test_support()
+                        .h(px(28.))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .cursor_pointer()
+                        .hover(|row| row.bg(rgb(0x262626)))
+                        .child(
+                            div()
+                                .w(px(52.))
+                                .flex_none()
+                                .text_color(rgb(0xa1a1aa))
+                                .child(left.to_string()),
+                        )
+                        .child(div().flex_1().min_w_0().overflow_hidden().child(right))
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            workspace_entity.update(cx, |workspace, cx| {
+                                workspace.select_event(index, None, cx);
+                            });
+                        })),
+                );
+            } else {
+                list = list.child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .flex()
+                        .gap_2()
+                        .text_sm()
+                        .child(div().w(px(150.)).flex_none().child(left))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_color(rgb(0xf5a623))
+                                .child(right),
+                        ),
+                );
+            }
+        }
+        let dock_button = {
+            let workspace_entity = workspace_entity.clone();
+            div()
+                .id("floating-window-dock")
+                .test_support()
+                .cursor_pointer()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .bg(rgb(0x1f1f1f))
+                .hover(|view| view.bg(rgb(0x262626)))
+                .child(dock_label)
+                .on_click(cx.listener(move |_, _, window, cx| {
+                    workspace_entity.update(cx, |workspace, cx| {
+                        workspace.dock_dock_from_window(dock, cx);
+                    });
+                    window.remove_window();
+                }))
+        };
+        div()
+            .size_full()
+            .bg(rgb(0x0a0a0a))
+            .text_color(rgb(0xededed))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_2()
+                    .py_1()
+                    .bg(rgb(0x111111))
+                    .border_b_1()
+                    .border_color(rgb(0x1f1f1f))
+                    .text_sm()
+                    .child(title)
+                    .child(dock_button),
+            )
+            .child(list)
+    }
 }
 
 impl Workspace {
@@ -15408,7 +15608,7 @@ impl Workspace {
         cx: &mut Context<Self>,
         floating: bool,
     ) -> gpui::AnyElement {
-        let rows: Vec<(usize, u32, String)> = {
+        let rows: Vec<(usize, String, String)> = {
             let Some(snapshot) = self.snapshot.as_ref() else {
                 return div().into_any_element();
             };
@@ -15419,7 +15619,7 @@ impl Workspace {
                     snapshot
                         .actions
                         .get(index)
-                        .map(|action| (index, action.event_id, action.name.clone()))
+                        .map(|action| (index, action.event_id.to_string(), action.name.clone()))
                 })
                 .collect()
         };
@@ -15622,17 +15822,11 @@ impl Workspace {
         column.into_any_element()
     }
 
-    fn floating_index(dock: FloatingDock) -> usize {
-        match dock {
-            FloatingDock::EventBrowser => 0,
-            FloatingDock::ApiInspector => 1,
-        }
-    }
-
     fn float_dock(&mut self, dock: FloatingDock, cx: &mut Context<Self>) {
-        if !self.floating_docks.contains(&dock) {
-            self.floating_docks.push(dock);
+        if self.floating_docks.contains(&dock) {
+            return;
         }
+        self.floating_docks.push(dock);
         match dock {
             FloatingDock::EventBrowser => self.dock_event_browser = true,
             FloatingDock::ApiInspector => self.dock_api_inspector = true,
@@ -15640,17 +15834,74 @@ impl Workspace {
         self.menu_open = None;
         self.status = Some(
             self.t(
-                "Panel is floating; drag its title bar or dock it again.",
-                "面板已浮动；可拖动标题栏或重新停靠。",
+                "Panel is floating; use Dock to return it.",
+                "面板已浮动；使用“停靠”可返回。",
             )
             .to_owned(),
         );
+        let workspace = cx.entity();
+        // Opening a second window synchronously from inside this update would let the
+        // new root view read the Workspace while it is still borrowed. Defer the
+        // window creation until the current update has completed.
+        cx.defer(move |cx| {
+            if !workspace.read(cx).floating_docks.contains(&dock) {
+                return;
+            }
+            let offset = workspace.read(cx).floating_windows.len() as f32 * 40.0;
+            let bounds = Bounds::new(
+                gpui::point(px(200. + offset), px(140. + offset)),
+                size(px(380.), px(520.)),
+            );
+            let workspace_for_window = workspace.clone();
+            match cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    focus: true,
+                    show: true,
+                    ..Default::default()
+                },
+                move |window, cx| {
+                    cx.new(|cx| {
+                        FloatingDockWindow::new(workspace_for_window, dock, window, cx)
+                    })
+                },
+            ) {
+                Ok(handle) => {
+                    workspace.update(cx, |workspace, cx| {
+                        workspace.floating_windows.push((dock, handle));
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    workspace.update(cx, |workspace, cx| {
+                        workspace.floating_docks.retain(|item| *item != dock);
+                        workspace.status = Some(format!(
+                            "{}: {error}",
+                            workspace.t(
+                                "Could not open floating panel",
+                                "无法打开浮动面板"
+                            )
+                        ));
+                        cx.notify();
+                    });
+                }
+            }
+        });
         cx.notify();
     }
 
     fn dock_dock(&mut self, dock: FloatingDock, cx: &mut Context<Self>) {
         self.floating_docks.retain(|item| *item != dock);
-        self.floating_drag = None;
+        if let Some(position) = self
+            .floating_windows
+            .iter()
+            .position(|(item, _)| *item == dock)
+        {
+            let (_, handle) = self.floating_windows.remove(position);
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            });
+        }
         match dock {
             FloatingDock::EventBrowser => self.dock_event_browser = true,
             FloatingDock::ApiInspector => self.dock_api_inspector = true,
@@ -15658,127 +15909,14 @@ impl Workspace {
         cx.notify();
     }
 
-    fn floating_dock_panel(
-        &self,
-        dock: FloatingDock,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let index = Self::floating_index(dock);
-        let (x, y) = self.floating_positions[index];
-        let (title, root_id, return_id) = match dock {
-            FloatingDock::EventBrowser => (
-                self.t("Event Browser", "事件浏览器"),
-                "floating-dock-event-browser",
-                "floating-dock-return-event-browser",
-            ),
-            FloatingDock::ApiInspector => (
-                self.t("API Inspector", "API 检查器"),
-                "floating-dock-api-inspector",
-                "floating-dock-return-api-inspector",
-            ),
-        };
-        let content = match dock {
-            FloatingDock::EventBrowser => self.dock_event_browser_panel(cx, true),
-            FloatingDock::ApiInspector => self.dock_api_inspector_panel(cx, true),
-        };
-        let drag_dock = dock;
-        div()
-            .id(root_id)
-            .test_support()
-            .absolute()
-            .left(px(x))
-            .top(px(y))
-            .w(px(360.))
-            .h(px(380.))
-            .bg(rgb(0x0a0a0a))
-            .border_1()
-            .border_color(rgb(0x333333))
-            .rounded_lg()
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .id(("floating-dock-header", index))
-                    .test_support()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px_2()
-                    .py_1()
-                    .bg(rgb(0x111111))
-                    .text_sm()
-                    .text_color(rgb(0xededed))
-                    .cursor_pointer()
-                    .child(title)
-                    .child(
-                        div()
-                            .id(return_id)
-                            .test_support()
-                            .cursor_pointer()
-                            .px_1()
-                            .rounded_md()
-                            .hover(|view| view.bg(rgb(0x262626)))
-                            .child(self.t("Dock", "停靠"))
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    this.dock_dock(drag_dock, cx);
-                                }),
-                            ),
-                    )
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                            let index = Self::floating_index(drag_dock);
-                            let (origin_x, origin_y) = this.floating_positions[index];
-                            this.floating_drag = Some((
-                                drag_dock,
-                                f32::from(event.position.x),
-                                f32::from(event.position.y),
-                                origin_x,
-                                origin_y,
-                            ));
-                            cx.stop_propagation();
-                            cx.notify();
-                        }),
-                    ),
-            )
-            .child(content)
-            .on_mouse_move(cx.listener(
-                |this, event: &gpui::MouseMoveEvent, _, cx| {
-                    if event.dragging() {
-                        if let Some((dock, start_x, start_y, origin_x, origin_y)) =
-                            this.floating_drag
-                        {
-                            let index = Self::floating_index(dock);
-                            let next_x =
-                                origin_x + (f32::from(event.position.x) - start_x);
-                            let next_y =
-                                origin_y + (f32::from(event.position.y) - start_y);
-                            this.floating_positions[index] =
-                                (next_x.max(0.0), next_y.max(0.0));
-                            cx.notify();
-                        }
-                    } else {
-                        this.floating_drag = None;
-                    }
-                },
-            ))
-            .on_mouse_up(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.floating_drag = None;
-                    cx.notify();
-                }),
-            )
-            .into_any_element()
-    }
-
-    fn floating_docks_overlay(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
-        self.floating_docks
-            .iter()
-            .map(|dock| self.floating_dock_panel(*dock, cx))
-            .collect()
+    fn dock_dock_from_window(&mut self, dock: FloatingDock, cx: &mut Context<Self>) {
+        self.floating_docks.retain(|item| *item != dock);
+        self.floating_windows.retain(|(item, _)| *item != dock);
+        match dock {
+            FloatingDock::EventBrowser => self.dock_event_browser = true,
+            FloatingDock::ApiInspector => self.dock_api_inspector = true,
+        }
+        cx.notify();
     }
 
     fn menu_item(
@@ -22995,7 +23133,6 @@ impl Workspace {
                                 .child(button("event-show-empty", self.t("Show empty regions", "显示空分组"), self.event_tree.show_empty_regions(), |this, cx| { this.event_tree.set_show_empty_regions(!this.event_tree.show_empty_regions()); cx.notify(); }, cx)))),
                     ),
             )
-            .children(self.floating_docks_overlay(cx))
             .child(self.menu_bar_view(cx))
             .child(self.menu_overlay_view(cx))
     }
@@ -24555,8 +24692,7 @@ fn main() {
                         show_aux_tabs: cfg!(test),
                         menu_open: None,
                         floating_docks: Vec::new(),
-                        floating_positions: [(420.0, 160.0), (520.0, 320.0)],
-                        floating_drag: None,
+                        floating_windows: Vec::new(),
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
@@ -25453,8 +25589,7 @@ mod ui_tests {
                         show_aux_tabs: cfg!(test),
                         menu_open: None,
                         floating_docks: Vec::new(),
-                        floating_positions: [(420.0, 160.0), (520.0, 320.0)],
-                        floating_drag: None,
+                        floating_windows: Vec::new(),
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
@@ -26291,8 +26426,7 @@ mod ui_tests {
                         show_aux_tabs: cfg!(test),
                         menu_open: None,
                         floating_docks: Vec::new(),
-                        floating_positions: [(420.0, 160.0), (520.0, 320.0)],
-                        floating_drag: None,
+                        floating_windows: Vec::new(),
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
@@ -33424,11 +33558,22 @@ mod ui_tests {
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            assert!(window.find("floating-dock-event-browser").visible());
             assert!(window.try_find("dock-event-browser").is_none());
-            window.click("floating-dock-return-event-browser", cx);
         })
         .unwrap();
+        let floating_handle = cx.update(|cx| {
+            view.read(cx)
+                .floating_windows
+                .iter()
+                .find(|(dock, _)| *dock == FloatingDock::EventBrowser)
+                .map(|(_, handle)| *handle)
+                .expect("Window > Float Event Browser must open a floating window")
+        });
+        let _ = cx.update_window(floating_handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("floating-window-event-2").visible());
+            window.click("floating-window-dock", cx);
+        });
         cx.run_until_parked();
         cx.update(|cx| {
             assert!(
