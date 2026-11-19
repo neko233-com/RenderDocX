@@ -406,7 +406,6 @@ struct StructureView {
     callstack: Option<renderdocx::replay::EventCallstack>,
 }
 
-#[derive(Default)]
 struct TimelineView {
     model: renderdocx::timeline::Timeline,
     shown: bool,
@@ -417,6 +416,22 @@ struct TimelineView {
     drag_x: Option<f32>,
     usage: Option<renderdocx::replay::TimelineUsage>,
     history: Option<renderdocx::replay::TimelineHistory>,
+}
+
+impl Default for TimelineView {
+    fn default() -> Self {
+        Self {
+            model: Default::default(),
+            shown: true,
+            start: 0,
+            end: 0,
+            collapsed: Default::default(),
+            pending_scrub: None,
+            drag_x: None,
+            usage: None,
+            history: None,
+        }
+    }
 }
 impl TimelineView {
     fn reset(&mut self, actions: &[renderdocx::replay::Action]) {
@@ -27614,7 +27629,6 @@ mod ui_tests {
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            window.click("capture-timeline", cx);
             window.render_frame(cx);
             assert!(window.find(("timeline-action", 1usize)).visible());
             window.click(("timeline-marker", 0usize), cx);
