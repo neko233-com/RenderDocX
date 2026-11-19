@@ -31,7 +31,7 @@ package.
 
 Verified in this checkout with WiX 5.0.2: a `0.1.0.0` x64 MSI was produced from
 the release binaries (25.67 MB, SHA-256
-`7D96C022EE561E7F4729DB3F13539A22ECAE458C4743ABE173B7BF1DCC9BCB67`). Its contents were verified
+`156A943B41C2D3CE920EEBBE86A41FBFF67E5C4D6CBA91DA8E08A12BF41A2C20`). Its contents were verified
 non-interactively with an administrative install
 (`msiexec /a RenderDocX-0.1.0-x64.msi /qn TARGETDIR=<dir>`), which exited 0 and
 extracted exactly: `PFiles64/RenderDocX/renderdocx.exe` (34.7 MB),
@@ -57,6 +57,12 @@ The installed binary's real window was captured at 1056×799 through UI
 Automation + BitBlt (the screenshot shows the Chinese workspace UI and the
 embedded-CPython extension description), and uninstall removed the payload.
 Logs are written to `target/visual/msi-install.log` / `msi-uninstall.log`.
+
+Portable and development builds resolve the replay bridge next to the
+executable first, then in `target/renderdocx-runtime` (the layout produced by
+`scripts/build-replay-bridge.ps1`), and finally on `PATH`. This lets
+`target/release/renderdocx.exe` open captures without an MSI install while the
+installed package still uses its bundled runtime.
 
 **Installed capture replay verification** was also executed against the
 packaged replay runtime:

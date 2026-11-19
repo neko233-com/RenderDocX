@@ -325,6 +325,25 @@ pub(crate) fn find_tool(configured: &Option<PathBuf>, name: &str) -> Result<Path
             if candidate.is_file() {
                 return Ok(candidate);
             }
+            // Portable/dev builds keep the version-matched runtime in
+            // target/renderdocx-runtime while the executable sits in
+            // target/release or target/debug.
+            if let Some(target_dir) = parent.parent() {
+                let candidate = target_dir.join("renderdocx-runtime").join(&executable);
+                if candidate.is_file() {
+                    return Ok(candidate);
+                }
+            }
+        }
+    }
+    // `cargo run` from the repository root.
+    if let Ok(cwd) = std::env::current_dir() {
+        let candidate = cwd
+            .join("target")
+            .join("renderdocx-runtime")
+            .join(&executable);
+        if candidate.is_file() {
+            return Ok(candidate);
         }
     }
     if cfg!(windows) {
