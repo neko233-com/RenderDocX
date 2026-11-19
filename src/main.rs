@@ -7635,7 +7635,7 @@ impl Workspace {
                         this.texture_custom_open = false;
                         this.texture_custom_encodings.clear();
                         this.texture_custom_diagnostics.clear();
-                        this.tab = CaptureTab::Events;
+                        this.tab = CaptureTab::Textures;
                         this.selected_buffer = None;
                         this.buffer_binding_range = None;
                         this.buffer_data = None;
@@ -24836,6 +24836,116 @@ impl Render for DockDragPreview {
     }
 }
 
+fn vercel_color(hex: u32) -> gpui::Hsla {
+    gpui::Hsla::from(rgb(hex))
+}
+
+/// Apply the Vercel Geist dark palette to gpui-component widgets while keeping
+/// RenderDoc's official window layout unchanged.
+fn apply_vercel_theme(cx: &mut App) {
+    let is_dark = Theme::global(cx).is_dark();
+    if !is_dark {
+        return;
+    }
+    Theme::update(cx, |theme| {
+        theme.radius = px(6.);
+        theme.radius_lg = px(8.);
+        theme.font_size = px(14.);
+        theme.mono_font_size = px(13.);
+        theme.colors.background = vercel_color(0x000000);
+        theme.colors.foreground = vercel_color(0xededed);
+        theme.colors.muted = vercel_color(0x1f1f1f);
+        theme.colors.muted_foreground = vercel_color(0xa1a1aa);
+        theme.colors.border = vercel_color(0x333333);
+        theme.colors.accent = vercel_color(0x1f1f1f);
+        theme.colors.accent_foreground = vercel_color(0xededed);
+        theme.colors.primary = vercel_color(0x3291ff);
+        theme.colors.primary_hover = vercel_color(0x0070f3);
+        theme.colors.primary_active = vercel_color(0x0060d0);
+        theme.colors.primary_foreground = vercel_color(0xffffff);
+        theme.colors.secondary = vercel_color(0x1a1a1a);
+        theme.colors.secondary_hover = vercel_color(0x262626);
+        theme.colors.secondary_active = vercel_color(0x1f1f1f);
+        theme.colors.secondary_foreground = vercel_color(0xededed);
+        theme.colors.button = vercel_color(0x1a1a1a);
+        theme.colors.button_hover = vercel_color(0x262626);
+        theme.colors.button_active = vercel_color(0x1f1f1f);
+        theme.colors.button_foreground = vercel_color(0xededed);
+        theme.colors.button_primary = vercel_color(0x3291ff);
+        theme.colors.button_primary_hover = vercel_color(0x0070f3);
+        theme.colors.button_primary_active = vercel_color(0x0060d0);
+        theme.colors.button_primary_foreground = vercel_color(0xffffff);
+        theme.colors.button_secondary = vercel_color(0x1a1a1a);
+        theme.colors.button_secondary_hover = vercel_color(0x262626);
+        theme.colors.button_secondary_active = vercel_color(0x1f1f1f);
+        theme.colors.button_secondary_foreground = vercel_color(0xededed);
+        theme.colors.input = vercel_color(0x333333);
+        theme.colors.ring = vercel_color(0x3291ff);
+        theme.colors.caret = vercel_color(0x3291ff);
+        theme.colors.list = vercel_color(0x0a0a0a);
+        theme.colors.list_hover = vercel_color(0x1f1f1f);
+        theme.colors.list_active = vercel_color(0x1f1f1f);
+        theme.colors.list_active_border = vercel_color(0x333333);
+        theme.colors.list_even = vercel_color(0x0a0a0a);
+        theme.colors.list_head = vercel_color(0x111111);
+        theme.colors.popover = vercel_color(0x0a0a0a);
+        theme.colors.popover_foreground = vercel_color(0xededed);
+        theme.colors.tab_bar = vercel_color(0x000000);
+        theme.colors.tab = vercel_color(0x0a0a0a);
+        theme.colors.tab_active = vercel_color(0x1f1f1f);
+        theme.colors.tab_foreground = vercel_color(0xa1a1aa);
+        theme.colors.tab_active_foreground = vercel_color(0xededed);
+        theme.colors.title_bar = vercel_color(0x000000);
+        theme.colors.title_bar_border = vercel_color(0x1f1f1f);
+        theme.colors.status_bar = vercel_color(0x0a0a0a);
+        theme.colors.status_bar_border = vercel_color(0x1f1f1f);
+        theme.colors.scrollbar = vercel_color(0x000000);
+        theme.colors.scrollbar_thumb = vercel_color(0x333333);
+        theme.colors.scrollbar_thumb_hover = vercel_color(0x4d4d4d);
+        theme.colors.selection = vercel_color(0x3291ff);
+        theme.colors.link = vercel_color(0x3291ff);
+        theme.colors.link_hover = vercel_color(0x0070f3);
+        theme.colors.link_active = vercel_color(0x0060d0);
+        theme.colors.danger = vercel_color(0xff6161);
+        theme.colors.danger_foreground = vercel_color(0xffffff);
+        theme.colors.success = vercel_color(0x50e3c2);
+        theme.colors.warning = vercel_color(0xf5a623);
+        theme.colors.info = vercel_color(0x3291ff);
+        theme.colors.group_box = vercel_color(0x0a0a0a);
+        theme.colors.group_box_foreground = vercel_color(0xededed);
+        theme.colors.table = vercel_color(0x0a0a0a);
+        theme.colors.table_head = vercel_color(0x111111);
+        theme.colors.table_head_foreground = vercel_color(0xa1a1aa);
+        theme.colors.table_even = vercel_color(0x0a0a0a);
+        theme.colors.table_hover = vercel_color(0x1f1f1f);
+        theme.colors.table_active = vercel_color(0x1f1f1f);
+        theme.colors.table_active_border = vercel_color(0x333333);
+        theme.colors.table_row_border = vercel_color(0x1f1f1f);
+        theme.colors.table_foot = vercel_color(0x111111);
+        theme.colors.table_foot_foreground = vercel_color(0xa1a1aa);
+        theme.colors.sidebar = vercel_color(0x0a0a0a);
+        theme.colors.sidebar_foreground = vercel_color(0xededed);
+        theme.colors.sidebar_border = vercel_color(0x1f1f1f);
+        theme.colors.sidebar_accent = vercel_color(0x1f1f1f);
+        theme.colors.sidebar_accent_foreground = vercel_color(0xededed);
+        theme.colors.sidebar_primary = vercel_color(0x3291ff);
+        theme.colors.sidebar_primary_foreground = vercel_color(0xffffff);
+        theme.colors.switch = vercel_color(0x333333);
+        theme.colors.switch_thumb = vercel_color(0xededed);
+        theme.colors.slider_bar = vercel_color(0x333333);
+        theme.colors.slider_thumb = vercel_color(0xededed);
+        theme.colors.progress_bar = vercel_color(0x3291ff);
+        theme.colors.skeleton = vercel_color(0x1f1f1f);
+        theme.colors.overlay = vercel_color(0x000000);
+        theme.colors.window_border = vercel_color(0x1f1f1f);
+        theme.colors.drag_border = vercel_color(0x3291ff);
+        theme.colors.drop_target = vercel_color(0x1f1f1f);
+        theme.colors.description_list_label = vercel_color(0x0a0a0a);
+        theme.colors.description_list_label_foreground = vercel_color(0xa1a1aa);
+        theme.colors.accordion = vercel_color(0x0a0a0a);
+    });
+}
+
 fn with_title_bar(
     show: bool,
     content: gpui::AnyElement,
@@ -26222,6 +26332,7 @@ fn main() {
                 None,
                 cx,
             );
+            apply_vercel_theme(cx);
             let bounds = Bounds::centered(None, size(px(1400.), px(900.)), cx);
             let initial_capture = std::env::var_os("RENDERDOCX_OPEN_CAPTURE")
                 .or_else(|| std::env::args_os().nth(1))
