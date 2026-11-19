@@ -951,6 +951,7 @@ struct Workspace {
     dock_api_ratio: f32,
     dock_event_browser: bool,
     dock_api_inspector: bool,
+    dock_drag_x: Option<f32>,
     selected_texture: Option<usize>,
     texture_selection: TextureSelection,
     texture_saved_selection: std::collections::HashMap<usize, (TextureSelection, u64)>,
@@ -15360,11 +15361,8 @@ impl Workspace {
         let mut column = div()
             .id("dock-left")
             .test_support()
-            .absolute()
-            .left(px(0.))
-            .top(px(0.))
-            .bottom(px(0.))
-            .w(px(260.))
+            .w(gpui::relative(self.dock_left_ratio.clamp(0.15, 0.5)))
+            .flex_none()
             .min_w_0()
             .min_h_0()
             .flex()
@@ -15389,6 +15387,27 @@ impl Workspace {
             column = column.child(div().flex_1().min_h_0().flex().child(panel));
         }
         column.into_any_element()
+    }
+
+    fn dock_splitter(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
+            .id("dock-splitter")
+            .test_support()
+            .w(px(6.))
+            .flex_none()
+            .h_full()
+            .cursor_pointer()
+            .bg(rgb(0x101827))
+            .hover(|bar| bar.bg(rgb(0x304c7c)))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                    this.dock_drag_x = Some(f32::from(event.position.x));
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .into_any_element()
     }
 
     fn reset_dock_layout(&mut self, cx: &mut Context<Self>) {
@@ -21099,7 +21118,6 @@ impl Workspace {
                     )),
             )
             .when(self.show_remote_browser && self.session.as_ref().and_then(Session::remote_server_url).is_some(), |view| view.child(self.remote_browser_view(true, cx)))
-            .when(self.timeline.shown, |view| view.child(self.timeline_view(cx)))
             .child(div().text_sm().text_color(rgb(0x9eacc0)).child(title))
             .child(
                 div()
@@ -21111,23 +21129,39 @@ impl Workspace {
             .when_some(status, |view, text| {
                 view.child(div().text_color(rgb(0xd4b77c)).child(text))
             })
+            .when(self.timeline.shown, |view| {
+                view.child(self.timeline_view(cx))
+            })
             .child(
                 div()
-                    .relative()
                     .flex()
                     .flex_1()
                     .min_h_0()
                     .gap_4()
+                    .on_mouse_move(cx.listener(
+                        |this, event: &gpui::MouseMoveEvent, window, cx| {
+                            if event.dragging() && this.dock_drag_x.is_some() {
+                                let width = f32::from(window.viewport_size().width) - 40.0;
+                                if width > 0.0 {
+                                    let x = f32::from(event.position.x) - 20.0;
+                                    this.dock_left_ratio = (x / width).clamp(0.15, 0.5);
+                                    cx.notify();
+                                }
+                            } else if !event.dragging() {
+                                this.dock_drag_x = None;
+                            }
+                        },
+                    ))
                     .child(self.dock_left_panel(cx))
+                    .when(self.dock_event_browser || self.dock_api_inspector, |view| {
+                        view.child(self.dock_splitter(cx))
+                    })
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .flex_1()
                             .min_w_0()
-                            .when(self.dock_event_browser || self.dock_api_inspector, |view| {
-                                view.pl(px(276.))
-                            })
                             .bg(rgb(0x192332))
                             .rounded_lg()
                             .overflow_hidden()
@@ -23435,6 +23469,7 @@ fn main() {
                         dock_api_ratio: 0.7,
                         dock_event_browser: true,
                         dock_api_inspector: true,
+                        dock_drag_x: None,
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
@@ -24327,6 +24362,7 @@ mod ui_tests {
                         dock_api_ratio: 0.7,
                         dock_event_browser: true,
                         dock_api_inspector: true,
+                        dock_drag_x: None,
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
@@ -25159,6 +25195,7 @@ mod ui_tests {
                         dock_api_ratio: 0.7,
                         dock_event_browser: true,
                         dock_api_inspector: true,
+                        dock_drag_x: None,
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
@@ -32094,9 +32131,23 @@ mod ui_tests {
             assert!(window.find("dock-left").visible());
             assert!(window.find("dock-event-browser").visible());
             assert!(window.find("dock-api-inspector").visible());
+            let splitter = window.find("dock-splitter").bounds();
+            let from = point(
+                splitter.origin.x + splitter.size.width / 2.0,
+                splitter.origin.y + splitter.size.height / 2.0,
+            );
+            window.drag(from, point(from.x + px(60.), from.y), cx);
+            window.render_frame(cx);
             window.click("dock-event-2", cx);
         })
         .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                view.read(cx).dock_left_ratio > 0.25,
+                "dock splitter drag must widen the left dock"
+            );
+        });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             cx.run_until_parked();
