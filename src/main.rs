@@ -12069,6 +12069,22 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some((start, _, _)) = self.preview_drag else {
+            return;
+        };
+        let start_x = f32::from(start.x);
+        let start_y = f32::from(start.y);
+        let left = f32::from(bounds.origin.x);
+        let top = f32::from(bounds.origin.y);
+        if start_x < left
+            || start_x > left + f32::from(bounds.size.width)
+            || start_y < top
+            || start_y > top + f32::from(bounds.size.height)
+        {
+            // The mouse-up reached a different preview widget; leave the drag
+            // state for the widget where the gesture started.
+            return;
+        }
         let Some((start, scale, offset)) = self.preview_drag.take() else {
             return;
         };
@@ -15889,14 +15905,20 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn texture_preview_image(&self, path: PathBuf, cx: &mut Context<Self>) -> impl IntoElement {
+    fn texture_preview_image(
+        &self,
+        id: &'static str,
+        height: f32,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let bounds = std::rc::Rc::new(std::cell::Cell::new(Bounds::<gpui::Pixels>::default()));
         let paint = bounds.clone();
         let scroll = bounds.clone();
         let up = bounds.clone();
         let up_out = bounds.clone();
         div()
-            .id("texture-preview-image")
+            .id(id)
             .test_support()
             .track_focus(&self.texture_preview_focus)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
@@ -15908,7 +15930,7 @@ impl Workspace {
                 }
             }))
             .w_full()
-            .h(px(180.))
+            .h(px(height))
             .on_prepaint(move |bounds, _, _| paint.set(bounds))
             .on_scroll(cx.listener(move |this, event: &gpui::ScrollEvent, _, cx| {
                 if !this.preview_edit_ready(cx) {
@@ -18199,14 +18221,18 @@ impl Workspace {
         }
         if self.pending_texture_autoselect {
             self.pending_texture_autoselect = false;
-            if self
-                .snapshot
-                .as_ref()
-                .is_some_and(|snapshot| !snapshot.textures.is_empty())
+            // The real window mirrors RenderDoc by selecting and previewing the
+            // first texture. Headless test windows keep their explicit selection
+            // flow so preview requests do not race the assertions.
+            if self.show_title_bar
+                && self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| !snapshot.textures.is_empty())
             {
-                // RenderDoc selects the first texture when a capture opens so the
-                // Texture Viewer shows a preview instead of an empty pane.
-                self.switch_texture(0, None, window, cx);
+                if self.switch_texture(0, None, window, cx) {
+                    self.preview_texture(cx);
+                }
             }
         }
         if self.tab == CaptureTab::Annotations && self.annotations.editor.is_none() {
@@ -19423,7 +19449,8 @@ impl Workspace {
             .flex_1()
             .into_any_element()
         } else if self.tab == CaptureTab::Textures {
-            uniform_list(
+            let preview_path = self.preview.as_ref().map(|preview| preview.path.clone());
+            let rows = uniform_list(
                 "capture-textures",
                 count,
                 cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
@@ -19468,8 +19495,51 @@ impl Workspace {
                         .collect::<Vec<_>>()
                 }),
             )
-            .flex_1()
-            .into_any_element()
+            .flex_1();
+            let mut viewer = div()
+                .id("texture-viewer")
+                .test_support()
+                .flex()
+                .flex_1()
+                .min_h_0()
+                .gap_3()
+                .child(
+                    div()
+                        .w(px(300.))
+                        .flex_none()
+                        .min_h_0()
+                        .flex()
+                        .child(rows),
+                );
+            if let Some(path) = preview_path {
+                viewer = viewer.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .child(self.texture_preview_image(
+                            "texture-preview-image-center",
+                            360.0,
+                            path,
+                            cx,
+                        )),
+                );
+            } else {
+                viewer = viewer.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(rgb(0xa1a1aa))
+                        .child(self.t("Select a texture to preview.", "选择纹理以预览。")),
+                );
+            }
+            viewer.into_any_element()
         } else if self.tab == CaptureTab::Pipeline || self.tab == CaptureTab::CaptureDialog {
             div().flex_1().into_any_element()
         } else {
@@ -23243,7 +23313,12 @@ impl Workspace {
                         )
                     })
                     .when_some(preview_path, |view, path| {
-                        view.child(self.texture_preview_image(path, cx))
+                        view.child(self.texture_preview_image(
+                            "texture-preview-image",
+                            180.0,
+                            path,
+                            cx,
+                        ))
                         .child(div().text_sm().text_color(rgb(0xa1a1aa)).child(self.t("Click the preview or pixel context, then use the arrow keys to move the selected pixel.", "点击预览或像素上下文后使用方向键移动所选像素。")))
                         .child(
                             div()
