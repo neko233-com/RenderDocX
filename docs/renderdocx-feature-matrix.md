@@ -97,7 +97,7 @@
 | 捕获启动配置（exe/参数/工作目录/环境/选项） | 🟡 | 见 B1；`.cap` 互操作本批完成 |
 | 实时捕获、触发、捕获列表 | 🟡 | D1/B7 功能已迁移；跨 API/长时间会话稳定性未实机验证 |
 | 远程捕获/回放/浏览 | 🟡 | 见 B4、B5；跨机与其他 API 未验证 |
-| Unity / Tuanjie 集成 | 🟡 | Unity 2022.3.51f1 实机通过：`scripts/test-unity.ps1` 本地 UPM 安装 + Editor smoke，`scripts/test-unity-live.ps1` 真实 Editor 批量连接（PID 120612、Direct3D11、target 38920）。**未验收**：Unity Player 构建/呈现帧捕获（批量模式不产生 presented-frame）、其他 Unity 版本、Tuanjie（本机仅 `Tuanjie AI` 目录，无 Editor/Hub） |
+| Unity / Tuanjie 集成 | 🟡 | Unity 2022.3.51f1 实机通过：`scripts/test-unity.ps1` 本地 UPM 安装 + Editor smoke，`scripts/test-unity-live.ps1` 真实 Editor 批量连接（PID 120612、Direct3D11、target 38920），`scripts/test-unity-player.ps1` 构建/启动 Development Player 并完成 D3D11 捕获与回放（event 54；`RenderDocXFixture_2026.11.19_13.42_capture.rdc`）。**未验收**：其他 Unity 版本、Tuanjie（本机仅 `Tuanjie AI` 目录，无 Editor/Hub） |
 | 扩展体系 | ✅ | B9 清单发现/启停与扩展生命周期（register/unregister/callback）已迁移；嵌入式 CPython 提供捕获数据、动作、网格、纹理、着色器消息、调用栈等动态查询与 CaptureContext 兼容方法（2 项真实捕获测试）。未映射上游界面操作方法（`Show*`/`Get*Viewer`）与 debugpy 附加 |
 | 符号解析 / 重放循环 / 重压缩 / RGP | ✅ | D12 符号解析、D14 重压缩、D13 真实 Win32 窗口 + `IReplayOutput` GPU 回放（3 秒 255 帧）、D15 RGP profile 提取均已实现；`CreateRGPProfile` 代码路径就绪，实际生成需 RGP-capable AMD 独立显卡（本机 iGPU `GetRGPControl()` 为空） |
 | 遥测 / 更新 / 崩溃上报 | ✅ | B13 自动检查更新（只读）、B14 本地完整崩溃报告、B15/B16 本地统计授权与可导出 JSON 报告均已实现；有意边界：不静默下载、不上传遥测 |
@@ -125,7 +125,7 @@
 |---|---|---|
 | 生成真实 AMD `.rgp` | ❌ 未达成 | 本机 AMD 设备为 `AMD Radeon(TM) Graphics`（device_id 5056，集显）；`create_rgp_profile` 返回 `rgp_profile_failed: AMD RGP requires an AMD GPU and a driver that exposes the RGP control interface (GetRGPControl).` 另一块独显为 NVIDIA RTX 5060，不是 RGP-capable AMD |
 | 远程捕获/回放/浏览跨机验收 | ❌ 未验收 | 本机只有单一 Windows 会话，没有第二台机器或远程 RenderDoc 服务器；代码路径已有 `--remote-list`/`--remote-copy`/远程回放测试 |
-| Unity Player 呈现帧捕获 | 🟡 部分 | Unity 2022.3.51f1 的 UPM 安装、Editor smoke、Editor 批量连接已通过；批量模式明确不产生 presented-frame 捕获，Player 构建/捕获未在本批执行 |
+| Unity Player 呈现帧捕获 | ✅（Unity 2022.3.51f1） | `scripts/test-unity-player.ps1` 通过：Development Player 启动后以 `-load-renderdoc` 连接，完成实时捕获与回放（event 54，D3D11）以及计划帧捕获；其他 Unity 版本未验收 |
 | Tuanjie 集成 | ❌ 未验收 | 本机 `C:\Program Files\Tuanjie` 仅有 `Tuanjie AI`，未安装 Tuanjie Editor/Hub，无法启动工程或捕获 |
 | Metal 专属状态 | ⬜ 平台外 | 上游 Metal 支持仅 macOS；本项目当前只交付/验收 Windows，Windows 不产生 Metal 捕获 |
 

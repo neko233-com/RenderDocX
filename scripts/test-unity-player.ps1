@@ -27,11 +27,22 @@ New-Item -ItemType Directory -Path $run -Force | Out-Null
 $player = Join-Path $run 'build/RenderDocXFixture.exe'
 New-Item -ItemType Directory -Path (Split-Path -Parent $player) -Force | Out-Null
 $buildLog = Join-Path $run 'build.log'
-& $cliPath build $projectPath --target StandaloneWindows64 --execute-method RenderDocXPlayerBuild.Build `
-    --output $player --editor-path $editorPath --architecture x86_64 --log-file $buildLog --no-tail --non-interactive --format json
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $player) -or
+$editorArgs = @(
+    '-batchmode', '-nographics',
+    '-projectPath', "`"$projectPath`"",
+    '-executeMethod', 'RenderDocXPlayerBuild.Build',
+    '-buildOutput', "`"$player`"",
+    '-logFile', "`"$buildLog`"",
+    '-quit'
+)
+$buildProcess = Start-Process -FilePath $editorPath -ArgumentList $editorArgs -WindowStyle Hidden -PassThru
+if (-not $buildProcess.WaitForExit(1800000)) {
+    $buildProcess.Kill()
+    throw "Unity fixture build timed out; see $buildLog"
+}
+if ($buildProcess.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $player) -or
     -not (Select-String -LiteralPath $buildLog -SimpleMatch -Quiet -Pattern 'RENDERDOCX_PLAYER_BUILT')) {
-    throw "Unity fixture build failed; see $buildLog"
+    throw "Unity fixture build failed (exit $($buildProcess.ExitCode)); see $buildLog"
 }
 
 $previousReady = $env:RENDERDOCX_PLAYER_READY

@@ -328,10 +328,33 @@ Unity live connection passed: PID 120612, Direct3D11, target 38920.
 Batch mode does not establish a presented-frame capture or replay.
 ```
 
-**Still unverified:** Unity Player (standalone) build/presented-frame capture,
-other Unity versions, and all Tuanjie validation. `C:\Program Files\Tuanjie`
-only contains `Tuanjie AI`; no Tuanjie Editor/Hub is installed, so no Tuanjie
-project could be launched or captured.
+Player build, presented-frame capture and replay:
+
+```powershell
+& "C:\Program Files\PowerShell\7\pwsh.exe" -File scripts/test-unity-player.ps1 `
+  -UnityCli "...\Unity.exe" -Editor "...\Unity.exe" `
+  -Project target/unity-test-project `
+  -Agent target/release/renderdocx-cli.exe `
+  -Bridge target/renderdocx-runtime/renderdocx-replay.exe
+```
+
+The script was updated to build through Unity's batch `-executeMethod` path
+(the previous `Unity.exe build` subcommand is not available in 2022.3).
+Observed:
+
+```
+Unity Player capture and replay passed: event 54; capture
+target/unity-fixtures/player-6e54344e621a45aa8faef9fbf8319843/RenderDoc/
+RenderDocXFixture_2026.11.19_13.42_capture.rdc
+```
+
+This validates the Development Player attaching via `-load-renderdoc`,
+Direct3D11 capture, replaying the capture, selecting the fixture draw, and the
+scheduled-frame capture/cancel paths.
+
+**Still unverified:** other Unity versions and all Tuanjie validation.
+`C:\Program Files\Tuanjie` only contains `Tuanjie AI`; no Tuanjie Editor/Hub is
+installed, so no Tuanjie project could be launched or captured.
 
 ## Reproduce
 
