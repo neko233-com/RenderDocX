@@ -67,6 +67,9 @@ pub struct WindowLayout {
     /// Fraction of the capture row used by the bottom dock row.
     #[serde(default = "default_bottom_ratio")]
     pub bottom_ratio: f32,
+    /// Fraction of the capture workspace used by the top dock row.
+    #[serde(default = "default_top_ratio")]
+    pub top_ratio: f32,
     /// Fraction of the API Inspector used by the API event list; the rest is
     /// the callstack list, mirroring qrenderdoc's vertical splitter.
     #[serde(default = "default_api_stack_ratio")]
@@ -83,6 +86,9 @@ pub struct WindowLayout {
     /// Panels moved from the left dock to the bottom row.
     #[serde(default)]
     pub dock_bottom: Vec<String>,
+    /// Panels moved from the left dock to the top row.
+    #[serde(default)]
+    pub dock_top: Vec<String>,
     #[serde(default = "default_true")]
     pub textures_shown: bool,
     #[serde(default = "default_true")]
@@ -112,11 +118,13 @@ impl Default for WindowLayout {
             timeline_ratio: default_timeline_ratio(),
             right_ratio: default_right_ratio(),
             bottom_ratio: default_bottom_ratio(),
+            top_ratio: default_top_ratio(),
             api_stack_ratio: default_api_stack_ratio(),
             main_tab_order: Vec::new(),
             aux_tab_order: Vec::new(),
             dock_right: Vec::new(),
             dock_bottom: Vec::new(),
+            dock_top: Vec::new(),
             textures_shown: true,
             pipeline_shown: true,
             mesh_shown: true,
@@ -149,6 +157,10 @@ fn default_right_ratio() -> f32 {
 
 fn default_bottom_ratio() -> f32 {
     0.30
+}
+
+fn default_top_ratio() -> f32 {
+    0.25
 }
 
 fn default_api_stack_ratio() -> f32 {

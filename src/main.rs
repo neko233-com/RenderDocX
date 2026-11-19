@@ -1038,6 +1038,7 @@ struct Workspace {
     dock_timeline_ratio: f32,
     dock_right_ratio: f32,
     dock_bottom_ratio: f32,
+    dock_top_ratio: f32,
     dock_api_stack_ratio: f32,
     dock_event_browser: bool,
     dock_api_inspector: bool,
@@ -1046,6 +1047,7 @@ struct Workspace {
     timeline_drag_y: Option<(f32, f32)>,
     right_drag_y: Option<(f32, f32)>,
     bottom_drag_y: Option<(f32, f32)>,
+    top_drag_y: Option<(f32, f32)>,
     api_stack_drag_y: Option<(f32, f32)>,
     show_aux_tabs: bool,
     show_event_columns: bool,
@@ -1067,6 +1069,7 @@ struct Workspace {
     floating_main_windows: Vec<(FloatingMainPanel, gpui::WindowHandle<FloatingMainPanelWindow>)>,
     dock_right: Vec<FloatingDock>,
     dock_bottom: Vec<FloatingDock>,
+    dock_top: Vec<FloatingDock>,
     selected_texture: Option<usize>,
     texture_selection: TextureSelection,
     texture_saved_selection: std::collections::HashMap<usize, (TextureSelection, u64)>,
@@ -5014,6 +5017,7 @@ impl Workspace {
             timeline_ratio: self.dock_timeline_ratio,
             right_ratio: self.dock_right_ratio,
             bottom_ratio: self.dock_bottom_ratio,
+            top_ratio: self.dock_top_ratio,
             api_stack_ratio: self.dock_api_stack_ratio,
             textures_shown: self.show_textures_tab,
             pipeline_shown: self.show_pipeline_tab,
@@ -5023,6 +5027,7 @@ impl Workspace {
             aux_tab_order: self.aux_tab_order.iter().map(|tab| tab.name().to_owned()).collect(),
             dock_right: self.dock_right.iter().map(|dock| match dock { FloatingDock::EventBrowser => "event_browser".to_owned(), FloatingDock::ApiInspector => "api_inspector".to_owned() }).collect(),
             dock_bottom: self.dock_bottom.iter().map(|dock| match dock { FloatingDock::EventBrowser => "event_browser".to_owned(), FloatingDock::ApiInspector => "api_inspector".to_owned() }).collect(),
+            dock_top: self.dock_top.iter().map(|dock| match dock { FloatingDock::EventBrowser => "event_browser".to_owned(), FloatingDock::ApiInspector => "api_inspector".to_owned() }).collect(),
             event_browser_shown: self.dock_event_browser,
             api_inspector_shown: self.dock_api_inspector,
         };
@@ -5062,6 +5067,7 @@ impl Workspace {
         self.dock_timeline_ratio = layout.timeline_ratio.clamp(0.12, 0.5);
         self.dock_right_ratio = layout.right_ratio.clamp(0.15, 0.75);
         self.dock_bottom_ratio = layout.bottom_ratio.clamp(0.15, 0.6);
+        self.dock_top_ratio = layout.top_ratio.clamp(0.15, 0.6);
         self.dock_api_stack_ratio = layout.api_stack_ratio.clamp(0.3, 0.8);
         self.show_textures_tab = layout.textures_shown;
         self.show_pipeline_tab = layout.pipeline_shown;
@@ -5071,6 +5077,7 @@ impl Workspace {
         self.aux_tab_order = normalize_aux_tab_order(&layout.aux_tab_order);
         self.dock_right = normalize_right_docks(&layout.dock_right);
         self.dock_bottom = normalize_right_docks(&layout.dock_bottom);
+        self.dock_top = normalize_right_docks(&layout.dock_top);
         self.dock_event_browser = layout.event_browser_shown;
         self.dock_api_inspector = layout.api_inspector_shown;
         self.status = Some(format!("{} {slot}", self.t("Loaded window layout", "已加载窗口布局")));
@@ -17687,6 +17694,7 @@ impl Workspace {
         close_dock: Option<FloatingDock>,
         right_docked: bool,
         bottom_docked: bool,
+        top_docked: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let mut actions = div().flex().items_center().gap_1();
@@ -17704,7 +17712,7 @@ impl Workspace {
             );
         }
         if let Some(dock) = float_dock {
-            let (side_id, side_label) = if right_docked || bottom_docked {
+            let (side_id, side_label) = if right_docked || bottom_docked || top_docked {
                 (
                     match dock {
                         FloatingDock::EventBrowser => "dock-left-event-browser",
@@ -17731,11 +17739,13 @@ impl Workspace {
                     .hover(|view| view.bg(rgb(0x262626)))
                     .child(side_label)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if right_docked || bottom_docked {
+                        if right_docked || bottom_docked || top_docked {
                             this.dock_right.retain(|item| *item != dock);
                             this.dock_bottom.retain(|item| *item != dock);
+                            this.dock_top.retain(|item| *item != dock);
                         } else {
                             this.dock_bottom.retain(|item| *item != dock);
+                            this.dock_top.retain(|item| *item != dock);
                             if !this.dock_right.contains(&dock) {
                                 this.dock_right.push(dock);
                             }
@@ -17747,7 +17757,7 @@ impl Workspace {
                         cx.notify();
                     })),
             );
-            if !right_docked && !bottom_docked {
+            if !right_docked && !bottom_docked && !top_docked {
                 let bottom_id = match dock {
                     FloatingDock::EventBrowser => "dock-bottom-event-browser",
                     FloatingDock::ApiInspector => "dock-bottom-api-inspector",
@@ -17765,6 +17775,32 @@ impl Workspace {
                             this.dock_right.retain(|item| *item != dock);
                             if !this.dock_bottom.contains(&dock) {
                                 this.dock_bottom.push(dock);
+                            }
+                            match dock {
+                                FloatingDock::EventBrowser => this.dock_event_browser = true,
+                                FloatingDock::ApiInspector => this.dock_api_inspector = true,
+                            }
+                            cx.notify();
+                        })),
+                );
+                let top_id = match dock {
+                    FloatingDock::EventBrowser => "dock-top-event-browser",
+                    FloatingDock::ApiInspector => "dock-top-api-inspector",
+                };
+                actions = actions.child(
+                    div()
+                        .id(top_id)
+                        .test_support()
+                        .cursor_pointer()
+                        .px_1()
+                        .rounded_md()
+                        .hover(|view| view.bg(rgb(0x262626)))
+                        .child("⇧")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.dock_right.retain(|item| *item != dock);
+                            this.dock_bottom.retain(|item| *item != dock);
+                            if !this.dock_top.contains(&dock) {
+                                this.dock_top.push(dock);
                             }
                             match dock {
                                 FloatingDock::EventBrowser => this.dock_event_browser = true,
@@ -17826,6 +17862,7 @@ impl Workspace {
         floating: bool,
         right_docked: bool,
         bottom_docked: bool,
+        top_docked: bool,
     ) -> gpui::AnyElement {
         let Some(snapshot) = self.snapshot.as_ref() else {
             return div().into_any_element();
@@ -17914,6 +17951,7 @@ impl Workspace {
                 Some(FloatingDock::EventBrowser),
                 right_docked,
                 bottom_docked,
+                top_docked,
                 cx,
             ));
         }
@@ -18313,6 +18351,7 @@ impl Workspace {
         floating: bool,
         right_docked: bool,
         bottom_docked: bool,
+        top_docked: bool,
     ) -> gpui::AnyElement {
         let mut rows: Vec<(String, String)> = Vec::new();
         if let Some(action) = self
@@ -18560,6 +18599,7 @@ impl Workspace {
                 Some(FloatingDock::ApiInspector),
                 right_docked,
                 bottom_docked,
+                top_docked,
                 cx,
             ));
         }
@@ -18589,13 +18629,15 @@ impl Workspace {
                 .floating_docks
                 .contains(&FloatingDock::EventBrowser)
             && !self.dock_right.contains(&FloatingDock::EventBrowser)
-            && !self.dock_bottom.contains(&FloatingDock::EventBrowser);
+            && !self.dock_bottom.contains(&FloatingDock::EventBrowser)
+            && !self.dock_top.contains(&FloatingDock::EventBrowser);
         let api_inspector = self.dock_api_inspector
             && !self
                 .floating_docks
                 .contains(&FloatingDock::ApiInspector)
             && !self.dock_right.contains(&FloatingDock::ApiInspector)
-            && !self.dock_bottom.contains(&FloatingDock::ApiInspector);
+            && !self.dock_bottom.contains(&FloatingDock::ApiInspector)
+            && !self.dock_top.contains(&FloatingDock::ApiInspector);
         if !event_browser && !api_inspector {
             return div().into_any_element();
         }
@@ -18623,7 +18665,7 @@ impl Workspace {
                 });
             });
         if event_browser {
-            let panel = self.dock_event_browser_panel(cx, false, false, false);
+            let panel = self.dock_event_browser_panel(cx, false, false, false, false);
             column = if api_inspector {
                 column.child(
                     div()
@@ -18637,7 +18679,7 @@ impl Workspace {
             };
         }
         if api_inspector {
-            let panel = self.dock_api_inspector_panel(cx, false, false, false);
+            let panel = self.dock_api_inspector_panel(cx, false, false, false, false);
             column = column.child(div().flex_1().min_h_0().flex().child(panel));
         }
         column.into_any_element()
@@ -20647,6 +20689,27 @@ impl Workspace {
             .into_any_element()
     }
 
+    fn top_splitter(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
+            .id("top-splitter")
+            .test_support()
+            .h(px(6.))
+            .w_full()
+            .flex_none()
+            .cursor_pointer()
+            .bg(rgb(0x111111))
+            .hover(|bar| bar.bg(rgb(0x1f1f1f)))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                    this.top_drag_y = Some((f32::from(event.position.y), this.dock_top_ratio));
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .into_any_element()
+    }
+
     fn reset_dock_layout(&mut self, cx: &mut Context<Self>) {
         self.dock_left_ratio = 0.25;
         self.dock_api_ratio = 0.7;
@@ -20654,10 +20717,12 @@ impl Workspace {
         self.dock_timeline_ratio = 0.20;
         self.dock_right_ratio = 0.45;
         self.dock_bottom_ratio = 0.30;
+        self.dock_top_ratio = 0.25;
         self.dock_api_stack_ratio = 0.55;
         self.timeline_drag_y = None;
         self.right_drag_y = None;
         self.bottom_drag_y = None;
+        self.top_drag_y = None;
         self.api_stack_drag_y = None;
         self.show_textures_tab = true;
         self.show_pipeline_tab = true;
@@ -20667,6 +20732,7 @@ impl Workspace {
         self.aux_tab_order = standard_aux_tab_order();
         self.dock_right.clear();
         self.dock_bottom.clear();
+        self.dock_top.clear();
         self.dock_event_browser = true;
         self.dock_api_inspector = true;
         self.dock_drag_x = None;
@@ -20839,10 +20905,10 @@ impl Workspace {
             .map(|dock| {
                 let panel = match dock {
                     FloatingDock::EventBrowser => {
-                        self.dock_event_browser_panel(cx, false, true, false)
+                        self.dock_event_browser_panel(cx, false, true, false, false)
                     }
                     FloatingDock::ApiInspector => {
-                        self.dock_api_inspector_panel(cx, false, true, false)
+                        self.dock_api_inspector_panel(cx, false, true, false, false)
                     }
                 };
                 div()
@@ -20855,16 +20921,39 @@ impl Workspace {
             .collect();
         let right_dock_drop = cx.entity();
         let bottom_dock_drop = cx.entity();
+        let top_dock_drop = cx.entity();
+        let top_dock_drop_empty = top_dock_drop.clone();
+        let top_dock_panels: Vec<gpui::AnyElement> = self
+            .dock_top
+            .iter()
+            .map(|dock| {
+                let panel = match dock {
+                    FloatingDock::EventBrowser => {
+                        self.dock_event_browser_panel(cx, false, false, false, true)
+                    }
+                    FloatingDock::ApiInspector => {
+                        self.dock_api_inspector_panel(cx, false, false, false, true)
+                    }
+                };
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .child(panel)
+                    .into_any_element()
+            })
+            .collect();
         let bottom_dock_panels: Vec<gpui::AnyElement> = self
             .dock_bottom
             .iter()
             .map(|dock| {
                 let panel = match dock {
                     FloatingDock::EventBrowser => {
-                        self.dock_event_browser_panel(cx, false, false, true)
+                        self.dock_event_browser_panel(cx, false, false, true, false)
                     }
                     FloatingDock::ApiInspector => {
-                        self.dock_api_inspector_panel(cx, false, false, true)
+                        self.dock_api_inspector_panel(cx, false, false, true, false)
                     }
                 };
                 div()
@@ -26182,6 +26271,13 @@ impl Workspace {
                                     .clamp(0.15, 0.6);
                                 cx.notify();
                             }
+                        } else if let Some((start_y, start_ratio)) = this.top_drag_y {
+                            if height > 0.0 {
+                                this.dock_top_ratio = (start_ratio
+                                    + (f32::from(event.position.y) - start_y) / height)
+                                    .clamp(0.15, 0.6);
+                                cx.notify();
+                            }
                         } else if let Some((start_y, start_ratio)) = this.api_stack_drag_y {
                             let inspector_height = height * this.dock_api_ratio;
                             if inspector_height > 0.0 {
@@ -26196,6 +26292,7 @@ impl Workspace {
                         this.timeline_drag_y = None;
                         this.right_drag_y = None;
                         this.bottom_drag_y = None;
+                        this.top_drag_y = None;
                         this.api_stack_drag_y = None;
                     }
                 },
@@ -26420,6 +26517,69 @@ impl Workspace {
                                 .child(self.timeline_view(cx)),
                         )
                         .child(self.timeline_splitter(cx)),
+                )
+            })
+            .when(!self.dock_top.is_empty(), |view| {
+                view.child(
+                    div()
+                        .id("dock-top")
+                        .test_support()
+                        .flex()
+                        .gap_2()
+                        .w_full()
+                        .flex_none()
+                        .h(gpui::relative(self.dock_top_ratio))
+                        .min_h(px(140.))
+                        .on_drop::<FloatingDock>(move |dock, _, cx| {
+                            let dock = *dock;
+                            top_dock_drop.update(cx, |workspace, cx| {
+                                workspace.dock_right.retain(|item| *item != dock);
+                                workspace.dock_bottom.retain(|item| *item != dock);
+                                if !workspace.dock_top.contains(&dock) {
+                                    workspace.dock_top.push(dock);
+                                }
+                                match dock {
+                                    FloatingDock::EventBrowser => {
+                                        workspace.dock_event_browser = true
+                                    }
+                                    FloatingDock::ApiInspector => {
+                                        workspace.dock_api_inspector = true
+                                    }
+                                }
+                                cx.notify();
+                            });
+                        })
+                        .children(top_dock_panels),
+                )
+                .child(self.top_splitter(cx))
+            })
+            .when(self.dock_top.is_empty(), |view| {
+                view.child(
+                    div()
+                        .id("dock-top")
+                        .test_support()
+                        .h(px(8.))
+                        .w_full()
+                        .flex_none()
+                        .on_drop::<FloatingDock>(move |dock, _, cx| {
+                            let dock = *dock;
+                            top_dock_drop_empty.update(cx, |workspace, cx| {
+                                workspace.dock_right.retain(|item| *item != dock);
+                                workspace.dock_bottom.retain(|item| *item != dock);
+                                if !workspace.dock_top.contains(&dock) {
+                                    workspace.dock_top.push(dock);
+                                }
+                                match dock {
+                                    FloatingDock::EventBrowser => {
+                                        workspace.dock_event_browser = true
+                                    }
+                                    FloatingDock::ApiInspector => {
+                                        workspace.dock_api_inspector = true
+                                    }
+                                }
+                                cx.notify();
+                            });
+                        }),
                 )
             })
             .child(
@@ -28973,6 +29133,7 @@ fn main() {
                         dock_timeline_ratio: 0.20,
                         dock_right_ratio: 0.45,
                         dock_bottom_ratio: 0.30,
+                        dock_top_ratio: 0.25,
                         dock_api_stack_ratio: 0.55,
                         dock_event_browser: true,
                         dock_api_inspector: true,
@@ -28981,6 +29142,7 @@ fn main() {
                         timeline_drag_y: None,
                         right_drag_y: None,
                         bottom_drag_y: None,
+                        top_drag_y: None,
                         api_stack_drag_y: None,
                         show_aux_tabs: cfg!(test),
                         show_event_columns: false,
@@ -29002,6 +29164,7 @@ fn main() {
                         floating_main_windows: Vec::new(),
                         dock_right: Vec::new(),
                         dock_bottom: Vec::new(),
+                        dock_top: Vec::new(),
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
@@ -29906,6 +30069,7 @@ mod ui_tests {
                         dock_timeline_ratio: 0.20,
                         dock_right_ratio: 0.45,
                         dock_bottom_ratio: 0.30,
+                        dock_top_ratio: 0.25,
                         dock_api_stack_ratio: 0.55,
                         dock_event_browser: true,
                         dock_api_inspector: true,
@@ -29914,6 +30078,7 @@ mod ui_tests {
                         timeline_drag_y: None,
                         right_drag_y: None,
                         bottom_drag_y: None,
+                        top_drag_y: None,
                         api_stack_drag_y: None,
                         show_aux_tabs: cfg!(test),
                         show_event_columns: false,
@@ -29935,6 +30100,7 @@ mod ui_tests {
                         floating_main_windows: Vec::new(),
                         dock_right: Vec::new(),
                         dock_bottom: Vec::new(),
+                        dock_top: Vec::new(),
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
@@ -30779,6 +30945,7 @@ mod ui_tests {
                         dock_timeline_ratio: 0.20,
                         dock_right_ratio: 0.45,
                         dock_bottom_ratio: 0.30,
+                        dock_top_ratio: 0.25,
                         dock_api_stack_ratio: 0.55,
                         dock_event_browser: true,
                         dock_api_inspector: true,
@@ -30787,6 +30954,7 @@ mod ui_tests {
                         timeline_drag_y: None,
                         right_drag_y: None,
                         bottom_drag_y: None,
+                        top_drag_y: None,
                         api_stack_drag_y: None,
                         show_aux_tabs: cfg!(test),
                         show_event_columns: false,
@@ -30808,6 +30976,7 @@ mod ui_tests {
                         floating_main_windows: Vec::new(),
                         dock_right: Vec::new(),
                         dock_bottom: Vec::new(),
+                        dock_top: Vec::new(),
                         selected_texture: None,
                         texture_selection: TextureSelection::default(),
                         texture_saved_selection: std::collections::HashMap::new(),
@@ -37958,6 +38127,51 @@ mod ui_tests {
             );
         });
 
+        // Drag Event Browser to the top row and back.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.drag_to("dock-event-browser-header", "dock-top", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                view.read(cx).dock_top.contains(&FloatingDock::EventBrowser),
+                "dragging the Event Browser header to dock-top must dock it there"
+            );
+        });
+        let top_before = cx.update(|cx| view.read(cx).dock_top_ratio);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let splitter = window.find("top-splitter").bounds();
+            let from = point(
+                splitter.origin.x + splitter.size.width / 2.0,
+                splitter.origin.y + splitter.size.height / 2.0,
+            );
+            window.drag(from, point(from.x, from.y + px(40.)), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                view.read(cx).dock_top_ratio > top_before,
+                "top splitter drag downward must grow the top dock row"
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("dock-event-browser").visible());
+            window.click("dock-left-event-browser", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                !view.read(cx).dock_top.contains(&FloatingDock::EventBrowser),
+                "dock-left must remove the panel from the top row"
+            );
+        });
+
         // Layout slots persist dock visibility and split ratios.
         cx.update(|cx| {
             view.update(cx, |view, cx| {
@@ -37967,8 +38181,10 @@ mod ui_tests {
                 view.dock_timeline_ratio = 0.34;
                 view.dock_right_ratio = 0.52;
                 view.dock_bottom_ratio = 0.36;
+                view.dock_top_ratio = 0.32;
                 view.dock_api_stack_ratio = 0.74;
                 view.dock_bottom = vec![FloatingDock::ApiInspector];
+                view.dock_top = vec![FloatingDock::EventBrowser];
                 view.dock_event_browser = false;
                 view.dock_api_inspector = false;
                 view.show_textures_tab = false;
@@ -37980,8 +38196,10 @@ mod ui_tests {
                 view.dock_timeline_ratio = 0.40;
                 view.dock_right_ratio = 0.45;
                 view.dock_bottom_ratio = 0.30;
+                view.dock_top_ratio = 0.25;
                 view.dock_api_stack_ratio = 0.68;
                 view.dock_bottom.clear();
+                view.dock_top.clear();
                 view.dock_event_browser = true;
                 view.dock_api_inspector = true;
                 view.show_textures_tab = true;
@@ -37993,8 +38211,10 @@ mod ui_tests {
                 assert!((view.dock_timeline_ratio - 0.34).abs() < f32::EPSILON);
                 assert!((view.dock_right_ratio - 0.52).abs() < f32::EPSILON);
                 assert!((view.dock_bottom_ratio - 0.36).abs() < f32::EPSILON);
+                assert!((view.dock_top_ratio - 0.32).abs() < f32::EPSILON);
                 assert!((view.dock_api_stack_ratio - 0.74).abs() < f32::EPSILON);
                 assert!(view.dock_bottom.contains(&FloatingDock::ApiInspector));
+                assert!(view.dock_top.contains(&FloatingDock::EventBrowser));
                 view.dock_bottom.clear();
                 assert!(!view.dock_event_browser);
                 assert!(!view.dock_api_inspector);
@@ -38007,6 +38227,7 @@ mod ui_tests {
         // Mesh Preview / Capture Dialog, with auxiliary panels behind Window.
         cx.update(|cx| {
             view.update(cx, |view, cx| {
+                view.reset_dock_layout(cx);
                 view.dock_event_browser = true;
                 view.dock_api_inspector = true;
                 view.show_aux_tabs = false;
