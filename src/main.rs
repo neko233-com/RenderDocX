@@ -15653,7 +15653,7 @@ impl Workspace {
         close_dock: Option<FloatingDock>,
         right_docked: bool,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> impl IntoElement {
         let mut actions = div().flex().items_center().gap_1();
         if let (Some(id), Some(dock)) = (float_id, float_dock) {
             actions = actions.child(
@@ -15728,7 +15728,14 @@ impl Workspace {
                     })),
             );
         }
-        div()
+        let header_id = match float_dock {
+            Some(FloatingDock::EventBrowser) => "dock-event-browser-header",
+            Some(FloatingDock::ApiInspector) => "dock-api-inspector-header",
+            None => "dock-header",
+        };
+        let mut header = div()
+            .id(header_id)
+            .test_support()
             .flex()
             .items_center()
             .justify_between()
@@ -15738,7 +15745,13 @@ impl Workspace {
             .text_sm()
             .text_color(rgb(0xededed))
             .child(title.to_owned())
-            .child(actions)
+            .child(actions);
+        if let Some(dock) = float_dock {
+            header = header.on_drag(dock, move |_, _, _, cx| {
+                cx.new(|_| DockDragPreview { label: title })
+            });
+        }
+        header
     }
 
     fn dock_event_browser_panel(
@@ -15947,6 +15960,7 @@ impl Workspace {
         if !event_browser && !api_inspector {
             return div().into_any_element();
         }
+        let drop_workspace = cx.entity();
         let mut column = div()
             .id("dock-left")
             .test_support()
@@ -15956,7 +15970,18 @@ impl Workspace {
             .min_h_0()
             .flex()
             .flex_col()
-            .gap_2();
+            .gap_2()
+            .on_drop::<FloatingDock>(move |dock, _, cx| {
+                let dock = *dock;
+                drop_workspace.update(cx, |workspace, cx| {
+                    workspace.dock_right.retain(|item| *item != dock);
+                    match dock {
+                        FloatingDock::EventBrowser => workspace.dock_event_browser = true,
+                        FloatingDock::ApiInspector => workspace.dock_api_inspector = true,
+                    }
+                    cx.notify();
+                });
+            });
         if event_browser {
             let panel = self.dock_event_browser_panel(cx, false, false);
             column = if api_inspector {
@@ -17484,6 +17509,7 @@ impl Workspace {
                     .into_any_element()
             })
             .collect();
+        let right_dock_drop = cx.entity();
         let mesh_lines = if let Some(page) = &self.mesh.draw {
             page.rows
                 .iter()
@@ -23787,12 +23813,31 @@ impl Workspace {
                     .child(self.details_splitter(cx))
                     .child(
                         div()
+                            .id("dock-right")
+                            .test_support()
                             .w(gpui::relative(1.0 - self.dock_details_ratio))
                             .flex_none()
                             .min_h_0()
                             .flex()
                             .flex_col()
                             .gap_2()
+                            .on_drop::<FloatingDock>(move |dock, _, cx| {
+                                let dock = *dock;
+                                right_dock_drop.update(cx, |workspace, cx| {
+                                    if !workspace.dock_right.contains(&dock) {
+                                        workspace.dock_right.push(dock);
+                                    }
+                                    match dock {
+                                        FloatingDock::EventBrowser => {
+                                            workspace.dock_event_browser = true
+                                        }
+                                        FloatingDock::ApiInspector => {
+                                            workspace.dock_api_inspector = true
+                                        }
+                                    }
+                                    cx.notify();
+                                });
+                            })
                             .children(right_dock_panels)
                             .child(
                                 div()
@@ -23969,6 +24014,25 @@ struct TabDragPreview {
 }
 
 impl Render for TabDragPreview {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .bg(rgb(0x1f1f1f))
+            .border_1()
+            .border_color(rgb(0x333333))
+            .text_sm()
+            .text_color(rgb(0xededed))
+            .child(self.label)
+    }
+}
+
+struct DockDragPreview {
+    label: &'static str,
+}
+
+impl Render for DockDragPreview {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .px_3()
@@ -34357,10 +34421,10 @@ mod ui_tests {
             assert!((view.dock_timeline_ratio - 0.40).abs() < f32::EPSILON);
         });
 
-        // Move Event Browser to the right details column and back.
+        // Drag Event Browser to the right details column and back.
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            window.click("dock-right-event-browser", cx);
+            window.drag_to("dock-event-browser-header", "dock-right", cx);
         })
         .unwrap();
         cx.run_until_parked();
@@ -34374,7 +34438,7 @@ mod ui_tests {
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(window.find("dock-event-browser").visible());
-            window.click("dock-left-event-browser", cx);
+            window.drag_to("dock-event-browser-header", "dock-left", cx);
         })
         .unwrap();
         cx.run_until_parked();
