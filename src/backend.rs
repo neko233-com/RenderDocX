@@ -64,6 +64,9 @@ pub struct WindowLayout {
     /// Stable serialization names of the main tab order.
     #[serde(default)]
     pub main_tab_order: Vec<String>,
+    /// Stable serialization names of the auxiliary panel tab order.
+    #[serde(default)]
+    pub aux_tab_order: Vec<String>,
     #[serde(default = "default_true")]
     pub textures_shown: bool,
     #[serde(default = "default_true")]
@@ -92,6 +95,7 @@ impl Default for WindowLayout {
             details_ratio: default_details_ratio(),
             timeline_ratio: default_timeline_ratio(),
             main_tab_order: Vec::new(),
+            aux_tab_order: Vec::new(),
             textures_shown: true,
             pipeline_shown: true,
             mesh_shown: true,

@@ -982,6 +982,7 @@ struct Workspace {
     show_mesh_tab: bool,
     show_capture_dialog_tab: bool,
     main_tab_order: Vec<CaptureTab>,
+    aux_tab_order: Vec<CaptureTab>,
     menu_open: Option<MenuBar>,
     layout_submenu_open: bool,
     recent_submenu_open: bool,
@@ -4724,6 +4725,7 @@ impl Workspace {
             mesh_shown: self.show_mesh_tab,
             capture_dialog_shown: self.show_capture_dialog_tab,
             main_tab_order: self.main_tab_order.iter().map(|tab| tab.name().to_owned()).collect(),
+            aux_tab_order: self.aux_tab_order.iter().map(|tab| tab.name().to_owned()).collect(),
             event_browser_shown: self.dock_event_browser,
             api_inspector_shown: self.dock_api_inspector,
         };
@@ -4766,6 +4768,7 @@ impl Workspace {
         self.show_mesh_tab = layout.mesh_shown;
         self.show_capture_dialog_tab = layout.capture_dialog_shown;
         self.main_tab_order = normalize_main_tab_order(&layout.main_tab_order);
+        self.aux_tab_order = normalize_aux_tab_order(&layout.aux_tab_order);
         self.dock_event_browser = layout.event_browser_shown;
         self.dock_api_inspector = layout.api_inspector_shown;
         self.status = Some(format!("{} {slot}", self.t("Loaded window layout", "已加载窗口布局")));
@@ -16972,6 +16975,121 @@ impl Workspace {
             .into_any_element()
     }
 
+    fn aux_tab_label(&self, tab: CaptureTab) -> &'static str {
+        match tab {
+            CaptureTab::Events => self.t("Events", "事件"),
+            CaptureTab::ApiCalls => self.t("API Calls", "API 调用"),
+            CaptureTab::Parameters => self.t("Parameters", "参数"),
+            CaptureTab::Buffers => self.t("Buffers", "缓冲区"),
+            CaptureTab::Shaders => self.t("Shaders", "着色器"),
+            CaptureTab::VertexInput => self.t("Vertex input", "顶点输入"),
+            CaptureTab::Resources => self.t("Resources", "资源"),
+            CaptureTab::Messages => self.t("Messages", "调试消息"),
+            CaptureTab::ShaderMessages => self.t("Shader messages", "着色器消息"),
+            CaptureTab::Statistics => self.t("Statistics", "统计"),
+            CaptureTab::Counters => self.t("GPU counters", "GPU 计数器"),
+            CaptureTab::Descriptors => self.t("Descriptors", "描述符"),
+            CaptureTab::Annotations => self.t("Annotations", "注释与书签"),
+            _ => "",
+        }
+    }
+
+    fn activate_aux_tab(&mut self, tab: CaptureTab, cx: &mut Context<Self>) {
+        self.show_aux_tabs = true;
+        self.tab = tab;
+        match tab {
+            CaptureTab::Parameters => {
+                if self.structure.page.is_none() {
+                    self.read_structure(Vec::new(), 0, cx);
+                }
+            }
+            CaptureTab::Buffers => self.refresh_buffer_formats(cx),
+            CaptureTab::VertexInput => {
+                if self.input_page.is_none() {
+                    self.load_vertex_instance(cx);
+                }
+            }
+            CaptureTab::Resources => self.refresh_resources(),
+            CaptureTab::ShaderMessages => {
+                if self.shader_message_page.is_none() {
+                    self.read_shader_messages(0, cx);
+                }
+            }
+            CaptureTab::Descriptors => {
+                if self.descriptor_page.is_none() {
+                    self.read_descriptors(self.descriptor_store, 0, cx);
+                }
+            }
+            CaptureTab::Annotations => {
+                if self.annotations.notes.is_none() {
+                    self.load_annotations(cx);
+                }
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    fn move_aux_tab(&mut self, dragged: CaptureTab, target: CaptureTab) {
+        if dragged == target {
+            return;
+        }
+        let Some(from) = self.aux_tab_order.iter().position(|tab| *tab == dragged) else {
+            return;
+        };
+        let Some(to) = self.aux_tab_order.iter().position(|tab| *tab == target) else {
+            return;
+        };
+        let tab = self.aux_tab_order.remove(from);
+        let insert = if from < to { to.saturating_sub(1) } else { to };
+        self.aux_tab_order.insert(insert.min(self.aux_tab_order.len()), tab);
+    }
+
+    fn aux_tab_button(&self, tab: CaptureTab, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let id = match tab {
+            CaptureTab::Events => "events-tab",
+            CaptureTab::ApiCalls => "api-calls-tab",
+            CaptureTab::Parameters => "parameters-tab",
+            CaptureTab::Buffers => "buffers-tab",
+            CaptureTab::Shaders => "shaders-tab",
+            CaptureTab::VertexInput => "vertex-input-tab",
+            CaptureTab::Resources => "resources-tab",
+            CaptureTab::Messages => "messages-tab",
+            CaptureTab::ShaderMessages => "shader-messages-tab",
+            CaptureTab::Statistics => "statistics-tab",
+            CaptureTab::Counters => "counters-tab",
+            CaptureTab::Descriptors => "descriptors-tab",
+            CaptureTab::Annotations => "annotations-tab",
+            _ => "aux-tab",
+        };
+        let label = self.aux_tab_label(tab);
+        let active = self.tab == tab;
+        let drop_workspace = cx.entity();
+        div()
+            .id(id)
+            .test_support()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .cursor_pointer()
+            .text_sm()
+            .bg(rgb(if active { 0x1f1f1f } else { 0x0a0a0a }))
+            .hover(|view| view.bg(rgb(0x262626)))
+            .child(label)
+            .on_click(cx.listener(move |this, _, _, cx| this.activate_aux_tab(tab, cx)))
+            .on_drag(tab, move |_, _, _, cx| {
+                cx.new(|_| TabDragPreview { label })
+            })
+            .on_drop::<CaptureTab>(move |dragged, _, cx| {
+                let dragged = *dragged;
+                drop_workspace.update(cx, |workspace, cx| {
+                    workspace.move_aux_tab(dragged, tab);
+                    cx.notify();
+                });
+            })
+            .into_any_element()
+    }
+
     fn main_tab_visible(&self, tab: CaptureTab) -> bool {
         match tab {
             CaptureTab::Textures => self.show_textures_tab,
@@ -17130,6 +17248,7 @@ impl Workspace {
         self.show_mesh_tab = true;
         self.show_capture_dialog_tab = true;
         self.main_tab_order = standard_main_tab_order();
+        self.aux_tab_order = standard_aux_tab_order();
         self.dock_event_browser = true;
         self.dock_api_inspector = true;
         self.dock_drag_x = None;
@@ -17271,6 +17390,12 @@ impl Workspace {
             .into_iter()
             .filter(|tab| self.main_tab_visible(*tab))
             .map(|tab| self.main_tab_button(tab, cx))
+            .collect();
+        let aux_tab_buttons: Vec<gpui::AnyElement> = self
+            .aux_tab_order
+            .clone()
+            .into_iter()
+            .map(|tab| self.aux_tab_button(tab, cx))
             .collect();
         let mesh_lines = if let Some(page) = &self.mesh.draw {
             page.rows
@@ -17551,9 +17676,6 @@ impl Workspace {
             "Open in RenderDoc",
             "在 RenderDoc 中打开",
         );
-        let events = self.t("EVENTS", "事件");
-        let api_calls = self.t("API calls", "API 调用");
-        let parameters_label = self.t("Parameters", "参数");
         let parent_label = self.t("Parent", "上一级");
         let previous_label = self.t("Previous", "上一页");
         let next_label = self.t("Next", "下一页");
@@ -17596,8 +17718,6 @@ impl Workspace {
         let channel_label = self.t("Channel", "通道");
         let resolve_label = self.t("Resolve", "解析");
         let all_label = self.t("All", "全部");
-        let buffers_label = self.t("Buffers", "缓冲区");
-        let shaders_tab_label = self.t("Shaders", "着色器");
         let shader_details = self.t(
             "SHADER DETAILS",
             "着色器详情",
@@ -23044,153 +23164,7 @@ impl Workspace {
                                         .gap_2()
                                         .px_3()
                                         .pb_2()
-                                        .child(button(
-                                            "events-tab",
-                                            events,
-                                            self.tab == CaptureTab::Events,
-                                            |this, cx| {
-                                                this.tab = CaptureTab::Events;
-                                                cx.notify();
-                                            },
-                                            cx,
-                                        ))
-                                        .child(button(
-                                            "api-calls-tab",
-                                            api_calls,
-                                            self.tab == CaptureTab::ApiCalls,
-                                            |this, cx| {
-                                                this.tab = CaptureTab::ApiCalls;
-                                                cx.notify();
-                                            },
-                                            cx,
-                                        ))
-                                        .child(button(
-                                            "parameters-tab",
-                                            parameters_label,
-                                            self.tab == CaptureTab::Parameters,
-                                            |this, cx| {
-                                                this.tab = CaptureTab::Parameters;
-                                                if this.structure.page.is_none() {
-                                                    this.read_structure(Vec::new(), 0, cx);
-                                                }
-                                                cx.notify();
-                                            },
-                                            cx,
-                                        ))
-                                        .child(button(
-                                            "buffers-tab",
-                                            buffers_label,
-                                            self.tab == CaptureTab::Buffers,
-                                            |this, cx| {
-                                                this.tab = CaptureTab::Buffers;
-                                                this.refresh_buffer_formats(cx);
-                                                cx.notify();
-                                            },
-                                            cx,
-                                        ))
-                                        .child(button(
-                                            "shaders-tab",
-                                            shaders_tab_label,
-                                            self.tab == CaptureTab::Shaders,
-                                            |this, cx| {
-                                                this.tab = CaptureTab::Shaders;
-                                                cx.notify();
-                                            },
-                                            cx,
-                                        ))
-                                        .child(button(
-                                            "vertex-input-tab",
-                                            self.t("Vertex input", "顶点输入"),
-                                            self.tab == CaptureTab::VertexInput,
-                                            |this, cx| {
-                                                this.tab = CaptureTab::VertexInput;
-                                                if this.input_page.is_none() {
-                                                    this.load_vertex_instance(cx);
-                                                }
-                                                cx.notify();
-                                            },
-                                            cx,
-                                        ))
-                                        .child(button(
-                                            "resources-tab",
-                                            self.t("Resources", "资源"),
-                                            self.tab == CaptureTab::Resources,
-                                            |this, cx| {
-                                                this.tab = CaptureTab::Resources;
-                                                this.refresh_resources();
-                                                cx.notify();
-                                            },
-                                            cx,
-                                        ))
-                                        .child(button(
-                                            "messages-tab",
-                                            self.t("Messages", "调试消息"),
-                                            self.tab == CaptureTab::Messages,
-                                            |this, cx| {
-                                                this.tab = CaptureTab::Messages;
-                                                cx.notify();
-                                            },
-                                            cx,
-                                        ))
-                                        .child(button(
-                                            "shader-messages-tab",
-                                            self.t("Shader messages", "着色器消息"),
-                                            self.tab == CaptureTab::ShaderMessages,
-                                            |this, cx| {
-                                                this.tab = CaptureTab::ShaderMessages;
-                                                if this.shader_message_page.is_none() {
-                                                    this.read_shader_messages(0, cx);
-                                                }
-                                                cx.notify();
-                                            },
-                                            cx,
-                                        ))
-                                        .child(button(
-                                            "statistics-tab",
-                                            self.t("Statistics", "统计"),
-                                            self.tab == CaptureTab::Statistics,
-                                            |this, cx| {
-                                                this.tab = CaptureTab::Statistics;
-                                                cx.notify();
-                                            },
-                                            cx,
-                                        ))
-                                        .child(button(
-                                            "counters-tab",
-                                            self.t("GPU counters", "GPU 计数器"),
-                                            self.tab == CaptureTab::Counters,
-                                            |this, cx| {
-                                                this.tab = CaptureTab::Counters;
-                                                cx.notify();
-                                            },
-                                            cx,
-                                        ))
-                                        .child(button(
-                                            "descriptors-tab",
-                                            self.t("Descriptors", "描述符"),
-                                            self.tab == CaptureTab::Descriptors,
-                                            |this, cx| {
-                                                this.tab = CaptureTab::Descriptors;
-                                                if this.descriptor_page.is_none() {
-                                                    this.read_descriptors(this.descriptor_store, 0, cx);
-                                                }
-                                                cx.notify();
-                                            },
-                                            cx,
-                                        ))
-                                        .child(button(
-                                            "annotations-tab",
-                                            self.t("Annotations", "注释与书签"),
-                                            self.tab == CaptureTab::Annotations,
-                                            |this, cx| {
-                                                this.tab = CaptureTab::Annotations;
-                                                if this.annotations.notes.is_none() {
-                                                    this.load_annotations(cx);
-                                                }
-                                                cx.notify();
-                                            },
-                                            cx,
-                                        )),
+                                        .children(aux_tab_buttons)
                                 )
                             })
                             .when(self.tab == CaptureTab::Resources, |view| {
@@ -23807,6 +23781,42 @@ fn button(
     } else {
         button.secondary()
     }
+}
+
+fn standard_aux_tab_order() -> Vec<CaptureTab> {
+    vec![
+        CaptureTab::Events,
+        CaptureTab::ApiCalls,
+        CaptureTab::Parameters,
+        CaptureTab::Buffers,
+        CaptureTab::Shaders,
+        CaptureTab::VertexInput,
+        CaptureTab::Resources,
+        CaptureTab::Messages,
+        CaptureTab::ShaderMessages,
+        CaptureTab::Statistics,
+        CaptureTab::Counters,
+        CaptureTab::Descriptors,
+        CaptureTab::Annotations,
+    ]
+}
+
+fn normalize_aux_tab_order(names: &[String]) -> Vec<CaptureTab> {
+    let standard = standard_aux_tab_order();
+    let mut order = Vec::new();
+    for name in names {
+        if let Some(tab) = CaptureTab::from_name(name) {
+            if standard.contains(&tab) && !order.contains(&tab) {
+                order.push(tab);
+            }
+        }
+    }
+    for tab in standard {
+        if !order.contains(&tab) {
+            order.push(tab);
+        }
+    }
+    order
 }
 
 fn standard_main_tab_order() -> Vec<CaptureTab> {
@@ -25431,6 +25441,7 @@ fn main() {
                         show_mesh_tab: true,
                         show_capture_dialog_tab: true,
                         main_tab_order: standard_main_tab_order(),
+                        aux_tab_order: standard_aux_tab_order(),
                         menu_open: None,
                         layout_submenu_open: false,
                         recent_submenu_open: false,
@@ -26342,6 +26353,7 @@ mod ui_tests {
                         show_mesh_tab: true,
                         show_capture_dialog_tab: true,
                         main_tab_order: standard_main_tab_order(),
+                        aux_tab_order: standard_aux_tab_order(),
                         menu_open: None,
                         layout_submenu_open: false,
                         recent_submenu_open: false,
@@ -27193,6 +27205,7 @@ mod ui_tests {
                         show_mesh_tab: true,
                         show_capture_dialog_tab: true,
                         main_tab_order: standard_main_tab_order(),
+                        aux_tab_order: standard_aux_tab_order(),
                         menu_open: None,
                         layout_submenu_open: false,
                         recent_submenu_open: false,
@@ -34365,12 +34378,22 @@ mod ui_tests {
         })
         .unwrap();
         cx.run_until_parked();
+        let before_aux = cx.update(|cx| view.read(cx).aux_tab_order.clone());
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(window.find("events-tab").visible());
             assert!(window.find("shaders-tab").visible());
+            window.drag_to("shaders-tab", "events-tab", cx);
         })
         .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_ne!(
+                view.read(cx).aux_tab_order,
+                before_aux,
+                "dragging an auxiliary tab must reorder it"
+            );
+        });
         // Global shortcut: Ctrl+F returns to the event browser.
         cx.update(|cx| {
             view.update(cx, |view, cx| {
