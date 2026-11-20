@@ -26234,7 +26234,11 @@ impl Workspace {
                 })
         };
 
+        let dock_float_drop = cx.entity();
+        let tab_float_drop = cx.entity();
         div()
+            .id("capture-root")
+            .test_support()
             .relative()
             .size_full()
             .bg(rgb(0x000000))
@@ -26246,6 +26250,27 @@ impl Workspace {
             .pb_5()
             .pt(px(56.))
             .track_focus(&self.capture_focus)
+            .on_drop::<FloatingDock>(move |dock, _, cx| {
+                let dock = *dock;
+                dock_float_drop.update(cx, |workspace, cx| {
+                    workspace.float_dock(dock, cx);
+                });
+            })
+            .on_drop::<CaptureTab>(move |tab, _, cx| {
+                let tab = *tab;
+                tab_float_drop.update(cx, |workspace, cx| {
+                    let panel = match tab {
+                        CaptureTab::Textures => Some(FloatingMainPanel::TextureViewer),
+                        CaptureTab::Mesh => Some(FloatingMainPanel::Mesh),
+                        CaptureTab::Pipeline => Some(FloatingMainPanel::Pipeline),
+                        CaptureTab::CaptureDialog => Some(FloatingMainPanel::CaptureDialog),
+                        _ => None,
+                    };
+                    if let Some(panel) = panel {
+                        workspace.float_main_panel(panel, cx);
+                    }
+                });
+            })
             .on_mouse_move(cx.listener(
                 |this, event: &gpui::MouseMoveEvent, window, cx| {
                     let height = f32::from(window.viewport_size().height) - 200.0;
@@ -38744,6 +38769,43 @@ mod ui_tests {
                     .floating_docks
                     .contains(&FloatingDock::EventBrowser),
                 "Dock button must remove the floating dock"
+            );
+        });
+        // Dragging a dock header outside the dock areas floats the panel.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.drag_to("dock-api-inspector-header", "capture-root", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                view.read(cx)
+                    .floating_docks
+                    .contains(&FloatingDock::ApiInspector),
+                "dragging the API Inspector header outside the dock areas must float it"
+            );
+        });
+        let api_float = cx.update(|cx| {
+            view.read(cx)
+                .floating_windows
+                .iter()
+                .find(|(dock, _)| *dock == FloatingDock::ApiInspector)
+                .map(|(_, handle)| *handle)
+                .expect("drag-out must open a floating API Inspector window")
+        });
+        let _ = cx.update_window(api_float.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("floating-window-dock", cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                !view
+                    .read(cx)
+                    .floating_docks
+                    .contains(&FloatingDock::ApiInspector),
+                "dock button must remove the floating API Inspector"
             );
         });
         cx.update_window(handle.into(), |_, window, cx| {
